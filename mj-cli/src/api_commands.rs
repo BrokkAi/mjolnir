@@ -964,6 +964,14 @@ async fn stop_tasks(client: &ApiClient, args: &StopTaskArgs) -> Result<StopTaskR
 /// Scratch in `$MJ_KEEP_DIR` travels with Move but is not saved when the session is suspended.
 #[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
+    /// Save conversation history and resume into a fresh checkout.
+    /// Tearing down a managed clone also removes the shared .git directory used by
+    /// any external linked worktrees.
+    #[arg(long, conflicts_with_all = ["without_checkpoint", "fix_blockers"])]
+    history_only: bool,
+    /// Clear hidden index flags and move eligible worktrees inside the clone.
+    #[arg(long, conflicts_with_all = ["without_checkpoint", "dry_run"])]
+    fix_blockers: bool,
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: Option<String>,
@@ -1782,6 +1790,64 @@ fn wait_continuation(session: &str, request: &WaitRequest, json: bool) -> Vec<St
     args
 }
 
+/// The whole export again, for a daemon that is a newer build.
+fn export_continuation(args: &ExportArgs) -> Vec<String> {
+    let mut arguments = vec![
+        "export".to_owned(),
+        "--session".to_owned(),
+        args.session.clone(),
+        "--kind".to_owned(),
+        match args.kind {
+            ExportKindArg::Patch => "patch",
+            ExportKindArg::Branch => "branch",
+            ExportKindArg::Bundle => "bundle",
+        }
+        .to_owned(),
+    ];
+    if let Some(branch) = &args.branch {
+        arguments.extend(["--branch".to_owned(), branch.clone()]);
+    }
+    if let Some(out) = &args.out {
+        arguments.extend(["--out".to_owned(), out.to_string_lossy().into_owned()]);
+    }
+    if args.json {
+        arguments.push("--json".to_owned());
+    }
+    arguments
+}
+
+/// Export a session's work, following the daemon across automatic upgrades.
+///
+/// A handoff ends a patch or bundle export the old daemon was building. Both
+/// are reads of the session's work, so the next daemon is asked for the same
+/// export. A branch push is not repeated: its handoff error is reported.
+async fn export_following_handoffs<Reconnect, Connecting>(
+    first: ApiClient,
+    session: &str,
+    request: &ExportRequest,
+    mut reconnect: Reconnect,
+) -> Result<ExportResult>
+where
+    Reconnect: FnMut() -> Connecting,
+    Connecting: std::future::Future<Output = Result<ApiClient>>,
+{
+    let mut client = first;
+    loop {
+        match client.export(session, request).await {
+            Err(error)
+                if request.kind != ExportKind::Branch
+                    && crate::api_client::is_daemon_handoff(&error) =>
+            {
+                eprintln!(
+                    "The Mjolnir daemon is being replaced by an upgrade; repeating the export on the new daemon."
+                );
+                client = reconnect().await?;
+            }
+            answered => return answered,
+        }
+    }
+}
+
 /// The rest of an event stream: the same filter, after the last event seen.
 fn events_continuation(
     filter: &mj_controller::database::ApiEventFilter,
@@ -2160,7 +2226,14 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
         kind,
         branch: args.branch.clone(),
     };
-    match client.export(&args.session, &request).await? {
+    // A patch and a bundle are repeatable reads, so a daemon replaced during a
+    // long export is asked again. A branch push changes the remote and is
+    // never repeated.
+    let exported = export_following_handoffs(client, &args.session, &request, || {
+        follow_handoff(export_continuation(&args))
+    })
+    .await?;
+    match exported {
         ExportResult::Branch(pushed) => match args.json {
             true => print_json(&pushed),
             false => {
@@ -2174,12 +2247,23 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
                 Ok(())
             }
         },
-        ExportResult::Bytes(bytes) => {
+        ExportResult::Bytes { bytes, notice } => {
             let format = match args.kind {
                 ExportKindArg::Bundle => "bundle",
                 _ => "patch",
             };
-            write_bytes(&bytes, args.out.as_deref(), args.json, format)
+            // Standard output may be piped into `git apply`, so the notice
+            // goes to standard error.
+            if let Some(notice) = &notice {
+                eprintln!("note: {}", sanitize_terminal_text(notice));
+            }
+            write_bytes(
+                &bytes,
+                args.out.as_deref(),
+                args.json,
+                format,
+                notice.as_deref(),
+            )
         }
     }
 }
@@ -2484,9 +2568,19 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
     let client = ApiClient::connect().await?;
+    if args.fix_blockers && !args.dry_run {
+        let result = client.resolve_suspend_blockers(session).await?;
+        eprintln!("{}", result.summary());
+        if result.preflight.has_blockers() && !args.dry_run {
+            bail!(
+                "Blockers remain after safe remediation:\n{}",
+                format_suspend_dry_run(&result.preflight)
+            );
+        }
+    }
     if args.dry_run {
         let preflight = client
-            .suspend_preflight(session, true, args.without_checkpoint)
+            .suspend_preflight(session, true, args.without_checkpoint, args.history_only)
             .await?;
         if args.json {
             return print_json(&preflight);
@@ -2495,7 +2589,9 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         return Ok(());
     }
     if args.without_checkpoint {
-        let preflight = client.suspend_preflight(session, false, true).await?;
+        let preflight = client
+            .suspend_preflight(session, false, true, false)
+            .await?;
         let has_verified = preflight
             .existing_checkpoint
             .as_ref()
@@ -2507,6 +2603,7 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         }
     }
     let consent = mj_core::suspend_consent::SuspendConsent {
+        history_only: args.history_only,
         discard_untracked: if args.discard_untracked {
             mj_core::suspend_consent::UntrackedConsent::Any
         } else {
@@ -2730,7 +2827,11 @@ pub(crate) fn format_suspend_dry_run(
     if !preflight.blockers.is_empty() {
         let _ = writeln!(out, "blockers:");
         for b in &preflight.blockers {
-            let _ = writeln!(out, "  - {}: {}", b.kind, b.remedy);
+            let _ = writeln!(out, "  {}", b.title());
+            for path in &b.paths {
+                let _ = writeln!(out, "    - {path}");
+            }
+            let _ = writeln!(out, "    fix: {}", b.remedy);
         }
     }
     if !preflight.operations.is_empty() {
@@ -3264,8 +3365,16 @@ fn write_bytes(
     out: Option<&std::path::Path>,
     json: bool,
     format: &str,
+    notice: Option<&str>,
 ) -> Result<()> {
-    write_bytes_to(&mut std::io::stdout().lock(), bytes, out, json, format)
+    write_bytes_to(
+        &mut std::io::stdout().lock(),
+        bytes,
+        out,
+        json,
+        format,
+        notice,
+    )
 }
 
 fn write_bytes_to(
@@ -3274,16 +3383,20 @@ fn write_bytes_to(
     out: Option<&std::path::Path>,
     json: bool,
     format: &str,
+    notice: Option<&str>,
 ) -> Result<()> {
     match out {
         Some(path) => {
             std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
             if json {
-                let report = serde_json::json!({
+                let mut report = serde_json::json!({
                     "path": path,
                     "bytes": bytes.len(),
                     "format": format,
                 });
+                if let Some(notice) = notice {
+                    report["notice"] = notice.into();
+                }
                 writeln!(stdout, "{}", serde_json::to_string_pretty(&report)?)
                     .context("report the export")
             } else {
@@ -4272,15 +4385,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("work.patch");
         let mut printed = Vec::new();
-        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch").unwrap();
+        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch", None).unwrap();
         let report: serde_json::Value = serde_json::from_slice(&printed).unwrap();
         assert_eq!(report["bytes"], 4);
         assert_eq!(report["format"], "patch");
         assert_eq!(report["path"], path.to_str().unwrap());
+        assert!(report.get("notice").is_none());
         assert_eq!(std::fs::read(&path).unwrap(), b"diff");
 
         let mut printed = Vec::new();
-        write_bytes_to(&mut printed, b"diff", Some(&path), false, "patch").unwrap();
+        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch", Some("n")).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&printed).unwrap();
+        assert_eq!(report["notice"], "n");
+
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", Some(&path), false, "patch", None).unwrap();
         assert!(
             String::from_utf8(printed)
                 .unwrap()
@@ -4288,7 +4407,7 @@ mod tests {
         );
 
         let mut printed = Vec::new();
-        write_bytes_to(&mut printed, b"diff", None, true, "patch").unwrap();
+        write_bytes_to(&mut printed, b"diff", None, true, "patch", Some("n")).unwrap();
         assert_eq!(printed, b"diff");
     }
 
@@ -4394,6 +4513,88 @@ mod tests {
             (3590..=3600).contains(&remaining),
             "the next daemon gets what is left of the budget: {remaining}"
         );
+    }
+
+    fn handoff_refusal_app() -> axum::Router {
+        use axum::http::StatusCode;
+        axum::Router::new().route(
+            "/api/v1/sessions/{session_id}/export",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [
+                        (mj_daemon::server::UPGRADE_HEADER, "pending"),
+                        ("retry-after", "1"),
+                    ],
+                    axum::Json(serde_json::json!({
+                        "error": "the Mjolnir daemon is being replaced by an upgrade; ask again",
+                        "code": mj_daemon::server::api::DAEMON_HANDOFF_CODE,
+                    })),
+                )
+            }),
+        )
+    }
+
+    /// A patch or bundle export is a read of the session's work, so a daemon
+    /// replaced during it is asked again; a branch push changes the remote and
+    /// is reported instead of repeated.
+    #[tokio::test]
+    async fn only_repeatable_exports_follow_the_daemon_across_an_upgrade_handoff() {
+        use std::sync::{Arc, Mutex};
+        let old = serve_api(handoff_refusal_app()).await;
+        let new = serve_api(axum::Router::new().route(
+            "/api/v1/sessions/{session_id}/export",
+            axum::routing::post(|| async {
+                (
+                    [
+                        (mj_daemon::server::api::API_VERSION_HEADER, "1"),
+                        ("content-type", "application/octet-stream"),
+                    ],
+                    b"bundle bytes".to_vec(),
+                )
+            }),
+        ))
+        .await;
+        for kind in [ExportKind::Patch, ExportKind::Bundle] {
+            let reconnects = Arc::new(Mutex::new(0_usize));
+            let exported = export_following_handoffs(
+                ApiClient::new(old.clone(), "token".into()).unwrap(),
+                "s1",
+                &ExportRequest { kind, branch: None },
+                || {
+                    *reconnects.lock().unwrap() += 1;
+                    let new = new.clone();
+                    async move { ApiClient::new(new, "token".into()) }
+                },
+            )
+            .await
+            .unwrap();
+            let ExportResult::Bytes { bytes, .. } = exported else {
+                panic!("expected bytes for {kind:?}");
+            };
+            assert_eq!(bytes, b"bundle bytes");
+            assert_eq!(*reconnects.lock().unwrap(), 1, "{kind:?}");
+        }
+
+        let reconnects = Arc::new(Mutex::new(0_usize));
+        let error = export_following_handoffs(
+            ApiClient::new(old, "token".into()).unwrap(),
+            "s1",
+            &ExportRequest {
+                kind: ExportKind::Branch,
+                branch: Some("work".into()),
+            },
+            || {
+                *reconnects.lock().unwrap() += 1;
+                let new = new.clone();
+                async move { ApiClient::new(new, "token".into()) }
+            },
+        )
+        .await
+        .err()
+        .expect("a branch push is not repeated");
+        assert!(crate::api_client::is_daemon_handoff(&error));
+        assert_eq!(*reconnects.lock().unwrap(), 0);
     }
 
     /// A command continued under the daemon's newer build must parse there as
@@ -6220,6 +6421,7 @@ mod tests {
                 condition,
             };
         let row = |id: &str, kind, targets: &[&str]| HostCapacityRow {
+            storage_warning: None,
             ec2_instance_type: None,
             physical_memory: None,
             id: id.into(),
@@ -6248,6 +6450,19 @@ mod tests {
                 StorageCondition::Low,
             ),
         ];
+        // Hard-won: #1597: degraded storage must preserve healthy host readings.
+        assert!(
+            serde_json::to_value(&local)
+                .unwrap()
+                .get("storage_warning")
+                .is_none()
+        );
+        let mut degraded = local.clone();
+        degraded.storage_warning = Some("mbx config: invalid TOML".into());
+        let healthy = mj_core::targets::render_host_capacity(&[local.clone()], now);
+        let warning = mj_core::targets::render_host_capacity(&[degraded], now);
+        assert_eq!(warning, format!("{healthy}\n  mbx config: invalid TOML"));
+
         let mut build = row("build.example", DeploymentCapacityKind::Host, &["build"]);
         build.cpu_percent = None;
         build.sampled_at_epoch_seconds = Some(now - 600);

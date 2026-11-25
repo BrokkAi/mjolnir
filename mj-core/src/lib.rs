@@ -1,5 +1,6 @@
 //! Mjolnir shared contracts, formats, pure projections and reusable utilities.
 
+pub mod claude_mcp;
 pub mod clock;
 
 pub mod acp;
@@ -19,6 +20,7 @@ pub mod daemon_exit;
 pub mod diagnostic;
 pub mod diff;
 pub mod draft;
+pub mod ec2_records;
 pub mod elicitation;
 pub mod event_outcome;
 pub mod file_lock;

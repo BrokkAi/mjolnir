@@ -199,15 +199,16 @@ path, not the selected project or its linked-worktree location.
 
 The host does not need a preinstalled harness bridge, except DSH. Its worker
 installs and reuses the exact harness version pinned by Mjolnir in the remote
-user's cache; DSH instead runs the host's own `dsh-acp` when it is 0.4.0 or
+user's cache; DSH instead runs the host's own `dsh-acp` when it is 0.8.0 or
 newer, or the pinned npm package. Node-based harnesses reuse Node.js 22 or newer
 with npm and npx when already on the host; otherwise the worker downloads a
-checksum-verified pinned Node.js into the user cache. Kimi, Grok, Muse, and
-OpenCode also install from checksum-verified artifacts downloaded by Mjolnir;
-they do not require `curl`, `tar`, or a shell-based vendor installer. DSH needs
-a current `dsh-acp` on `PATH` or the managed Node fallback. Mjolnir never uses
-sudo to add these prerequisites and does not fall back to another harness
-executable from the remote `PATH`.
+checksum-verified pinned Node.js into the user cache. DSH's npm fallback needs
+Node.js 24.9 or newer. Kimi, Grok, Muse, and OpenCode also install from
+checksum-verified artifacts downloaded by Mjolnir; they do not require `curl`,
+`tar`, or a shell-based vendor installer. DSH needs a current `dsh-acp` on
+`PATH` or the managed Node fallback. Mjolnir never uses sudo to add these
+prerequisites and does not fall back to another harness executable from the
+remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
 machine's SSH connection fields include `identity_file` and `extra_args`. See
@@ -435,6 +436,20 @@ read `secrets.toml` beside it, or `{ from_env = "NAME" }` to read the daemon's
 environment; see [Secrets](/configuration/#secrets-secretstoml). Use the
 harness login flow for provider credentials and the controller's GitHub token
 flow for GitHub access. See [Profiles and harnesses](/profiles/).
+
+A plain-string target environment entry is passed to the container engine as
+`--env`, so the container records it. An entry that names a secret is not: the
+engine never sees its value, so `podman inspect` and the daemon's session
+records hold only the reference. Mjolnir reads the secret each time a worker
+launches and delivers it to the worker, the harness, and its shells through the
+session's private `launch.json`. A secret you rotate therefore takes effect at
+the session's next Restart, and a reference that no longer resolves stops that
+launch with an error naming it.
+
+The one thing a secret-sourced entry does not reach is Mjolnir's own
+provisioning commands, which run in the container before its worker exists
+(installing Git and cloning the project). Put a value those commands need, such
+as a proxy setting, in the table as a plain string.
 
 ## Full field reference
 

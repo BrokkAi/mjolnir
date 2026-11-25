@@ -243,6 +243,8 @@ pub enum ControllerAction {
         without_checkpoint: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         confirm_no_checkpoint: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        history_only: bool,
     },
     /// Destroy a session without checkpointing it: the live target is torn
     /// down, the recovery archive is removed, and sub-agent children are

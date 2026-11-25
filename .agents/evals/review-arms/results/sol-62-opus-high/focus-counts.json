@@ -1,0 +1,156 @@
+{
+  "confirmed_groups_by_severity": {
+    "medium": 130,
+    "low": 188,
+    "high": 24
+  },
+  "options": {
+    "L": {
+      "low": "193/3",
+      "medium": "59",
+      "high": "34/3",
+      "medium+high": "211/3",
+      "all": "404/3"
+    },
+    "M": {
+      "low": "305/3",
+      "medium": "91",
+      "high": "21",
+      "medium+high": "112",
+      "all": "641/3"
+    },
+    "T": {
+      "low": "139/4",
+      "medium": "575/12",
+      "high": "7",
+      "medium+high": "659/12",
+      "all": "269/3"
+    },
+    "LL": {
+      "low": "238/3",
+      "medium": "217/3",
+      "high": "40/3",
+      "medium+high": "257/3",
+      "all": "165"
+    },
+    "LM": {
+      "low": "1007/9",
+      "medium": "293/3",
+      "high": "190/9",
+      "medium+high": "1069/9",
+      "all": "692/3"
+    },
+    "LT": {
+      "low": "220/3",
+      "medium": "425/6",
+      "high": "38/3",
+      "medium+high": "167/2",
+      "all": "941/6"
+    },
+    "MM": {
+      "low": "121",
+      "medium": "104",
+      "high": "23",
+      "medium+high": "127",
+      "all": "248"
+    },
+    "MT": {
+      "low": "1303/12",
+      "medium": "872/9",
+      "high": "191/9",
+      "medium+high": "1063/9",
+      "all": "8161/36"
+    },
+    "TT": {
+      "low": "87/2",
+      "medium": "359/6",
+      "high": "26/3",
+      "medium+high": "137/2",
+      "all": "112"
+    },
+    "LLL": {
+      "low": "85",
+      "medium": "79",
+      "high": "15",
+      "medium+high": "94",
+      "all": "179"
+    },
+    "LLM": {
+      "low": "1048/9",
+      "medium": "910/9",
+      "high": "191/9",
+      "medium+high": "367/3",
+      "all": "2149/9"
+    },
+    "LLT": {
+      "low": "761/9",
+      "medium": "1423/18",
+      "high": "43/3",
+      "medium+high": "1681/18",
+      "all": "3203/18"
+    },
+    "LMM": {
+      "low": "385/3",
+      "medium": "107",
+      "high": "23",
+      "medium+high": "130",
+      "all": "775/3"
+    },
+    "LMT": {
+      "low": "12587/108",
+      "medium": "2725/27",
+      "high": "64/3",
+      "medium+high": "3301/27",
+      "all": "8597/36"
+    },
+    "LTT": {
+      "low": "1379/18",
+      "medium": "457/6",
+      "high": "41/3",
+      "medium+high": "539/6",
+      "all": "1498/9"
+    },
+    "MMM": {
+      "low": "132",
+      "medium": "110",
+      "high": "24",
+      "medium+high": "134",
+      "all": "266"
+    },
+    "MMT": {
+      "low": "1523/12",
+      "medium": "3865/36",
+      "high": "23",
+      "medium+high": "4693/36",
+      "all": "4631/18"
+    },
+    "MTT": {
+      "low": "2005/18",
+      "medium": "896/9",
+      "high": "64/3",
+      "medium+high": "1088/9",
+      "all": "4181/18"
+    },
+    "TTT": {
+      "low": "195/4",
+      "medium": "66",
+      "high": "10",
+      "medium+high": "76",
+      "all": "499/4"
+    },
+    "S": {
+      "low": "9",
+      "medium": "31",
+      "high": "19/2",
+      "medium+high": "81/2",
+      "all": "99/2"
+    },
+    "STT": {
+      "low": "134/3",
+      "medium": "385/6",
+      "high": "37/3",
+      "medium+high": "153/2",
+      "all": "727/6"
+    }
+  }
+}

@@ -186,6 +186,8 @@ impl LatchExclusivity {
 pub(in crate::controller) enum CheckpointExportPolicy {
     /// Always export, transfer, and install a new archive.
     Always,
+    /// Save conversation and repository identity without workspace Git state.
+    HistoryOnly,
     /// Explicit suspend of an independent managed clone.
     OriginDelta,
     /// Explicit suspend of a raw Git checkout.
@@ -213,69 +215,15 @@ pub(in crate::controller) enum CheckpointCompletion {
     ReleasedAfterCapture,
 }
 
+/// A latched checkpoint owns an open relay barrier, and that barrier freezes
+/// ACP dispatch until something ends it. The close that took it keeps its
+/// lease through the durable Close and CompleteCheckpoint decisions; losing
+/// the connection preserves its sealed cut for recovery.
 pub(in crate::controller) struct LatchedCheckpoint {
-    pub(in crate::controller) admission: crate::recovery_gate::SessionAdmission,
     pub(in crate::controller) artifact: CheckpointArtifact,
     pub(in crate::controller) relay: ControllerRelayLease,
     pub(in crate::controller) barrier_command_id: String,
     pub(in crate::controller) cursor: RelayCursor,
-    pub(in crate::controller) completion: CheckpointCompletion,
-    pub(in crate::controller) relay_protocol: u32,
     // Declared last: relay cleanup must finish before another operation enters.
     pub(in crate::controller) _worker_owner: crate::worker_lifecycle::WorkerPermit,
-}
-
-/// A latched checkpoint owns an open relay barrier, and that barrier freezes
-/// ACP dispatch until something ends it. Every path out of one must therefore
-/// either [`LatchedCheckpoint::complete`] it or [`LatchedCheckpoint::abandon`]
-/// it; both consume the value so a new exit cannot quietly skip the choice.
-/// A close keeps its lease through the durable Close and CompleteCheckpoint
-/// decisions. Losing the connection preserves its sealed cut for recovery.
-impl LatchedCheckpoint {
-    /// Release a held barrier, or maintain archive coverage for older workers.
-    pub(super) async fn complete(mut self) -> Result<()> {
-        if matches!(self.completion, CheckpointCompletion::ReleasedAfterCapture)
-            && self.relay_protocol >= mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL
-        {
-            return Ok(());
-        }
-        let (prefix, command) = match self.completion {
-            CheckpointCompletion::HeldBarrier => (
-                "checkpoint-complete",
-                RelayCommand::CompleteCheckpoint {
-                    barrier_command_id: self.barrier_command_id.clone(),
-                },
-            ),
-            // The worker that accepted the early release also understands the
-            // floor move; they were added together.
-            CheckpointCompletion::ReleasedAfterCapture => (
-                "checkpoint-floor",
-                RelayCommand::AdvanceRecoveryFloor {
-                    through: self.cursor.clone(),
-                },
-            ),
-        };
-        let command_id = new_command_id(prefix)?;
-        self.relay.submit(command_id, command).await.map(|_| ())
-    }
-
-    /// Cancel the barrier of a checkpoint the caller could not install.
-    ///
-    /// The latch is already back with the session actor, whose connection can
-    /// stay healthy for the rest of the session, so nothing else would ever
-    /// end this barrier.
-    pub(super) async fn abandon(mut self, session_id: &str) {
-        if self.completion == CheckpointCompletion::ReleasedAfterCapture {
-            // Dispatch resumed when target capture finished, so there is no barrier
-            // left to cancel, and the recovery floor must stay behind an
-            // archive that was never installed. Doing nothing is the exit.
-            return;
-        }
-        if let Err(error) = self.relay.cancel_abandoned_barrier(&self.admission).await {
-            tracing::warn!(
-                session_id,
-                "abandoned checkpoint could not cancel its relay barrier: {error:#}"
-            );
-        }
-    }
 }

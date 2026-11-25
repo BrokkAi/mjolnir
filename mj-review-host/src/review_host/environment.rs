@@ -171,7 +171,9 @@ pub struct ChildStanding {
 
 impl ChildStanding {
     pub(crate) fn answer_to_startup(self, request_key: &str) -> Option<String> {
-        let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(request_key);
+        let startup_key =
+            mj_core::subagent::SubagentKind::Reviewer.startup_request_key(request_key);
+        let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&startup_key);
         let command_id = mj_store::database::startup_step_id(&group, "prompt");
         // Daemons predating worker preload used the registration key directly.
         let legacy_id = mj_store::database::startup_step_id(request_key, "prompt");

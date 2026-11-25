@@ -79,9 +79,14 @@ impl ReviewEnvironment for ControllerEnvironment {
                 controller.config.targets.get(&session.target_template_id),
                 Some(mj_core::config::TargetTemplate::LocalBare)
             )
-            && if let Some(directory) = session.project_directory.as_deref() {
+            && if let Some(directory) = controller
+                .state
+                .checkout(session_id)
+                .ok()
+                .and_then(|checkout| checkout.project_directory())
+            {
                 mj_core::repository::resolve_local_directory(
-                    directory,
+                    &directory,
                     &mj_controller::targets::BoundedProcessExecutor::new(
                         std::time::Duration::from_secs(5),
                     ),
@@ -174,6 +179,18 @@ impl ReviewEnvironment for ControllerEnvironment {
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
     ) -> Result<String, String> {
+        let borrower_gate = self
+            .runtime
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .and_then(|runtime| runtime.borrower_registration_gate(session_id));
+        let _borrower_guard = match borrower_gate.as_ref() {
+            Some(gate) => Some(gate.try_read().map_err(|_| {
+                "Cannot start a reviewer while suspend blockers are being repaired on its workspace."
+                    .to_owned()
+            })?),
+            None => None,
+        };
         let mut controller =
             mj_controller::controller::Controller::load().map_err(|e| format!("{e:#}"))?;
         let mut launch = controller

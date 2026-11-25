@@ -433,8 +433,11 @@ type DurableRelay struct {
 	// long build was failed as if the harness had died (#1020).
 	foregroundTools *core.ToolsInFlight
 	turnContext     *transcript.TurnContext
-	verdictHarness  *core.HarnessKind
-	jevDisabled     bool
+	// decisionLog is the Jev decision log this relay opened in its root and
+	// owns; Shutdown closes it. The turn context lends it to classifiers.
+	decisionLog    *core.DecisionLog
+	verdictHarness *core.HarnessKind
+	jevDisabled    bool
 	// authenticationLoginPath is read only by the Unix worker control runtime.
 	authenticationLoginPath *string
 	loginIdentity           *ClaudeLoginIdentity
@@ -726,9 +729,10 @@ func (r *DurableRelay) LiveSessionBaseline() (core.LiveSessionBaseline, error) {
 	}
 	var nativeAgentReplay *[]core.NativeAgent
 	if r.snapshot.NativeAgentReplay != nil {
-		agents := make([]core.NativeAgent, 0, len(r.snapshot.NativeAgentReplay))
-		for _, id := range slices.Sorted(maps.Keys(r.snapshot.NativeAgentReplay)) {
-			agents = append(agents, r.snapshot.NativeAgentReplay[id])
+		replay := *r.snapshot.NativeAgentReplay
+		agents := make([]core.NativeAgent, 0, len(replay))
+		for _, id := range slices.Sorted(maps.Keys(replay)) {
+			agents = append(agents, replay[id])
 		}
 		nativeAgentReplay = &agents
 	}
@@ -1846,11 +1850,23 @@ func (r *DurableRelay) SetTurnVerdictHarness(harness core.HarnessKind) {
 		if err != nil {
 			slog.Warn("Jev diagnostic log unavailable", "error", err)
 		} else {
+			r.decisionLog = &log
 			r.turnContext.SetDecisionLog(log)
 		}
 	}
 	r.turnContext.SetSessionID(r.snapshot.SessionID)
 	r.publishAssessmentDiagnostic()
+}
+
+// Shutdown ends the relay's ownership of the Jev decision log it opened:
+// every record queued so far is written before it returns, and tasks still
+// holding the log can write no more, so nothing lands in the root after its
+// owner is done with it. Rust drops the log with the relay. Calling it
+// again has no further effect.
+func (r *DurableRelay) Shutdown() {
+	if r.decisionLog != nil {
+		r.decisionLog.Close()
+	}
 }
 
 func (r *DurableRelay) TurnContext() *transcript.TurnContext {

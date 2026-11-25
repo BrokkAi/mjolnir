@@ -17,6 +17,104 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
 }
 
 impl DurableRelay {
+    /// Claim destination ownership before recording its identity or changing input.
+    pub fn begin_pending_parked_move(&mut self) -> Result<()> {
+        let Some(parked) = self.pending_parked_move.as_ref() else {
+            return Ok(());
+        };
+        let marker = format!("parked-move-started:{}", parked.operation_id);
+        if self.snapshot.handled_commands.contains_key(&marker) {
+            return Ok(());
+        }
+        let mut next = self.snapshot.clone();
+        next.handled_commands
+            .insert(marker, self.parked_move_receipt());
+        self.commit_snapshot(next)
+    }
+
+    fn parked_move_receipt(&self) -> HandledRelayCommand {
+        HandledRelayCommand {
+            accepted_ordinal: self.snapshot.latest_ordinal,
+            terminal_identity: None,
+            terminal_ordinal: None,
+            outcome: None,
+            failure: None,
+        }
+    }
+
+    /// Apply the durable Move prefix before runtime dispatch or control attachment.
+    /// Each journal command tolerates a crash before the final snapshot marker.
+    pub fn apply_parked_move_launch(
+        &mut self,
+        parked: &mj_core::worker_launch::ParkedMoveLaunch,
+    ) -> Result<()> {
+        let marker = format!("parked-move:{}", parked.operation_id);
+        if self.snapshot.handled_commands.contains_key(&marker) {
+            return Ok(());
+        }
+        if parked.discard_queued_prompts {
+            self.submit_command_inner(
+                &format!("parked-move-discard-{}", parked.operation_id),
+                RelayCommand::ClearQueuedPrompts,
+                false,
+            )?
+            .map_err(|error| anyhow!("apply parked Move queue discard: {}", error.message))?;
+        }
+        if let Some(continuation) = &parked.quota_continuation {
+            self.submit_command_inner(
+                &continuation.command_id,
+                continuation.command.clone(),
+                true,
+            )?
+            .map_err(|error| anyhow!("apply parked Move continuation: {}", error.message))?;
+        }
+        let mut next = self.snapshot.clone();
+        if let Some(handoff) = &parked.prompt_context {
+            anyhow::ensure!(
+                !handoff.trim().is_empty(),
+                "pending prompt context is empty"
+            );
+            anyhow::ensure!(
+                next.active_prompt.is_none()
+                    && next
+                        .pending_prompt_context
+                        .as_ref()
+                        .is_none_or(|context| context.attached_command_id.is_none()),
+                "cannot replace prompt context while its prompt is active"
+            );
+            match next.pending_prompt_context.as_mut() {
+                Some(context) if context.text != *handoff => {
+                    context.text.push_str("\n\n");
+                    context.text.push_str(handoff);
+                }
+                Some(_) => {}
+                None => {
+                    next.pending_prompt_context = Some(PendingPromptContext {
+                        text: handoff.clone(),
+                        attached_command_id: None,
+                    })
+                }
+            }
+        }
+        // Context and marker share this atomic snapshot: replay cannot append twice.
+        // This receipt is a durable boot marker, not a dispatchable command.
+        next.handled_commands
+            .insert(marker, self.parked_move_receipt());
+        self.commit_snapshot(next)
+    }
+
+    /// The destination has opened; commit the Move before permitting any work.
+    pub fn complete_pending_parked_move(&mut self) -> Result<()> {
+        if let Some(parked) = self.pending_parked_move.clone() {
+            self.begin_pending_parked_move()?;
+            // Keep the pending envelope installed until its atomic commit succeeds.
+            self.apply_parked_move_launch(&parked)?;
+            self.pending_parked_move = None;
+            self.promote_next_queued_command()?;
+        }
+        Ok(())
+    }
+
     fn return_boundary_steer_after_turn_end(&mut self, active_prompt_id: &str) -> Result<()> {
         if self.steering_delivery_mode.uses_acp() {
             return Ok(());
@@ -423,10 +521,24 @@ impl DurableRelay {
     /// agent's next tool boundary or turn start and never starts a turn.
     /// `key` must be unique among this session's messages.
     pub fn deliver_agent_message(&mut self, source: &str, key: &str, text: String) -> Result<()> {
+        self.deliver_agent_mailbox_event(source, key, text, false)
+    }
+
+    pub fn deliver_agent_wake(&mut self, source: &str, key: &str, text: String) -> Result<()> {
+        self.deliver_agent_mailbox_event(source, key, text, true)
+    }
+
+    fn deliver_agent_mailbox_event(
+        &mut self,
+        source: &str,
+        key: &str,
+        text: String,
+        wake: bool,
+    ) -> Result<()> {
         let event = mj_core::mailbox::MailboxEvent {
             key: key.to_owned(),
             source: source.to_owned(),
-            wake: false,
+            wake,
             created_at_ms: u64::try_from(epoch_millis()).unwrap_or_default(),
             body: mj_core::mailbox::MailboxEventBody::PlainText { text },
         };
@@ -511,6 +623,7 @@ impl DurableRelay {
             .map(|queued| queued.command_id.clone())
             .collect();
         self.snapshot.in_place_move_hold = Some(mj_core::relay::InPlaceMoveHold {
+            reload_phase: None,
             operation_id: operation_id.to_owned(),
             captured_pending_command_ids: captured_pending_command_ids.clone(),
             harness_restarted: false,
@@ -638,6 +751,7 @@ impl DurableRelay {
         &mut self,
         operation_id: &str,
         expected_store_id: &str,
+        expected_harness_restarted: Option<bool>,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
         if let Some(error) = self.verify_expected_store_id(expected_store_id) {
             return Ok(Err(error));
@@ -647,11 +761,49 @@ impl DurableRelay {
                 RelayErrorCode::InvalidState,
                 "cannot release in-place move dispatch hold while an in-place harness restart is in progress",
                 true,
-                None,
+                Some(RelayErrorDetail::ReloadInProgress {
+                    operation_id: operation_id.to_owned(),
+                }),
             )));
         }
         match &self.snapshot.in_place_move_hold {
             Some(hold) if hold.operation_id == operation_id => {
+                use mj_core::relay::InPlaceReloadPhase;
+                if matches!(hold.reload_phase, Some(InPlaceReloadPhase::Committed)) {
+                    return Ok(Err(relay_protocol_error(
+                        RelayErrorCode::InvalidState,
+                        "cannot release in-place move dispatch hold while a committed harness reload is starting",
+                        true,
+                        Some(RelayErrorDetail::ReloadInProgress {
+                            operation_id: operation_id.to_owned(),
+                        }),
+                    )));
+                }
+                if let Some(expected) = expected_harness_restarted {
+                    if !expected
+                        && let Some(InPlaceReloadPhase::FailedAfterCommit { message }) =
+                            &hold.reload_phase
+                    {
+                        return Ok(Err(relay_protocol_error(
+                            RelayErrorCode::Internal,
+                            message.clone(),
+                            false,
+                            Some(RelayErrorDetail::ReloadFailedAfterCommit {
+                                operation_id: operation_id.to_owned(),
+                            }),
+                        )));
+                    }
+                    let actual_restarted = hold.harness_restarted
+                        || matches!(hold.reload_phase, Some(InPlaceReloadPhase::Started));
+                    if actual_restarted != expected {
+                        return Ok(Err(relay_protocol_error(
+                            RelayErrorCode::InvalidState,
+                            "in-place move harness reload state changed before releasing dispatch hold",
+                            true,
+                            None,
+                        )));
+                    }
+                }
                 self.snapshot.in_place_move_hold = None;
                 self.persist_snapshot()?;
                 self.promote_next_queued_command()?;
@@ -697,12 +849,41 @@ impl DurableRelay {
                 None,
             )));
         }
+        use mj_core::relay::InPlaceReloadPhase;
+        match &hold.reload_phase {
+            Some(InPlaceReloadPhase::Started) => {
+                return Ok(InPlaceHarnessRestartDecision::AlreadyRestarted);
+            }
+            Some(InPlaceReloadPhase::Committed) => {
+                return Err(Box::new(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "in-place harness reload already committed and is starting",
+                    true,
+                    Some(RelayErrorDetail::ReloadInProgress {
+                        operation_id: operation_id.to_owned(),
+                    }),
+                )));
+            }
+            Some(InPlaceReloadPhase::FailedAfterCommit { message }) => {
+                return Err(Box::new(relay_protocol_error(
+                    RelayErrorCode::Internal,
+                    message.clone(),
+                    false,
+                    Some(RelayErrorDetail::ReloadFailedAfterCommit {
+                        operation_id: operation_id.to_owned(),
+                    }),
+                )));
+            }
+            None => (),
+        }
         if self.in_place_harness_restart_in_flight.is_some() {
             return Err(Box::new(relay_protocol_error(
                 RelayErrorCode::InvalidState,
                 "an in-place harness restart is already in progress",
                 true,
-                None,
+                Some(RelayErrorDetail::ReloadInProgress {
+                    operation_id: operation_id.to_owned(),
+                }),
             )));
         }
         if hold.harness_restarted {
@@ -751,9 +932,104 @@ impl DurableRelay {
             hold.operation_id
         );
         hold.harness_restarted = true;
+        hold.reload_phase = Some(mj_core::relay::InPlaceReloadPhase::Started);
         self.persist_snapshot()?;
         self.in_place_harness_restart_in_flight = None;
         Ok(())
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn reconcile_committed_reload(&mut self, operation_id: &str) -> Result<()> {
+        if let Some(hold) = self.snapshot.in_place_move_hold.as_mut()
+            && hold.operation_id == operation_id
+            && hold.reload_phase.is_none()
+            && !hold.harness_restarted
+        {
+            hold.reload_phase = Some(mj_core::relay::InPlaceReloadPhase::Committed);
+            self.persist_snapshot()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn finish_committed_reload(&mut self) -> Result<()> {
+        if let Some((operation, store)) = self.committed_reload_operation() {
+            self.set_reload_phase(
+                &operation,
+                &store,
+                mj_core::relay::InPlaceReloadPhase::Started,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn committed_reload_operation(&self) -> Option<(String, String)> {
+        let hold = self.snapshot.in_place_move_hold.as_ref()?;
+        matches!(
+            hold.reload_phase,
+            Some(
+                mj_core::relay::InPlaceReloadPhase::Committed
+                    | mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { .. }
+            )
+        )
+        .then(|| {
+            (
+                hold.operation_id.clone(),
+                self.snapshot.store_id.clone().expect("held store"),
+            )
+        })
+    }
+
+    pub(crate) fn mark_in_place_harness_committed(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<()> {
+        self.set_reload_phase(
+            operation_id,
+            expected_store_id,
+            mj_core::relay::InPlaceReloadPhase::Committed,
+        )
+    }
+
+    pub(crate) fn mark_in_place_harness_failed_after_commit(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        message: String,
+    ) -> Result<()> {
+        self.set_reload_phase(
+            operation_id,
+            expected_store_id,
+            mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { message },
+        )
+    }
+
+    fn set_reload_phase(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        phase: mj_core::relay::InPlaceReloadPhase,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.snapshot.store_id.as_deref() == Some(expected_store_id),
+            "reload store identity changed"
+        );
+        let hold = self
+            .snapshot
+            .in_place_move_hold
+            .as_mut()
+            .context("reload hold disappeared")?;
+        anyhow::ensure!(
+            hold.operation_id == operation_id,
+            "reload hold owner changed"
+        );
+        if matches!(phase, mj_core::relay::InPlaceReloadPhase::Started) {
+            hold.harness_restarted = true;
+        }
+        hold.reload_phase = Some(phase);
+        self.persist_snapshot()
     }
 
     fn submit_command_inner(
@@ -1934,7 +2210,10 @@ impl DurableRelay {
     /// asked. It goes through admission like an Escape steer, so the journal
     /// and every client see the same steering operation.
     fn submit_automatic_steer(&mut self) -> Result<()> {
-        if self.live_baseline_pending() || self.snapshot.in_place_move_hold.is_some() {
+        if self.pending_parked_move.is_some()
+            || self.live_baseline_pending()
+            || self.snapshot.in_place_move_hold.is_some()
+        {
             return Ok(());
         }
 
@@ -2804,7 +3083,10 @@ impl DurableRelay {
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run one at a time; restart recovery precedes previously queued input.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
-        if self.live_baseline_pending() || self.snapshot.in_place_move_hold.is_some() {
+        if self.pending_parked_move.is_some()
+            || self.live_baseline_pending()
+            || self.snapshot.in_place_move_hold.is_some()
+        {
             return Ok(None);
         }
         let recovery = self

@@ -40,7 +40,12 @@ pub trait GuardianStage1: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = GuardianStage1Verdict> + Send + 'a>>;
 }
 
+// Acknowledge retries worker journal GC after transient failures, even when
+// the projection watermark has not changed (mj-worker relay/requests.rs).
+const ACK_GC_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
 pub struct StandaloneSession {
+    pub(super) last_ack_sent: Option<Instant>,
     pub client: RelayClient,
     pub materialized: MaterializedSession,
     pub window: mj_core::state::ProjectionWindow,
@@ -53,9 +58,9 @@ pub struct StandaloneSession {
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
     subagent_queue: Option<super::subagent_queue::SubagentQueueObserver>,
     subagent_queue_error: Option<String>,
-    history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
+    pub(super) history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
     operator_presence_revision: Option<u64>,
-    history_active: std::collections::BTreeSet<String>,
+    pub(super) history_active: std::collections::BTreeMap<String, tokio::task::AbortHandle>,
     guardian_jobs: tokio::task::JoinSet<GuardianReviewResult>,
     guardian_active: std::collections::BTreeSet<String>,
 }
@@ -100,6 +105,7 @@ impl StandaloneSession {
         let operational = client.status().await?;
         let (materialized, window) = load_projection(&target.session_id).await?;
         let mut connection = Self {
+            last_ack_sent: None,
             client,
             materialized,
             window,
@@ -221,58 +227,37 @@ impl StandaloneSession {
         client: &mut RelayClient,
         baseline: &mj_core::relay::LiveSessionBaseline,
     ) -> Result<()> {
+        let mut images = Vec::new();
+        let mut files = Vec::new();
         for queued in baseline
             .queue
             .iter()
             .chain(&baseline.delivered_initial_prompts)
         {
             if let Some(prompt) = queued.command.prompt_blocks() {
-                Self::cache_prompt_attachments_with(client, &baseline.state.session_id, &prompt)
-                    .await?;
+                images.extend(mj_core::attachment::references(&prompt)?);
+                files.extend(mj_core::attachment::file_references(&prompt)?);
             }
         }
-        Ok(())
-    }
-
-    async fn cache_prompt_attachments(
-        &mut self,
-        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
-    ) -> Result<()> {
-        Self::cache_prompt_attachments_with(&mut self.client, &self.materialized.session_id, prompt)
-            .await
-    }
-
-    async fn cache_prompt_attachments_with(
-        client: &mut RelayClient,
-        session_id: &str,
-        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
-    ) -> Result<()> {
-        for reference in mj_core::attachment::references(prompt)? {
-            if let Err(error) = client.cache_attachment(&reference).await {
-                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
-            }
-        }
-        for reference in mj_core::attachment::file_references(prompt)? {
-            if let Err(error) = client.cache_file_attachment(&reference).await {
-                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
-            }
-        }
-        Ok(())
+        client.cache_attachments(&images, &files).await
     }
 
     async fn cache_event_attachments(
         &mut self,
         events: &[mj_core::relay::RelayEvent],
     ) -> Result<()> {
+        let mut images = Vec::new();
+        let mut files = Vec::new();
         for event in events {
             if let mj_core::relay::RelayObservation::CommandQueued { command, .. } =
                 &event.observation
                 && let Some(prompt) = command.prompt_blocks()
             {
-                self.cache_prompt_attachments(&prompt).await?;
+                images.extend(mj_core::attachment::references(&prompt)?);
+                files.extend(mj_core::attachment::file_references(&prompt)?);
             }
         }
-        Ok(())
+        self.client.cache_attachments(&images, &files).await
     }
 
     pub async fn prepare_adoption(spec: &CommandSpec, session_id: &str) -> Result<RelayClient> {
@@ -468,6 +453,21 @@ impl StandaloneSession {
     }
 
     pub async fn sync_in_place(&mut self) -> Result<bool> {
+        self.sync_reads(None, false)
+            .await
+            .map(|(changed, _)| changed)
+    }
+
+    pub(super) async fn sync_reads(
+        &mut self,
+        actor: Option<Option<&Arc<dyn GuardianStage1>>>,
+        cpu: bool,
+    ) -> Result<(
+        bool,
+        Option<Result<Option<mj_core::cpu_usage::SessionCpuUsage>>>,
+    )> {
+        use mj_core::relay::{RelayRequest, RelayResponsePayload};
+        let mut cpu_reply = None;
         if self.protocol_version() >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL {
             let presence =
                 mj_core::runtime::spawn_blocking(crate::database::load_operator_presence)
@@ -478,15 +478,73 @@ impl StandaloneSession {
                 self.operator_presence_revision = Some(presence.revision);
             }
         }
-        self.sync_history().await?;
+        self.flush_history().await?;
         let original_ordinal = self.materialized.applied_event_ordinal;
         let original_digest = self.materialized.applied_event_digest.clone();
         let original_operational = self.operational.clone();
         let mut repaired = false;
         let mut repaired_frontiers = std::collections::HashSet::new();
+        let mut first_pass = true;
         loop {
             let after_ordinal = self.materialized.applied_event_ordinal;
-            let error = match self.catch_up_fixed_frontier().await {
+            let after_digest = self.materialized.applied_event_digest.clone();
+            let attach = self
+                .client
+                .attach_request(after_ordinal, after_digest.clone());
+            let mut requests = Vec::new();
+            if first_pass && RelayRequest::HistoryRequests.supported_at(self.protocol_version()) {
+                requests.push(RelayRequest::HistoryRequests);
+            }
+            requests.push(attach.clone());
+            if first_pass
+                && actor.is_some()
+                && RelayRequest::GuardianRequests.supported_at(self.protocol_version())
+            {
+                requests.push(RelayRequest::GuardianRequests);
+            }
+            if first_pass && cpu && RelayRequest::CpuUsage.supported_at(self.protocol_version()) {
+                requests.push(RelayRequest::CpuUsage);
+            }
+            first_pass = false;
+            let methods: Vec<_> = requests.iter().map(RelayRequest::method_name).collect();
+            let mut replies: std::collections::BTreeMap<_, _> = methods
+                .into_iter()
+                .zip(self.client.call_many(requests).await?)
+                .collect();
+            if let Some(reply) = replies.remove("history_requests") {
+                match reply? {
+                    RelayResponsePayload::HistoryRequests { requests } => {
+                        self.apply_history(requests)
+                    }
+                    _ => bail!("unexpected history queue response"),
+                }
+            }
+            if let Some(reply) = replies.remove("guardian_requests") {
+                match reply? {
+                    RelayResponsePayload::GuardianRequests { requests } => {
+                        self.apply_guardian(requests, actor.flatten())
+                    }
+                    _ => bail!("unexpected guardian queue response"),
+                }
+            }
+            if let Some(reply) = replies.remove("cpu_usage") {
+                cpu_reply = Some(reply.and_then(|reply| match reply {
+                    RelayResponsePayload::CpuUsage { usage } => Ok(usage),
+                    _ => bail!("unexpected CPU response"),
+                }));
+            }
+            let catch_up = replies
+                .remove("attach")
+                .expect("attach reply")
+                .and_then(|reply| self.client.decode_attachment(attach, reply))
+                .and_then(|first| {
+                    RelayClient::catch_up_from_attachment(after_ordinal, after_digest, first)
+                });
+            let result = match catch_up {
+                Ok(catch_up) => self.apply_catch_up(catch_up).await,
+                Err(error) => Err(error),
+            };
+            let error = match result {
                 Ok(()) => break,
                 Err(error) => error,
             };
@@ -563,18 +621,20 @@ impl StandaloneSession {
             || self.subagent_requests != previous_requests
             || self.subagent_completions != previous_results;
         let changed = changed || self.subagent_queue_error != previous_error;
-        Ok(changed)
+        Ok((changed, cpu_reply))
     }
 
     /// Poll only bounded messages here. Disk searches run independently of this
     /// actor, and the owned JoinSet cancels them when the connection is retired.
-    async fn sync_history(&mut self) -> Result<()> {
+    async fn flush_history(&mut self) -> Result<()> {
         while let Some(completed) = self.history_jobs.try_join_next() {
             match completed {
                 Ok(result) => {
                     self.history_active.remove(&result.request_id);
                     self.client.complete_history_request(result).await?;
                 }
+                // Aborted below because the worker no longer lists the request.
+                Err(error) if error.is_cancelled() => continue,
                 Err(error) => {
                     tracing::error!(%error, "history task failed; pending requests will retry");
                     self.history_jobs.abort_all();
@@ -589,16 +649,38 @@ impl StandaloneSession {
                 }
             }
         }
-        for request in self.client.history_requests().await? {
+        Ok(())
+    }
+
+    fn apply_history(&mut self, pending: Vec<mj_core::history::HistoryRequest>) {
+        // The worker drops a request when its caller gives up or it expires.
+        // Stop that work now, before it waits for a permit or runs a query.
+        let listed: std::collections::BTreeSet<&str> = pending
+            .iter()
+            .map(|request| request.request_id.as_str())
+            .collect();
+        self.history_active.retain(|request_id, task| {
+            let keep = listed.contains(request_id.as_str());
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        for request in pending {
             if self.history_active.len() >= mj_core::history::MAX_PENDING {
                 break;
             }
-            if self.history_active.insert(request.request_id.clone()) {
-                self.history_jobs
-                    .spawn(crate::sessionwiki::history::execute(request));
+            if !self.history_active.contains_key(&request.request_id) {
+                let request_id = request.request_id.clone();
+                let task = self
+                    .history_jobs
+                    .spawn(crate::sessionwiki::history::execute(
+                        request,
+                        Some(self.materialized.session_id.clone()),
+                    ));
+                self.history_active.insert(request_id, task);
             }
         }
-        Ok(())
     }
 
     pub(super) fn cancel_guardian_jobs(&mut self) {
@@ -607,13 +689,12 @@ impl StandaloneSession {
         self.guardian_active.clear();
     }
 
-    /// Called only by the relay actor. Lifecycle connections leave pending
-    /// reviews with the worker until an actor takes ownership.
-    pub(super) async fn sync_guardian(
+    fn apply_guardian(
         &mut self,
+        requests: Vec<mj_core::guardian::GuardianReviewRequest>,
         classifier: Option<&Arc<dyn GuardianStage1>>,
-    ) -> Result<()> {
-        for request in self.client.guardian_requests().await? {
+    ) {
+        for request in requests {
             if self.guardian_active.len() >= MAX_PENDING_GUARDIAN_REVIEWS {
                 break;
             }
@@ -622,7 +703,6 @@ impl StandaloneSession {
                     .spawn(execute_guardian_review(request, classifier.cloned()));
             }
         }
-        Ok(())
     }
 
     pub(super) async fn deliver_guardian_review(
@@ -655,6 +735,10 @@ impl StandaloneSession {
             .client
             .begin_catch_up(after.ordinal, &after.digest)
             .await?;
+        self.apply_catch_up(catch_up).await
+    }
+
+    async fn apply_catch_up(&mut self, catch_up: crate::worker_client::RelayCatchUp) -> Result<()> {
         let mut cursor = self.apply_event_page(catch_up.first_page).await?;
         let mut pages_remaining = catch_up.frontier.ordinal.saturating_sub(cursor.ordinal);
         while cursor.ordinal < catch_up.frontier.ordinal {
@@ -673,11 +757,18 @@ impl StandaloneSession {
             cursor == catch_up.frontier,
             "controller projection did not reach the captured relay frontier"
         );
-        if cursor.ordinal > 0 {
+        if cursor.ordinal > 0
+            && (catch_up.state.acknowledged_through != cursor.ordinal
+                || catch_up.state.acknowledged_digest != cursor.digest
+                || self
+                    .last_ack_sent
+                    .is_none_or(|at| at.elapsed() >= ACK_GC_RETRY_INTERVAL))
+        {
             let acknowledged = self
                 .client
                 .acknowledge(cursor.ordinal, &cursor.digest)
                 .await?;
+            self.last_ack_sent = Some(Instant::now());
             // The reply carries the worker's global watermark. A newer ACK
             // requires reloading the projection before publishing any state.
             if acknowledged.ordinal > cursor.ordinal {

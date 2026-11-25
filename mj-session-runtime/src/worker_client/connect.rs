@@ -129,6 +129,7 @@ impl RelayClient {
             )
             .await;
         }
+        let requested_bulk = spec.ssh_bulk_variant();
         let requested = spec.clone();
         let executor =
             crate::targets::CancellableProcessExecutor::with_timeout(SSH_MASTER_OPEN_TIMEOUT);
@@ -158,14 +159,16 @@ impl RelayClient {
                 )));
             }
         };
-        Self::spawn_and_handshake(
+        let mut client = Self::spawn_and_handshake(
             &spec,
             expected_session_id,
             request_timeout,
             handshake_timeout,
             lease,
         )
-        .await
+        .await?;
+        client.bulk_spec = requested_bulk;
+        Ok(client)
     }
 
     pub async fn spawn_and_handshake(
@@ -222,6 +225,7 @@ impl RelayClient {
             error
         })?;
         let mut client = Self {
+            bulk_spec: None,
             child: Some(child),
             input: Some(input),
             output: BufReader::new(output),

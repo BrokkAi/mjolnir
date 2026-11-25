@@ -56,6 +56,31 @@ fn profile_home_for(root: &Path, kind: HarnessKind) -> std::path::PathBuf {
     }
 }
 
+fn install_fake_managed_antigravity(root: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let kind = HarnessKind::Antigravity;
+    let selected = mj_core::harness_runtime::pin(kind);
+    let cache =
+        mj_core::harness_runtime::managed_harness_cache_root(None, Some(root.as_os_str())).unwrap();
+    let install = mj_core::harness_runtime::managed_harness_install_dir(&cache, kind);
+    let agy = install.join(selected.entrypoint);
+    std::fs::create_dir_all(agy.parent().unwrap()).unwrap();
+    std::fs::write(&agy, script).unwrap();
+    std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(install.join(mj_core::harness_runtime::LEASE_FILE), []).unwrap();
+    std::fs::write(
+        install.join(mj_core::harness_runtime::MANIFEST_FILE),
+        serde_json::to_vec(
+            &mj_core::harness_runtime::ManagedHarnessManifest::for_install(
+                kind,
+                selected.install_id,
+            ),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn cli_login_targets_only_the_selected_profile_home_for_every_harness() {
     let root = tempfile::tempdir().unwrap();
@@ -123,14 +148,12 @@ fn cli_login_targets_only_the_selected_profile_home_for_every_harness() {
     // `fake-command.sh`; write a regular executable file before spawning `mj`.
     {
         use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"{ANTIGRAVITY_VERSION}\"; exit 0; fi\ntarget=\"$HOME/.gemini\"\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in --gemini-dir) shift; target=\"$1\" ;; esac\n  shift\ndone\nmkdir -p \"$target/antigravity-cli\"\nprintf profile-account > \"$target/antigravity-cli/antigravity-oauth-token\"\n"
+        );
+        install_fake_managed_antigravity(root.path(), &script);
         let agy = tools.join("agy");
-        std::fs::write(
-            &agy,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"{ANTIGRAVITY_VERSION}\"; exit 0; fi\ntarget=\"$HOME/.gemini\"\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in --gemini-dir) shift; target=\"$1\" ;; esac\n  shift\ndone\nmkdir -p \"$target/antigravity-cli\"\nprintf profile-account > \"$target/antigravity-cli/antigravity-oauth-token\"\n"
-            ),
-        )
-        .unwrap();
+        std::fs::write(&agy, script).unwrap();
         std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     mj_core::test_hooks::install_fake_command(
@@ -238,11 +261,8 @@ fn headless_antigravity_acp_login_falls_back_to_profile_scoped_terminal_login() 
     // - in `acp` (no `--login`): rejects `authenticate` with agy's SSH no-browser error
     {
         use std::os::unix::fs::PermissionsExt;
-        let agy = tools.join("agy");
-        std::fs::write(
-            &agy,
-            format!(
-                r#"#!/bin/sh
+        let script = format!(
+            r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
     echo "{ANTIGRAVITY_VERSION}"
     exit 0
@@ -272,9 +292,10 @@ while IFS= read -r line; do
     esac
 done
 "#
-            ),
-        )
-        .unwrap();
+        );
+        install_fake_managed_antigravity(root.path(), &script);
+        let agy = tools.join("agy");
+        std::fs::write(&agy, script).unwrap();
         std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 

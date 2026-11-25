@@ -119,15 +119,18 @@ pub use mj_session_runtime::host_git_config::{
     controller_git_identity, set_controller_git_identity,
 };
 pub use worker_binary::{
-    ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
+    ControlWorker, image_worker_label, prepare_recovery_worker_binary,
+    prestage_host_container_worker, prewarm_profile_content, profile_upload_generation,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
     shared_content_ssh, worker_source_problem,
 };
 
 pub use checkpoint::{
-    CheckpointArtifact, CheckpointDeferred, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease,
-    SessionExportLayout, checkpoint_was_deferred, host_snapshot_cache_wakeup,
-    reconcile_managed_checkpoint_archives, sweep_expired_host_snapshot_cache,
+    CheckpointArtifact, CheckpointBundle, CheckpointDeferred, CheckpointExportError,
+    CheckpointPatch, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease, SessionExportLayout,
+    checkpoint_bundle, checkpoint_patch, checkpoint_was_deferred, export_reads_checkpoint,
+    host_snapshot_cache_wakeup, reconcile_managed_checkpoint_archives,
+    retire_host_snapshot_cache_for_ssh_identity, sweep_expired_host_snapshot_cache,
     sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
@@ -788,7 +791,7 @@ impl Controller {
         // needed to repair them. Operations validate the session they act on.
         self.state.validate()?;
         for session in self.state.sessions.values() {
-            if let Some(issue) = session.configuration_issue(&self.config) {
+            if let Some(issue) = self.state.configuration_issue(session, &self.config) {
                 tracing::warn!(session_id = %session.id, "{issue}");
             }
         }

@@ -2203,7 +2203,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
-    let group_id = format!("subagent-spawn-{}", child.request_key);
+    let group_id = child.startup_group_id();
     let initial = crate::database::load_startup_group(&child_id, &group_id).unwrap();
     assert!(matches!(
         serde_json::from_str::<crate::database::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
@@ -2240,9 +2240,17 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             .report_dir,
         Some(report_dir)
     );
+    // The child records no checkout of its own: it works in its parent's
+    // clone, which `State::checkout` derives from the parent's descriptor.
+    assert_eq!(controller.state.sessions[&child_id].project_directory, None);
     assert_eq!(
-        controller.state.sessions[&child_id].project_directory,
-        Some(clone),
+        controller
+            .state
+            .checkout(&child_id)
+            .unwrap()
+            .project_directory()
+            .as_deref(),
+        Some(clone.as_path()),
         "the child works in its parent's clone"
     );
 
@@ -2364,7 +2372,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
-    let prompt_id = format!("subagent-spawn-{}-prompt", child.request_key);
+    let prompt_id = crate::database::startup_step_id(&child.startup_group_id(), "prompt");
     let backend = targets::TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir()
             .join("workers")
@@ -3452,18 +3460,6 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .unwrap();
     launch.model = Some("resolved-model".into());
     launch.effort = Some("high".into());
-    launch.environment.insert(
-        mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
-        "0".into(),
-    );
-    launch.environment.insert(
-        mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV.into(),
-        "1".into(),
-    );
-    launch.environment.insert(
-        mj_core::subagent::CHILD_REPORT_DIR_ENV.into(),
-        "/outside-the-child".into(),
-    );
     let request = RegisterSubagentRequest {
         no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,

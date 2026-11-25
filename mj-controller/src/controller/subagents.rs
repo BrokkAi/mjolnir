@@ -480,7 +480,9 @@ impl Controller {
             last_profile: request.profile_id.clone(),
             staged_aws_profile: None,
             bundle_id: parent.bundle_id.clone(),
-            project_directory: parent.project_directory.clone(),
+            // A borrowed child works in its owner's checkout, which
+            // `State::checkout` resolves; copying the path would duplicate it.
+            project_directory: None,
             managed_worktree: None,
             review: None,
             // A child works in its parent's tree and gets what its parent got,
@@ -648,7 +650,7 @@ pub fn recover_registered_subagent_startup(
 ) -> Result<()> {
     if crate::database::load_startup_group(
         &relation.child_session_id,
-        &mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key),
+        &relation.startup_group_id(),
     )?
     .is_empty()
         && crate::database::load_startup_group(&relation.child_session_id, &relation.request_key)?
@@ -665,7 +667,7 @@ fn initial_startup_deliveries(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<Vec<crate::database::StartupDelivery>> {
-    let group_id = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
+    let group_id = relation.startup_group_id();
     crate::database::api_followup_steps(
         &group_id,
         crate::database::StartFollowup {
@@ -1388,6 +1390,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn reviewer_registration_preloads_initial_input_and_preserves_legacy_groups() {
         use super::super::worker_binary::LaunchHistory;
         use mj_worker_launch::worker_launch::{session_launch_config, worker_placement};
@@ -1449,8 +1455,7 @@ mod tests {
             })
             .unwrap();
         let id = &relation.child_session_id;
-        let group =
-            mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
+        let group = relation.startup_group_id();
         let steps = crate::database::load_startup_group(id, &group).unwrap();
         assert_eq!(steps.len(), 4);
         let state = crate::database::load_state().unwrap();
@@ -1511,8 +1516,7 @@ mod tests {
         )
         .unwrap();
         recover_registered_subagent_startup(&legacy_relation, true).unwrap();
-        let modern =
-            mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&legacy_relation.request_key);
+        let modern = legacy_relation.startup_group_id();
         assert!(
             crate::database::load_startup_group(&legacy_child.id, &modern)
                 .unwrap()

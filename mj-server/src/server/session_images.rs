@@ -249,11 +249,7 @@ fn select(request: &ImageRequest, status: bool) -> Result<Selection> {
 /// Only the manifest owner supplies production artifacts. This fixture is a
 /// temporary integration seam until Milestone 1 is merged by the parent.
 fn mise_artifact(platform: &str) -> Result<MiseArtifact> {
-    let arch = match platform {
-        "linux/amd64" => "x86_64",
-        "linux/arm64" => "aarch64",
-        _ => bail!("no pinned mise artifact for {platform}"),
-    };
+    let arch = mj_harness_install::session_image::platform_arch(platform)?;
     mj_harness_install::session_image::pinned_mise(arch)
 }
 
@@ -746,8 +742,17 @@ async fn prepare(
             .context("engine image metadata did not report a registry digest")?;
         (digest, &metadata["Config"])
     };
+    let (baked_node, baked_harnesses) = ImageBase::parse_baked_labels(&image_config["Labels"]);
+    let mut harnesses: Vec<_> = config
+        .enabled_profiles()
+        .map(|(_, profile)| profile.kind)
+        .collect();
+    harnesses.sort_by_key(|kind| kind.id());
+    harnesses.dedup();
     containerfile(
         &ImageBase {
+            baked_node,
+            baked_harnesses,
             reference: format!("{}@{digest}", base.split('@').next().unwrap_or(&base)),
             user: image_config["User"].as_str().unwrap_or_default().into(),
             workdir: image_config["WorkingDir"]
@@ -758,6 +763,7 @@ async fn prepare(
         platform,
         &mise_artifact(platform)?,
         files,
+        &harnesses,
     )
 }
 

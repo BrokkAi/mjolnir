@@ -85,7 +85,7 @@ pub fn aws_session_inputs<'a>(
         .context("session target is missing")?;
     let backend = backend_locator(locator, session, config)?;
     let runtime = session.target_runtime_settings(config)?;
-    Ok((profile, backend, runtime.environment.clone()))
+    Ok((profile, backend, runtime.launch_environment()?))
 }
 
 /// Where this session's worker lives. This is decided from the session
@@ -151,6 +151,7 @@ pub fn prepare_worker_files_for(
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
 ) -> Result<StagedWorkerProfile> {
+    let candidate = matches!(&preparation, WorkerFilePreparation::StageCandidate { .. });
     let (launch, staged_profile) = stage_worker_files_for(
         config,
         state,
@@ -160,8 +161,11 @@ pub fn prepare_worker_files_for(
         executor,
         preparation,
         history,
+        None,
     )?;
-    if let Some(launch) = launch {
+    if let Some(launch) = launch
+        && !candidate
+    {
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
     }
     Ok(staged_profile)
@@ -180,6 +184,7 @@ pub fn stage_worker_files_for(
     executor: &impl CommandExecutor,
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
+    created_container: Option<&targets::CreationObservation>,
 ) -> Result<(Option<WorkerLaunchConfig>, StagedWorkerProfile)> {
     let _timing = crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
     let owner = crate::worker_lifecycle::require(session_id)?;
@@ -227,28 +232,31 @@ pub fn stage_worker_files_for(
         .get(&session.last_profile)
         .context("session profile is missing")?;
     profile.ensure_ready(&session.last_profile)?;
-    let target_environment = &session.target_runtime_settings(config)?.environment;
-    let aws_source = if preparation == WorkerFilePreparation::RestoreProfileOnly {
-        crate::aws_credentials::source_for_staged_profile(
-            profile,
-            backend,
-            target_environment,
-            session.staged_aws_profile.as_deref(),
-        )?
-    } else {
-        crate::aws_credentials::source(profile, backend, target_environment)?
-    };
+    let target_environment = session
+        .target_runtime_settings(config)?
+        .launch_environment()?;
+    let aws_source = crate::aws_credentials::source(profile, backend, &target_environment)?;
     let (mut launch, project_memory, target_profile_home) = session_launch_config_with_source(
         config,
         state,
         session_id,
         backend,
         history,
+        &target_environment,
         aws_source.as_ref(),
     )?;
 
     if session.native_session_id.is_some() && profile.kind == mj_core::config::HarnessKind::Codex {
         launch.goal_resume_request = Some(mj_core::state::new_session_id()?);
+    }
+    if let WorkerFilePreparation::StageCandidate {
+        operation_id,
+        candidate_id,
+        ..
+    } = &preparation
+    {
+        mj_core::worker_launch::validate_candidate_id(candidate_id)?;
+        launch.accepted_reload_operation_id = Some(operation_id.clone());
     }
     let staging = tempfile::tempdir().context("create worker staging directory")?;
     let launch_path = staging.path().join("launch.json");
@@ -292,7 +300,7 @@ pub fn stage_worker_files_for(
         &session.last_profile,
         profile,
         crate::aws_credentials::SessionHost::from(backend),
-        target_environment,
+        &target_environment,
     ) {
         executor.notify_notice(&notice);
     }
@@ -316,7 +324,12 @@ pub fn stage_worker_files_for(
     // Edits to attachment settings apply on the next container creation;
     // describe this container's creation snapshot while it is retained.
     let attachments = mj_core::state::applied_container_settings(session).additional_mounts;
-    let storage = targets::inspect_container_storage(backend, attachments, executor)?;
+    let storage = targets::inspect_container_storage_observed(
+        backend,
+        attachments,
+        created_container,
+        executor,
+    )?;
     append_container_storage_guidance(
         profile.kind,
         &profile_stage,
@@ -392,6 +405,49 @@ pub fn stage_worker_files_for(
     // deliver too long, so the staged file is checked before it travels.
     profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
     let shared_login = shared_profile_login(profile, backend);
+    if let WorkerFilePreparation::StageCandidate {
+        operation_id,
+        expected_store_id,
+        candidate_id,
+    } = &preparation
+    {
+        use mj_core::worker_launch::{ReloadCandidateManifest, ReloadSharedLogin};
+        // In-place Move reuses the running environment's mbx binary/config/shims.
+        // Phase B's link_build_cache_configuration links the destination XDG config after commit.
+        let (clear_paths, protected_paths) = profile_clear_spec(profile.kind);
+        let manifest = ReloadCandidateManifest {
+            operation_id: operation_id.clone(),
+            expected_store_id: expected_store_id.clone(),
+            candidate_id: candidate_id.clone(),
+            harness: profile.kind,
+            target_profile_home: target_profile_home.clone(),
+            clear_paths,
+            protected_paths,
+            shared_login: shared_login.as_ref().map(|login| ReloadSharedLogin {
+                relative_marker: login.name.to_owned(),
+                source_path: login.file.to_string_lossy().into_owned(),
+            }),
+            clear_github_token: session.no_github_credentials,
+        };
+        let manifest_path = staging.path().join("manifest.json");
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+        install_reload_candidate(
+            executor,
+            backend,
+            session_id,
+            worker_root,
+            candidate_id,
+            &manifest_path,
+            mj_worker_staging::worker_binary::StagedWorkerProfile {
+                launch: &launch_path,
+                ownership: &ownership_path,
+                profile: &profile_stage,
+                shared_login: None,
+                shared_paths: &shared_paths,
+            },
+        )?;
+        return Ok((Some(launch), staged_profile));
+    }
     if preparation != WorkerFilePreparation::Install {
         // A shared symlink stays live across boot. Only a copied login
         // identifies the credentials staged for this specific launch.
@@ -406,6 +462,11 @@ pub fn stage_worker_files_for(
         } else {
             None
         };
+        // The profile install below also replaces `launch.json`, whose
+        // `MJ_MBX_CONFIG_DIR` names this session's private policy snapshot.
+        // Stage it, and the mbx the launchers run, before the file names them.
+        install_build_cache_shim(session, backend, &launch, executor)
+            .context("stage the session's mbx and configuration")?;
         clear_profile_configuration(
             executor,
             backend,
@@ -449,7 +510,7 @@ pub fn stage_worker_files_for(
         &shared_paths,
     )?;
     if session.build_cache.is_some() {
-        install_build_cache_shim(config, state, session, backend, &launch, executor)
+        install_build_cache_shim(session, backend, &launch, executor)
             .context("install shared machine build cache configuration")?;
     }
     Ok((Some(launch), staged_profile))
@@ -458,16 +519,14 @@ pub fn stage_worker_files_for(
 /// Stage and verify the session's mbx, then install marked launchers in
 /// the session's `bin` directory on the worker PATH.
 pub fn install_build_cache_shim(
-    config: &Config,
-    state: &State,
     session: &mj_core::state::SessionRecord,
     backend: &targets::TargetLocator,
     launch: &WorkerLaunchConfig,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    let Some(cache) = session.build_cache.as_ref() else {
+    if session.build_cache.is_none() {
         return Ok(());
-    };
+    }
     let worker_root = targets::worker_root(backend, &session.id)?;
     if matches!(backend, targets::TargetLocator::SshNitro { .. }) {
         let _timing = crate::launch_timing::LaunchPhaseTimer::new(&session.id, "stage Nitro mbx");
@@ -485,7 +544,7 @@ pub fn install_build_cache_shim(
             Ok::<_, anyhow::Error>(binary)
         })();
         return match staged {
-            Ok(binary) => install_mbx_shims(executor, backend, &worker_root, &binary, None, &[]),
+            Ok(binary) => install_mbx_shims(executor, backend, &worker_root, &binary),
             Err(error) => {
                 disable_mbx_cache_shims(
                     &session.id,
@@ -498,27 +557,105 @@ pub fn install_build_cache_shim(
             }
         };
     }
+    let cache = session
+        .build_cache
+        .as_ref()
+        .expect("checked above that the session has a build cache");
     let config_roots = build_cache_config_roots(launch);
-    let configuration = mj_core::config::build_cache_configuration_directory(&cache.directory);
-    if link_legacy_mbx_configuration(
-        executor,
+    // The build cache is optional: whatever keeps the host's policy or
+    // executable from reaching the container turns the cache off for this
+    // session, with a notice, instead of blocking the session from starting.
+    if matches!(
         backend,
-        &worker_root,
-        &configuration,
-        &config_roots,
-    )? {
+        targets::TargetLocator::SshPodman { .. } | targets::TargetLocator::SshDocker { .. }
+    ) {
+        // Over SSH, every command is a round trip: read the host's policy and
+        // mbx in one, and stage everything in the container with one more.
+        let staged = (|| -> Result<()> {
+            let (configuration, native) =
+                mj_build_cache::mbx::native_mbx_and_config_for_container(backend, cache, executor)
+                    .context("read the container host's mbx configuration")?;
+            let host_mbx = match &native {
+                mj_build_cache::mbx::NativeMbxLookup::Ready(native) => Some(HostMbx {
+                    program: &native.program,
+                    version: &native.version,
+                }),
+                mj_build_cache::mbx::NativeMbxLookup::Unavailable(_) => None,
+            };
+            match stage_ssh_container_mbx(
+                executor,
+                backend,
+                &worker_root,
+                &configuration,
+                &config_roots,
+                host_mbx,
+            )? {
+                // An older private mbx keeps its executable and now has its policy.
+                SshContainerMbx::Legacy | SshContainerMbx::Installed(_) => Ok(()),
+                SshContainerMbx::HostMbxUnavailable => match native {
+                    mj_build_cache::mbx::NativeMbxLookup::Unavailable(reason) => bail!("{reason}"),
+                    mj_build_cache::mbx::NativeMbxLookup::Ready(_) => {
+                        bail!("staging found no host mbx although one was supplied")
+                    }
+                },
+            }
+        })();
+        if let Err(error) = staged {
+            disable_mbx_cache_shims(
+                &session.id,
+                backend,
+                &worker_root,
+                executor,
+                &format!("{error:#}"),
+            );
+        }
         return Ok(());
     }
-    let binary = match mj_build_cache::mbx::sync_mbx_binary_for_container(
-        backend,
-        &cache.directory,
-        executor,
-    ) {
-        Ok(mj_build_cache::mbx::CachedMbxSync::Ready(binary)) => binary,
-        Ok(mj_build_cache::mbx::CachedMbxSync::Unavailable(reason)) => {
-            disable_mbx_cache_shims(&session.id, backend, &worker_root, executor, &reason);
-            return Ok(());
+    let staged = (|| -> Result<Option<PathBuf>> {
+        // The policy snapshot goes first: an older private mbx, which keeps its
+        // own executable, is linked to it below.
+        let configuration =
+            mj_build_cache::mbx::native_config_for_container(backend, cache, executor)
+                .context("read the container host's mbx configuration")?;
+        let configuration_directory =
+            stage_mbx_configuration(executor, backend, &configuration, &config_roots)?;
+        if link_legacy_mbx_configuration(
+            executor,
+            backend,
+            &worker_root,
+            &configuration_directory,
+            &config_roots,
+        )? {
+            return Ok(None);
         }
+        let native = match mj_build_cache::mbx::native_mbx_for_container(backend, executor)? {
+            mj_build_cache::mbx::NativeMbxLookup::Ready(native) => native,
+            mj_build_cache::mbx::NativeMbxLookup::Unavailable(reason) => bail!("{reason}"),
+        };
+        stage_container_mbx(
+            executor,
+            backend,
+            &worker_root,
+            &native.program,
+            &native.version,
+        )
+        .map(Some)
+    })();
+    match staged {
+        Ok(Some(binary)) => {
+            install_mbx_shims(executor, backend, &worker_root, &binary).or_else(|error| {
+                disable_mbx_cache_shims(
+                    &session.id,
+                    backend,
+                    &worker_root,
+                    executor,
+                    &format!("{error:#}"),
+                );
+                Ok(())
+            })
+        }
+        // An older private mbx keeps its executable and now has its policy.
+        Ok(None) => Ok(()),
         Err(error) => {
             disable_mbx_cache_shims(
                 &session.id,
@@ -527,61 +664,18 @@ pub fn install_build_cache_shim(
                 executor,
                 &format!("{error:#}"),
             );
-            return Ok(());
+            Ok(())
         }
-    };
-    if let Err(error) = verify_mbx_binary(executor, backend, &binary.path, &binary.version) {
-        disable_mbx_cache_shims(
-            &session.id,
-            backend,
-            &worker_root,
-            executor,
-            &format!("{error:#}"),
-        );
-        return Ok(());
     }
-    let (configuration, config_roots) =
-        build_cache_configuration(config, state, session, backend, launch, executor)?;
-    install_mbx_shims(
-        executor,
-        backend,
-        &worker_root,
-        &binary.path,
-        Some(&configuration),
-        &config_roots,
-    )
 }
 
 pub fn prepare_build_cache_links(
-    config: &Config,
-    state: &State,
     session: &mj_core::state::SessionRecord,
     backend: &targets::TargetLocator,
     launch: &WorkerLaunchConfig,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    install_build_cache_shim(config, state, session, backend, launch, executor)
-}
-
-pub fn build_cache_configuration(
-    config: &Config,
-    _state: &State,
-    session: &mj_core::state::SessionRecord,
-    backend: &targets::TargetLocator,
-    launch: &WorkerLaunchConfig,
-    executor: &impl CommandExecutor,
-) -> Result<(PathBuf, Vec<PathBuf>)> {
-    let configuration = mj_build_cache::mbx::prepare_session_configuration(
-        config,
-        backend,
-        session
-            .build_cache
-            .as_ref()
-            .context("session has no build cache")?,
-        executor,
-    )?;
-    let config_roots = build_cache_config_roots(launch);
-    Ok((configuration, config_roots))
+    install_build_cache_shim(session, backend, launch, executor)
 }
 
 /// Probe the installed binary and the worker's recorded state after a
@@ -695,11 +789,13 @@ pub fn session_launch_config(
         .profiles
         .get(&session.last_profile)
         .context("session profile is missing")?;
-    let target = session.target_runtime_settings(config)?;
+    let target_environment = session
+        .target_runtime_settings(config)?
+        .launch_environment()?;
     let aws_source = crate::aws_credentials::source_for_staged_profile(
         profile,
         backend,
-        &target.environment,
+        &target_environment,
         session.staged_aws_profile.as_deref(),
     )?;
     session_launch_config_with_source(
@@ -708,6 +804,7 @@ pub fn session_launch_config(
         session_id,
         backend,
         history,
+        &target_environment,
         aws_source.as_ref(),
     )
 }
@@ -718,6 +815,8 @@ fn session_launch_config_with_source(
     session_id: &str,
     backend: &targets::TargetLocator,
     history: LaunchHistory<'_>,
+    // The target environment resolved once for this launch.
+    target_environment: &std::collections::BTreeMap<String, String>,
     aws_source: Option<&AwsCredentialSource>,
 ) -> Result<(
     WorkerLaunchConfig,
@@ -728,13 +827,13 @@ fn session_launch_config_with_source(
         .sessions
         .get(session_id)
         .with_context(|| format!("unknown session {session_id}"))?;
-    session.validate_configuration(config)?;
     let profile = config
         .profiles
         .get(&session.last_profile)
         .context("session profile is missing")?;
     let owner = state.workspace_owner(session_id)?;
     let checkout = owner.checkout();
+    session.validate_configuration_in(&checkout, config)?;
     let bundle = checkout
         .project_directory()
         .is_none()
@@ -778,6 +877,7 @@ fn session_launch_config_with_source(
             working_directories: &working_directories,
         },
         &target,
+        target_environment.clone(),
         config,
         aws_source,
     )?;
@@ -792,7 +892,6 @@ fn session_launch_config_with_source(
         launch.bridge_command = reviewer.bridge_command.clone();
         launch.bridge_args = reviewer.bridge_args.clone();
         launch.execution_policy = reviewer.execution_policy;
-        launch.environment.extend(reviewer.environment.clone());
         if let Some(source) = aws_source {
             apply_aws_launch_environment(&mut launch.environment, &target_profile_home, source);
         }
@@ -877,9 +976,11 @@ fn session_launch_config_with_source(
 
     // The child's harness opens on its spawn model instead of switching
     // to it from the profile default before the first turn (issue 1217).
-    launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
+    launch.initial_model = None;
     if let Some(child) = subagent.as_ref() {
-        let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key);
+        let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+            &child.kind.startup_request_key(&child.request_key),
+        );
         let steps = crate::database::load_startup_group(session_id, &group)?;
         // The assignment is delivered at most once per session history.
         // A restore deletes the worker's command receipts, so the history
@@ -887,9 +988,30 @@ fn session_launch_config_with_source(
         // already holds it and the settings it was sent with.
         let prompt_id = crate::database::startup_step_id(&group, "prompt");
         let assignment_started = prompt_started(session_id, &history, &prompt_id)?;
+        let same_spawn_service = session.last_profile == child.profile_id
+            || config
+                .profiles
+                .get(&child.profile_id)
+                .and_then(|spawn| {
+                    config
+                        .native_continuity(spawn.kind, &child.profile_id, &session.last_profile)
+                        .ok()
+                })
+                .unwrap_or(false);
+        if !assignment_started && same_spawn_service {
+            launch.initial_model = child.model.clone();
+        }
         if !assignment_started {
             launch.initial_commands = steps
                 .into_iter()
+                .filter(|step| {
+                    same_spawn_service
+                        || !matches!(
+                            serde_json::from_str::<crate::database::StartupStep>(&step.step_json),
+                            Ok(crate::database::StartupStep::Configure { key, .. })
+                                if matches!(key.as_str(), "model" | "effort" | "thought_level")
+                        )
+                })
                 .map(|step| {
                     let (command, optional) = match serde_json::from_str::<
                         crate::database::StartupStep,
@@ -1003,7 +1125,6 @@ pub fn project_memory_sync_target(
     if session.no_project_memory {
         return Ok(None);
     }
-    session.validate_configuration(config)?;
     let locator = session
         .target
         .as_ref()
@@ -1015,6 +1136,7 @@ pub fn project_memory_sync_target(
         .context("session profile is missing")?;
     let owner = state.workspace_owner(session_id)?;
     let checkout = owner.checkout();
+    session.validate_configuration_in(&checkout, config)?;
     let bundle = checkout
         .project_directory()
         .is_none()
@@ -1035,6 +1157,7 @@ pub fn project_memory_sync_target(
     let target_home = target_profile_home(&backend, session_id, profile);
     let launch = project_memory_launch(
         session,
+        &checkout,
         bundle,
         &workspace,
         &target_home,
@@ -1124,7 +1247,7 @@ pub fn reconnect_command(
         .sessions
         .get(session_id)
         .with_context(|| format!("unknown session {session_id}"))?;
-    session.validate_configuration(config)?;
+    state.validate_session_configuration(session, config)?;
     let locator = session.target.as_ref().context("session has no target")?;
     let backend = backend_locator(locator, session, config)?;
     targets::reconnect_plan(&backend, session_id)?
@@ -1141,6 +1264,165 @@ mod tests {
     use mj_core::state::{SessionState, TargetLocator};
     use mj_core::subagent::{CHILD_REPORT_DIR_ENV, SubagentKind, SubagentRecord};
     use mj_targets::test_isolation::{IsolatedTest, test_name};
+
+    // A sub-agent records no checkout of its own, so its configuration must
+    // be judged by its owner's: a plain project directory needs no bundle.
+    #[test]
+    fn reconnect_accepts_a_borrowed_sub_agent_of_a_bare_raw_session() {
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/profile")),
+        );
+        let session = |id: &str, directory: Option<&str>| {
+            let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+            session.state = SessionState::Running;
+            session.target_template_id = "localhost".into();
+            session.bundle_id = "no-such-bundle".into();
+            session.project = None;
+            session.project_directory = directory.map(PathBuf::from);
+            session.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: PathBuf::from("/workers").join(id),
+            }));
+            session
+        };
+        let parent = session("11111111111111111111111111111111", Some("/work/raw"));
+        let child = session("22222222222222222222222222222222", None);
+        let mut state = State::default();
+        for record in [&parent, &child] {
+            state.sessions.insert(record.id.clone(), record.clone());
+        }
+        state.environment_owners = [
+            (parent.id.clone(), parent.id.clone()),
+            (child.id.clone(), parent.id.clone()),
+        ]
+        .into_iter()
+        .collect();
+        reconnect_command(&config, &state, &child.id).unwrap();
+    }
+
+    #[test]
+    fn stage_candidate_preserves_live_files() {
+        const MARKER: &str = "MJ_TEST_PRIVATE_RELOAD";
+        if std::env::var_os(MARKER).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "stage_candidate_preserves_live_files",
+            ))
+            .env(MARKER, "1")
+            .isolated_store(dir.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("config.toml"), "model = \"candidate\"\n").unwrap();
+        std::fs::write(source.join("auth.json"), r#"{"OPENAI_API_KEY":"test-key"}"#).unwrap();
+        let mut config = Config::default().with_local_targets();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(HarnessKind::Codex, &source),
+        );
+        let id = "55555555555555555555555555555555";
+        let root = dir.path().join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: root.to_string_lossy().into_owned(),
+        };
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "localhost".into(),
+            directory: dir.path().join("cache"),
+            max_size: None,
+            target_root: None,
+        });
+        session.last_profile = "codex".into();
+        session.harness_kind = HarnessKind::Codex;
+        session.native_session_id = None;
+        session.project_directory = Some(dir.path().to_owned());
+        session.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: root.clone(),
+        }));
+        session.target_template_id = "localhost".into();
+        crate::database::save_session(&session).unwrap();
+        let home = targets::target_profile_home(&backend, id, &config.profiles["codex"]);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(Path::new(&home).join("config.toml"), "live profile").unwrap();
+        for name in ["launch.json", "ownership.json"] {
+            std::fs::write(root.join(name), "live").unwrap();
+        }
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        for name in ["cargo", "mbx"] {
+            std::fs::write(root.join("bin").join(name), "live shim").unwrap();
+        }
+        let state = crate::database::load_state().unwrap();
+        // Candidate staging must not consult host mbx or alter live cache shims.
+        #[cfg(unix)]
+        {
+            let no_host_mbx = dir.path().join("no-host-mbx");
+            std::fs::create_dir(&no_host_mbx).unwrap();
+            for utility in [
+                "mkdir", "cp", "chmod", "sh", "rm", "ln", "find", "dirname", "cat",
+            ] {
+                let executable = ["/usr/bin", "/bin"]
+                    .into_iter()
+                    .map(|directory| Path::new(directory).join(utility))
+                    .find(|path| path.exists())
+                    .expect("system filesystem utility");
+                std::os::unix::fs::symlink(executable, no_host_mbx.join(utility)).unwrap();
+            }
+            unsafe {
+                std::env::set_var("PATH", &no_host_mbx);
+            }
+        }
+        crate::database::test_fixtures::worker_test_scope(id, || {
+            prepare_worker_files_for(
+                &config,
+                &state,
+                id,
+                &backend,
+                root.to_str().unwrap(),
+                &mj_core::targets::ProcessExecutor,
+                WorkerFilePreparation::StageCandidate {
+                    operation_id: "move".into(),
+                    expected_store_id: "store".into(),
+                    candidate_id: "candidate".into(),
+                },
+                LaunchHistory::Stored,
+            )
+            .unwrap();
+        });
+        for name in ["cargo", "mbx"] {
+            assert_eq!(
+                std::fs::read(root.join("bin").join(name)).unwrap(),
+                b"live shim"
+            );
+        }
+        let candidate = root.join("reload-candidates/candidate");
+        let launch = WorkerLaunchConfig::read(&candidate.join("launch.json")).unwrap();
+        assert_eq!(launch.accepted_reload_operation_id.as_deref(), Some("move"));
+        for name in [
+            "launch.json",
+            "ownership.json",
+            "manifest.json",
+            "profile/config.toml",
+        ] {
+            assert!(candidate.join(name).exists(), "{name}");
+        }
+        for name in ["launch.json", "ownership.json"] {
+            assert_eq!(std::fs::read(root.join(name)).unwrap(), b"live");
+        }
+        assert_eq!(
+            std::fs::read(Path::new(&home).join("config.toml")).unwrap(),
+            b"live profile"
+        );
+    }
 
     #[test]
     fn current_worker_launch_config_preserves_staged_aws_profile() {
@@ -1166,10 +1448,10 @@ mod tests {
         session.native_session_id = None;
         session.project_directory = Some(dir.path().to_owned());
         session.container_workspace = Some(crate::targets::new_container_workspace(id).unwrap());
-        let locator = TargetLocator::LocalPodman {
+        session.target_template_id = "docker".into();
+        let locator = TargetLocator::LocalDocker {
             container_id: "c".repeat(64),
             borrowed_from: None,
-            workspace_storage: Default::default(),
         };
         let backend = backend_locator(&locator, &session, &config).unwrap();
         session.target = Some(Box::new(locator));
@@ -1248,7 +1530,7 @@ mod tests {
             created_at: child.created_at.clone(),
             kind: SubagentKind::Worker,
             reviewer_launch: None,
-            model: None,
+            model: Some("codex-spawn-model".into()),
             effort: None,
             initial_prompt: "inspect".into(),
             noticed_turn: None,
@@ -1257,13 +1539,62 @@ mod tests {
             orchestrator: true,
             resume_with_parent: false,
         };
+        let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+            &relation.kind.startup_request_key(&relation.request_key),
+        );
+        let startup = [
+            (
+                "model",
+                crate::database::StartupStep::Configure {
+                    key: "model".into(),
+                    value: "codex-spawn-model".into(),
+                    optional: false,
+                },
+            ),
+            (
+                "effort",
+                crate::database::StartupStep::Configure {
+                    key: "effort".into(),
+                    value: "high".into(),
+                    optional: false,
+                },
+            ),
+            (
+                "thought",
+                crate::database::StartupStep::Configure {
+                    key: "thought_level".into(),
+                    value: "high".into(),
+                    optional: true,
+                },
+            ),
+            (
+                "approval",
+                crate::database::StartupStep::Configure {
+                    key: "approval-policy".into(),
+                    value: "never".into(),
+                    optional: true,
+                },
+            ),
+            (
+                "prompt",
+                crate::database::StartupStep::ApiPrompt {
+                    text: "inspect".into(),
+                },
+            ),
+        ]
+        .into_iter()
+        .map(|(suffix, step)| crate::database::StartupDelivery {
+            session_id: child_id.into(),
+            command_id: crate::database::startup_step_id(&group, suffix),
+            step_json: serde_json::to_string(&step).unwrap(),
+            phase: "pending".into(),
+            group_id: Some(group.clone()),
+            accepted_ordinal: None,
+            error: None,
+        })
+        .collect();
         crate::database::register_subagent_with_startup(
-            &child,
-            &relation,
-            vec![],
-            None,
-            None,
-            true,
+            &child, &relation, startup, None, None, true,
         )
         .unwrap();
         parent.state = SessionState::Stopped;
@@ -1291,5 +1622,111 @@ mod tests {
         let launch: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
         assert!(launch.oracle && launch.review_gate());
         assert_eq!(launch.subagent_kind, Some(SubagentKind::Worker));
+        let state = crate::database::load_state().unwrap();
+        let (launch, _, _) =
+            session_launch_config(&config, &state, child_id, &backend, LaunchHistory::Stored)
+                .unwrap();
+        assert_eq!(launch.initial_model.as_deref(), Some("codex-spawn-model"));
+        assert!(
+            !prompt_started(
+                child_id,
+                &LaunchHistory::Stored,
+                &crate::database::startup_step_id(&group, "prompt")
+            )
+            .unwrap()
+        );
+        let original_commands = launch.initial_commands.clone();
+        config
+            .profiles
+            .insert("same-service".into(), config.profiles["codex"].clone());
+        let mut same_service = state.clone();
+        same_service
+            .sessions
+            .get_mut(child_id)
+            .unwrap()
+            .last_profile = "same-service".into();
+        let (same_launch, _, _) = session_launch_config(
+            &config,
+            &same_service,
+            child_id,
+            &backend,
+            LaunchHistory::Stored,
+        )
+        .unwrap();
+        assert_eq!(
+            same_launch.initial_model.as_deref(),
+            Some("codex-spawn-model")
+        );
+        assert_eq!(same_launch.initial_commands, original_commands);
+
+        let deepseek_home = mj_core::config::data_dir().join("deepseek-profile");
+        std::fs::create_dir_all(&deepseek_home).unwrap();
+        std::fs::write(
+            deepseek_home.join("config.toml"),
+            r#"model_provider = "deepseek"
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+env_key = "DEEPSEEK_API_KEY"
+wire_api = "responses"
+"#,
+        )
+        .unwrap();
+        config.profiles.insert(
+            "deepseek".into(),
+            HarnessProfile::new(HarnessKind::Codex, deepseek_home),
+        );
+        assert!(
+            !config
+                .native_continuity(HarnessKind::Codex, "codex", "deepseek")
+                .unwrap()
+        );
+        let mut different_service = state.clone();
+        different_service
+            .sessions
+            .get_mut(child_id)
+            .unwrap()
+            .last_profile = "deepseek".into();
+        let (different_launch, _, _) = session_launch_config(
+            &config,
+            &different_service,
+            child_id,
+            &backend,
+            LaunchHistory::Stored,
+        )
+        .unwrap();
+        assert_eq!(different_launch.initial_model, None);
+        assert_eq!(
+            different_launch
+                .initial_commands
+                .iter()
+                .map(|input| input.command.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                mj_core::relay::RelayCommand::SetConfig {
+                    key: "approval-policy".into(),
+                    value: "never".into()
+                },
+                mj_core::relay::RelayCommand::Prompt {
+                    prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                        "inspect"
+                    )]
+                },
+            ]
+        );
+
+        config.profiles.insert(
+            "claude".into(),
+            HarnessProfile::new(
+                HarnessKind::Claude,
+                mj_core::config::data_dir().join("claude"),
+            ),
+        );
+        let mut moved = state.clone();
+        moved.sessions.get_mut(child_id).unwrap().last_profile = "claude".into();
+        moved.sessions.get_mut(child_id).unwrap().harness_kind = HarnessKind::Claude;
+        let (launch, _, _) =
+            session_launch_config(&config, &moved, child_id, &backend, LaunchHistory::Stored)
+                .unwrap();
+        assert_eq!(launch.initial_model, None);
     }
 }

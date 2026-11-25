@@ -1971,7 +1971,7 @@ func TestAuthenticationRecoveryHandlesBothOrdersOfInstallAndFailure(t *testing.T
 		fresh := []byte(`{"claudeAiOauth":{"accessToken":"new-access","expiresAt":2000}}`)
 		runtimeRelayWriteFile(t, path, old)
 		durable := runtimeRelayOpen(t, root, "test")
-		durable.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, durable, core.HarnessKindClaude)
 		loginPath := path
 		durable.authenticationLoginPath = &loginPath
 		initialRevision, _ := durable.loginIdentity.snapshot()
@@ -2082,7 +2082,7 @@ func TestAStalledLoginReadDoesNotBlockRelayEventsOrShutdown(t *testing.T) {
 	path := filepath.Join(root, "login.json")
 	gate := stalledReadFile(path)
 	durable := runtimeRelayOpen(t, root, "test")
-	durable.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, durable, core.HarnessKindClaude)
 	durable.authenticationLoginPath = &path
 	_, err := durable.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}})
 	runtimeRelayMust(t, err)
@@ -6068,6 +6068,34 @@ func TestOversizedResponseIsRejectedBeforeWriting(t *testing.T) {
 	}
 }
 
+// Hard-won: 390e88f94: the Go worker answered command_retention_status with
+// "operation_ids":null, which the Rust daemon refused, so no session started.
+// The frames were recorded from the Rust worker at 3dde0c11b (a fresh OpenCode
+// session's control socket); a fresh Go relay must answer each request with
+// the same bytes.
+func TestAFreshRelayAnswersAsTheRustWorkerDid(t *testing.T) {
+	recorded := runtimeRelayReadFile(t, filepath.Join("testdata", "rust_worker_exchange", "fresh_relay_frames.txt"))
+	frames := strings.Split(strings.TrimSuffix(string(recorded), "\n"), "\n")
+	if len(frames) == 0 || len(frames)%2 != 0 {
+		t.Fatalf("the recording holds %d frames, not request and response pairs", len(frames))
+	}
+	relay := runtimeRelayCell(t, t.TempDir(), "2.74.0")
+	for pair := 0; pair < len(frames); pair += 2 {
+		request, want := frames[pair], frames[pair+1]
+		decoded, known := core.DecodeRelayRequest([]byte(request)).(core.DecodedRelayRequestKnown)
+		if !known {
+			t.Fatalf("the Go relay cannot decode %s", request)
+		}
+		response, err := handleRequest(context.Background(), relay, *decoded.Envelope, nil)
+		runtimeRelayMust(t, err)
+		var written bytes.Buffer
+		runtimeRelayMust(t, writeResponse(&written, &response))
+		if got := strings.TrimSuffix(written.String(), "\n"); got != want {
+			t.Errorf("%s\nGo answered   %s\nRust answered %s", request, got, want)
+		}
+	}
+}
+
 func TestRequestLineLimitIsEnforcedWhileTheLineIsRead(t *testing.T) {
 	maximum := 64 * 1024
 	exactInput := append(bytes.Repeat([]byte{'1'}, maximum), []byte("\nnext\n")...)
@@ -7184,7 +7212,7 @@ func TestCapacityRetryDispatchesWithoutAControllerAfterTheDeadline(t *testing.T)
 		temp := t.TempDir()
 		state := runtimeRelayOpen(t, temp, "1.0.0")
 		state.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
-		state.SetTurnVerdictHarness(core.HarnessKindCodex)
+		setVerdictHarness(t, state, core.HarnessKindCodex)
 		_, err := state.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}})
 		runtimeRelayMust(t, err)
 		runtimeRelayTestsSubmit(t, state, "capacity-original", runtimeRelayTestsPrompt("work"))
@@ -8045,7 +8073,19 @@ func TestAReadyBarrierKeepsDrainingRuntimeEventsPastTheChannelCapacity(t *testin
 			t.Fatal("the coordinator stopped draining runtime events behind the barrier")
 		}
 	}
-	waitUntil(t, func() bool { return len(events) == 0 }, "the coordinator never drained the channel")
+	// Rust waits for the channel's capacity to return. Its single-threaded
+	// test runtime finishes handling a received event before yielding, so a
+	// drained channel there means every notice is held. A goroutine receives
+	// first and takes the relay after, so here wait for the relay to hold
+	// all of them too.
+	waitUntil(t, func() bool {
+		if len(events) != 0 {
+			return false
+		}
+		observed := relay.Observe()
+		defer observed.Unlock()
+		return len(observed.heldWrites) == len(sent)
+	}, "the coordinator never drained the channel")
 	if got := runtimeRelayOperationalState(relay).LatestOrdinal; got != cut.Ordinal {
 		t.Fatalf("latest ordinal = %d, cut at %d", got, cut.Ordinal)
 	}
@@ -8844,7 +8884,7 @@ func TestAntigravityConnectedWithHookPublishesSteeringAndEnablesAutomaticSteerin
 	runtimeRelayMust(t, err)
 	relay := NewRelayCell(durable)
 	guard := relay.Lock()
-	guard.SetTurnVerdictHarness(core.HarnessKindAntigravity)
+	setVerdictHarness(t, guard.DurableRelay, core.HarnessKindAntigravity)
 	guard.SetSteeringDeliveryMode(core.HarnessKindAntigravity, true)
 	guard.Unlock()
 	agentName, agentVersion := "antigravity", "1.5.11"

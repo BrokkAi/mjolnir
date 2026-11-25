@@ -14,6 +14,9 @@ package accounts
 
 import (
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -152,7 +155,49 @@ func ProfileHealthShared() *LockedProfileHealth { return sharedProfileHealth() }
 // backoff using the schedule for its fault. A provider reset time, when
 // given, sets the end. Quota marks also use the latest quota report.
 func (h *ProfileHealth) Record(profileID, model string, fault ProfileFault, diagnostic *core.TurnDiagnostic, now time.Time) {
-	panic("unported: mj-accounts/src/profile_health.rs ProfileHealth::record")
+	key := healthKey{profileID: profileID, model: model}
+	strikes := uint32(1)
+	if mark, ok := h.marks[key]; ok {
+		if mark.unhealthy.Until.After(now) {
+			return
+		}
+		if mark.unhealthy.Until.Add(healthQuietReset).After(now) {
+			strikes = mark.strikes + 1
+		}
+	}
+	base, maximum := healthBaseBackoff, healthMaxBackoff
+	if fault == ProfileFaultProviderError {
+		base, maximum = healthProviderErrorBaseBackoff, healthProviderErrorMaxBackoff
+	}
+	backoff := min(base*time.Duration(uint64(1)<<min(strikes-1, 16)), maximum)
+	explicitResetAt, hasExplicitResetAt := profileHealthProviderReset(diagnostic, now)
+	var explicitReset *int64
+	if hasExplicitResetAt {
+		seconds := explicitResetAt.Unix()
+		explicitReset = &seconds
+	} else if fault == ProfileFaultQuotaExhausted {
+		if stated := MessageReset(diagnostic.Message, now.UnixMilli()); stated != nil {
+			at := stated.At
+			explicitReset = &at
+		}
+	}
+	until := now.Add(backoff)
+	if fault == ProfileFaultQuotaExhausted {
+		if reset, ok := profileHealthQuotaReset(h.quotaWindows[profileID], model, explicitReset, now); ok {
+			until = reset
+		}
+	} else if hasExplicitResetAt {
+		until = explicitResetAt
+	}
+	if h.marks == nil {
+		h.marks = map[healthKey]*healthMark{}
+	}
+	h.marks[key] = &healthMark{
+		unhealthy:     Unhealthy{Fault: fault, Until: until, Message: diagnostic.Message},
+		strikes:       strikes,
+		setAt:         now,
+		explicitReset: explicitReset,
+	}
 }
 
 // Observe records what a finished turn of profileID running model shows.
@@ -191,7 +236,18 @@ func (h *ProfileHealth) HasMarks(now time.Time) bool {
 // active quota marks when the report gives a later reset. A report never
 // shortens a mark; only a successful turn ends one early.
 func (h *ProfileHealth) ObserveQuota(profileID string, windows []client.QuotaWindow, now time.Time) {
-	panic("unported: mj-accounts/src/profile_health.rs ProfileHealth::observe_quota")
+	if h.quotaWindows == nil {
+		h.quotaWindows = map[string][]client.QuotaWindow{}
+	}
+	h.quotaWindows[profileID] = slices.Clone(windows)
+	for key, mark := range h.marks {
+		if key.profileID != profileID || mark.unhealthy.Fault != ProfileFaultQuotaExhausted || !mark.unhealthy.Until.After(now) {
+			continue
+		}
+		if reset, ok := profileHealthQuotaReset(windows, key.model, mark.explicitReset, now); ok && reset.After(mark.unhealthy.Until) {
+			mark.unhealthy.Until = reset
+		}
+	}
 }
 
 // ForgetQuota forgets a profile's quota windows when the profile is no
@@ -214,11 +270,60 @@ func (h *ProfileHealth) Unhealthy(profileID, model string, now time.Time) *Unhea
 // with quota left says nothing about the limit that failed, so its reset
 // must not hold the mark.
 func profileHealthQuotaReset(windows []client.QuotaWindow, model string, explicitReset *int64, now time.Time) (time.Time, bool) {
-	panic("unported: mj-accounts/src/profile_health.rs quota_reset")
+	nowSeconds := now.Unix()
+	exhausted := []client.QuotaWindow{}
+	for index := range windows {
+		window := &windows[index]
+		if WindowApplies(window, model) && Exhausted(window, nowSeconds) {
+			exhausted = append(exhausted, *window)
+		}
+	}
+	reset := RecoveryReset(exhausted, explicitReset, nowSeconds, nil)
+	if reset == nil || *reset < 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(*reset, 0), true
 }
 
 // profileHealthProviderReset is the provider's reset time, when it gave one
 // in a supported form.
 func profileHealthProviderReset(diagnostic *core.TurnDiagnostic, now time.Time) (time.Time, bool) {
-	panic("unported: mj-accounts/src/profile_health.rs provider_reset")
+	if diagnostic.ResetAt == nil {
+		return time.Time{}, false
+	}
+	value := strings.TrimSpace(*diagnostic.ResetAt)
+	var at time.Time
+	if number, ok := profileHealthParseU64(value); ok {
+		millis := number
+		if number <= 100_000_000_000 {
+			if number > (1<<64-1)/1000 {
+				return time.Time{}, false
+			}
+			millis = number * 1000
+		}
+		at = time.Unix(int64(millis/1000), int64(millis%1000)*int64(time.Millisecond))
+	} else {
+		_, offset := now.Local().Zone()
+		localNow := now.In(time.FixedZone("", offset))
+		normalized, ok := NormalizeResetAt(value, localNow)
+		if !ok {
+			return time.Time{}, false
+		}
+		at = normalized
+	}
+	if !at.After(now) {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// profileHealthParseU64 is Rust's `str::parse::<u64>`: decimal digits after
+// an optional `+`.
+func profileHealthParseU64(value string) (uint64, bool) {
+	digits := strings.TrimPrefix(value, "+")
+	if digits == "" || strings.ContainsFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) {
+		return 0, false
+	}
+	number, err := strconv.ParseUint(digits, 10, 64)
+	return number, err == nil
 }

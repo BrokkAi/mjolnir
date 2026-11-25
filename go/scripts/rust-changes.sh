@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# Show the Rust changes a Go-ported crate has not caught up with yet:
-#   go/scripts/rust-changes.sh mj-core [--stat]
+# List the Rust commits still to replay into the Go build, oldest first:
+# those after go/RUST_TARGET's replayed-through commit, up to its target,
+# that touch a crate already ported to Go, minus the already-applied ones.
+#   go/scripts/rust-changes.sh            # one line per commit
+#   go/scripts/rust-changes.sh --count    # how many remain
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-crate="$1"; shift || true
-base="$(awk -v c="$crate" '$1 == c {print $2}' "$root/go/PORTED_FROM")"
-[ -n "$base" ] || { echo "$crate is not in go/PORTED_FROM" >&2; exit 1; }
-# Where a crate's files lived when it was ported, for crates Rust has since
-# extracted, so the diff shows their changes as renames.
-moved_from=()
-case "$crate" in
-mj-harness-install)
-	moved_from=(mj-core/src/harness_install.rs mj-core/src/login_environment.rs
-		mj-core/src/program_path.rs mj-core/src/session_image.rs
-		mj-core/assets/antigravity mj-core/assets/grok mj-core/assets/harnesses
-		mj-core/assets/kimi mj-core/assets/mise mj-core/assets/muse
-		mj-core/assets/node mj-core/assets/opencode
-		mj-core/tests/fixtures/bridge-version.sh mj-core/tests/fixtures/login-shell.sh) ;;
-mj-microvm)
-	moved_from=(mj-worker/src/microvm mj-worker/tests/microvm_reaper.rs) ;;
-esac
-git -C "$root" log --oneline "$base..HEAD" -- "$crate" ${moved_from[@]+"${moved_from[@]}"}
-git -C "$root" diff -M "$@" "$base" HEAD -- "$crate" ${moved_from[@]+"${moved_from[@]}"}
+file="$root/go/RUST_TARGET"
+field() { awk -v k="$1" '$1 == k {for (i = 2; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "\n")}' "$file"; }
+target="$(field target | awk '{print $1}')"
+from="$(field replayed-through)"
+applied=" $(field already-applied) "
+ported=()
+for crate in "$root"/mj-* "$root"/voice-worker; do
+	name="$(basename "$crate")"
+	package="${name#mj-}"; package="${package//-/}"
+	[ "$name" = mj-import ] && package=mjimport
+	[ "$name" = mj-worker-bin ] && package=workerbin
+	[ "$name" = voice-worker ] && package=voiceworker
+	if [ -d "$root/go/internal/$package" ] || [ -d "$root/go/cmd/$name" ]; then
+		ported+=("$name")
+	fi
+done
+list=$(git -C "$root" log --reverse --no-merges --format='%h %s' "$from..$target" -- "${ported[@]}" |
+	while read -r sha subject; do
+		case "$applied" in *" ${sha:0:9} "*) continue ;; esac
+		printf '%s %s\n' "$sha" "$subject"
+	done)
+if [ "${1:-}" = --count ]; then printf '%s\n' "$list" | grep -c . || true; else printf '%s\n' "$list"; fi

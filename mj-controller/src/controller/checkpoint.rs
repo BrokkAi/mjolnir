@@ -32,8 +32,7 @@ use mj_core::state::{
 use mj_transcript::projection::canonical_session_from_materialized_owned;
 
 use crate::targets::{
-    self, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor, ProvisionStage,
-    ProvisionStageGuard,
+    self, CommandExecutor, CommandOutput, CommandSpec, ProvisionStage, ProvisionStageGuard,
 };
 use mj_core::relay::{RelayCommand, RelayCursor, RelayExecutionState};
 
@@ -105,6 +104,8 @@ pub(super) fn restart_falls_back_to_checkpoint_only(
 
 mod archives;
 pub use archives::*;
+mod export;
+pub use export::*;
 mod host_cache;
 pub use host_cache::*;
 mod purge;
@@ -114,7 +115,6 @@ pub use leftovers::*;
 mod lease;
 pub use lease::*;
 mod barrier;
-mod capture;
 mod latched;
 pub(in crate::controller) use latched::{
     BarrierRecovery, BarrierRecoveryOutcome, lost_wakes_notice,

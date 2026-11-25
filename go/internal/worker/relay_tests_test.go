@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -124,23 +123,15 @@ func successfulShell(command, stdout string) core.UserShellResult {
 	}
 }
 
-// setVerdictHarness is relay.SetTurnVerdictHarness(harness) for a relay
-// whose root the test removes. The harness opens the Jev decision log, whose
-// goroutine (Rust's writer thread) appends after the call that queued the
-// record returns. Rust's TempDir drop ignores a removal that races those
-// writes; Go's t.TempDir cleanup fails the test on it. So the drain is
-// registered here, where the writer starts: cleanups run last in, first out,
-// so it runs before the removal of a root created before the relay. It holds
-// the relay until the read is queued, so the writer cannot be collected
-// first and leave its queued appends unordered with the read.
+// setVerdictHarness is relay.SetTurnVerdictHarness(harness) for a relay the
+// test owns. The harness makes the relay open its Jev decision log, so the
+// relay's shutdown is registered here: cleanups run last in, first out, so
+// it runs before the removal of a root created before the relay, and no
+// record lands in the root after that.
 func setVerdictHarness(t *testing.T, relay *DurableRelay, harness core.HarnessKind) {
 	t.Helper()
 	relay.SetTurnVerdictHarness(harness)
-	t.Cleanup(func() {
-		// The read is ordered after every queued write; its answer is unused.
-		_, _ = core.JevRead(filepath.Join(relay.Root(), "jev-decisions"), session, nil)
-		runtime.KeepAlive(relay)
-	})
+	t.Cleanup(relay.Shutdown)
 }
 
 // relayTestsClaudeRelay builds a relay that models the turns Claude Code
@@ -7796,7 +7787,7 @@ func TestRestoredSchema15SeedPreservesLoadBeforeReplaceAndUsedOrUnknownEvidence(
 func TestAntigravityHookSteeringAndConversationIDFiltering(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "test"))
-	relay.SetTurnVerdictHarness(core.HarnessKindAntigravity)
+	setVerdictHarness(t, relay, core.HarnessKindAntigravity)
 	relay.SetSteeringDeliveryMode(core.HarnessKindAntigravity, true)
 	relay.SetMailboxDeliveryMode(core.MailboxDeliveryModeToolBoundary)
 	relay.setAcpReady(true)

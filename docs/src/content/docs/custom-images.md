@@ -58,17 +58,18 @@ reports the missing glibc loader before downloading an unusable archive.
 An image-baked `opencode` must be OpenCode 2, because each session imports its
 logins with `opencode auth import` before it starts.
 
-DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
-`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.7.0`,
-using Node.js 22 or newer with npm and npx; the npm package bundles the release
-binaries. An older `dsh-acp` on `PATH` is likewise skipped, so the image needs
-the same Node.js tools for the fallback unless its binary is 0.7.0 or newer.
-Mjolnir supplies the pinned Node runtime when the image has no compatible one.
-To bake it in, run
-`npm install -g @brokkai/dsh-acp@0.7.0`
-(Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
-<https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
-need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.
+`dsh-acp` is the ACP frontend for the pinned official DSH runtime. Without it
+on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.8.0`, using
+Node.js 24.9 or newer with npm and npx; the npm package bundles the release
+binaries and the pinned DSH runtime. An older `dsh-acp` on `PATH` is likewise
+skipped, so the image needs the same Node.js tools for the fallback unless its
+binary is 0.8.0 or newer. Mjolnir supplies the pinned Node runtime when the
+image has no compatible one. To bake it in, run
+`npm install -g @brokkai/dsh-acp@0.8.0`
+(Node.js 24.9 or newer), or put the `dsh-acp` binary from a release archive at
+<https://github.com/BrokkAi/dsh-acp/releases> on `PATH` together with its
+pinned `@deepseek-ai/dsh@0.2.2-rc.5` runtime. The Linux binaries need glibc
+2.34 or newer, so musl images such as Alpine cannot run DSH.
 
 Baking the bridges into a custom image avoids that installation cost.
 Codex images should install the bridge version pinned by

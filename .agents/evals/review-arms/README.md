@@ -414,6 +414,29 @@ Low effort took a median 46.0 s solo and cost an estimated $0.120 per diff,
 compared with 106.3 s and $0.252 for 6.2 medium.
 [Impact counts, uncertainty, and runtime details](results/sol-62-low/README.md)
 
+### Sol 6.2 high: one new sample per diff, fresh Opus 5.5/high judging
+
+High did not continue the low-to-medium gain: fresh matched all-confirmed
+solo totals are **130.33 / 209.00 / 180.00** for low / medium / high. High-impact
+yield is **13.00 / 18.33 / 19.00**; high-minus-medium is +0.67 with a paired
+95% interval of −0.67 to +2.33. High costs $0.288 versus medium's $0.241 and
+takes 123.8 versus 109.7 simulated median seconds. High used an explicit-profile
+launch protocol, so this is a cohort comparison with that recorded confound.
+
+[Full counts, paired intervals, cost chart, and collection/judge audits](results/sol-62-high/README.md)
+
+### Sol 6.2 repeated samples: fresh Opus 5.5/high judging
+
+The Opus round uses three independent samples per diff for both Sol 6.2 low
+and medium and freshly judges the full historical frontier pool: 1,726
+reviewer sessions across the original 70 diffs. One medium reviewer yields
+213.67 confirmed findings versus 179.00 for three lows, with higher latency
+but lower estimated cost. Two Terra 6.1 xhigh reviewers plus one Sol 6.2
+medium reviewer yield 256.00 at 115.8 seconds and $0.427 per diff, on both
+latency and cost frontiers. Use this Opus round for current comparisons;
+the Neon follow-ups above remain historical records.
+[Full impact counts, paired intervals, frontier figure, and judge comparison](results/sol-62-opus-high/README.md)
+
 ## Missing-fact labels (for a static-analysis hypothesis)
 
 Jonathan asked, on 2026-11-14, for the one fact each defect's reviewer needed

@@ -1024,6 +1024,42 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn the_shared_preflight_probe_helper_frames_large_noisy_output_from_a_real_shell() {
+    // Both streams exceed a pipe buffer, so a helper that wrote all of one
+    // before reading the other would deadlock here.
+    let script = format!(
+        "{}probe big sh -c 'i=0; while [ $i -lt 4000 ]; do echo \"line $i of stdout padding padding\"; echo \"line $i of stderr padding padding\" >&2; i=$((i+1)); done; exit 7'\nprobe after true\nexit 0\n",
+        PROBE_HELPER_SH
+    );
+    let output = ProcessExecutor
+        .execute(&CommandSpec::new("sh", ["-c", &script]))
+        .unwrap();
+    assert_eq!(output.status, 0);
+    assert!(output.stdout.len() > 64 * 1024, "{}", output.stdout.len());
+
+    let probes = parse_framed_probes(&output.stdout, DEFAULT_PROBE_FRAMES);
+
+    let big = &probes["big"];
+    assert_eq!(big.status, 7);
+    let stdout = String::from_utf8_lossy(&big.stdout);
+    let stderr = String::from_utf8_lossy(&big.stderr);
+    assert_eq!(stdout.lines().count(), 4000);
+    assert_eq!(stderr.lines().count(), 4000);
+    assert_eq!(
+        stdout.lines().last(),
+        Some("line 3999 of stdout padding padding")
+    );
+    assert_eq!(
+        stderr.lines().last(),
+        Some("line 3999 of stderr padding padding")
+    );
+    assert_eq!(probes["after"].status, 0);
+    // The Podman preflight is this helper plus its own probes.
+    assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.starts_with(&format!("\n{PROBE_HELPER_SH}")));
+}
+
 #[test]
 fn managed_resource_identity_args_build_container_labels() {
     let instance = mj_core::config::instance_identity();
@@ -1310,7 +1346,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
         .find(|command| command.purpose == "install Git")
         .unwrap();
     assert!(bootstrap.args.last().unwrap().contains("command -v git"));
-    assert!(bootstrap.args.last().unwrap().contains("command -v gh"));
+    assert!(bootstrap.args.last().unwrap().contains("gh --version"));
     assert!(
         bootstrap
             .args
@@ -2691,6 +2727,126 @@ fn ssh_directory_check_quotes_the_source_and_distinguishes_missing() {
     assert!(!ssh_directory_exists(&ssh(), Path::new("/missing"), &missing).unwrap());
 }
 
+/// Runs what ssh would hand the remote login shell, on this machine.
+#[cfg(unix)]
+struct LoopbackSsh {
+    seen: RefCell<Vec<CommandSpec>>,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for LoopbackSsh {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.seen.borrow_mut().push(command.clone());
+        assert_eq!(command.program, "ssh");
+        let remote = command.args.last().unwrap().clone();
+        ProcessExecutor.execute(&CommandSpec::new("sh", ["-c".to_owned(), remote]))
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_project_validation_asks_one_question_and_tells_the_answers_apart() {
+    let git = |directory: &Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.test"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{args:?}");
+    };
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("user's project");
+    std::fs::create_dir(&project).unwrap();
+    git(&project, &["init", "-q"]);
+    let validate = |path: &Path| {
+        let executor = LoopbackSsh {
+            seen: RefCell::new(vec![]),
+        };
+        let result = validate_bare_project_directory(&ssh(), path, &executor);
+        assert_eq!(executor.seen.borrow().len(), 1, "{}", path.display());
+        result
+    };
+    // A repository without a commit has no HEAD, and says so.
+    let error = validate(&project).unwrap_err();
+    assert!(
+        error.to_string().contains("has no valid Git HEAD"),
+        "{error:#}"
+    );
+    assert!(mj_core::refusal::Refusal::of(&error).is_none());
+    git(
+        &project,
+        &["commit", "-q", "--allow-empty", "-m", "initial"],
+    );
+    validate(&project).unwrap();
+    // A plain directory exists but is not a repository.
+    let plain = root.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    assert!(
+        validate(&plain)
+            .unwrap_err()
+            .to_string()
+            .contains("has no valid Git HEAD")
+    );
+    // A path that is missing, or is a file, is the caller's to correct.
+    std::fs::write(root.path().join("file"), "").unwrap();
+    for path in [root.path().join("missing"), root.path().join("file")] {
+        let error = validate(&path).unwrap_err();
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal");
+        assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Unusable);
+        assert!(
+            refusal
+                .message()
+                .contains("does not exist or is not a directory"),
+            "{}",
+            refusal.message()
+        );
+    }
+
+    // The missing-directory status alone, without its sentinel, and ssh's own
+    // status 255 are not a missing directory.
+    for (status, stderr) in [(44, "fatal: odd\n"), (255, "Connection refused\n")] {
+        let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+            status,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+        }]);
+        let error = validate_bare_project_directory(&ssh(), Path::new("/srv/project"), &executor)
+            .unwrap_err();
+        assert!(
+            mj_core::refusal::Refusal::of(&error).is_none(),
+            "{status}: {error:#}"
+        );
+        if status == 255 {
+            assert!(
+                error.to_string().contains("remote directory check failed"),
+                "{error:#}"
+            );
+        }
+    }
+}
+
 /// Launch finding R3-6: a host-key refusal during `mj new --target <ssh>`
 /// reached the CLI as "500 ... the daemon log records the reason under
 /// reference ...". The caller gets ssh's own words and what to do, as a
@@ -3556,18 +3712,89 @@ fn podman_cleanup_ignores_an_already_absent_container() {
         SESSION,
     )
     .unwrap();
-    assert!(
-        remote.scripts()[0]
-            .args
-            .last()
-            .unwrap()
-            .contains("podman rm --force --ignore")
-    );
-    assert_eq!(
-        remote.scripts()[2].purpose,
-        "remove Podman session Git cache snapshot"
-    );
-    assert!(remote.scripts()[2].args.last().unwrap().contains(SESSION));
+    // Over SSH the whole removal is one command; its script holds every step.
+    assert_eq!(remote.scripts().len(), 1);
+    let script = remote.scripts()[0].args.last().unwrap();
+    assert!(script.contains("podman rm --force --ignore"));
+    assert!(script.contains(&format!(".cache/mjolnir/git/sessions/{SESSION}")));
+}
+
+/// The SSH removal is one command, and each step still runs only if the one
+/// before it succeeded: a container that is not this session's is refused
+/// before any volume or cache is touched, and the failure names the step.
+#[cfg(unix)]
+#[test]
+fn an_ssh_podman_cleanup_runs_in_one_command_and_stops_at_a_refused_container() {
+    let name = resource_name(SESSION).unwrap();
+    let workspace = format!("{name}-workspace");
+    let temporary = format!("{name}-tmp");
+    let locator = TargetLocator::SshPodman {
+        borrowed_from: None,
+        ssh: ssh(),
+        container_id: name.clone(),
+        workspace_storage: PodmanWorkspaceLocator::Volume {
+            name: workspace.clone(),
+        },
+    };
+    let plan = podman_cleanup_plan(&locator, SESSION, true).unwrap();
+    assert_eq!(plan.commands.len(), 1);
+    assert_eq!(plan.commands[0].program, "ssh");
+    // The remote command line, run from the host's home as SSH runs it.
+    let line = format!("cd \"$HOME\" && {}", plan.commands[0].args.last().unwrap());
+    let remote = CommandSpec::new("sh", ["-c", line.as_str()]);
+
+    for (owner, refused) in [(SESSION, false), ("someone-else", true)] {
+        let environment = fake_ssh_podman_environment();
+        let home = environment.path().join("home");
+        let state = home.join("fake-podman");
+        std::fs::write(state.join("container"), "").unwrap();
+        std::fs::write(state.join("volumes"), format!("{workspace}\n{temporary}\n")).unwrap();
+        let cache = home.join(format!(".cache/mjolnir/git/sessions/{SESSION}"));
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let output = execute_with_fake_docker(
+            &environment,
+            &remote,
+            &[
+                ("FAKE_SESSION", owner),
+                ("FAKE_TMP_VOLUME", temporary.as_str()),
+            ],
+        );
+        let invocations = fake_podman_invocations(&environment);
+        let removed = |prefix: &str| invocations.iter().position(|line| line.starts_with(prefix));
+        if refused {
+            let error = mj_core::targets::checked_command_output(&plan.commands[0], output)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error
+                    .contains("remove exact stopped Podman session container failed with status 2")
+                    && error.contains("refusing to operate on a Podman container"),
+                "{error}"
+            );
+            assert_eq!(removed("volume rm"), None, "{invocations:#?}");
+            assert!(state.join("container").exists());
+            assert!(cache.exists(), "the Git cache survives a refused removal");
+            assert_eq!(
+                std::fs::read_to_string(state.join("volumes")).unwrap(),
+                format!("{workspace}\n{temporary}\n")
+            );
+        } else {
+            mj_core::targets::checked_command_output(&plan.commands[0], output).unwrap();
+            let container = removed("rm --force --ignore").expect("container removed");
+            let volume_removals: Vec<_> = invocations
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.starts_with("volume rm"))
+                .collect();
+            assert_eq!(volume_removals.len(), 2, "{invocations:#?}");
+            assert!(volume_removals.iter().all(|(index, _)| *index > container));
+            assert!(volume_removals[0].1.ends_with(&workspace));
+            assert!(volume_removals[1].1.ends_with(&temporary));
+            assert!(!state.join("container").exists());
+            assert!(!cache.exists());
+        }
+    }
 }
 
 #[test]
@@ -5833,7 +6060,7 @@ fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout()
     assert_eq!(running.status, 0);
     assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "false");
 
-    let cleanup = podman_cleanup_plan(&locator, &session).unwrap();
+    let cleanup = podman_cleanup_plan(&locator, &session, false).unwrap();
     let remove_output = mj_core::targets::checked_command_output(
         &cleanup.commands[0],
         ProcessExecutor.execute(&cleanup.commands[0]).unwrap(),
@@ -5844,4 +6071,470 @@ fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout()
         .execute(&CommandSpec::new("podman", ["container", "exists", &name]))
         .unwrap();
     assert_eq!(exists.status, 1, "container should be absent after removal");
+}
+
+/// A `podman` that records what it is asked and answers the way the creation
+/// script needs: volumes it created, the image's presence, and the mounts of
+/// the container.
+#[cfg(unix)]
+fn fake_ssh_podman_environment() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(root.path().join("home/fake-podman")).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "podman",
+        r#"#!/bin/sh
+set -eu
+state="$HOME/fake-podman"
+printf '%s\n' "$*" >>"$state/invocations"
+last=
+for argument do last=$argument; done
+case "${1-}" in
+image)
+    case "${FAKE_IMAGE:-present}" in
+    present) exit 0 ;;
+    absent) exit 1 ;;
+    *) echo "engine unavailable" >&2; exit 125 ;;
+    esac
+    ;;
+info)
+    exit 0
+    ;;
+volume)
+    case "${2-}" in
+    inspect)
+        grep -Fx "$last" "$state/volumes" >/dev/null 2>&1 || exit 1
+        if [ "$last" = "${FAKE_FOREIGN_VOLUME:-}" ]; then
+            echo 'true|someone-else'
+        else
+            printf 'true|%s\n' "$FAKE_SESSION"
+        fi
+        ;;
+    create)
+        printf '%s\n' "$last" >>"$state/volumes"
+        echo "$last"
+        ;;
+    rm)
+        { grep -Fxv "$last" "$state/volumes" || true; } >"$state/remaining"
+        mv "$state/remaining" "$state/volumes"
+        ;;
+    esac
+    ;;
+container)
+    case "$*" in
+    *Mounts*)
+        printf '[{"Type":"volume","Name":"%s","Destination":"/tmp","RW":true}]\n' "$FAKE_TMP_VOLUME"
+        ;;
+    *)
+        [ -f "$state/container" ] || exit 1
+        printf 'true|%s\n' "$FAKE_SESSION"
+        ;;
+    esac
+    ;;
+run)
+    : >"$state/container"
+    echo fake-container-id
+    ;;
+rm)
+    rm -f "$state/container"
+    ;;
+exec)
+    case "$*" in
+    *'id -u'*) printf '1000:1000' ;;
+    *mkdir*) if [ "${FAKE_FAIL_HOME:-0}" = 1 ]; then exit 46; fi ;;
+    *HOME*) printf '/home/dev/' ;;
+    esac
+    ;;
+esac
+"#,
+    );
+    root
+}
+
+/// The creation command of an SSH Podman session as the host's shell runs it,
+/// without the SSH hop.
+#[cfg(unix)]
+fn run_ssh_podman_creation(
+    environment: &tempfile::TempDir,
+    name: &str,
+    gate: crate::image_pull_gate::LaunchImageGate,
+    extra_env: &[(&str, &str)],
+) -> CommandOutput {
+    let template = ContainerTemplate {
+        image: "fake:image".to_owned(),
+        pull_policy: ImagePullPolicy::Missing,
+        extra_run_args: Vec::new(),
+        workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
+        build_cache: None,
+    };
+    let command = podman_container_run_gated(
+        &template,
+        name,
+        SESSION,
+        &[],
+        Some(&ssh()),
+        "/workspace",
+        gate,
+    )
+    .unwrap();
+    assert_eq!(command.program, "ssh");
+    let remote = CommandSpec::new("sh", ["-c", command.args.last().unwrap().as_str()]);
+    let tmp = format!("{name}-tmp");
+    let mut env = vec![("FAKE_SESSION", SESSION), ("FAKE_TMP_VOLUME", tmp.as_str())];
+    env.extend_from_slice(extra_env);
+    execute_with_fake_docker(environment, &remote, &env)
+}
+
+#[cfg(unix)]
+fn fake_podman_invocations(environment: &tempfile::TempDir) -> Vec<String> {
+    std::fs::read_to_string(environment.path().join("home/fake-podman/invocations"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// One SSH command creates the container, makes its HOME exist, and reports
+/// its mounts, without the engine round trips that only re-check what the
+/// script just did (`podman info`, and `volume inspect` after `volume
+/// create`).
+#[cfg(unix)]
+#[test]
+fn an_ssh_podman_creation_initializes_home_and_reports_mounts_in_one_command() {
+    let environment = fake_ssh_podman_environment();
+    let name = resource_name(SESSION).unwrap();
+    let output = run_ssh_podman_creation(
+        &environment,
+        &name,
+        crate::image_pull_gate::LaunchImageGate::Exclusive,
+        &[],
+    );
+    assert_eq!(
+        output.status,
+        0,
+        "{} {:#?}",
+        String::from_utf8_lossy(&output.stderr),
+        fake_podman_invocations(&environment)
+    );
+    let invocations = fake_podman_invocations(&environment);
+    let position = |prefix: &str| {
+        invocations
+            .iter()
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no `{prefix}` in {invocations:#?}"))
+    };
+    assert!(
+        !invocations.iter().any(|line| line == "info"),
+        "{invocations:#?}"
+    );
+    let counted = |prefix: &str| {
+        invocations
+            .iter()
+            .filter(|line| line.starts_with(prefix))
+            .count()
+    };
+    assert_eq!(
+        counted("volume inspect"),
+        4,
+        "an identity check before and after each volume is created"
+    );
+    assert_eq!(counted("volume create"), 2);
+    assert!(position("run ") < position("exec --user 0"));
+    assert!(position("exec --user 0") < position("container inspect --format {{json .Mounts}}"));
+    assert_eq!(
+        invocations.last().unwrap(),
+        &format!("container inspect --format {{{{json .Mounts}}}} {name}")
+    );
+
+    // The first line is still the container id, and the mounts answer the
+    // storage questions a launch asks later without another engine call.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).lines().next(),
+        Some("fake-container-id")
+    );
+    let observed = creation_observation(&output).expect("the script reports the mounts");
+    let locator = TargetLocator::SshPodman {
+        ssh: ssh(),
+        container_id: name.clone(),
+        workspace_storage: PodmanWorkspaceLocator::Volume {
+            name: format!("{name}-workspace"),
+        },
+        borrowed_from: None,
+    };
+    let executor = PodmanPreflightExecutor::with_outputs([]);
+    let storage =
+        inspect_container_storage_observed(&locator, &[], Some(&observed), &executor).unwrap();
+    assert!(storage.managed_temporary_volume);
+    assert!(executor.seen.borrow().is_empty());
+}
+
+/// A volume that already exists but is not this session's is never adopted,
+/// even though the script no longer re-reads the identity of volumes it just
+/// created.
+#[cfg(unix)]
+#[test]
+fn an_ssh_podman_creation_refuses_a_foreign_workspace_volume() {
+    let environment = fake_ssh_podman_environment();
+    let name = resource_name(SESSION).unwrap();
+    let foreign = format!("{name}-workspace");
+    let state = environment.path().join("home/fake-podman");
+    std::fs::write(state.join("volumes"), format!("{foreign}\n")).unwrap();
+    let output = run_ssh_podman_creation(
+        &environment,
+        &name,
+        crate::image_pull_gate::LaunchImageGate::Exclusive,
+        &[("FAKE_FOREIGN_VOLUME", foreign.as_str())],
+    );
+    assert_ne!(output.status, 0);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing foreign Podman volume"));
+    assert!(
+        !fake_podman_invocations(&environment)
+            .iter()
+            .any(|line| line.starts_with("run ")),
+        "no container may start on a foreign volume"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("volumes")).unwrap(),
+        format!("{foreign}\n"),
+        "the foreign volume survives; only the volume this script made is removed"
+    );
+}
+
+/// Another process can create a volume of the same name between the script's
+/// failed `volume inspect` and its `volume create`; the engine then succeeds
+/// without applying the labels. The script must read the identity back, for the
+/// workspace volume and the temporary volume alike.
+#[cfg(unix)]
+#[test]
+fn an_ssh_podman_creation_refuses_a_volume_created_by_someone_else_during_the_race() {
+    let name = resource_name(SESSION).unwrap();
+    for (volume, message) in [
+        (
+            format!("{name}-workspace"),
+            "Podman volume {volume} does not carry the expected Mjolnir identity",
+        ),
+        (
+            format!("{name}-tmp"),
+            "refusing foreign podman temporary volume {volume}",
+        ),
+    ] {
+        let environment = fake_ssh_podman_environment();
+        // The volume is absent when the script first looks, and carries
+        // someone else's labels once the script's `volume create` returns.
+        let output = run_ssh_podman_creation(
+            &environment,
+            &name,
+            crate::image_pull_gate::LaunchImageGate::Exclusive,
+            &[("FAKE_FOREIGN_VOLUME", volume.as_str())],
+        );
+        assert_ne!(output.status, 0, "{volume}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&message.replace("{volume}", &volume)),
+            "{stderr}"
+        );
+        assert!(
+            !fake_podman_invocations(&environment)
+                .iter()
+                .any(|line| line.starts_with("run ")),
+            "no container may start on {volume}"
+        );
+    }
+}
+
+/// HOME initialization is part of creation: when it fails, the container and
+/// the volumes the script made are removed, as for a failed start.
+#[cfg(unix)]
+#[test]
+fn a_failed_home_initialization_rolls_back_the_ssh_podman_creation() {
+    let environment = fake_ssh_podman_environment();
+    let name = resource_name(SESSION).unwrap();
+    let output = run_ssh_podman_creation(
+        &environment,
+        &name,
+        crate::image_pull_gate::LaunchImageGate::Exclusive,
+        &[("FAKE_FAIL_HOME", "1")],
+    );
+    assert_eq!(output.status, 46);
+    assert!(creation_observation(&output).is_none());
+    let state = environment.path().join("home/fake-podman");
+    assert!(
+        !state.join("container").exists(),
+        "the container is removed"
+    );
+    assert_eq!(std::fs::read_to_string(state.join("volumes")).unwrap(), "");
+}
+
+/// A creation that may not download its image reports an absent image before
+/// it creates anything, and tells that apart from the engine failing.
+#[cfg(unix)]
+#[test]
+fn a_creation_that_may_not_pull_reports_an_absent_image_before_creating_anything() {
+    use crate::image_pull_gate::{LaunchImageGate, image_is_missing};
+    let name = resource_name(SESSION).unwrap();
+
+    let environment = fake_ssh_podman_environment();
+    let absent = run_ssh_podman_creation(
+        &environment,
+        &name,
+        LaunchImageGate::SharedPullOnMiss,
+        &[("FAKE_IMAGE", "absent")],
+    );
+    assert!(image_is_missing(&absent), "{absent:?}");
+    assert_eq!(
+        fake_podman_invocations(&environment),
+        ["image exists fake:image"],
+        "nothing may be created for an absent image"
+    );
+
+    let environment = fake_ssh_podman_environment();
+    let broken = run_ssh_podman_creation(
+        &environment,
+        &name,
+        LaunchImageGate::SharedPullOnMiss,
+        &[("FAKE_IMAGE", "broken")],
+    );
+    assert_eq!(broken.status, 125);
+    assert!(!image_is_missing(&broken));
+    assert!(String::from_utf8_lossy(&broken.stderr).contains("engine unavailable"));
+
+    let environment = fake_ssh_podman_environment();
+    let present =
+        run_ssh_podman_creation(&environment, &name, LaunchImageGate::SharedPullOnMiss, &[]);
+    assert_eq!(present.status, 0);
+    let invocations = fake_podman_invocations(&environment);
+    let run = invocations
+        .iter()
+        .find(|line| line.starts_with("run "))
+        .unwrap();
+    assert!(run.contains("--pull=never"), "{run}");
+}
+
+/// Runs an SSH command's remote line in a local shell whose `PATH` holds the
+/// test's fake `podman`, and records the commands and notices.
+#[cfg(unix)]
+struct LocalShellExecutor<'a> {
+    environment: &'a tempfile::TempDir,
+    env: Vec<(&'static str, String)>,
+    seen: RefCell<Vec<CommandSpec>>,
+    notices: RefCell<Vec<String>>,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for LocalShellExecutor<'_> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.seen.borrow_mut().push(command.clone());
+        let remote = CommandSpec::new("sh", ["-c", command.args.last().unwrap().as_str()]);
+        let env = self
+            .env
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        Ok(execute_with_fake_docker(self.environment, &remote, &env))
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.notices.borrow_mut().push(notice.to_owned());
+    }
+}
+
+/// A launch on an SSH Podman host asks one SSH command whether the host is
+/// reachable and which cgroup limits its engine can enforce. The answers come
+/// through the real probe script, so a failing `podman info` stays distinct
+/// from a failing connection, and the engine is asked on every launch.
+#[cfg(unix)]
+#[test]
+fn the_ssh_podman_launch_preflight_asks_one_command_and_keeps_the_engines_failures_apart() {
+    let environment = tempfile::tempdir().unwrap();
+    let bin = environment.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(environment.path().join("home")).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "podman",
+        r#"#!/bin/sh
+[ "$*" = "info --format json" ] || exit 2
+if [ -n "${FAKE_INFO_FAILS:-}" ]; then
+    echo "$FAKE_INFO_FAILS" >&2
+    exit 125
+fi
+printf '%s\n' "$FAKE_INFO"
+"#,
+    );
+    let executor = |env: Vec<(&'static str, String)>| LocalShellExecutor {
+        environment: &environment,
+        env,
+        seen: RefCell::new(Vec::new()),
+        notices: RefCell::new(Vec::new()),
+    };
+    let host = ImageHost::SshPodman(ssh());
+    let requested = |_: CgroupLimit| true;
+
+    // Delegation without cpu and memory: the limits are dropped and reported.
+    let delegated = executor(vec![(
+        "FAKE_INFO",
+        r#"{"host":{"cgroupVersion":"v2","cgroupControllers":["pids"]}}"#.to_owned(),
+    )]);
+    let cgroups = verify_ssh_podman_launch(&ssh(), &delegated).unwrap();
+    assert_eq!(delegated.seen.borrow().len(), 1);
+    assert_eq!(
+        delegated.seen.borrow()[0].args[..4],
+        ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+    );
+    let dropped = unenforceable_container_limits(&host, Some(cgroups), requested, &delegated);
+    assert_eq!(dropped, [CgroupLimit::Cpu, CgroupLimit::Memory]);
+    assert_eq!(delegated.seen.borrow().len(), 1, "the report is reused");
+    assert!(delegated.notices.borrow()[0].contains("cannot enforce session cpu and memory"));
+
+    // The engine fails: the launch keeps its limits and says why, after one
+    // command, not two.
+    let failing = executor(vec![(
+        "FAKE_INFO_FAILS",
+        "cannot connect to podman".to_owned(),
+    )]);
+    let cgroups = verify_ssh_podman_launch(&ssh(), &failing).unwrap();
+    let dropped = unenforceable_container_limits(&host, Some(cgroups), requested, &failing);
+    assert!(dropped.is_empty());
+    assert_eq!(failing.seen.borrow().len(), 1);
+    let notices = failing.notices.borrow();
+    assert!(
+        notices[0].contains("Could not read cgroup capabilities")
+            && notices[0]
+                .contains("`podman info` failed with status 125: cannot connect to podman"),
+        "{notices:?}"
+    );
+
+    // ssh itself fails: the reachability message, not an engine one.
+    let unreachable = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 255,
+        stdout: Vec::new(),
+        stderr: b"Host key verification failed.".to_vec(),
+    }]);
+    let error = verify_ssh_podman_launch(&ssh(), &unreachable).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "SSH connectivity test failed for dev@example.test with status 255: Host key verification failed."
+    );
 }

@@ -22,7 +22,7 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
         serde_json::from_slice(&fs::read(data.join("daemon.json")).unwrap()).unwrap();
     let daemon_pid = metadata["pid"].as_u64().unwrap() as u32;
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("session is missing"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown session"));
     let logs = fs::read_dir(data.join("logs"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -47,7 +47,7 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
     assert!(contents.contains("Mjolnir started"));
     assert!(contents.contains("command=\"upgrade-container\""));
     assert!(contents.contains("Mjolnir exited with an error"));
-    assert!(contents.contains("session is missing"));
+    assert!(contents.contains("unknown session"));
 
     #[cfg(unix)]
     {

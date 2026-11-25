@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 pub use crate::targets::backend_locator;
 pub(super) use crate::targets::recorded_backend_locator;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 
 use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
 use mj_core::state::{
@@ -158,7 +158,7 @@ impl Controller {
                 let paths = mj_core::targets::storage::session_storage_paths(
                     session.target.as_ref()?,
                     &session.id,
-                    checkout.project_directory(),
+                    checkout.project_directory().as_deref(),
                 );
                 Some(paths.all().map(str::to_owned).collect::<Vec<_>>())
             })
@@ -167,7 +167,7 @@ impl Controller {
     }
 
     pub fn deployment_capacity_targets(&self) -> Vec<targets::DeploymentCapacityTarget> {
-        use targets::{DeploymentCapacityKind, DeploymentCapacityTarget};
+        use targets::{DeploymentCapacityKind, DeploymentCapacityTarget, HostCapacityIdentity};
 
         let mut local_ids = Vec::new();
         // Per host: its target ids, and per SSH connection the paths to measure.
@@ -175,7 +175,10 @@ impl Controller {
         // sandbox, whose memory total is the engine's pool. A host shared
         // with other runtimes keeps its physical memory as the total, because
         // their sessions draw on all of it.
-        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>, bool)>);
+        type HostProbes = (
+            Vec<String>,
+            Vec<(SshTarget, Vec<String>, bool, Vec<String>)>,
+        );
         let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
         for (target_id, template) in &self.config.targets {
@@ -198,11 +201,11 @@ impl Controller {
                     let position = match entry
                         .1
                         .iter()
-                        .position(|(known, _, _)| *known == connection)
+                        .position(|(known, _, _, _)| *known == connection)
                     {
                         Some(position) => position,
                         None => {
-                            entry.1.push((connection, Vec::new(), true));
+                            entry.1.push((connection, Vec::new(), true, Vec::new()));
                             entry.1.len() - 1
                         }
                     };
@@ -221,7 +224,9 @@ impl Controller {
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
                     // clone can sit on a filesystem of its own.
-                    push_unique(paths, self.session_storage_paths(target_id));
+                    entry.1[position]
+                        .3
+                        .extend(self.session_storage_paths(target_id));
                 }
                 TargetTemplate::AwsEc2 { .. } => {
                     let mut probes = Vec::new();
@@ -245,6 +250,7 @@ impl Controller {
                         }
                     }
                     targets.push(DeploymentCapacityTarget {
+                        stable_identity: None,
                         id: format!("aws:{target_id}"),
                         host: target_id.clone(),
                         target_ids: vec![target_id.clone()],
@@ -252,6 +258,7 @@ impl Controller {
                         local: false,
                         probes,
                         local_storage_paths: Vec::new(),
+                        storage_warning: None,
                         probe_error,
                     });
                 }
@@ -261,14 +268,42 @@ impl Controller {
             // CPU and memory come from sysinfo; storage is measured over the
             // paths by `targets::measure_local_storage`.
             let mut paths = Vec::new();
-            let mbx_paths = super::mbx::local_storage_paths();
+            let (mbx_paths, storage_warning) = match super::mbx::local_storage_paths() {
+                Ok(paths) => (paths, None),
+                Err(error) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "local mbx configuration could not be read; omitting mbx paths from local disk capacity"
+                    );
+                    (
+                        Vec::new(),
+                        Some(
+                            format!("mbx config: {error:#}")
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
+                    )
+                }
+            };
+            let mut session_paths = Vec::new();
             for target_id in &local_ids {
                 if let Some(template) = self.config.targets.get(target_id) {
                     push_unique(&mut paths, local_storage_paths(template, &mbx_paths));
                 }
-                push_unique(&mut paths, self.session_storage_paths(target_id));
+                session_paths.extend(self.session_storage_paths(target_id));
             }
+            paths.sort();
+            paths.dedup();
+            let local_template_paths = paths.clone();
+            push_unique(&mut paths, session_paths);
+            paths.sort();
+            paths.dedup();
             targets.push(DeploymentCapacityTarget {
+                stable_identity: Some(HostCapacityIdentity {
+                    connections: Vec::new(),
+                    local_template_paths,
+                }),
                 id: "local".into(),
                 host: "local".into(),
                 target_ids: local_ids,
@@ -276,14 +311,26 @@ impl Controller {
                 local: true,
                 probes: Vec::new(),
                 local_storage_paths: paths,
+                storage_warning,
                 probe_error: None,
             });
         }
         targets.extend(
             ssh_hosts
                 .into_iter()
-                .map(
-                    |(host, (target_ids, connections))| DeploymentCapacityTarget {
+                .map(|(host, (target_ids, mut connections))| {
+                    for (_, paths, _, _) in &mut connections {
+                        paths.sort();
+                        paths.dedup();
+                    }
+                    DeploymentCapacityTarget {
+                        stable_identity: Some(HostCapacityIdentity {
+                            connections: connections
+                                .iter()
+                                .map(|(ssh, paths, nitro, _)| (ssh.clone(), *nitro, paths.clone()))
+                                .collect(),
+                            local_template_paths: Vec::new(),
+                        }),
                         id: format!("ssh:{host}"),
                         host,
                         target_ids,
@@ -291,18 +338,23 @@ impl Controller {
                         local: false,
                         probes: connections
                             .iter()
-                            .map(|(ssh, paths, nitro)| {
+                            .map(|(ssh, paths, nitro, sessions)| {
+                                let mut paths = paths.clone();
+                                push_unique(&mut paths, sessions.clone());
+                                paths.sort();
+                                paths.dedup();
                                 if *nitro {
-                                    targets::ssh_nitro_host_capacity_command(ssh, paths)
+                                    targets::ssh_nitro_host_capacity_command(ssh, &paths)
                                 } else {
-                                    targets::ssh_host_capacity_command(ssh, paths)
+                                    targets::ssh_host_capacity_command(ssh, &paths)
                                 }
                             })
                             .collect(),
                         local_storage_paths: Vec::new(),
+                        storage_warning: None,
                         probe_error: None,
-                    },
-                ),
+                    }
+                }),
         );
         targets.sort_by(|left, right| left.id.cmp(&right.id));
         targets
@@ -459,6 +511,24 @@ pub(super) fn preflight_target(
     }
 }
 
+/// [`preflight_target`] for a launch that is about to create `target`.
+///
+/// An SSH Podman host that will be asked which limits its engine can enforce
+/// answers that in the same SSH command as the reachability check, so the
+/// launch pays one round trip for both.
+pub(super) fn preflight_launch_target(
+    template: &TargetTemplate,
+    target: &targets::TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<Option<targets::CgroupCapabilities>> {
+    if let TargetTemplate::SshPodman { ssh, .. } = template
+        && targets::CgroupLimit::any_requested_by(target)
+    {
+        return targets::verify_ssh_podman_launch(&SshTarget::from(ssh), executor).map(Some);
+    }
+    preflight_target(template, executor, TargetCheck::Launch)
+}
+
 pub use mj_targets::command_checks::is_missing_command;
 
 /// Check that a target's host and runtime can run sessions.
@@ -572,14 +642,7 @@ pub(super) fn verify_target(
 
 fn verify_ssh_connectivity(ssh: &SshTarget, executor: &impl CommandExecutor) -> Result<()> {
     let output = executor.execute(&targets::ssh_connectivity_probe(ssh))?;
-    ensure!(
-        output.status == 0,
-        "SSH connectivity test failed for {} with status {}: {}",
-        ssh.destination,
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(())
+    targets::ensure_ssh_connectivity(ssh, &output)
 }
 
 #[cfg(test)]
@@ -786,7 +849,7 @@ pub(super) fn backend_target(
         },
         TargetTemplate::SshNitro { ssh, container } => targets::TargetTemplate::SshNitro {
             ssh: SshTarget::from(ssh),
-            container: backend_container_with(container, allocation, overrides, true),
+            container: backend_container(container, allocation, overrides),
         },
     })
 }
@@ -827,56 +890,40 @@ pub(super) fn use_github_https_urls(bundle: &mut targets::ProjectBundleSpec) {
     }
 }
 
+/// The container engine's `--env` arguments for the template's environment.
+///
+/// Only literal entries become arguments. A value that comes from a reference
+/// (`from_env`, `from_secret`) would be recorded by the engine in the
+/// container's configuration, where `inspect` and a later upgrade can read it
+/// and a rotated secret could never replace it. Referenced values reach the
+/// worker, the harness, and its shells through the session's `0600`
+/// `launch.json` instead (see `TargetRuntimeSettings::launch_environment`).
+pub(super) fn container_environment(
+    container: &mj_core::config::ContainerTemplate,
+    overrides: ContainerOverrides,
+) -> Vec<String> {
+    let mut environment = container
+        .environment
+        .sources()
+        .iter()
+        .filter_map(|(key, value)| match value {
+            mj_core::config::EnvironmentValue::Literal(value) => Some((key.clone(), value.clone())),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    if overrides.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut environment);
+    }
+    environment
+        .into_iter()
+        .flat_map(|(key, value)| ["--env".to_owned(), format!("{key}={value}")])
+        .collect()
+}
+
 fn backend_container(
     container: &mj_core::config::ContainerTemplate,
     allocation: Option<&SessionResourceAllocation>,
     overrides: ContainerOverrides,
-) -> ContainerTemplate {
-    backend_container_with(container, allocation, overrides, false)
-}
-
-/// A container environment as the engine receives it: the `--env` arguments,
-/// and the values those arguments leave out.
-///
-/// An entry whose value comes from a reference (`from_env`, `from_secret`) or
-/// from the controller's own environment is a secret. When the engine runs
-/// under `sudo`, which logs every command line, a secret is named by a
-/// valueless `--env NAME` and its value travels in the ssh command's
-/// environment instead (see `CommandPlan::provide_target_environment_secrets`).
-/// One function builds both lists, so an argument and its value cannot
-/// disagree. Everything else stays `--env NAME=value`.
-pub(super) struct ContainerEnvironment {
-    pub args: Vec<String>,
-    pub secrets: Vec<(String, String)>,
-}
-
-pub(super) fn container_environment(
-    container: &mj_core::config::ContainerTemplate,
-    overrides: ContainerOverrides,
-    secrets_out_of_band: bool,
-) -> ContainerEnvironment {
-    let mut environment = container.environment.resolved().clone();
-    if overrides.no_github_credentials {
-        mj_core::credentials::remove_github_authentication_environment(&mut environment);
-    }
-    let mut args = Vec::new();
-    let mut secrets = Vec::new();
-    for (key, value) in environment {
-        if secrets_out_of_band && container.environment.is_secret_sourced(&key) {
-            args.extend(["--env".to_owned(), key.clone()]);
-            secrets.push((key, value));
-        } else {
-            args.extend(["--env".to_owned(), format!("{key}={value}")]);
-        }
-    }
-    ContainerEnvironment { args, secrets }
-}
-
-fn backend_container_with(
-    container: &mj_core::config::ContainerTemplate,
-    allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides,
-    secrets_out_of_band: bool,
 ) -> ContainerTemplate {
     let mut extra_run_args = Vec::new();
     if let Some(platform) = &container.platform {
@@ -894,7 +941,7 @@ fn backend_container_with(
     if let Some(memory) = memory {
         extra_run_args.push(format!("--memory={memory}"));
     }
-    extra_run_args.extend(container_environment(container, overrides, secrets_out_of_band).args);
+    extra_run_args.extend(container_environment(container, overrides));
     ContainerTemplate {
         image: container.image.clone(),
         pull_policy: container.pull_policy,

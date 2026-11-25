@@ -5,10 +5,14 @@
 package accounts
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"math"
+	"slices"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -101,7 +105,37 @@ func schedulingReport(publication *QuotaReportPublication, nowSeconds int64) *cl
 // `resets_at_epoch_seconds <= now_seconds` as a reset. A windowless
 // non-usage reading with no paid credits is not.
 func lastGoodSchedulable(report *client.ProfileQuota, nowSeconds int64) bool {
-	panic("unported: mj-accounts/src/profile_scheduler.rs last_good_schedulable")
+	if report.BillingClass() == client.QuotaBillingUsage || report.PaidCredits != nil {
+		return true
+	}
+	refreshedAt := int64(math.MaxInt64)
+	if report.RefreshedAtEpochSeconds <= math.MaxInt64 {
+		refreshedAt = int64(report.RefreshedAtEpochSeconds)
+	}
+	age := telemetrySaturatingSub(nowSeconds, refreshedAt)
+	for index := range report.Windows {
+		window := &report.Windows[index]
+		hasReading := window.RemainingPercent != nil || (window.Used != nil && window.Limit != nil)
+		if window.ResetsAtEpochSeconds != nil {
+			if hasReading || *window.ResetsAtEpochSeconds <= nowSeconds {
+				return true
+			}
+			continue
+		}
+		var maxAge int64
+		switch {
+		case window.DurationSeconds != nil:
+			maxAge = *window.DurationSeconds
+		case window.IsFiveHour():
+			maxAge = 5 * 3600
+		default:
+			maxAge = 7 * 86_400
+		}
+		if hasReading && age < maxAge {
+			return true
+		}
+	}
+	return false
 }
 
 // Billing is the candidate's billing: its report decides, then what the
@@ -169,11 +203,45 @@ type quotaRank struct {
 }
 
 func quotaRankOf(candidate *SubagentCandidate, model string, nowSeconds int64) quotaRank {
-	panic("unported: mj-accounts/src/profile_scheduler.rs quota_rank")
+	quota := &candidate.Quota
+	switch quota.Kind {
+	case CandidateQuotaUnknown:
+		return quotaRank{kind: quotaRankUnknown}
+	case CandidateQuotaUsagePriced:
+		return quotaRank{kind: quotaRankUsagePriced}
+	}
+	score, scored := QuotaScore(quota.Windows, model, nowSeconds)
+	if scored && score > 0 {
+		price := 1.0
+		if quota.MonthlyPriceUsd != nil && *quota.MonthlyPriceUsd > 0 {
+			price = float64(*quota.MonthlyPriceUsd) / 100.0
+		}
+		return quotaRank{kind: quotaRankAvailable, value: score * price}
+	}
+	if weight, ok := paidWeight(quota.PaidCredits); ok {
+		return quotaRank{kind: quotaRankPaid, value: weight}
+	}
+	if scored || (len(quota.Windows) == 0 && quota.PaidCredits != nil) {
+		return quotaRank{kind: quotaRankExhausted}
+	}
+	return quotaRank{kind: quotaRankUnknown}
 }
 
 func paidWeight(credits *client.PaidCredits) (float64, bool) {
-	panic("unported: mj-accounts/src/profile_scheduler.rs paid_weight")
+	if credits == nil {
+		return 0, false
+	}
+	switch credits.Kind {
+	case client.PaidCreditsLimited:
+		balance, ok := jvF64(credits.Balance, true)
+		if !ok || math.IsNaN(balance) || math.IsInf(balance, 0) || balance <= 0 {
+			return 0, false
+		}
+		return balance, true
+	}
+	// No finite balance to compare: give known usable accounts equal
+	// weight.
+	return 1.0, true
 }
 
 // Ineligible is why load balancing must not offer a candidate for a model.
@@ -310,14 +378,115 @@ func DrawScheduledCandidates[T ScheduledCandidateRef](candidates *[]T, ctx *Sche
 // DrawScheduledCandidates taking one uniform `(0, 1]` sample per surviving
 // pool in deterministic pre-draw order.
 func OrderScheduledCandidatesByDraw[T ScheduledCandidateRef](candidates *[]T, units []float64, ctx *SchedulingContext) {
-	panic("unported: mj-accounts/src/profile_scheduler.rs order_scheduled_candidates_by_draw")
+	scored := prepareScoredPools(*candidates, ctx)
+	type keyedPool struct {
+		key  float64
+		pool scoredPool[T]
+	}
+	keyed := make([]keyedPool, 0, len(scored))
+	for index, pool := range scored {
+		unit := 0.5
+		if index < len(units) {
+			unit = units[index]
+		}
+		unit = schedulerClamp(unit, schedulerMinPositive, 1.0)
+		key := math.Inf(-1)
+		switch pool.tier {
+		case 0, 1, 3, 4, 5:
+			if pool.weight > 0 {
+				key = math.Log(unit) / pool.weight
+			}
+		}
+		keyed = append(keyed, keyedPool{key: key, pool: pool})
+	}
+	slices.SortStableFunc(keyed, func(left, right keyedPool) int {
+		return cmp.Or(
+			cmp.Compare(left.pool.tier, right.pool.tier),
+			cmp.Compare(left.pool.preferPos, right.pool.preferPos),
+			schedulerTotalCmp(right.key, left.key),
+			telemetryCompareBool(right.pool.isAnchor, left.pool.isAnchor),
+			strings.Compare(left.pool.item.AsScheduledCandidate().ProfileID, right.pool.item.AsScheduledCandidate().ProfileID),
+		)
+	})
+	ordered := make([]T, 0, len(keyed))
+	for _, entry := range keyed {
+		ordered = append(ordered, entry.pool.item)
+	}
+	*candidates = ordered
 }
 
 // RankScheduledCandidates is the deterministic ranking (no random draw):
 // orders surviving pools by tier, `[quota] prefer`, descending weight,
 // `ranking_anchor`, and `profile_id`.
 func RankScheduledCandidates[T ScheduledCandidateRef](candidates *[]T, ctx *SchedulingContext) {
-	panic("unported: mj-accounts/src/profile_scheduler.rs rank_scheduled_candidates")
+	scored := prepareScoredPools(*candidates, ctx)
+	slices.SortStableFunc(scored, compareScoredPools[T])
+	ordered := make([]T, 0, len(scored))
+	for _, pool := range scored {
+		ordered = append(ordered, pool.item)
+	}
+	*candidates = ordered
+}
+
+// compareScoredPools orders pools by tier, `[quota] prefer`, descending
+// weight, `ranking_anchor`, and `profile_id`.
+func compareScoredPools[T ScheduledCandidateRef](left, right scoredPool[T]) int {
+	return cmp.Or(
+		cmp.Compare(left.tier, right.tier),
+		cmp.Compare(left.preferPos, right.preferPos),
+		schedulerTotalCmp(right.weight, left.weight),
+		telemetryCompareBool(right.isAnchor, left.isAnchor),
+		strings.Compare(left.item.AsScheduledCandidate().ProfileID, right.item.AsScheduledCandidate().ProfileID),
+	)
+}
+
+// schedulerMinPositive is Rust's `f64::MIN_POSITIVE`, the smallest positive
+// normal value.
+const schedulerMinPositive = 0x1p-1022
+
+// schedulerTotalCmp is Rust's `f64::total_cmp`.
+func schedulerTotalCmp(left, right float64) int {
+	key := func(value float64) int64 {
+		bits := int64(math.Float64bits(value))
+		return bits ^ int64(uint64(bits>>63)>>1)
+	}
+	return cmp.Compare(key(left), key(right))
+}
+
+// schedulerClamp is Rust's `f64::clamp`, which panics when min > max.
+func schedulerClamp(value, low, high float64) float64 {
+	if !(low <= high) {
+		panic(fmt.Sprintf("min > max, or either was NaN. min = %v, max = %v", low, high))
+	}
+	if value < low {
+		value = low
+	}
+	if value > high {
+		value = high
+	}
+	return value
+}
+
+// schedulerMax is Rust's `f64::max`: a NaN argument yields the other.
+func schedulerMax(left, right float64) float64 {
+	switch {
+	case math.IsNaN(left):
+		return right
+	case math.IsNaN(right):
+		return left
+	}
+	return math.Max(left, right)
+}
+
+// schedulerMin is Rust's `f64::min`: a NaN argument yields the other.
+func schedulerMin(left, right float64) float64 {
+	switch {
+	case math.IsNaN(left):
+		return right
+	case math.IsNaN(right):
+		return left
+	}
+	return math.Min(left, right)
 }
 
 type scoredPool[T ScheduledCandidateRef] struct {
@@ -355,7 +524,55 @@ func windowRemainingPct(window *client.QuotaWindow) (float64, bool) {
 }
 
 func evaluateApplyingWindows(windows []client.QuotaWindow, model string, nowSeconds int64) []windowEval {
-	panic("unported: mj-accounts/src/profile_scheduler.rs evaluate_applying_windows")
+	evals := []windowEval{}
+	for index := range windows {
+		window := &windows[index]
+		if !WindowApplies(window, model) {
+			continue
+		}
+		kind := WindowKindFromWindow(window)
+		if window.ResetsAtEpochSeconds != nil && *window.ResetsAtEpochSeconds <= nowSeconds {
+			evals = append(evals, windowEval{
+				kind:         kind,
+				remainingPct: 100.0,
+				hW:           (100.0 - ReserveFloorPct) / 100.0,
+				uW:           1.0,
+				tLeftHours:   0.0,
+				modelScope:   cloneOptionalString(window.ModelScope),
+			})
+			continue
+		}
+		remainingPct, ok := windowRemainingPct(window)
+		if !ok {
+			continue
+		}
+		hW := schedulerMax(remainingPct-ReserveFloorPct, 0.0) / 100.0
+		uW, tLeftHours := hW/0.5, 0.0
+		if window.ResetsAtEpochSeconds != nil {
+			tLeft := float64(*window.ResetsAtEpochSeconds - nowSeconds)
+			var duration int64
+			switch {
+			case window.DurationSeconds != nil && *window.DurationSeconds > 0:
+				duration = *window.DurationSeconds
+			case kind == WindowKindShort5h:
+				duration = 5 * 3600
+			default:
+				duration = 7 * 86_400
+			}
+			dW := float64(duration)
+			fW := schedulerClamp(tLeft/dW, minPaceRemainingSeconds/dW, 1.0)
+			uW, tLeftHours = hW/fW, tLeft/3600.0
+		}
+		evals = append(evals, windowEval{
+			kind:         kind,
+			remainingPct: remainingPct,
+			hW:           hW,
+			uW:           uW,
+			tLeftHours:   tLeftHours,
+			modelScope:   cloneOptionalString(window.ModelScope),
+		})
+	}
+	return evals
 }
 
 // bindingWindowScope identifies the quota pool `(profile_id,
@@ -368,7 +585,7 @@ func bindingWindowScope(candidate *ScheduledCandidate) *string {
 	}
 	for i := range candidate.Quota.Windows {
 		window := &candidate.Quota.Windows[i]
-		if window.ModelScope != nil && window.AppliesToModel(candidate.Model) {
+		if window.ModelScope != nil && WindowApplies(window, candidate.Model) {
 			scope := *window.ModelScope
 			return &scope
 		}
@@ -377,5 +594,325 @@ func bindingWindowScope(candidate *ScheduledCandidate) *string {
 }
 
 func prepareScoredPools[T ScheduledCandidateRef](rawCandidates []T, ctx *SchedulingContext) []scoredPool[T] {
-	panic("unported: mj-accounts/src/profile_scheduler.rs prepare_scored_pools")
+	// tasksPer200 is the lookup's rate, preferring one column and falling
+	// back to the other.
+	tasksPer200 := func(lookup *PowerRankingLookup, preferAPI bool) *float64 {
+		if lookup == nil {
+			return nil
+		}
+		first, second := lookup.TasksPer200Sub, lookup.TasksPer200API
+		if preferAPI {
+			first, second = second, first
+		}
+		if first != nil {
+			return first
+		}
+		return second
+	}
+	usable := func(value *float64) (float64, bool) {
+		if value == nil || math.IsNaN(*value) || math.IsInf(*value, 0) || *value <= 0 {
+			return 0, false
+		}
+		return *value, true
+	}
+
+	// 1. Hard guardian filter + pool-first deduplication.
+	type poolKey struct {
+		profileID string
+		scope     telemetryScope
+	}
+	type poolEntry struct {
+		tasksPer200 float64
+		item        T
+	}
+	pools := map[poolKey]poolEntry{}
+	for _, item := range rawCandidates {
+		candidate := item.AsScheduledCandidate()
+		if !GuardianEligible(candidate.Harness, ctx.ExecutionPolicy) {
+			continue
+		}
+		if ctx.Placement == PlacementOrchestrator && !candidate.Harness.SupportsDelegationTools() {
+			continue
+		}
+		lookup := ctx.PowerRanking.Lookup(candidate.Model, candidate.Effort, candidate.Harness)
+		entryTasksPer200 := 1.0
+		if rate := tasksPer200(lookup, candidate.Quota.Kind == CandidateQuotaUsagePriced); rate != nil {
+			entryTasksPer200 = *rate
+		}
+		key := poolKey{profileID: candidate.ProfileID, scope: telemetryScopeOf(bindingWindowScope(candidate))}
+		existing, occupied := pools[key]
+		if !occupied {
+			pools[key] = poolEntry{tasksPer200: entryTasksPer200, item: item}
+			continue
+		}
+		existingCandidate := existing.item.AsScheduledCandidate()
+		replace := entryTasksPer200 > existing.tasksPer200 ||
+			(entryTasksPer200 == existing.tasksPer200 &&
+				cmp.Or(
+					strings.Compare(candidate.Model, existingCandidate.Model),
+					schedulerCompareOptional(candidate.Effort, existingCandidate.Effort),
+				) < 0)
+		if replace {
+			pools[key] = poolEntry{tasksPer200: entryTasksPer200, item: item}
+		}
+	}
+	keys := make([]poolKey, 0, len(pools))
+	for key := range pools {
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(left, right poolKey) int {
+		return cmp.Or(
+			strings.Compare(left.profileID, right.profileID),
+			telemetryCompareBool(left.scope.present, right.scope.present),
+			strings.Compare(left.scope.scope, right.scope.scope),
+		)
+	})
+	poolItems := make([]T, 0, len(keys))
+	for _, key := range keys {
+		poolItems = append(poolItems, pools[key].item)
+	}
+
+	// 2. Compute geometric mean of `tasks_per_200_sub * (P_eff / 200.0)`
+	//    across priced subscription peers in this draw, for unpriced peers.
+	logSum, pricedCount := 0.0, 0
+	for _, item := range poolItems {
+		candidate := item.AsScheduledCandidate()
+		if candidate.Quota.Kind != CandidateQuotaSubscription {
+			continue
+		}
+		lookup := ctx.PowerRanking.Lookup(candidate.Model, candidate.Effort, candidate.Harness)
+		pEff, pricedOK := 0.0, false
+		if price := candidate.Quota.MonthlyPriceUsd; price != nil && *price > 0 {
+			pEff, pricedOK = float64(*price), true
+		} else if lookup != nil {
+			pEff, pricedOK = usable(lookup.PlanUsdPerMonth)
+		}
+		rate, rateOK := usable(tasksPer200(lookup, false))
+		if pricedOK && rateOK {
+			if capacity := rate * (pEff / 200.0); capacity > 0 {
+				logSum += math.Log(capacity)
+				pricedCount++
+			}
+		}
+	}
+	peerGeomMeanCapacity := 1.0
+	if pricedCount > 0 {
+		peerGeomMeanCapacity = math.Exp(logSum / float64(pricedCount))
+	}
+
+	category := "primary"
+	if ctx.Category != nil {
+		category = *ctx.Category
+	}
+	catStats := ctx.Telemetry.CategoryStatsFor(category)
+
+	// 3. Score each pool, filtering out Exhausted (tier 6) and disallowed
+	//    Paid.
+	scored := make([]scoredPool[T], 0, len(poolItems))
+	for _, item := range poolItems {
+		candidate := item.AsScheduledCandidate()
+		lookup := ctx.PowerRanking.Lookup(candidate.Model, candidate.Effort, candidate.Harness)
+		preferPos := slices.Index(ctx.Prefer, candidate.ProfileID)
+		if preferPos < 0 {
+			preferPos = math.MaxInt
+		}
+		isAnchor := ctx.RankingAnchor != nil && *ctx.RankingAnchor == candidate.ProfileID
+		subscriptionRate := func() float64 {
+			if rate, ok := usable(tasksPer200(lookup, false)); ok {
+				return rate
+			}
+			return 1.0
+		}
+
+		var (
+			tier   uint8
+			weight float64
+		)
+		quota := &candidate.Quota
+		switch quota.Kind {
+		case CandidateQuotaUnknown:
+			tier, weight = 2, 1.0
+		case CandidateQuotaUsagePriced:
+			rate, ok := usable(tasksPer200(lookup, true))
+			if !ok {
+				rate = 1.0
+			}
+			tier, weight = 5, rate
+		default:
+			evals := evaluateApplyingWindows(quota.Windows, candidate.Model, ctx.NowSeconds)
+			exhausted := false
+			for _, eval := range evals {
+				if eval.remainingPct <= 0 {
+					exhausted = true
+				}
+			}
+			switch {
+			case len(evals) == 0:
+				if creditWeight, ok := paidWeight(quota.PaidCredits); ok {
+					if !candidate.MayConsumeCredits {
+						continue
+					}
+					tier, weight = 4, subscriptionRate()*creditWeight
+				} else if len(quota.Windows) == 0 && quota.PaidCredits != nil {
+					// Exhausted paid-only subscription with 0 credits.
+					continue
+				} else {
+					tier, weight = 2, 1.0
+				}
+			case exhausted:
+				// Exhausted subscription: fall back to Paid credits if
+				// allowed, else drop (tier 6).
+				creditWeight, ok := paidWeight(quota.PaidCredits)
+				if !ok || !candidate.MayConsumeCredits {
+					continue
+				}
+				tier, weight = 4, subscriptionRate()*creditWeight
+			default:
+				tier, weight = scoreSubscriptionPool(ctx, candidate, lookup, evals, peerGeomMeanCapacity, catStats)
+			}
+		}
+
+		scored = append(scored, scoredPool[T]{
+			item:      item,
+			tier:      tier,
+			weight:    weight,
+			preferPos: preferPos,
+			isAnchor:  isAnchor,
+		})
+	}
+
+	// Deterministic pre-draw order so `units[i]` binds to a stable pool
+	// order.
+	slices.SortStableFunc(scored, compareScoredPools[T])
+	return scored
+}
+
+// scoreSubscriptionPool is the tier and weight of a subscription pool with
+// quota left on every applying window.
+func scoreSubscriptionPool(ctx *SchedulingContext, candidate *ScheduledCandidate, lookup *PowerRankingLookup, evals []windowEval, peerGeomMeanCapacity float64, catStats CategoryBurnStats) (uint8, float64) {
+	usable := func(value *float64) *float64 {
+		if value == nil || math.IsNaN(*value) || math.IsInf(*value, 0) || *value <= 0 {
+			return nil
+		}
+		return value
+	}
+	var planPrice, weeklyBudget, rate *float64
+	if lookup != nil {
+		planPrice = usable(lookup.PlanUsdPerMonth)
+		weeklyBudget = usable(lookup.WeeklyBudgetUsd)
+		if lookup.TasksPer200Sub != nil {
+			rate = usable(lookup.TasksPer200Sub)
+		} else {
+			rate = usable(lookup.TasksPer200API)
+		}
+	}
+	var inferredPrice *float64
+	if price := candidate.Quota.MonthlyPriceUsd; price != nil && *price > 0 {
+		value := float64(*price)
+		inferredPrice = &value
+	}
+	pEffOpt := inferredPrice
+	if pEffOpt == nil {
+		pEffOpt = planPrice
+	}
+
+	var baseCapacity, pEffForBudget float64
+	switch {
+	case pEffOpt != nil && rate != nil:
+		if inferredPrice == nil {
+			slog.Debug("using power-ranking plan_usd_per_month as P_eff",
+				"profile_id", candidate.ProfileID, "model", candidate.Model, "plan_usd_per_month", *pEffOpt)
+		}
+		baseCapacity, pEffForBudget = *rate*(*pEffOpt/200.0), *pEffOpt
+	case pEffOpt != nil:
+		baseCapacity, pEffForBudget = peerGeomMeanCapacity*(*pEffOpt/200.0), *pEffOpt
+	default:
+		slog.Debug("using geometric mean peer capacity for unpriced subscription pool",
+			"profile_id", candidate.ProfileID, "model", candidate.Model, "assumed_capacity", peerGeomMeanCapacity)
+		pEffForBudget = 200.0
+		if planPrice != nil {
+			pEffForBudget = *planPrice
+		}
+		baseCapacity = peerGeomMeanCapacity
+	}
+
+	var uLong, u5h *float64
+	allAboveReserve, fiveHourSafe, weeklySafe := true, true, true
+	for _, eval := range evals {
+		if eval.hW <= 0 {
+			allAboveReserve = false
+		}
+		switch eval.kind {
+		case WindowKindLong:
+			value := eval.uW
+			if uLong != nil {
+				value = schedulerMin(*uLong, eval.uW)
+			}
+			uLong = &value
+		case WindowKindShort5h:
+			value := eval.uW
+			if u5h != nil {
+				value = schedulerMin(*u5h, eval.uW)
+			}
+			u5h = &value
+		}
+		if eval.tLeftHours > 0 {
+			telemetry := ctx.Telemetry.WindowTelemetry(candidate.ProfileID, candidate.CacheIdentity, eval.kind, eval.modelScope)
+			v60m := 0.0
+			var secondToLast *int64
+			var ratio *float64
+			if telemetry != nil {
+				v60m = telemetry.Trailing60mPctPerHour
+				secondToLast = telemetry.SecondToLastCleanTs
+				ratio = telemetry.FiveHourToWeeklyRatio
+			}
+			reserved := ctx.Telemetry.ReservedPct(candidate.ProfileID, eval.kind, secondToLast, weeklyBudget, pEffForBudget, planPrice, ratio)
+			newBurn := MeanBurnForWindowPct(catStats.MeanAPIUsd, eval.kind, weeklyBudget, pEffForBudget, planPrice, ratio)
+			remEff := eval.remainingPct - ReserveFloorPct - reserved - newBurn
+			safe := remEff >= v60m*schedulerMin(catStats.RunwayDurationHours, eval.tLeftHours)
+			if !safe {
+				switch eval.kind {
+				case WindowKindShort5h:
+					fiveHourSafe = false
+				case WindowKindLong:
+					weeklySafe = false
+				}
+			}
+		}
+	}
+
+	var weight float64
+	switch {
+	case uLong != nil && u5h != nil:
+		weight = baseCapacity * math.Pow(*uLong, PaceExponentAlpha) * schedulerMin(*u5h, 1.0)
+	case uLong != nil:
+		weight = baseCapacity * math.Pow(*uLong, PaceExponentAlpha)
+	case u5h != nil:
+		weight = baseCapacity * math.Pow(*u5h, PaceExponentAlpha)
+	default:
+		weight = baseCapacity
+	}
+	weight = schedulerMax(weight, schedulerMinPositive)
+
+	switch {
+	case !allAboveReserve || !weeklySafe:
+		return 3, weight
+	case fiveHourSafe:
+		return 0, weight
+	}
+	return 1, weight
+}
+
+// schedulerCompareOptional orders optional strings as Rust's Option does:
+// None first.
+func schedulerCompareOptional(left, right *string) int {
+	switch {
+	case left == nil && right == nil:
+		return 0
+	case left == nil:
+		return -1
+	case right == nil:
+		return 1
+	}
+	return strings.Compare(*left, *right)
 }

@@ -997,12 +997,14 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
         docker[0].detail
     );
     assert!(docker[0].detail.contains("built-in `docker` target"));
-    let podman = podman_checks(
-        Ok(&written),
-        &AlwaysFailingExecutor,
-        false,
-        &ApplePlatform::Linux,
-    );
+    #[cfg(target_os = "macos")]
+    let platform = ApplePlatform::Macos {
+        architecture: "aarch64".into(),
+        major_version: 26,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let platform = ApplePlatform::Linux;
+    let podman = podman_checks(Ok(&written), &AlwaysFailingExecutor, false, &platform);
     assert_eq!(podman.len(), 1);
     assert_eq!(
         podman[0].status,

@@ -252,6 +252,7 @@ fn documentation_dashboard() -> DashboardState {
     );
 
     dashboard.set_deployment_capacity_targets(vec![DeploymentCapacityTarget {
+        stable_identity: None,
         id: "local".into(),
         host: "local".into(),
         target_ids: vec!["podman".into()],
@@ -259,6 +260,7 @@ fn documentation_dashboard() -> DashboardState {
         local: true,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(

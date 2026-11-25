@@ -1,0 +1,13 @@
+Build, push, and assign an image from the repository's mise recipe
+
+Usage: mj image build [OPTIONS]
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --path <PATH>      Directory inside the repository; defaults to the current directory
+      --bundle <BUNDLE>  Bundle to assign; defaults to the session's bundle or this local repository
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --target <TARGET>  Container target whose configured image supplies the base
+      --name <NAME>      Registry image name; defaults to the bundle id
+      --print            Print the deterministic Containerfile without building or publishing
+  -h, --help             Print help

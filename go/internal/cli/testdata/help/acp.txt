@@ -1,0 +1,48 @@
+Serve the Agent Client Protocol on standard input and output, running each session it creates through this daemon
+
+Usage: mj acp [OPTIONS]
+
+Options:
+  -i, --instance <NAME>
+          Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence
+          
+          [env: MJ_INSTANCE=]
+
+      --profile <PROFILE>
+          Profile the session runs its harness from
+
+      --no-splash
+          Start the dashboard without the animated startup splash, for example over a slow remote connection
+          
+          [env: MJ_NO_SPLASH=]
+
+      --target <TARGET>
+          Target template the session is provisioned on
+
+      --bundle <BUNDLE>
+          Existing bundle to run. Without one the consumer's working directory is the project, which is what a local target needs
+
+      --at <SHA>
+          Start the workspace checked out at this full commit ID in the bundle's primary repository
+
+      --branch <BRANCH>
+          With --at, the new branch to create there; otherwise the existing branch to check out
+
+      --base <REV>
+          Record this Git revision as the diff base, when it should not be --at
+
+      --workspace <NAME>
+          Workspace to work in, by name. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it, and need it when the instance has more than one workspace
+
+      --on-exit <ON_EXIT>
+          What happens to the sessions this process created when it exits
+
+          Possible values:
+          - keep:    Leave every session as it is, for a consumer a person follows up on
+          - suspend: Checkpoint each session and release its worker and target, leaving a session a person can resume
+          - destroy: Destroy each session once its turn has stopped, for a scheduler that takes its answer from the turn and wants nothing left behind
+          
+          [default: keep]
+
+  -h, --help
+          Print help (see a summary with '-h')

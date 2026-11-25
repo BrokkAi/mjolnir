@@ -1,0 +1,11 @@
+Show a finished review's per-reviewer output: each reviewer's model, effort and profile, its full handback, its verdict, and its usage. Works after the reviewer sessions have been destroyed
+
+Usage: mj review show [OPTIONS] --session <SESSION>
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id, as `mj sessions` lists it
+      --json               Print the response as JSON instead of text
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --review <REVIEW>    Review id, as a verdict message names it. Defaults to the newest finished review for the session
+  -h, --help               Print help

@@ -58,6 +58,7 @@ impl RuntimeState {
                 abort_operations,
                 without_checkpoint,
                 confirm_no_checkpoint,
+                history_only,
             } => {
                 self.start_suspend_session(
                     session_id,
@@ -66,6 +67,7 @@ impl RuntimeState {
                         abort_operations,
                         without_checkpoint,
                         confirm_no_checkpoint,
+                        history_only,
                     },
                 )
                 .await?
@@ -207,7 +209,8 @@ mod tests {
                 Some(preparation),
                 {
                     let release = release.clone();
-                    move |_, _, cancelled, _session_admission| async move {
+                    move |_, _, control, _session_admission| async move {
+                        let cancelled = control.cancelled.clone();
                         release.notified().await;
                         assert!(
                             !cancelled.load(Ordering::Acquire),

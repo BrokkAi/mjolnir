@@ -97,7 +97,7 @@ where
                     let Some(current) = latest.targets.iter().find(|target| target.id == sampled.id) else {
                         continue;
                     };
-                    let target_changed = current != &sampled;
+                    let target_changed = !current.same_schedule_identity(&sampled);
                     if !target_changed {
                         permit.send(CapacityPollUpdate {
                             target: sampled,
@@ -106,12 +106,12 @@ where
                             refresh_generation,
                         });
                     }
-                    // A busy probe cannot answer a request with newer inputs.
+                    // A busy probe cannot answer a newer refresh or host identity.
                     // If changed() already ran, it skipped this target while
                     // the old probe was busy, so start the follow-up here.
                     if (target_changed || latest.refresh_generation > refresh_generation)
                         && inputs.refresh_generation == latest.refresh_generation
-                        && inputs.targets.contains(current)
+                        && inputs.targets.iter().any(|known| known.same_schedule_identity(current))
                     {
                         samples.schedule(std::iter::once(current.clone()), latest.refresh_generation, &collect);
                     }
@@ -129,7 +129,10 @@ where
                     .filter(|target| {
                         schedule_all
                             || latest.refresh_generation != inputs.refresh_generation
-                            || !inputs.targets.contains(target)
+                            || !inputs
+                                .targets
+                                .iter()
+                                .any(|known| known.same_schedule_identity(target))
                     })
                     .cloned(),
                 latest.refresh_generation,

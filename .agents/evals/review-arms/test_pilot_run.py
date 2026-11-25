@@ -1015,7 +1015,7 @@ if not (attempt / "recover").exists():
         rubric = (checkout / "mj-core/assets/instructions/review_rubric.md").read_bytes()
         self.assertEqual(pilot_review.RUBRIC_PATH.read_bytes(), rubric)
         expected = literal.format(
-            repositories="Repository root: .\nRun this exact command: `git -C . diff --no-ext-diff --ignore-submodules=none tree-a tree-b`",
+            repositories="Repository root: .\nBaseline tree: tree-a\nCaptured tree: tree-b",
             brief="\n\n## Relations computed from the repository\n\nThese are relations computed from the repository at this commit, not findings. They may be incomplete.\n\nBrief.",
             declined="",
             *[2, '<changed_files source="git diff --numstat of the captured trees" trust="deterministic" changed_lines="2">\nTable\n</changed_files>',
@@ -1024,7 +1024,7 @@ if not (attempt / "recover").exists():
         actual = pilot_review.prompt_with_rubric(rubric, ("tree-a", "tree-b", 2, "Table"), "Task", "Brief.")
         self.assertEqual(actual.encode(), rubric + b"\n" + expected.encode())
 
-    def test_bounded_diff_reads_reach_a_diff_larger_than_the_exec_cap_and_stage2a_stays_unchanged(self):
+    def test_bounded_diff_reads_reach_a_diff_larger_than_the_exec_cap(self):
         # Codex 0.168/0.170 cut one exec_command output at 10,000 tokens, about 40,000 bytes
         # (codex-rs/core/src/tools/context.rs), however many tokens the model asks for.
         exec_cap = 40_000
@@ -1149,8 +1149,7 @@ if not (attempt / "recover").exists():
                 pilot_review.file_diffs(*capture[:2])
         git("config", "--unset", "diff.algorithm")
 
-        # The Stage 2a configuration renders its prompt and inputs unchanged; the new one adds
-        # the reads and binds its version, independently for writers and reviewers.
+        # The default adds no diff-reading inputs; bounded reads bind each role independently.
         manifest = pilot.load_manifest(manifest_fixture().replace(b"first", b"zqxone").replace(b"second", b"zqxtwo"))
         manifest["diffs"][0].update(intro=head, base=base)
         raw = json.dumps(manifest).encode()
@@ -1169,8 +1168,7 @@ if not (attempt / "recover").exists():
 
         old_writer, old_reviewer = render()
         self.assertIn(f"`git diff {base} HEAD`", old_writer["prompt"])
-        self.assertIn(f"Run this exact command: `git -C . diff --no-ext-diff --ignore-submodules=none {capture[0]} {capture[1]}`",
-                      old_reviewer["prompt"])
+        self.assertIn(f"Baseline tree: {capture[0]}\nCaptured tree: {capture[1]}", old_reviewer["prompt"])
         self.assertFalse([key for key in old_writer["inputs"] | old_reviewer["inputs"] if "diff_reading" in key])
         # The default captures in the caller's environment, as Stage 2a did: a host config that
         # turns rename detection off still reaches its diffstat, and bounded planning ignores it.
@@ -1195,6 +1193,13 @@ if not (attempt / "recover").exists():
                 self.assertIn(pilot_review.read_command(*capture[:2], read), params["prompt"])
         self.assertNotIn("git diff {base}", new_writer["prompt"])
         self.assertNotIn("Run this exact command", new_reviewer["prompt"])
+        # Pin the complete bounded prompt rendered by the pre-merge implementation.
+        fixed = pilot_review.prompt_with_rubric(b"Rubric", ("tree-a", "tree-b", 2, "Table"),
+                                                "Task", "Brief.", reads=[(("a.txt",), None, 123, ())])
+        self.assertEqual(pilot.digest(fixed.encode()),
+                         "fd7804e6e367ed3c23391ed740300995e4d2c90bc4b439624922decb49cafd40")
+        self.assertEqual(new_reviewer["inputs"]["review_template_sha256"],
+                         pilot.digest(pilot_review.STAGE2A_TEMPLATE.encode()))
         self.assertNotEqual(new_writer["inputs"]["prompt_sha256"], old_writer["inputs"]["prompt_sha256"])
         # A reviewer-only change keeps the writer's prompt and inputs, so the accepted briefs stand.
         only_writer, only_reviewer = render(reviewer_diff_reading=pilot_review.BOUNDED_READS)

@@ -38,6 +38,7 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         },
         ControllerAction::Restart {
             session_id: "restart-web-session".into(),
@@ -956,12 +957,19 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     operational.get_mut("session-1").unwrap().harness_turn = Some(mj_core::relay::HarnessTurn {
         started_at_ms: 1_000,
     });
+    operational.get_mut("session-1").unwrap().turn_controls = Some(mj_core::relay::TurnControls {
+        status: mj_core::relay::TurnControlStatus::Ready,
+        primary: None,
+        interrupt: Some(mj_core::relay::RelayCommand::CancelTurn),
+        message: None,
+    });
     assert!(
         project(&operational).sessions[0]
             .capabilities
             .interrupt_turn
     );
     operational.get_mut("session-1").unwrap().harness_turn = None;
+    operational.get_mut("session-1").unwrap().turn_controls = None;
     assert_eq!(
         session
             .available_commands
@@ -1479,7 +1487,7 @@ fn golden_phone_session_snapshot() {
             recorded_at_ms,
             tool_ended_at_ms: None,
             lines: vec!["line".into()],
-            mailbox_events: Vec::new(),
+            disclosures: Vec::new(),
             generated: false,
             glyph: "●",
             tone: "agent",
@@ -2474,6 +2482,7 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
         abort_operations: mj_core::suspend_consent::OperationConsent::None,
         without_checkpoint: false,
         confirm_no_checkpoint: false,
+        history_only: false,
     };
     assert_eq!(
         admit_phone_action(&close, &mut active, &sessions, &cancellations),

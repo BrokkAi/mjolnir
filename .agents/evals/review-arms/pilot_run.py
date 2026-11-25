@@ -387,7 +387,7 @@ def publish_tool_assignment(path, args, job, diff, sid, *, engine_identity):
 
 class Pilot:
     def __init__(self, args, config, manifest, raw, image, reference, steps, *, engine_identity=None,
-                 writer_diff_reading=pilot_review.SINGLE_COMMAND, reviewer_diff_reading=pilot_review.SINGLE_COMMAND):
+                 writer_diff_reading=pilot_review.TREES_AND_DIFFSTAT, reviewer_diff_reading=pilot_review.TREES_AND_DIFFSTAT):
         self.args, self.config = args, config
         self.diff_reading = {"writer": writer_diff_reading, "reviewer": reviewer_diff_reading}
         if not set(self.diff_reading.values()) <= set(pilot_review.DIFF_READINGS):
@@ -414,9 +414,9 @@ class Pilot:
     def diff_reading_inputs(self, kind, row, bug):
         """Prompt reads for `kind` and the inputs that bind its configuration.
 
-        The Stage 2a configuration adds no input, so its recorded inputs still match.
+        The default configuration adds no diff-reading input.
         """
-        if self.diff_reading[kind] == pilot_review.SINGLE_COMMAND:
+        if self.diff_reading[kind] == pilot_review.TREES_AND_DIFFSTAT:
             return None, {}
         if row["key"] not in self.captures:
             self.captures[row["key"]] = pilot_review.capture(bug)
@@ -480,7 +480,8 @@ class Pilot:
                 prompt = pilot_review.prompt_with_rubric(self.rubric, self.captures[row["key"]], task, brief,
                                                          reads=reads)
                 inputs.update(review_rubric_sha256=digest(self.rubric),
-                              review_template_sha256=digest(pilot_review.TEMPLATE.encode()))
+                              review_template_sha256=digest((pilot_review.TEMPLATE if reads is None
+                                                             else pilot_review.STAGE2A_TEMPLATE).encode()))
             if self.gold and self.gold in prompt:
                 raise ValueError(f"{job['job']}: prompt contains the private menu-step cases")
             if any(bug_id in prompt.casefold() for bug_id in self.bug_ids):
@@ -643,10 +644,10 @@ def main():
                         help="accepted for compatibility; every writer and reviewer Git cache is attested")
     parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     parser.add_argument("--bifrost-clone", type=Path, default=Path("/mnt/optane/tmp/rust10/bifrost-src"))
-    parser.add_argument("--writer-diff-reading", choices=pilot_review.DIFF_READINGS, default=pilot_review.SINGLE_COMMAND,
-                        help="how writers read the diff; the default is the Stage 2a single command")
+    parser.add_argument("--writer-diff-reading", choices=pilot_review.DIFF_READINGS, default=pilot_review.TREES_AND_DIFFSTAT,
+                        help="how writers read the diff; the default keeps the existing writer prompt")
     parser.add_argument("--reviewer-diff-reading", choices=pilot_review.DIFF_READINGS,
-                        default=pilot_review.SINGLE_COMMAND,
+                        default=pilot_review.TREES_AND_DIFFSTAT,
                         help="how reviewers read the diff; independent of the writers' setting, so a reviewer-only "
                              "rerun keeps the accepted briefs")
     parser.add_argument("--concurrency", type=int, default=1,

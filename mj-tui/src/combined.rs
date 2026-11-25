@@ -1001,6 +1001,11 @@ fn render_combined_themed(
     // Targets and Quota choose their representations independently.
     if sizes[1].1 == PaneSize::Minimized {
         let focused = dashboard.focus() == Focus::Targets;
+        let pressed = crate::surface_controls::register_minimized_title_menu(
+            dashboard,
+            SupportPane::Targets,
+            targets_area,
+        );
         frame.render_widget(
             theme::panel(focused)
                 .borders(Borders::TOP)
@@ -1010,7 +1015,7 @@ fn render_combined_themed(
                         targets_area.width,
                         dashboard.pane_maximize_enabled(SupportPane::Targets),
                     ),
-                    focused,
+                    pressed,
                 ))
                 .title(minimized_pane_size_controls(
                     focused,
@@ -1023,6 +1028,11 @@ fn render_combined_themed(
     }
     if sizes[2].1 == PaneSize::Minimized {
         let focused = dashboard.focus() == Focus::Quota;
+        let pressed = crate::surface_controls::register_minimized_title_menu(
+            dashboard,
+            SupportPane::Quota,
+            quota_area,
+        );
         frame.render_widget(
             theme::panel(focused)
                 .borders(Borders::TOP)
@@ -1032,7 +1042,7 @@ fn render_combined_themed(
                         quota_area.width,
                         dashboard.pane_maximize_enabled(SupportPane::Quota),
                     ),
-                    focused,
+                    pressed,
                     crate::render_changes::epoch_seconds(),
                 ))
                 .title(minimized_pane_size_controls(
@@ -2498,6 +2508,7 @@ mod tests {
                 .map(|index| {
                     let host = format!("host-{index:02}");
                     mj_core::targets::DeploymentCapacityTarget {
+                        stable_identity: None,
                         id: host.clone(),
                         host,
                         local: false,

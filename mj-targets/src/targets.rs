@@ -32,7 +32,7 @@ pub const DOCKER_DOCUMENTATION: &str = include_str!("../docs/DOCKER.md");
 
 const PODMAN_MINIMUM_VERSION: (u32, u32) = (4, 0);
 
-mod preflight;
+pub mod preflight;
 pub use preflight::*;
 mod platform;
 pub use platform::*;
@@ -62,8 +62,11 @@ pub use bootstrap::*;
 mod container;
 mod container_upgrade;
 mod nitro;
-pub use container::inspect_container_storage;
 use container::*;
+pub use container::{
+    CONTAINER_MOUNTS_PREFIX, CreationObservation, creation_observation, inspect_container_storage,
+    inspect_container_storage_observed,
+};
 #[doc(hidden)]
 pub use container_upgrade::container_upgrade_test_plan;
 pub use container_upgrade::{

@@ -18,11 +18,11 @@ use crate::targets::{
 };
 
 use super::backend::{
-    ContainerOverrides, TargetCheck, backend_locator, backend_session_bundle, backend_target,
-    configure_github_token_environment, preflight_target, use_github_https_urls,
+    ContainerOverrides, backend_locator, backend_session_bundle, backend_target,
+    configure_github_token_environment, preflight_launch_target, use_github_https_urls,
 };
 use super::git_cache;
-use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
+use super::readiness::{connect_started_worker_status, wait_for_native_session_in_stage};
 use super::worker_binary::{
     bridge_readiness_stage, start_worker_durably_with_aws_profile, worker_probe_diagnosis,
 };
@@ -51,6 +51,68 @@ fn provisioned_resource_name(session_id: &str) -> Result<(String, bool)> {
         ));
     }
     Ok((targets::resource_name(session_id)?, false))
+}
+
+/// Run the container host's Git cache cleanup in the background, after the
+/// launch that owes it has prepared its own snapshot. The launch does not wait
+/// for the cleanup or learn its result; failures are logged.
+///
+/// The cleanup is safe to stop and the next launch repeats it, so it does not
+/// hold daemon handoff admission. Instead the handoff cancels it: once the
+/// gate is draining or closed the cleanup's processes are stopped, and one that
+/// has not started does not start. `make_executor` builds the executor from the
+/// cancellation token when the work begins, never while it is queued. Returns
+/// the task for a caller that wants to wait for it.
+fn defer_git_cache_gc<E>(
+    gate: &Arc<mj_core::upgrade::Gate>,
+    gc: git_cache::PendingCloneCacheGc,
+    make_executor: impl FnOnce(tokio_util::sync::CancellationToken) -> E + Send + 'static,
+) -> Option<tokio::task::JoinHandle<()>>
+where
+    E: CommandExecutor,
+{
+    if gate.is_draining() {
+        tracing::debug!(
+            "container Git cache GC deferred to a later launch while the daemon hands off"
+        );
+        return None;
+    }
+    let gate = Arc::clone(gate);
+    Some(mj_core::runtime::spawn(async move {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut work = mj_core::runtime::spawn_blocking({
+            let cancel = cancel.clone();
+            move || {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let executor = make_executor(cancel.clone());
+                if let Err(error) = gc.run(&executor) {
+                    if cancel.is_cancelled() {
+                        tracing::debug!(
+                            error = format!("{error:#}"),
+                            "container Git cache GC stopped for the daemon handoff"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "container Git cache GC failed; a later launch will repeat it"
+                        );
+                    }
+                }
+            }
+        });
+        let joined = tokio::select! {
+            joined = &mut work => joined,
+            () = gate.wait_until_draining() => {
+                cancel.cancel();
+                work.await
+            }
+        };
+        if let Err(error) = joined {
+            tracing::warn!(%error, "container Git cache GC task panicked");
+        }
+    }))
 }
 
 /// How many sub-agent children may be brought up inside one container at the
@@ -142,6 +204,10 @@ pub(super) enum ProvisioningFailureDisposition {
 struct RepositorySetup {
     plan: targets::CommandPlan,
     managed_checkout: Option<super::worktree::PreparedManagedCheckout>,
+    /// What the creation command reported about the container it made. Worker
+    /// preparation in the same launch reads the mounts from it instead of
+    /// asking the engine again.
+    created_container: Option<targets::CreationObservation>,
 }
 
 struct PreparedWorkerPayload {
@@ -261,6 +327,9 @@ impl Controller {
             }
             .await;
             let committed = start.and_then(|native_session_id| {
+                mj_core::runtime::off_async_worker(|| {
+                    mj_core::test_hooks::reach_test_hook("create_before_running_commit")
+                })?;
                 grant_commit()?;
                 Ok(native_session_id)
             });
@@ -325,11 +394,21 @@ impl Controller {
             execute_repository_setup(session_id, &repositories, executor)?;
             let (backend, _) = self.worker_placement(session_id)?;
             self.prepare_subagent_report_dir(session_id, &backend, executor)?;
-            self.install_worker_payload(session_id, executor)?
+            self.install_worker_payload(
+                session_id,
+                executor,
+                repositories.created_container.as_ref(),
+            )?
         } else {
             let ((), payload) = execute_concurrent_lanes(
                 || execute_repository_setup(session_id, &repositories, executor),
-                || self.install_worker_payload(session_id, executor),
+                || {
+                    self.install_worker_payload(
+                        session_id,
+                        executor,
+                        repositories.created_container.as_ref(),
+                    )
+                },
             )?;
             payload
         };
@@ -339,18 +418,24 @@ impl Controller {
     fn prepare_borrowed_create(
         &self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<(targets::TargetLocator, String, Option<String>)> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
         targets::verify_locator(&backend, session_id)?;
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-        self.prepare_subagent_report_dir(session_id, &backend, syncing)?;
-        let staged_aws_profile = self.prepare_worker_files(
-            session_id,
-            &backend,
-            &worker_root,
-            syncing,
-            super::worker_binary::LaunchHistory::Stored,
+        // A borrowed child's report directory is already recorded, so creating
+        // it on the target does not depend on staging the worker files.
+        let ((), staged_aws_profile) = execute_concurrent_lanes(
+            || self.prepare_subagent_report_dir(session_id, &backend, syncing),
+            || {
+                self.prepare_worker_files(
+                    session_id,
+                    &backend,
+                    &worker_root,
+                    syncing,
+                    super::worker_binary::LaunchHistory::Stored,
+                )
+            },
         )?;
         mj_core::test_hooks::reach_test_hook("subagent_create_before_worker_start")?;
         Ok((backend, worker_root, staged_aws_profile))
@@ -427,6 +512,8 @@ impl Controller {
         }
         record.state = SessionState::Provisioning;
         record.last_error = None;
+        record.acp_session_title = None;
+        record.native_session_id = None;
         record.updated_at = now();
         crate::database::reset_session_for_create_retry(record)
     }
@@ -772,7 +859,7 @@ impl Controller {
             .get(session_id)
             .expect("session retained after managed worktree preparation")
             .clone();
-        let project_directory = self.state.checkout(session_id)?.project_directory().map(Path::to_path_buf);
+        let project_directory = self.state.checkout(session_id)?.project_directory().map(std::borrow::Cow::into_owned);
         // Keep planning, preflight, creation, and locator discovery in one
         // result so the caller's failure disposition applies to every error.
         let result = (|| {
@@ -838,7 +925,7 @@ impl Controller {
             {
                 use_github_https_urls(bundle);
             }
-            let cgroups = preflight_target(template, executor, TargetCheck::Launch)?;
+            let cgroups = preflight_launch_target(template, &target, executor)?;
             enforce_cgroup_capable_limits(&mut target, cgroups, executor);
             let (resource_name, moving_workspace) = provisioned_resource_name(session_id)?;
             // Reserve physical ownership before creation, including a target
@@ -862,7 +949,7 @@ impl Controller {
             std::sync::Arc::make_mut(runtime).tool_cache = tool_cache;
 
             self.persist_session_state(session_id)?;
-            let prepared_cache = bundle
+            let mut prepared_cache = bundle
                 .as_mut()
                 .filter(|_| !moving_workspace)
                 .map(|bundle| {
@@ -887,6 +974,15 @@ impl Controller {
                 })
                 .transpose()?
                 .flatten();
+            if let Some(gc) = prepared_cache
+                .as_mut()
+                .and_then(|cache| cache.pending_gc.take())
+            {
+                defer_git_cache_gc(crate::upgrade::gate(), gc, |cancel| {
+                    mj_core::targets::CancellableProcessExecutor::new(Default::default())
+                        .with_cancellation(cancel)
+                });
+            }
             // Mounts are fixed when the container is created, so the build
             // cache is decided here, before the provisioning plan is built.
             let build_cache = super::mbx::prepare(
@@ -936,26 +1032,12 @@ impl Controller {
                     return Err(error);
                 }
             };
-            // Values that must stay off the command line: the GitHub token,
-            // and, for a sandbox whose engine runs under `sudo`, every
-            // environment value that came from a reference.
-            let mut secrets = match template {
-                TargetTemplate::SshNitro { container, .. } => {
-                    super::backend::container_environment(
-                        container,
-                        ContainerOverrides::for_session(&session),
-                        true,
-                    )
-                    .secrets
-                }
-                _ => Vec::new(),
-            };
-            if let Some(token) = container_github_token {
-                secrets.retain(|(name, _)| name != "GH_TOKEN");
-                secrets.push(("GH_TOKEN".to_owned(), token.to_owned()));
-            }
-            if !secrets.is_empty()
-                && let Err(error) = provision.provide_target_environment_secrets(&target, &secrets)
+            // The GitHub token must stay off the command line. Secret-sourced
+            // target environment values are not passed to the engine at all:
+            // they reach the worker through `launch.json`.
+            if let Some(token) = container_github_token
+                && let Err(error) =
+                    provision.provide_target_environment_secret(&target, "GH_TOKEN", token)
             {
                 if let Some(cache) = &prepared_cache {
                     let _ = cache.cleanup(executor);
@@ -964,6 +1046,7 @@ impl Controller {
             }
 
             let started = Instant::now();
+            let mut creation_observation = None;
             let result = provision_target_creation_plan(
                 &provision,
                 &target,
@@ -996,13 +1079,25 @@ impl Controller {
                     )?;
                     // Creation owns HOME readiness before checkout and worker
                     // staging split into independent background operations.
-                    targets::initialize_container_home(
-                        &backend_locator(&locator, &session, &self.config)?, executor,
-                    )?;
+                    // An SSH Podman creation script does that itself, in the
+                    // same SSH command that starts the container, and reports
+                    // the container's mounts when it is done.
+                    let backend = backend_locator(&locator, &session, &self.config)?;
+                    match outputs.first().and_then(targets::creation_observation) {
+                        Some(observed) => creation_observation = Some(observed),
+                        None if matches!(backend, targets::TargetLocator::SshPodman { .. }) => {
+                            bail!(
+                                "the SSH Podman creation did not report its container's mounts, so its home directory was not initialized"
+                            );
+                        }
+                        None => targets::initialize_container_home(&backend, executor)?,
+                    }
                     Ok(locator)
                 },
             )
-            .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
+            .map(|(locator, remainder)| {
+                (locator, remainder, bundle, build_cache, creation_observation)
+            });
             tracing::debug!(
                 session_id,
                 elapsed_ms = started.elapsed().as_millis(),
@@ -1010,6 +1105,7 @@ impl Controller {
             );
             result
         })();
+        let mut created_container = None;
         let result = match result {
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Preserve => {
                 Err(error)
@@ -1021,7 +1117,8 @@ impl Controller {
             Err(error) => {
                 return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
             }
-            Ok((locator, remainder, bundle, build_cache)) => {
+            Ok((locator, remainder, bundle, build_cache, observed)) => {
+                created_container = observed;
                 let resolved_template = super::backend::session_target(&self.config, &session.bundle_id, &session.target_template_id, executor)?;
                 let image = resolved_template.container().map(|container| container.image.as_str());
                 let container_settings = backend_locator(&locator, &self.state.sessions[session_id], &self.config)?
@@ -1116,7 +1213,11 @@ impl Controller {
             }
         }
         self.persist_session_state(session_id)?;
-        result.map(|plan| RepositorySetup { plan, managed_checkout })
+        result.map(|plan| RepositorySetup {
+            plan,
+            managed_checkout,
+            created_container,
+        })
 
         }).await
     }
@@ -1159,6 +1260,7 @@ impl Controller {
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
+        created_container: Option<&targets::CreationObservation>,
     ) -> Result<PreparedWorkerPayload> {
         let _timing = LaunchPhaseTimer::new(session_id, "prepare worker payload");
         // Worker/profile installation is independent of repository cloning.
@@ -1171,6 +1273,7 @@ impl Controller {
             syncing,
             super::worker_binary::WorkerFilePreparation::Install,
             super::worker_binary::LaunchHistory::Stored,
+            created_container,
         )?;
         install_attached_resources(&self.state, session_id, &backend, &worker_root, syncing)?;
         Ok(PreparedWorkerPayload {
@@ -1184,7 +1287,7 @@ impl Controller {
     async fn connect_and_start_worker(
         &self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         backend: &targets::TargetLocator,
         worker_root: &str,
         initialize_workspace: bool,
@@ -1226,8 +1329,14 @@ impl Controller {
                         &self.config.github,
                         Some(staged_aws_profile),
                     )?;
-                    connect_started_worker(reconnect, session_id, executor, backend, worker_root)
-                        .await?
+                    connect_started_worker_status(
+                        reconnect,
+                        session_id,
+                        executor,
+                        backend,
+                        worker_root,
+                    )
+                    .await?
                 };
                 let native_session_id = wait_for_native_session_in_stage(
                     &mut relay,
@@ -1674,11 +1783,13 @@ fn provision_target_creation_plan(
             )
         });
     };
-    // Creating the container is what downloads the image on Docker, and the
-    // probe just before it is what downloads it on Podman. Either way, a
-    // background download of the same image must finish first.
-    let outputs = crate::image_pull_gate::with_image_ready(target, executor, || {
-        creation.execute_concurrent(executor)
+    // Creating the container is what downloads the image on Docker and Apple's
+    // engine, so a background download of the same image must finish first.
+    // A Podman launch that only needs an image already on the host shares it
+    // with other launches and downloads only when it is absent (see
+    // `with_image_for_launch`).
+    let outputs = crate::image_pull_gate::with_image_for_launch(target, executor, |gate| {
+        execute_creation_attempt(&creation, gate, executor)
     })?;
     discover(&outputs)
         .map(|locator| (locator, remainder))
@@ -1686,6 +1797,33 @@ fn provision_target_creation_plan(
             Some(note) => error.context(note),
             None => error,
         })
+}
+
+/// Run the creation commands once. Under an exclusive gate the creation may
+/// download the image, and its commands run as the plan orders them. Under a
+/// shared gate the creation is Podman's single `run` script (which has no
+/// parallel group), and a script that found the image absent reports it as
+/// [`CreationAttempt::ImageMissing`] instead of failing.
+fn execute_creation_attempt(
+    creation: &targets::CommandPlan,
+    gate: crate::image_pull_gate::LaunchImageGate,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<crate::image_pull_gate::CreationAttempt<Vec<CommandOutput>>> {
+    use crate::image_pull_gate::{CreationAttempt, LaunchImageGate, image_is_missing};
+    if gate == LaunchImageGate::Exclusive {
+        return creation
+            .execute_concurrent(executor)
+            .map(CreationAttempt::Created);
+    }
+    let mut outputs = Vec::with_capacity(creation.commands.len());
+    for command in &creation.commands {
+        let output = executor.execute(command)?;
+        if gate == LaunchImageGate::SharedPullOnMiss && image_is_missing(&output) {
+            return Ok(CreationAttempt::ImageMissing);
+        }
+        outputs.push(targets::checked_command_output(command, output)?);
+    }
+    Ok(CreationAttempt::Created(outputs))
 }
 
 /// Best-effort teardown of a target whose creation succeeded but whose
@@ -1961,10 +2099,7 @@ pub(super) fn enforce_cgroup_capable_limits(
     let dropped = targets::unenforceable_container_limits(
         &host,
         preflight,
-        |limit| {
-            args.iter()
-                .any(|arg| arg.starts_with(limit.run_flag_prefix()))
-        },
+        |limit| limit.is_requested_by(args),
         executor,
     );
     args.retain(|arg| {
@@ -2001,6 +2136,14 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.inner.execute_to_file(&self.staged(command), output)
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         self.inner.pause_deadline()
     }
@@ -2015,6 +2158,10 @@ impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
 
     fn cancellation_requested(&self) -> bool {
         self.inner.cancellation_requested()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.inner.shutdown_interrupted()
     }
 
     fn stage_started(&self, stage: ProvisionStage) {

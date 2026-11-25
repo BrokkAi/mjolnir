@@ -1,6 +1,5 @@
 //! Transient history requests. No history payload is written to worker state.
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -30,9 +29,44 @@ impl Default for HistoryEndpoint {
 }
 
 impl HistoryEndpoint {
+    #[cfg(test)]
     pub fn requests(&self) -> Vec<HistoryRequest> {
+        self.requests_for_protocol(mj_core::relay::RELAY_PROTOCOL_VERSION)
+    }
+
+    /// Pending requests a controller speaking `protocol_version` can parse.
+    /// A controller older than a request's feature would fail to deserialize the
+    /// whole `HistoryRequests` reply or answer with a misleading error, so such
+    /// requests are failed here and never listed.
+    pub fn requests_for_protocol(&self, protocol_version: u32) -> Vec<HistoryRequest> {
         let mut pending = self.pending.lock().expect("history queue lock poisoned");
         pending.retain(|_, entry| entry.expires > Instant::now() && !entry.reply.is_closed());
+        let unsupported: Vec<(String, u32, &'static str)> = pending
+            .iter()
+            .filter_map(|(id, entry)| {
+                let (required, feature) = entry.request.query.protocol_requirement();
+                (protocol_version < required).then(|| (id.clone(), required, feature))
+            })
+            .collect();
+        for (id, required, feature) in unsupported {
+            if let Some(entry) = pending.remove(&id) {
+                let mut message = format!(
+                    "{feature} requires controller relay protocol {required} (connected controller uses {protocol_version}); upgrade or restart the daemon"
+                );
+                if required == mj_core::relay::RELAY_READ_SESSION_V2_PROTOCOL {
+                    message.push_str(
+                        ", or retry without tail, before, max_message_chars, role=\"dialogue\", or \"self\"",
+                    );
+                }
+                if entry
+                    .reply
+                    .send(HistoryResult::failed(id, message))
+                    .is_err()
+                {
+                    tracing::debug!("history caller disconnected before its response");
+                }
+            }
+        }
         pending
             .values()
             .map(|entry| entry.request.clone())
@@ -51,7 +85,7 @@ impl HistoryEndpoint {
         }
     }
 
-    pub async fn query(&self, query: HistoryQuery, cwd: &Path) -> Result<HistoryResult> {
+    pub async fn query(&self, query: HistoryQuery) -> Result<HistoryResult> {
         query.validate()?;
         let _permit = self
             .permits
@@ -59,20 +93,6 @@ impl HistoryEndpoint {
             .context("too many pending history queries; retry shortly")?;
         let id = mj_core::state::new_session_id()?;
         let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
-        let blame = if let HistoryQuery::BlameFile {
-            path,
-            start_line,
-            end_line,
-        } = &query
-        {
-            Some(
-                tokio::time::timeout_at(deadline, capture_blame(cwd, path, *start_line, *end_line))
-                    .await
-                    .context("target Git blame timed out")??,
-            )
-        } else {
-            None
-        };
         let (reply, received) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("history queue lock poisoned");
@@ -87,7 +107,6 @@ impl HistoryEndpoint {
                     request: HistoryRequest {
                         request_id: id.clone(),
                         query,
-                        blame,
                     },
                     expires: deadline.into_std(),
                     reply,
@@ -112,104 +131,9 @@ impl HistoryEndpoint {
     }
 }
 
-async fn git(cwd: &Path, args: &[std::ffi::OsString]) -> Result<String> {
-    let mut command = tokio::process::Command::new("git");
-    command.current_dir(cwd).args([
-        "--no-pager",
-        "-c",
-        "core.fsmonitor=",
-        "-c",
-        "core.hooksPath=",
-    ]);
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            command.env_remove(key);
-        }
-    }
-    command
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_PAGER", "cat")
-        .args(args);
-    let output = mj_core::subprocess::run_bounded(
-        &mut command,
-        MAX_BLAME_BYTES,
-        std::time::Duration::from_secs(20),
-    )
-    .await?;
-    ensure!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).context("Git output is not UTF-8")
-}
-
-async fn capture_blame(cwd: &Path, path: &Path, start: usize, end: usize) -> Result<BlameEvidence> {
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    let path = tokio::fs::canonicalize(path)
-        .await
-        .context("resolve target file for blame")?;
-    let parent = path.parent().context("file has no parent")?;
-    let root = git(parent, &["rev-parse".into(), "--show-toplevel".into()]).await?;
-    let repository = PathBuf::from(root.trim());
-    let relative_path = path
-        .strip_prefix(&repository)
-        .context("file is outside Git repository")?
-        .to_path_buf();
-    let porcelain = git(
-        &repository,
-        &[
-            "blame".into(),
-            "--line-porcelain".into(),
-            "-M".into(),
-            "-C".into(),
-            format!("-L{start},{end}").into(),
-            "--".into(),
-            relative_path.as_os_str().to_owned(),
-        ],
-    )
-    .await?;
-    Ok(BlameEvidence {
-        repository,
-        relative_path,
-        porcelain,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn blame_reads_the_target_checkout_including_uncommitted_lines_and_reports_errors() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path();
-        crate::test_support::git(repo, &["init", "-q"]);
-        crate::test_support::git(repo, &["config", "user.name", "Test"]);
-        crate::test_support::git(repo, &["config", "user.email", "test@example.test"]);
-        std::fs::write(repo.join("a.rs"), "committed\nold\n").unwrap();
-        crate::test_support::git(repo, &["add", "a.rs"]);
-        crate::test_support::git(repo, &["commit", "-qm", "initial"]);
-        std::fs::write(repo.join("a.rs"), "committed\nuncommitted\n").unwrap();
-        let evidence = capture_blame(repo, Path::new("a.rs"), 1, 2).await.unwrap();
-        assert_eq!(evidence.relative_path, Path::new("a.rs"));
-        assert!(evidence.porcelain.contains("\tcommitted"));
-        assert!(
-            evidence
-                .porcelain
-                .contains("0000000000000000000000000000000000000000")
-        );
-        assert!(
-            capture_blame(repo, Path::new("missing.rs"), 1, 1)
-                .await
-                .is_err()
-        );
-        assert!(capture_blame(repo, Path::new("a.rs"), 9, 10).await.is_err());
-    }
 
     #[tokio::test(start_paused = true)]
     async fn disconnected_controller_queries_expire_and_release_capacity() {
@@ -219,13 +143,10 @@ mod tests {
             let endpoint = endpoint.clone();
             tasks.push(mj_core::runtime::spawn(async move {
                 endpoint
-                    .query(
-                        HistoryQuery::TraceFile {
-                            path: "a.rs".into(),
-                            limit: 20,
-                        },
-                        Path::new("/"),
-                    )
+                    .query(HistoryQuery::GetSessionBrief {
+                        session_id: "session".into(),
+                        max_chars: 16_000,
+                    })
                     .await
             }));
         }
@@ -234,13 +155,10 @@ mod tests {
         }
         assert!(
             endpoint
-                .query(
-                    HistoryQuery::TraceFile {
-                        path: "a.rs".into(),
-                        limit: 20
-                    },
-                    Path::new("/")
-                )
+                .query(HistoryQuery::GetSessionBrief {
+                    session_id: "session".into(),
+                    max_chars: 16_000,
+                },)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -267,8 +185,7 @@ mod tests {
             limit: 20,
         };
         let cloned = endpoint.clone();
-        let pending =
-            mj_core::runtime::spawn(async move { cloned.query(request, Path::new("/")).await });
+        let pending = mj_core::runtime::spawn(async move { cloned.query(request).await });
         let requests = loop {
             let requests = endpoint.requests();
             if !requests.is_empty() {
@@ -292,13 +209,10 @@ mod tests {
         let cloned = endpoint.clone();
         let pending = mj_core::runtime::spawn(async move {
             cloned
-                .query(
-                    HistoryQuery::TraceFile {
-                        path: "a.rs".into(),
-                        limit: 20,
-                    },
-                    Path::new("/"),
-                )
+                .query(HistoryQuery::GetSessionBrief {
+                    session_id: "session".into(),
+                    max_chars: 16_000,
+                })
                 .await
         });
         while endpoint.requests().is_empty() {
@@ -307,5 +221,124 @@ mod tests {
         pending.abort();
         assert!(pending.await.unwrap_err().is_cancelled());
         assert!(endpoint.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn older_controllers_get_search_history_failed_and_still_poll_legacy_requests() {
+        let endpoint = HistoryEndpoint::default();
+        let search = {
+            let endpoint = endpoint.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .query(HistoryQuery::SearchHistory {
+                        query: "needle".into(),
+                        session_ids: None,
+                        session_id: None,
+                        role: None,
+                        order: None,
+                        limit: 20,
+                        context_messages: 0,
+                        max_chars: 16_000,
+                        cursor: None,
+                    })
+                    .await
+            })
+        };
+        let legacy = {
+            let endpoint = endpoint.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .query(HistoryQuery::SearchSessions {
+                        query: "needle".into(),
+                        limit: 20,
+                    })
+                    .await
+            })
+        };
+        while endpoint.requests().len() != 2 {
+            tokio::task::yield_now().await;
+        }
+        let older = mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL - 1;
+        let listed = endpoint.requests_for_protocol(older);
+        assert_eq!(listed.len(), 1);
+        assert!(matches!(
+            listed[0].query,
+            HistoryQuery::SearchSessions { .. }
+        ));
+        // The reply serializes with only variants an older controller knows.
+        let wire = serde_json::to_string(&listed).unwrap();
+        assert!(!wire.contains("search_history"));
+        let failed = search.await.unwrap().unwrap();
+        assert!(failed.is_error);
+        let error = failed.value["error"].as_str().unwrap();
+        assert!(
+            error.contains("requires controller relay protocol 92"),
+            "{error}"
+        );
+        assert!(error.contains("connected controller uses 91"), "{error}");
+        assert!(!legacy.is_finished());
+        endpoint.complete(HistoryResult {
+            request_id: listed[0].request_id.clone(),
+            value: serde_json::json!({"ok": true}),
+            is_error: false,
+        });
+        assert!(!legacy.await.unwrap().unwrap().is_error);
+        assert!(endpoint.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn protocol_92_controllers_get_plain_reads_but_fail_protocol_94_reads_with_a_retry_hint()
+    {
+        let endpoint = HistoryEndpoint::default();
+        let read = |tail: bool| {
+            let endpoint = endpoint.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .query(HistoryQuery::ReadSession {
+                        session_id: "session".into(),
+                        start: 0,
+                        offset: 0,
+                        role: None,
+                        limit: 20,
+                        max_chars: 16_000,
+                        tail,
+                        before: None,
+                        max_message_chars: None,
+                    })
+                    .await
+            })
+        };
+        let plain = read(false);
+        let tailed = read(true);
+        while endpoint.requests().len() != 2 {
+            tokio::task::yield_now().await;
+        }
+        let listed = endpoint.requests_for_protocol(mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL);
+        assert_eq!(listed.len(), 1);
+        // Plain reads serialize without the protocol-94 keys an older controller rejects.
+        let wire = serde_json::to_string(&listed).unwrap();
+        assert!(
+            !wire.contains("tail") && !wire.contains("max_message_chars"),
+            "{wire}"
+        );
+        let failed = tailed.await.unwrap().unwrap();
+        assert!(failed.is_error);
+        let error = failed.value["error"].as_str().unwrap();
+        assert!(
+            error.contains("requires controller relay protocol 94"),
+            "{error}"
+        );
+        assert!(error.contains("connected controller uses 92"), "{error}");
+        assert!(
+            error.contains("retry without tail, before, max_message_chars"),
+            "{error}"
+        );
+        assert!(!plain.is_finished());
+        endpoint.complete(HistoryResult {
+            request_id: listed[0].request_id.clone(),
+            value: serde_json::json!({"ok": true}),
+            is_error: false,
+        });
+        assert!(!plain.await.unwrap().unwrap().is_error);
     }
 }

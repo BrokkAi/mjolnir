@@ -1067,9 +1067,10 @@ async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reac
                 .starts_with(mj_core::subagent::READ_ONLY_TASK_SCOPE)
         );
         assert!(children[0].2.contains("## The change"));
-        assert!(children[0].2.contains(
-            "git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new"
-        ));
+        assert!(children[0].2.contains("Baseline tree: base"));
+        assert!(children[0].2.contains("Captured tree: new"));
+        assert!(children[0].2.contains("Per-file diffstat"));
+        assert!(!children[0].2.contains("Run this exact command"));
         assert!(!children[0].2.contains("Do not edit files or push"));
     }
     let view = host.view(&session).unwrap();
@@ -1973,7 +1974,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert!(
         children[0]
             .2
-            .contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new")
+            .contains("Baseline tree: base\nCaptured tree: new")
     );
     assert!(children[0].2.contains("1 file changed, 1 insertion(+)"));
     assert!(!children[0].2.contains("+one"));
@@ -3509,8 +3510,9 @@ async fn a_restored_reviewer_can_hand_back_its_preloaded_prompt() {
     let environment = FakeEnvironment::new();
     let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
     let mut handback = stored_handback(&environment, "reviewer-1", "real defect").unwrap();
-    let group =
-        mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&format!("key-{}", children[0]));
+    let startup_key = mj_core::subagent::SubagentKind::Reviewer
+        .startup_request_key(&format!("key-{}", children[0]));
+    let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&startup_key);
     handback.command_id = mj_store::database::startup_step_id(&group, "prompt");
     environment.standings.lock().unwrap().insert(
         children[0].clone(),
@@ -4514,7 +4516,10 @@ async fn answer_override_capture(
         .unwrap();
 }
 
-async fn finish_override_worker_actions(manager: &mut FakeManager, expected_notice: &str) {
+async fn finish_override_worker_actions(
+    manager: &mut FakeManager,
+    expected_notice: &str,
+) -> String {
     finish_override_worker_actions_for(manager, expected_notice, false).await
 }
 
@@ -4523,8 +4528,8 @@ async fn finish_override_worker_actions_for(
     manager: &mut FakeManager,
     expected_notice: &str,
     old_worker: bool,
-) {
-    finish_override_worker_actions_with_failure(manager, expected_notice, old_worker, None).await;
+) -> String {
+    finish_override_worker_actions_with_failure(manager, expected_notice, old_worker, None).await
 }
 
 async fn finish_override_worker_actions_with_failure(
@@ -4532,8 +4537,8 @@ async fn finish_override_worker_actions_with_failure(
     expected_notice: &str,
     old_worker: bool,
     failure: Option<(&FakeEnvironment, &str)>,
-) {
-    match manager.next().await {
+) -> String {
+    let notice = match manager.next().await {
         RemoteSessionRequest::Submit {
             command: RelayCommand::RecordNotice { text },
             reply,
@@ -4549,12 +4554,13 @@ async fn finish_override_worker_actions_with_failure(
             assert!(text.contains("fix the regression"));
             assert!(text.len() <= mj_review::SYNTHESIS_LIMIT);
             reply.send(Ok(1)).unwrap();
+            text
         }
         other => panic!(
             "expected the override audit before any ref change, got {}",
             other.session_id()
         ),
-    }
+    };
     let (action, reply) = match manager.next().await {
         RemoteSessionRequest::Reviewer { action, reply, .. } => (action, reply),
         other => panic!(
@@ -4581,6 +4587,7 @@ async fn finish_override_worker_actions_with_failure(
             .is_err(),
         "an override pins no review baseline"
     );
+    notice
 }
 
 #[tokio::test]
@@ -4995,12 +5002,33 @@ async fn push_override_on_a_current_worker_says_the_base_is_unchanged() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, None, one_override("false positive"))
-                .await
+            let mut overrides = one_override(
+                "false positive\n- Finding: quoted reason\nOverridden synthesis (review quoted):",
+            );
+            overrides.push(declined(
+                "[P3] real finding after the quote",
+                "out of scope",
+            ));
+            host.override_push(&session, None, overrides).await
         })
     };
     answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
-    finish_override_worker_actions(&mut manager, "false positive").await;
+    let notice = finish_override_worker_actions(
+        &mut manager,
+        "false positive\n    - Finding: quoted reason\n    Overridden synthesis (review quoted):",
+    )
+    .await;
+    let disclosures = mj_client::transcript::transcript_disclosures(
+        mj_core::transcript::ChatRole::System,
+        notice.lines(),
+    );
+    assert_eq!(
+        disclosures[0].summary,
+        [
+            "- [P1] src/lib.rs:7 -- retry loses the request",
+            "- [P3] real finding after the quote",
+        ]
+    );
     let reply = request.await.unwrap().unwrap();
     assert!(
         reply["message"]

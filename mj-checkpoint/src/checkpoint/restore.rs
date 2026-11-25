@@ -632,41 +632,14 @@ pub(super) fn restore_repositories_from_archive(
         // A plain project folder is the user's own directory on a bare local
         // target. Its files were never captured, so a restore must never
         // check out, rewrite or remove anything in it.
-        if let Some(delta) = repository.metadata.origin_delta.as_deref() {
+        if repository.metadata.origin_delta.is_some() {
             if !restore_contents {
                 continue;
             }
             let id = &repository.metadata.id;
-            let pack_file = repository
-                .origin_delta_pack_path
-                .as_ref()
-                .map(|path| -> Result<_> {
-                    let descriptor = archive
-                        .manifest
-                        .payloads
-                        .iter()
-                        .find(|payload| {
-                            &payload.path == path
-                                && payload.role
-                                    == (PayloadRole::GitOriginDeltaPack {
-                                        repository_id: id.clone(),
-                                    })
-                        })
-                        .context("origin delta pack descriptor is missing")?;
-                    let mut temp = tempfile::NamedTempFile::new()
-                        .context("create temporary origin delta pack file")?;
-                    crate::archive::CheckpointPayloadReader::open(archive_path)?
-                        .copy_payload(descriptor, temp.as_file_mut())
-                        .context("stream origin delta pack payload")?;
-                    std::io::Write::flush(temp.as_file_mut())
-                        .context("flush temporary origin delta pack file")?;
-                    Ok(temp)
-                })
-                .transpose()?;
-            let snapshot = crate::snapshot::WorkspaceSnapshot {
-                metadata: delta.clone(),
-                pack: pack_file.as_ref().map(|file| file.path().to_path_buf()),
-            };
+            let spooled = spool_origin_delta_snapshot(archive_path, &archive.manifest, repository)?
+                .context("origin delta metadata is missing")?;
+            let snapshot = spooled.snapshot();
             let path = if repository.metadata.id == archive.manifest.bundle.primary_repository
                 && let Some(primary) = primary_repository_root
             {
@@ -685,14 +658,16 @@ pub(super) fn restore_repositories_from_archive(
                 )
                 .with_context(|| format!("restore repository {id:?}"))?
             };
-            let notices = crate::snapshot::restore_workspace_snapshot(git, &snapshot, &path)
+            let notices = crate::snapshot::restore_workspace_snapshot(git, snapshot, &path)
                 .with_context(|| format!("restore repository {id:?}"))?;
             for notice in &notices {
                 tracing::info!(repository_id = %id, "{notice}");
             }
             all_notices.extend(notices);
-            crate::snapshot::repair_workspace_snapshot(git, &snapshot, &path)
+            crate::snapshot::repair_workspace_snapshot(git, snapshot, &path)
                 .with_context(|| format!("repair repository {id:?}"))?;
+            restore_managed_base(git, &path, &repository.metadata)
+                .with_context(|| format!("restore the launch base of repository {id:?}"))?;
             continue;
         }
         if repository.metadata.plain_directory {
@@ -728,6 +703,117 @@ pub(super) fn restore_repositories_from_archive(
         all_notices.extend(notices);
     }
     Ok(all_notices)
+}
+
+/// An origin-delta snapshot whose pack is spooled to a temporary file. The
+/// file goes away with this value, so keep it until the snapshot is applied.
+pub struct SpooledWorkspaceSnapshot {
+    snapshot: crate::snapshot::WorkspaceSnapshot,
+    _pack: Option<tempfile::NamedTempFile>,
+}
+
+impl SpooledWorkspaceSnapshot {
+    pub fn snapshot(&self) -> &crate::snapshot::WorkspaceSnapshot {
+        &self.snapshot
+    }
+}
+
+/// Spool one repository's origin-delta pack out of the archive and pair it
+/// with the snapshot metadata. `None` when the repository is not an origin
+/// delta. Resume and export both restore through this one spooling path.
+pub fn spool_origin_delta_snapshot(
+    archive_path: &Path,
+    manifest: &crate::archive::ArchiveManifest,
+    repository: &crate::archive::RepositoryManifest,
+) -> Result<Option<SpooledWorkspaceSnapshot>> {
+    spool_origin_delta_snapshot_unless(archive_path, manifest, repository, &|| false)
+}
+
+/// [`spool_origin_delta_snapshot`] that stops copying the pack with
+/// [`crate::archive::ArchiveReadCancelled`] once `cancelled` returns true.
+pub fn spool_origin_delta_snapshot_unless(
+    archive_path: &Path,
+    manifest: &crate::archive::ArchiveManifest,
+    repository: &crate::archive::RepositoryManifest,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<SpooledWorkspaceSnapshot>> {
+    let Some(delta) = repository.metadata.origin_delta.as_deref() else {
+        return Ok(None);
+    };
+    let id = &repository.metadata.id;
+    let pack = repository
+        .origin_delta_pack_path
+        .as_ref()
+        .map(|path| -> Result<_> {
+            let descriptor = manifest
+                .payloads
+                .iter()
+                .find(|payload| {
+                    &payload.path == path
+                        && payload.role
+                            == (PayloadRole::GitOriginDeltaPack {
+                                repository_id: id.clone(),
+                            })
+                })
+                .context("origin delta pack descriptor is missing")?;
+            let mut temp = tempfile::NamedTempFile::new()
+                .context("create temporary origin delta pack file")?;
+            crate::archive::CheckpointPayloadReader::open(archive_path)?
+                .copy_payload_unless(descriptor, temp.as_file_mut(), cancelled)
+                .context("stream origin delta pack payload")?;
+            std::io::Write::flush(temp.as_file_mut())
+                .context("flush temporary origin delta pack file")?;
+            Ok(temp)
+        })
+        .transpose()?;
+    Ok(Some(SpooledWorkspaceSnapshot {
+        snapshot: crate::snapshot::WorkspaceSnapshot {
+            metadata: delta.clone(),
+            pack: pack.as_ref().map(|file| file.path().to_path_buf()),
+        },
+        _pack: pack,
+    }))
+}
+
+/// Put the archived launch base back on a managed network workspace.
+///
+/// Provisioning marks the fresh clone with its own `HEAD` as the base. The
+/// archived base is the one the session started from, so it replaces that when
+/// the restored repository has the commit. An archive that recorded none (it
+/// predates this, or the checkout was not a managed workspace) and a checkout
+/// without the managed marker keep what they have.
+fn restore_managed_base(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+    metadata: &crate::archive::RepositoryMetadata,
+) -> Result<()> {
+    if metadata.base_commit.is_empty()
+        || crate::archive::remote_workspace_base(git, repository)?.is_none()
+    {
+        return Ok(());
+    }
+    if !crate::archive::managed_base_is_available(git, repository, &metadata.base_commit)? {
+        tracing::warn!(repository = %repository.display(), base_commit = %metadata.base_commit,
+            "archived launch base is absent from the restored repository; keeping the provisioned base");
+        return Ok(());
+    }
+    mj_core::remote_git::finalize_managed_checkout(&metadata.base_commit, true, |arguments| {
+        let output = git.run(
+            repository,
+            &crate::archive::GitCommand {
+                arguments: arguments.iter().map(std::ffi::OsString::from).collect(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+        )?;
+        ensure!(
+            output.status == 0,
+            "restore the launch base: git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
+    })
 }
 
 /// The top level of the checkout a repository's session directory belongs to.
@@ -932,9 +1018,10 @@ pub fn restore_single_repository_into_clone(
     archive_path: &Path,
     repository_path: &Path,
     git: &dyn GitCommandRunner,
+    cancel: Option<&crate::archive::ArchivePurgeCancel>,
 ) -> Result<Vec<String>> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
-    let archive = crate::archive::read_archive_repositories(archive_path)?;
+    let archive = crate::archive::read_archive_repositories_unless(archive_path, cancel)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
         bail!("an isolated clone requires exactly one archived repository");
     };
@@ -1004,9 +1091,21 @@ pub(super) fn restored_native_relative_path(
             rewritten.extend(components);
             Ok(rewritten)
         }
-        // OpenCode's database records session directories itself, and
-        // dsh-acp records its directory inside the session file; neither has
-        // a per-workspace path key to rewrite.
+        HarnessKind::Dsh if super::native_scan::is_dsh_native_log_path(relative_path) => {
+            if components.next() != Some(Component::Normal("dsh-home".as_ref()))
+                || components.next() != Some(Component::Normal("sessions".as_ref()))
+                || components.next().is_none()
+            {
+                return Ok(relative_path.to_path_buf());
+            }
+            let mut rewritten = PathBuf::from("dsh-home").join("sessions");
+            rewritten.push(dsh_project_key(target_cwd)?);
+            rewritten.extend(components);
+            Ok(rewritten)
+        }
+        // OpenCode's database records session directories itself. The dsh-acp
+        // projection records its directory inside the JSON file; only DSH's
+        // native log has a per-workspace path key.
         HarnessKind::Codex
         | HarnessKind::Muse
         | HarnessKind::OpenCode
@@ -1028,7 +1127,8 @@ pub(super) fn target_primary_cwd(
 
 enum NativeRelocation {
     Muse,
-    Dsh,
+    DshProjection,
+    DshNativeLog,
     Antigravity,
     OpenCode,
     GrokSummary,
@@ -1043,7 +1143,10 @@ fn native_artifact_relocation(harness: HarnessKind, path: &Path) -> Option<Nativ
         HarnessKind::Muse if path.file_name().is_some_and(|name| name == "session.jsonl") => {
             Some(NativeRelocation::Muse)
         }
-        HarnessKind::Dsh if path.starts_with("sessions") => Some(NativeRelocation::Dsh),
+        HarnessKind::Dsh if super::native_scan::is_dsh_native_log_path(path) => {
+            Some(NativeRelocation::DshNativeLog)
+        }
+        HarnessKind::Dsh if path.starts_with("sessions") => Some(NativeRelocation::DshProjection),
         HarnessKind::Antigravity
             if super::native_scan::is_sqlite_native_database(harness, path) =>
         {
@@ -1079,7 +1182,12 @@ pub(super) fn restored_native_artifact_bytes(
     match native_artifact_relocation(harness, relative_path) {
         None => return Ok(data.to_vec()),
         Some(NativeRelocation::Muse) => return crate::native::muse::relocate(data, target_cwd),
-        Some(NativeRelocation::Dsh) => return rewrite_dsh_session_cwd(data, target_cwd),
+        Some(NativeRelocation::DshProjection) => {
+            return rewrite_dsh_session_cwd(data, target_cwd);
+        }
+        Some(NativeRelocation::DshNativeLog) => {
+            return rewrite_dsh_native_log_cwd(data, native_session_id, target_cwd);
+        }
         Some(NativeRelocation::Antigravity) => {
             return crate::native::antigravity::relocate(data, target_cwd).with_context(|| {
                 format!(
@@ -1148,6 +1256,85 @@ fn rewrite_dsh_session_cwd(data: &[u8], target_cwd: &Path) -> Result<Vec<u8>> {
         ),
     );
     Ok(serde_json::to_vec(&record)?)
+}
+
+/// DSH's native session log starts with its own zstd frame containing exactly
+/// one JSON header line. Rewrite that frame and recompress the remaining log
+/// separately; merging the frames makes DSH reject the session.
+fn rewrite_dsh_native_log_cwd(
+    data: &[u8],
+    native_session_id: &str,
+    target_cwd: &Path,
+) -> Result<Vec<u8>> {
+    let unpacked = zstd::stream::decode_all(data).context("decompress native DSH session log")?;
+    let newline = unpacked
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .context("native DSH session log has no header line")?;
+    let (header, rest) = unpacked.split_at(newline + 1);
+    let mut header: Value =
+        serde_json::from_slice(header).context("parse native DSH session header")?;
+    let object = header
+        .as_object_mut()
+        .context("native DSH session header is not a JSON object")?;
+    ensure!(
+        object.get("type").and_then(Value::as_str) == Some("session"),
+        "native DSH session log does not start with a session header"
+    );
+    ensure!(
+        object.get("id").and_then(Value::as_str) == Some(native_session_id),
+        "native DSH session header names another session"
+    );
+    object.insert(
+        "cwd".into(),
+        Value::String(
+            target_cwd
+                .to_str()
+                .context("native DSH target cwd is not valid UTF-8")?
+                .to_owned(),
+        ),
+    );
+    let mut header = serde_json::to_vec(&header)?;
+    header.push(b'\n');
+    let mut rewritten =
+        zstd::stream::encode_all(header.as_slice(), 0).context("compress native DSH header")?;
+    rewritten
+        .extend(zstd::stream::encode_all(rest, 0).context("compress native DSH session events")?);
+    Ok(rewritten)
+}
+
+/// DSH names a session-log directory after the UTF-16 code units in its cwd.
+pub(super) fn dsh_project_key(cwd: &Path) -> Result<String> {
+    let cwd = cwd
+        .to_str()
+        .context("native DSH target cwd is not valid UTF-8")?;
+    ensure!(!cwd.is_empty(), "native DSH target cwd is empty");
+    let mut readable = String::new();
+    let mut separator_run = false;
+    for unit in cwd.encode_utf16() {
+        let ascii = u8::try_from(unit).ok();
+        if matches!(ascii, Some(b'/' | b'\\' | b':')) {
+            if !separator_run {
+                readable.push('-');
+            }
+            separator_run = true;
+        } else if let Some(byte) = ascii.filter(|byte| {
+            *byte != b'~' && (byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        }) {
+            readable.push(char::from(byte));
+            separator_run = false;
+        } else {
+            use std::fmt::Write as _;
+            write!(readable, "~{unit:04X}")?;
+            separator_run = false;
+        }
+    }
+    let slug = readable.trim_start_matches('-');
+    let slug = if slug.is_empty() { "root" } else { slug };
+    Ok(format!(
+        "--{}--",
+        slug.chars().take(251).collect::<String>()
+    ))
 }
 
 /// Write `relative` under `root` with owner-only permissions, refusing to

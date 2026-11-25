@@ -107,3 +107,98 @@ func TestARelayResponseDecodesInAnyFieldOrder(t *testing.T) {
 		t.Fatal("a contradicting result decoded")
 	}
 }
+
+// Hard-won: 390e88f94: the Rust daemon refused the Go worker's
+// command_retention_state response (null where serde wants a set), so
+// every session stayed "launching". encoding/json writes a nil slice or
+// map as null and serde refuses null for a Vec, set or map, so each type the
+// worker writes to the relay, at any depth, must write an always-present
+// collection as [] or {}.
+func TestRelayWireWritesEmptyCollectionsAsSerdeDoes(t *testing.T) {
+	registries := []any{
+		relayResponseBodyVariants, relayResponsePayloadVariants, relayErrorDetailVariants,
+		relayObservationVariants, relayCommandOutcomeVariants, relayCommandVariants,
+		workerEventVariants, harnessPreparationVariants, reviewerRequestVariants,
+		projectMemoryTransferActionVariants, projectMemoryUploadKindVariants, projectMemoryTransferResultVariants,
+	}
+	// The variants of each sealed interface, so the walk follows a field
+	// that holds one.
+	variants := map[reflect.Type][]reflect.Type{}
+	for _, registry := range registries {
+		decoders := reflect.ValueOf(registry).MapRange()
+		for decoders.Next() {
+			results := decoders.Value().Call([]reflect.Value{reflect.ValueOf(json.RawMessage("null"))})
+			if !results[1].IsNil() {
+				t.Fatalf("variant %v: %v", decoders.Key(), results[1])
+			}
+			sealed := decoders.Value().Type().Out(0)
+			variants[sealed] = append(variants[sealed], results[0].Elem().Type())
+		}
+	}
+	pending := []reflect.Type{
+		reflect.TypeFor[RelayResponseEnvelope](), reflect.TypeFor[RelayEvent](),
+		reflect.TypeFor[RelaySnapshot](), reflect.TypeFor[RelayOperationalState](),
+		reflect.TypeFor[LiveSessionBaseline](),
+	}
+	for _, types := range variants {
+		pending = append(pending, types...)
+	}
+	seen := map[reflect.Type]bool{}
+	checked := 0
+	for len(pending) > 0 {
+		typ := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array || typ.Kind() == reflect.Map {
+			if typ.Kind() == reflect.Map {
+				pending = append(pending, typ.Key())
+			}
+			typ = typ.Elem()
+		}
+		if seen[typ] {
+			continue
+		}
+		seen[typ] = true
+		if typ.Kind() == reflect.Interface {
+			pending = append(pending, variants[typ]...)
+			continue
+		}
+		if typ.Kind() != reflect.Struct {
+			continue
+		}
+		var collections []string
+		for i := range typ.NumField() {
+			field := typ.Field(i)
+			pending = append(pending, field.Type)
+			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+			kind := field.Type.Kind()
+			if !field.IsExported() || name == "-" || serdeTagHasOption(options, "omitempty") ||
+				serdeTagHasOption(options, "omitzero") ||
+				(kind != reflect.Map && (kind != reflect.Slice || field.Type.Elem().Kind() == reflect.Uint8)) {
+				continue
+			}
+			if name == "" {
+				name = field.Name
+			}
+			collections = append(collections, name)
+		}
+		if len(collections) == 0 {
+			continue
+		}
+		written, err := relayMarshalJSON(reflect.New(typ).Elem().Interface())
+		if err != nil {
+			// A type that cannot encode its zero value would otherwise
+			// drop out of this check unnoticed.
+			t.Errorf("%v cannot encode its zero value, so its collections go unchecked: %v", typ, err)
+			continue
+		}
+		checked++
+		for _, name := range collections {
+			if bytes.Contains(written, []byte(`"`+name+`":null`)) {
+				t.Errorf("%v writes an empty %s as null: %s", typ, name, written)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no relay type holds a collection")
+	}
+}

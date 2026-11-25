@@ -100,6 +100,7 @@ pub(super) fn start_suspension(
                             abort_operations: consent.abort_operations,
                             without_checkpoint: consent.without_checkpoint,
                             confirm_no_checkpoint: consent.confirm_no_checkpoint,
+                            history_only: consent.history_only,
                         },
                     )
                     .await?;
@@ -705,6 +706,24 @@ pub(crate) async fn apply_dashboard_action(
                     client.warm_profile_capabilities(config).await
                 },
                 move |result| DashboardIoUpdate::ProfileHydration { key, result },
+            );
+        }
+        DashboardAction::SelectProviderProfile {
+            request,
+            generation,
+        } => {
+            super::io::spawn_async_io(
+                "selecting provider profile",
+                context.dashboard_io_tx.clone(),
+                async move {
+                    daemon::connect_existing()
+                        .await?
+                        .http()
+                        .await?
+                        .select_provider_profile(request)
+                        .await
+                },
+                move |result| DashboardIoUpdate::ProviderProfileSelection { generation, result },
             );
         }
         DashboardAction::ProbeGitStatus { session_id } => {
@@ -1635,13 +1654,60 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
-        DashboardAction::SuspendPreflight { session_id } => {
+        DashboardAction::PromptSession { session_id, text } => {
+            let updates = context.dashboard_io_tx.clone();
+            mj_core::runtime::spawn(async move {
+                let result = async {
+                    crate::api_client::ApiClient::connect()
+                        .await?
+                        .prompt(&session_id, text)
+                        .await
+                        .map(drop)
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                report(
+                    "sending suspend blocker cleanup request",
+                    &updates,
+                    DashboardIoUpdate::BlockerPromptSent { session_id, result },
+                );
+            });
+        }
+        DashboardAction::ResolveSuspendBlockers {
+            session_id,
+            request_id,
+        } => {
             let updates = context.dashboard_io_tx.clone();
             mj_core::runtime::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
                         .await?
-                        .suspend_preflight(session_id.clone(), false, false)
+                        .resolve_suspend_blockers(session_id.clone())
+                        .await
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                report(
+                    "fixing safe suspend blockers",
+                    &updates,
+                    DashboardIoUpdate::SuspendBlockersResolved {
+                        session_id,
+                        request_id,
+                        result,
+                    },
+                );
+            });
+        }
+        DashboardAction::SuspendPreflight {
+            session_id,
+            request_id,
+        } => {
+            let updates = context.dashboard_io_tx.clone();
+            mj_core::runtime::spawn(async move {
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .suspend_preflight(session_id.clone(), false, false, false)
                         .await
                 }
                 .await
@@ -1649,7 +1715,11 @@ pub(crate) async fn apply_dashboard_action(
                 report(
                     "checking workspace before suspend",
                     &updates,
-                    DashboardIoUpdate::SuspendPreflight { session_id, result },
+                    DashboardIoUpdate::SuspendPreflight {
+                        session_id,
+                        request_id,
+                        result,
+                    },
                 );
             });
         }

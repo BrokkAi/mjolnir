@@ -114,10 +114,10 @@ impl Guardian {
             tracing::info!(
                 target: "mj_guardian",
                 tool_call_id = %request.tool_call.tool_call_id,
-                "guardian denied several actions this turn; asking the person"
+                "several flagged actions were declined this turn; asking the person"
             );
             return GuardianDecision::AskPerson {
-                reason: "it denied several actions in this turn".into(),
+                reason: "several flagged actions were declined in this turn".into(),
             };
         }
         let sequence = self.review_sequence.fetch_add(1, Ordering::Relaxed);
@@ -354,10 +354,22 @@ impl Guardian {
         journal: mpsc::Permit<'_, RuntimeEvent>,
     ) -> bool {
         let denied = review.outcome == Outcome::Deny;
+        self.record_escalated_review(review, journal);
+        self.record_breaker_outcome(denied)
+    }
+
+    pub(in crate::acp) fn record_escalated_review(
+        &self,
+        review: PriorGuardianReview,
+        journal: mpsc::Permit<'_, RuntimeEvent>,
+    ) {
         self.spec
             .turn_context
             .record_prior_guardian_review(review.clone());
         journal.send(RuntimeEvent::GuardianReviewed { review });
+    }
+
+    pub(in crate::acp) fn record_breaker_outcome(&self, denied: bool) -> bool {
         self.spec.turn_context.record_guardian_review(denied)
     }
 

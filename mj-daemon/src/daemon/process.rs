@@ -194,6 +194,10 @@ pub(super) async fn run_daemon_runtime(
     .context("SSH master lock cleanup task failed")?;
     Controller::recover_config_id_rename()?;
     let config = Config::load()?;
+    // Records written before secret references were stored as references hold
+    // the resolved values. Rewrite them before anything reads or serves them.
+    mj_controller::database::scrub_resolved_target_secrets(&config)
+        .context("remove resolved secrets from recorded target settings")?;
     mj_controller::database::recover_interrupted_checkpointing_sessions(
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     )?;
@@ -320,22 +324,10 @@ pub(super) async fn run_daemon_runtime(
     ));
     manager_control
         .install_guardian_stage1(Arc::new(WolfGuardianStage1(guardian_classifier.clone())));
-    // Install the bounded failure recorder before worker observations start.
-    manager_targets.send_replace(dashboard_worker_targets(&controller));
-    log_relay_actors_launched(&manager_targets.borrow());
     state
         .reviewer_runtime
         .set(Arc::downgrade(&state))
         .expect("reviewer runtime installed once");
-    // Views are published only from the serving loop below, so the first
-    // targets are installed before any can arrive.
-    state.owner().install_relay_sessions(
-        manager_targets
-            .borrow()
-            .iter()
-            .map(|target| target.session_id.clone())
-            .collect(),
-    );
     // Fires once the startup start of Apple's container service has finished,
     // however it ended, so the image refresher's first look sees the service
     // as startup left it instead of mid-start.
@@ -659,6 +651,8 @@ pub(super) async fn run_daemon_runtime(
         super::jev_limit::publish_notices(&jev_notice_state, jev_notice_cancel).await
     });
 
+    // The first publication uses the same owner-filtered inputs as every
+    // refresh, after bootstrap re-admits interrupted lifecycle work.
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
         cancellation.clone(),
@@ -876,10 +870,6 @@ pub(super) async fn run_daemon_runtime(
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
     let mut delegation_outcome = None;
-    let mut cache_task = mj_core::runtime::spawn(crate::daemon::mbx_service::run(
-        state.clone(),
-        cancellation.clone(),
-    ));
     let mut mailbox_task = mj_core::runtime::spawn(crate::daemon::mailbox_delivery::run(
         state.clone(),
         manager_control.clone(),
@@ -895,7 +885,6 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     ));
     let mut alert_outcome = None;
-    let mut cache_outcome = None;
     let mut mailbox_outcome = None;
     let mut github_watch_outcome = None;
 
@@ -934,10 +923,6 @@ pub(super) async fn run_daemon_runtime(
                     break;
                 }
                 result = supervise_service(&mut availability, &mut availability_outcome, &cancellation, "availability service") => {
-                    result?;
-                    break;
-                }
-                result = supervise_service(&mut cache_task, &mut cache_outcome, &cancellation, "machine build cache service") => {
                     result?;
                     break;
                 }
@@ -1107,17 +1092,6 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join API activity cleanup",
         activity_cleanup.await.map_err(anyhow::Error::from),
-    );
-    epilogue.record(
-        &mut outcome,
-        "join machine build cache applications",
-        match cache_outcome {
-            Some(result) => result,
-            None => cache_task
-                .await
-                .context("machine cache service failed")
-                .and_then(|result| result),
-        },
     );
     epilogue.record(
         &mut outcome,
@@ -1623,27 +1597,6 @@ pub(super) fn spawn_manager_target_refresher(
             };
             let controller = inputs.controller();
             state.session_manager.update_model_policies(&controller.config, &controller.state);
-            let config = controller.config;
-            if auth_profiles.as_ref() != Some(&config.profiles) {
-                let mut cache = auth.clone();
-                let profiles = config.profiles.clone();
-                match mj_core::runtime::spawn_blocking(move || {
-                    cache.refresh(&config);
-                    cache
-                })
-                .await
-                {
-                    Ok(cache) => {
-                        auth = cache;
-                        auth_profiles = Some(profiles);
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "provider refresh task stopped");
-                        cancellation.cancel();
-                        return;
-                    }
-                }
-            }
             if !installed
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, &inputs))
@@ -1669,6 +1622,9 @@ pub(super) fn spawn_manager_target_refresher(
                     if !Arc::ptr_eq(&owner.pollable_worker_inputs(), &inputs) {
                         continue;
                     }
+                    if installed.is_none() {
+                        log_relay_actors_launched(&refreshed);
+                    }
                     targets.send_if_modified(|current| {
                         if *current == refreshed {
                             false
@@ -1691,6 +1647,28 @@ pub(super) fn spawn_manager_target_refresher(
                 }
                 state.review_host().retain_sessions(retained);
                 installed = Some(inputs.clone());
+            }
+            // Publish worker targets before probing profile homes for credential sync.
+            let config = controller.config;
+            if auth_profiles.as_ref() != Some(&config.profiles) {
+                let mut cache = auth.clone();
+                let profiles = config.profiles.clone();
+                match mj_core::runtime::spawn_blocking(move || {
+                    cache.refresh(&config);
+                    cache
+                })
+                .await
+                {
+                    Ok(cache) => {
+                        auth = cache;
+                        auth_profiles = Some(profiles);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "provider refresh task stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                }
             }
             let closing = state.owner().close_requested.clone();
             if !staged_sources

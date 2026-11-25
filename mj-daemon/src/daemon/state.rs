@@ -145,10 +145,10 @@ impl RuntimeState {
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(inactivity),
             inactivity_changed: tokio::sync::Notify::new(),
-            mbx_install_wake: crate::daemon::mbx_service::InstallWake::default(),
             projects: Arc::new(mj_controller::project_catalog::Catalog::default()),
             profile_catalog,
             session_gate,
+            borrower_registration_gates: Mutex::new(BTreeMap::new()),
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),
             next_notice_id: AtomicU64::new(1),
@@ -171,6 +171,30 @@ impl RuntimeState {
 
     pub(crate) fn projects(&self) -> Arc<mj_controller::project_catalog::Catalog> {
         self.projects.clone()
+    }
+
+    pub(crate) fn borrower_registration_gate(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<tokio::sync::RwLock<()>>> {
+        let owner_id = self
+            .owner()
+            .controller()
+            .state
+            .workspace_owner(session_id)
+            .ok()
+            .map(|owner| owner.id.clone())?;
+        let mut gates = self
+            .borrower_registration_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = gates.get(&owner_id).and_then(std::sync::Weak::upgrade) {
+            return Some(existing);
+        }
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        gates.insert(owner_id, Arc::downgrade(&gate));
+        Some(gate)
     }
 
     pub(crate) async fn stop_viewer_background_task(
@@ -862,16 +886,6 @@ impl RuntimeState {
 
     pub fn revisions(&self) -> tokio::sync::watch::Receiver<u64> {
         self.revisions.subscribe()
-    }
-
-    pub(crate) fn mbx_install_wake(&self) -> &crate::daemon::mbx_service::InstallWake {
-        &self.mbx_install_wake
-    }
-
-    pub(crate) fn notify_mbx_installed(&self, machine: &mj_core::config::Machine) {
-        if let Some(host_key) = mj_controller::controller::mbx::machine_cache_host_key(machine) {
-            self.mbx_install_wake.wake_host(host_key);
-        }
     }
 
     /// Read the config the daemon serves right now. A task on a schedule reads
@@ -1610,26 +1624,26 @@ impl RuntimeState {
     }
 
     fn startup_configuration_context(&self, session_id: &str, key: &str, value: &str) -> String {
-        let location = self
-            .owner()
-            .controller()
-            .state
-            .sessions
-            .get(session_id)
-            .map(|record| {
-                let host = record.target.as_ref().map(|target| {
-                    mj_core::targets::storage::session_storage_paths(
-                        target,
-                        session_id,
-                        record.project_directory.as_deref(),
-                    )
-                    .host
-                });
-                match host {
-                    Some(host) => format!("target {} on {host}", record.target_template_id),
-                    None => format!("target {}", record.target_template_id),
-                }
+        let owner = self.owner();
+        let controller = owner.controller();
+        let location = controller.state.sessions.get(session_id).map(|record| {
+            let checkout = controller.state.checkout(session_id).ok();
+            let host = record.target.as_ref().map(|target| {
+                mj_core::targets::storage::session_storage_paths(
+                    target,
+                    session_id,
+                    checkout
+                        .as_ref()
+                        .and_then(|checkout| checkout.project_directory())
+                        .as_deref(),
+                )
+                .host
             });
+            match host {
+                Some(host) => format!("target {} on {host}", record.target_template_id),
+                None => format!("target {}", record.target_template_id),
+            }
+        });
         format!(
             "startup configuration {key}={value} for session {session_id} ({}) failed",
             location.as_deref().unwrap_or("target no longer registered")
@@ -2006,13 +2020,10 @@ impl RuntimeState {
             .subagents
             .get(session_id)
             .is_some_and(|child| {
-                step.group_id.as_deref()
-                    == Some(
-                        mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
-                            &child.request_key,
-                        )
-                        .as_str(),
-                    )
+                let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                    &child.kind.startup_request_key(&child.request_key),
+                );
+                step.group_id.as_deref() == Some(group.as_str())
             })
     }
 
@@ -2142,7 +2153,7 @@ impl RuntimeState {
                 child.kind == mj_core::subagent::SubagentKind::Reviewer
                     || group_id
                         == mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
-                            &child.request_key,
+                            &child.kind.startup_request_key(&child.request_key),
                         )
             });
         if is_initial_child_startup {

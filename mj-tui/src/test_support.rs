@@ -891,6 +891,7 @@ pub(crate) fn precision_session() -> SessionRecord {
 
 pub(crate) fn test_capacity_target() -> DeploymentCapacityTarget {
     DeploymentCapacityTarget {
+        stable_identity: None,
         id: "local".into(),
         host: "local".into(),
         target_ids: vec!["podman".into()],
@@ -898,6 +899,7 @@ pub(crate) fn test_capacity_target() -> DeploymentCapacityTarget {
         local: true,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }
 }

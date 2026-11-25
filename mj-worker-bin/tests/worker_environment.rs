@@ -559,6 +559,7 @@ fn worker_git_uses_the_requested_repository_despite_a_polluted_launcher() {
             root.path().to_str().unwrap(),
             "--base",
             "HEAD",
+            "--patch",
         ],
     );
     command.env.extend([

@@ -46,7 +46,7 @@ impl Controller {
         let directory = session
             .checkout()
             .project_directory()
-            .map(std::path::Path::to_path_buf)
+            .map(std::borrow::Cow::into_owned)
             .unwrap_or(workspace_directory);
         let checked = |arguments: &[&str]| -> Result<String> {
             let mut args = vec![
@@ -84,7 +84,7 @@ impl Controller {
         &self,
         session_id: &str,
         backend: &targets::TargetLocator,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         let session = self
             .state
@@ -112,7 +112,7 @@ impl Controller {
             );
         }
         let root = workspace_root(backend, session.container_workspace.as_deref());
-        for repository in &bundle.repositories {
+        let initialize = |repository: &mj_core::config::ProjectRepository| {
             let directory = mj_core::target_path::join(
                 std::path::Path::new(&root),
                 std::path::Path::new(&repository.destination),
@@ -136,9 +136,44 @@ impl Controller {
                 launch_base,
                 session.launch_branch.as_deref(),
                 checkout.map(|v| &**v),
-            )?;
+            )
+        };
+        if let [repository] = bundle.repositories.as_slice() {
+            return initialize(repository);
         }
-        Ok(())
+        // Repositories are independent directories; every one is awaited, and
+        // the first failure in bundle order wins.
+        let owner = crate::worker_lifecycle::capture();
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        std::thread::scope(|scope| {
+            let handles = bundle
+                .repositories
+                .iter()
+                .map(|repository| {
+                    let (owner, runtime, initialize) = (&owner, &runtime, &initialize);
+                    scope.spawn(move || {
+                        let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+                        match owner {
+                            Some(owner) => owner.scope_blocking(|| initialize(repository)),
+                            None => initialize(repository),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut first_error = None;
+            for handle in handles {
+                let result = handle.join().unwrap_or_else(|panic| {
+                    Err(anyhow::anyhow!(
+                        "concurrent repository initialization panicked: {}",
+                        targets::command_thread_panic_message(panic.as_ref())
+                    ))
+                });
+                if let Err(error) = result {
+                    first_error.get_or_insert(error);
+                }
+            }
+            first_error.map_or(Ok(()), Err)
+        })
     }
 }
 
@@ -204,58 +239,165 @@ fn initialize_workspace(
         }
         return configure_workspace(executor, backend, session_id, directory, &base);
     }
-    let marker = git(&["config", "--local", "--get", "mj.remoteWorkspace"])?;
+    initialize_fresh_workspace(
+        executor,
+        backend,
+        session_id,
+        directory,
+        launch_base,
+        launch_branch,
+    )
+}
+
+/// Every question a fresh workspace asks before it is written, answered by one
+/// command. Directory, branch and base reach the script as positional
+/// arguments, never as shell text. A completed marker ends the script at once,
+/// so a retry costs this one command.
+const FRESH_WORKSPACE_PROBES: &str = r#"probe marker git -C "$1" config --local --get mj.remoteWorkspace
+case $? in 1) ;; *) exit 0 ;; esac
+probe default_ref git -C "$1" symbolic-ref --quiet refs/remotes/origin/HEAD || exit 0
+if [ "$2" = 1 ]; then
+    probe check_branch git -C "$1" check-ref-format --branch "$3" || exit 0
+    branch=$3
+else
+    case "$out" in
+        refs/remotes/origin/*) branch=${out#refs/remotes/origin/} ;;
+        *) branch= ;;
+    esac
+fi
+[ -n "$branch" ] || exit 0
+probe branch_tip git -C "$1" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" || exit 0
+if [ "$4" = 1 ]; then
+    probe base git -C "$1" rev-parse --verify --end-of-options "${5}^{commit}" || exit 0
+fi
+probe local_branch git -C "$1" show-ref --verify --quiet "refs/heads/${branch}"
+exit 0
+"#;
+
+/// One probe command, then one write command.
+fn initialize_fresh_workspace(
+    executor: &impl CommandExecutor,
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    directory: &std::path::Path,
+    launch_base: Option<&str>,
+    launch_branch: Option<&str>,
+) -> Result<()> {
+    const PURPOSE: &str = "initialize network session Git checkout";
+    let script = format!("{}{FRESH_WORKSPACE_PROBES}", targets::PROBE_HELPER_SH);
+    let flag = |present: bool| if present { "1" } else { "0" }.to_owned();
+    let probe_command = targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        backend,
+        session_id,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            script,
+            "mj-init-workspace".into(),
+            directory.to_string_lossy().into_owned(),
+            flag(launch_branch.is_some()),
+            launch_branch.unwrap_or_default().to_owned(),
+            flag(launch_base.is_some()),
+            launch_base.unwrap_or_default().to_owned(),
+        ],
+        PURPOSE,
+    )?;
+    let output = executor.execute(&probe_command)?;
+    // The script exits 0 whatever its probes did, so another status means the
+    // shell or the connection failed before the probes could speak.
+    ensure!(
+        output.status == 0,
+        "{PURPOSE} failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let probes = targets::parse_framed_probes(&output.stdout, targets::DEFAULT_PROBE_FRAMES);
+    let answer = |name: &str| -> Result<&targets::CommandOutput> {
+        probes
+            .get(name)
+            .with_context(|| format!("the workspace probe returned no `{name}` answer"))
+    };
+    let checked = |name: &str, verb: &str| -> Result<String> {
+        let output = answer(name)?;
+        ensure!(
+            output.status == 0,
+            "repository {}: Git {verb} failed: {}",
+            directory.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(String::from_utf8(output.stdout.clone())?.trim().to_owned())
+    };
+    let marker = answer("marker")?;
     ensure!(
         matches!(marker.status, 0 | 1),
         "could not inspect network workspace marker"
     );
     if marker.status == 0 {
         ensure!(
-            String::from_utf8(marker.stdout)?.trim() == "true",
+            String::from_utf8(marker.stdout.clone())?.trim() == "true",
             "invalid network workspace marker"
         );
         return Ok(());
     }
-    let default_ref = checked(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+    let default_ref = checked("default_ref", "symbolic-ref")
         .context("the network remote has no usable default branch")?;
     let branch = match launch_branch {
         Some(branch) => {
-            checked(&["check-ref-format", "--branch", branch])?;
+            checked("check_branch", "check-ref-format")?;
             branch.to_owned()
         }
         None => default_ref
             .strip_prefix("refs/remotes/origin/")
+            .filter(|branch| !branch.is_empty())
             .context("invalid default remote branch")?
             .to_owned(),
     };
-    let branch_tip = checked(&[
-        "rev-parse",
-        "--verify",
-        &format!("refs/remotes/origin/{branch}^{{commit}}"),
-    ])?;
+    let branch_tip = checked("branch_tip", "rev-parse")?;
     let base = match launch_base {
-        Some(revision) => resolve_base(revision)?,
+        // A named base must resolve in the clone; the clone holds only what the
+        // remote sent, so a host-only branch name is not there to resolve. Say
+        // so rather than repeat Git's "unknown revision".
+        Some(revision) => checked("base", "rev-parse").with_context(|| {
+            format!(
+                "base {revision:?} is not in the clone; name a commit SHA, a tag, or origin/<branch>"
+            )
+        })?,
         // Clone obtains origin/HEAD from the server, independent of host HEAD
         // and init.defaultBranch. An empty or misconfigured remote cannot seed
         // work.
         None => branch_tip.clone(),
     };
-    let local_branch = git(&[
-        "show-ref",
-        "--verify",
-        "--quiet",
-        &format!("refs/heads/{branch}"),
-    ])?;
-    match local_branch.status {
-        0 => {
-            checked(&["switch", &branch])?;
-        }
-        1 => {
-            checked(&["switch", "--no-track", "-c", &branch, &branch_tip])?;
-        }
+    let switch = match answer("local_branch")?.status {
+        0 => vec!["switch".to_owned(), branch],
+        1 => vec![
+            "switch".into(),
+            "--no-track".into(),
+            "-c".into(),
+            branch,
+            branch_tip,
+        ],
         _ => anyhow::bail!("could not inspect the selected local branch"),
-    }
-    configure_workspace(executor, backend, session_id, directory, &base)
+    };
+    let mut steps = vec![targets::CommandStep::new(
+        format!("repository {}: Git switch", directory.display()),
+        git_argv(
+            directory,
+            &switch.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
+    )];
+    steps.extend(configure_workspace_steps(directory, &base)?);
+    run_steps(executor, backend, session_id, steps)
+}
+
+fn git_argv(directory: &std::path::Path, arguments: &[&str]) -> Vec<String> {
+    let mut argv = vec![
+        "git".into(),
+        "-C".into(),
+        directory.to_string_lossy().into_owned(),
+    ];
+    argv.extend(arguments.iter().map(|argument| (*argument).to_owned()));
+    argv
 }
 
 pub(super) fn configure_workspace(
@@ -265,30 +407,47 @@ pub(super) fn configure_workspace(
     directory: &std::path::Path,
     base: &str,
 ) -> Result<()> {
-    let argv = |arguments: &[&str]| {
-        let mut argv = vec![
-            "git".into(),
-            "-C".into(),
-            directory.to_string_lossy().into_owned(),
-        ];
-        argv.extend(arguments.iter().map(|argument| (*argument).to_owned()));
-        argv
-    };
+    run_steps(
+        executor,
+        backend,
+        session_id,
+        configure_workspace_steps(directory, base)?,
+    )
+}
+
+/// The writes that mark a workspace complete, ready to follow other steps in
+/// one command.
+fn configure_workspace_steps(
+    directory: &std::path::Path,
+    base: &str,
+) -> Result<Vec<targets::CommandStep>> {
     let mut steps = Vec::new();
     mj_core::remote_git::finalize_managed_checkout(base, true, |arguments| {
         steps.push(targets::CommandStep::new(
             "initialize network session Git checkout",
-            argv(arguments),
+            git_argv(directory, arguments),
         ));
         Ok(())
     })?;
     steps.push(
         targets::CommandStep::new(
             "initialize network session Git checkout",
-            argv(&["config", "--local", "--unset-all", "remote.origin.push"]),
+            git_argv(
+                directory,
+                &["config", "--local", "--unset-all", "remote.origin.push"],
+            ),
         )
         .accepted_statuses([0, 5]),
     );
+    Ok(steps)
+}
+
+fn run_steps(
+    executor: &impl CommandExecutor,
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    steps: Vec<targets::CommandStep>,
+) -> Result<()> {
     let command = targets::command_on_locator(
         SshTrafficClass::Bulk,
         backend,
@@ -588,7 +747,8 @@ pub(super) fn bundle_from_manifest_for_session(
                 .origin_delta
                 .as_deref()
                 .is_some_and(|delta| !delta.history_cutoff && !metadata.origin.is_empty());
-            if !metadata.remote_workspace && !origin_backed_delta {
+            if !metadata.remote_workspace && !origin_backed_delta
+                && !(metadata.review_refs_metadata_only && !metadata.origin.is_empty()) {
                 if metadata.origin_delta.is_some() && metadata.origin.is_empty() {
                     anyhow::bail!(
                         "This raw session has no Git origin remote and can only be resumed on its original target."
@@ -1074,6 +1234,264 @@ mod tests {
             test_git(&workspace.join("other"), &["config", "mj.baseCommit"]),
             other_commit
         );
+    }
+
+    /// Delegates to real processes while counting commands and, when a latch
+    /// is set, holding each command until two have started together.
+    struct CountingExecutor {
+        commands: std::sync::Mutex<Vec<Vec<String>>>,
+        latch: Option<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+        overlapped: std::sync::atomic::AtomicBool,
+    }
+
+    impl CountingExecutor {
+        fn new(latch: bool) -> Self {
+            Self {
+                commands: Default::default(),
+                latch: latch.then(Default::default),
+                overlapped: Default::default(),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.commands.lock().unwrap().len()
+        }
+    }
+
+    impl CommandExecutor for CountingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(
+                std::iter::once(command.program.clone())
+                    .chain(command.args.iter().cloned())
+                    .collect(),
+            );
+            if let Some((started, changed)) = &self.latch {
+                let mut started = started.lock().unwrap();
+                *started += 1;
+                changed.notify_all();
+                // Two commands that are ever in flight together prove overlap;
+                // a serial caller times out here and is reported by the test.
+                let (started, wait) = changed
+                    .wait_timeout_while(started, std::time::Duration::from_secs(20), |started| {
+                        *started < 2
+                    })
+                    .unwrap();
+                if !wait.timed_out() && *started >= 2 {
+                    self.overlapped
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            ProcessExecutor.execute(command)
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
+    fn a_fresh_workspace_takes_two_commands_and_a_retry_one() {
+        let host = committed_repository();
+        let root = tempfile::tempdir().unwrap();
+        let session_id = "11111111-1111-4111-8111-111111111111";
+        let destination = root.path().join(session_id);
+        test_git(
+            root.path(),
+            &[
+                "clone",
+                host.path().to_str().unwrap(),
+                destination.to_str().unwrap(),
+            ],
+        );
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: destination.to_string_lossy().into_owned(),
+        };
+        let executor = CountingExecutor::new(false);
+        let initialize = |base: Option<&str>, branch: Option<&str>| {
+            initialize_workspace(
+                &executor,
+                &backend,
+                session_id,
+                &destination,
+                base,
+                branch,
+                None,
+            )
+        };
+        initialize(None, None).unwrap();
+        // One probe command and one write command.
+        assert_eq!(executor.count(), 2);
+        assert_eq!(
+            test_git(&destination, &["config", "mj.remoteWorkspace"]),
+            "true"
+        );
+        // A completed marker ends the probe script before it asks anything else.
+        initialize(None, None).unwrap();
+        assert_eq!(executor.count(), 3);
+
+        // Each refusal keeps its diagnostic. Values reach the script as
+        // arguments, so shell syntax in them is only text.
+        let refused = |mark: &str, base: Option<&str>, branch: Option<&str>, expected: &str| {
+            let clone = root
+                .path()
+                .join(format!("{mark}-22222222-2222-4222-8222-222222222222"));
+            let id = clone.file_name().unwrap().to_string_lossy().into_owned();
+            test_git(
+                root.path(),
+                &[
+                    "clone",
+                    host.path().to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
+            );
+            (
+                clone,
+                id,
+                base.map(str::to_owned),
+                branch.map(str::to_owned),
+                expected.to_owned(),
+            )
+        };
+        let injected = root.path().join("injected");
+        let hostile = format!("x'; touch '{}'; '", injected.display());
+        let cases = [
+            refused("base", Some(&hostile), None, "is not in the clone"),
+            refused(
+                "branch",
+                None,
+                Some("bad..branch"),
+                "check-ref-format failed",
+            ),
+            refused("empty", None, Some(""), "check-ref-format failed"),
+            refused("unset-head", None, None, "no usable default branch"),
+            refused("marker", None, None, "invalid network workspace marker"),
+        ];
+        for (clone, id, base, branch, expected) in cases {
+            if expected.contains("no usable default branch") {
+                test_git(&clone, &["remote", "set-head", "origin", "-d"]);
+            }
+            if expected.contains("workspace marker") {
+                test_git(&clone, &["config", "mj.remoteWorkspace", "nope"]);
+            }
+            let backend = targets::TargetLocator::LocalBare {
+                worker_root: clone.to_string_lossy().into_owned(),
+            };
+            let before = test_git(&clone, &["rev-parse", "HEAD"]);
+            let error = initialize_workspace(
+                &ProcessExecutor,
+                &backend,
+                &id,
+                &clone,
+                base.as_deref(),
+                branch.as_deref(),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(&expected),
+                "{expected}: {error:#}"
+            );
+            assert_eq!(test_git(&clone, &["rev-parse", "HEAD"]), before);
+        }
+        assert!(!injected.exists(), "a base reached the shell as code");
+
+        // A directory that is not a repository cannot answer the marker probe.
+        let missing = root.path().join("33333333-3333-4333-8333-333333333333");
+        let error = initialize_workspace(
+            &ProcessExecutor,
+            &targets::TargetLocator::LocalBare {
+                worker_root: missing.to_string_lossy().into_owned(),
+            },
+            "33333333-3333-4333-8333-333333333333",
+            &missing,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not inspect network workspace marker"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
+    fn the_repositories_of_a_bundle_initialize_concurrently() {
+        let first = committed_repository();
+        let second = committed_repository();
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join(EXACT_SESSION);
+        std::fs::create_dir(&workspace).unwrap();
+        for (source, name) in [(first.path(), "project"), (second.path(), "other")] {
+            test_git(&workspace, &["clone", source.to_str().unwrap(), name]);
+        }
+        let mut bundle = local_bundle(first.path());
+        let mut secondary = bundle.repositories[0].clone();
+        secondary.id = "other".into();
+        secondary.destination = "other".into();
+        secondary.local = Some(second.path().to_path_buf());
+        bundle.repositories.push(secondary);
+        let mut config = resume_compatibility_config();
+        config.bundles.insert("project".into(), bundle);
+        let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
+        session.launch_base = None;
+        let mut state = mj_core::state::State::default();
+        state
+            .environment_owners
+            .insert(EXACT_SESSION.into(), EXACT_SESSION.into());
+        state.sessions.insert(EXACT_SESSION.into(), session);
+        let controller = Controller { config, state };
+        let executor = CountingExecutor::new(true);
+        controller
+            .initialize_network_workspaces(
+                EXACT_SESSION,
+                &targets::TargetLocator::LocalBare {
+                    worker_root: workspace.to_string_lossy().into_owned(),
+                },
+                &executor,
+            )
+            .unwrap();
+        assert!(
+            executor
+                .overlapped
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "repositories were initialized one after another"
+        );
+        for name in ["project", "other"] {
+            assert_eq!(
+                test_git(&workspace.join(name), &["config", "mj.remoteWorkspace"]),
+                "true"
+            );
+        }
     }
 
     #[test]

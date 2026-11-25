@@ -27,8 +27,9 @@ impl RuntimeState {
         let (primary_selection, provider_reservation, delegation_notice) = if request
             .profile_id
             .is_empty()
+            || request.provider.is_some()
         {
-            let config = self.owner().controller().config.clone();
+            let mut config = self.owner().controller().config.clone();
             let execution_policy = if config
                 .targets
                 .get(&request.target_template_id)
@@ -60,6 +61,12 @@ impl RuntimeState {
                 request.profile_id = profile_id.to_owned();
             };
             if let Some(provider) = request.provider.clone() {
+                // The wizard resolves a provider before editing profile-specific
+                // settings. Admission validates and reserves that exact placement
+                // against the final target and current quota without reselecting it.
+                if !request.profile_id.is_empty() {
+                    config.profiles.retain(|id, _| id == &request.profile_id);
+                }
                 let selected = crate::server::api::resolve_provider_session_selection(
                     &backend,
                     &config,
@@ -405,6 +412,19 @@ impl RuntimeState {
         request: mj_controller::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = mj_controller::upgrade::activity("subagent admission")?;
+        let borrower_gate = if request.orchestrator {
+            None
+        } else {
+            self.borrower_registration_gate(&request.parent_session_id)
+        };
+        let _borrower_guard = match borrower_gate.as_ref() {
+            Some(gate) => Some(gate.try_read().map_err(|_| {
+                mj_core::refusal::Refusal::precondition(
+                    "Cannot start a sub-agent while suspend blockers are being repaired on its workspace.",
+                )
+            })?),
+            None => None,
+        };
         let manager = self.session_manager.clone();
         let (relation, needs_provisioning, registered_here) = blocking(move || {
             let mut controller = Controller::load()?;
@@ -444,6 +464,9 @@ impl RuntimeState {
                 .map(|relation| (relation, true, true))
         })
         .await?;
+        // Keep `_borrower_guard` held through `finish_subagent_registration`,
+        // which publishes the child via `reload_controller` and cleans up
+        // newly registered children on any failure.
         self.finish_subagent_registration(&relation, needs_provisioning, registered_here)
             .await?;
         Ok(relation)
@@ -714,14 +737,14 @@ impl RuntimeState {
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = mj_controller::upgrade::activity_unless_draining("session admission")?;
         let skip_remembering_subagent_policy = delegation_notice.is_some();
-        let path_cancelled = control.cancelled.clone();
+        let path_control = control.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
         let (registered, review_notice, oracle_notice) = blocking(move || {
             let mut controller = Controller::load()?;
-            let path_executor =
-                mj_controller::targets::CancellableProcessExecutor::new(path_cancelled)
-                    .with_deadline(Duration::from_secs(30));
+            let path_executor = path_control
+                .executor()
+                .with_deadline(Duration::from_secs(30));
             let project_directory = request
                 .project_directory
                 .as_deref()
@@ -896,7 +919,8 @@ impl RuntimeState {
             session_id,
             LifecycleKind::Create,
             start,
-            move |state, session_id, cancelled, _session_admission| async move {
+            move |state, session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 state
                     .run_admitted_create(
                         session_id,
@@ -926,7 +950,8 @@ impl RuntimeState {
             LifecycleKind::Create,
             super::lifecycle::LifecycleStart::request(request_key, None, Some(control.clone())),
             Some(acceptance),
-            move |state, session_id, cancelled, _session_admission| async move {
+            move |state, session_id, control, _session_admission| async move {
+ let cancelled = control.cancelled.clone();
                 let capacity = state
                     .admit_container_launch(
                         &record.target_template_id,
@@ -1049,7 +1074,7 @@ impl RuntimeState {
             control.request_cancel("session publication failed");
         }
         let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled),
+            control.executor(),
             state.clone(),
             session_id.clone(),
         );
@@ -1278,6 +1303,102 @@ mod capacity_admission_tests {
 mod delegation_replay_tests {
     use super::{CreateDelegationDefault, CreateWait, LifecycleControl};
     use mj_controller::controller::test_support::{IsolatedTest, test_name};
+
+    #[tokio::test]
+    async fn a_resolved_provider_profile_keeps_target_approval_constraints_at_create() {
+        use crate::server::api::DashboardBackend;
+        use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider, TargetTemplate};
+        use std::sync::Arc;
+        const CHILD: &str = "MJ_TEST_RESOLVED_PROVIDER_APPROVALS";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_resolved_provider_profile_keeps_target_approval_constraints_at_create",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "resolved-provider-approvals")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let mut config = Config::default();
+        config.profiles.insert(
+            "kimi".into(),
+            HarnessProfile::new(HarnessKind::Kimi, mj_core::config::data_dir().join("kimi")),
+        );
+        let compatible_home = mj_core::config::data_dir().join("compatible");
+        std::fs::create_dir_all(&compatible_home).unwrap();
+        std::fs::write(compatible_home.join("config.toml"), "model_provider = 'moonshot'\n[model_providers.moonshot]\nname = 'Moonshot'\nbase_url = 'https://api.moonshot.ai/v1'\nwire_api = 'responses'\nenv_key = 'MOONSHOT_API_KEY'\n").unwrap();
+        let mut compatible = HarnessProfile::new(HarnessKind::Codex, compatible_home);
+        compatible.environment = mj_core::config::Environment::from_sources(
+            [(
+                "MOONSHOT_API_KEY".into(),
+                mj_core::config::EnvironmentValue::Literal("test-only".into()),
+            )]
+            .into(),
+        );
+        config.profiles.insert("compatible".into(), compatible);
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        config.save().unwrap();
+        let runtime = crate::daemon::tests::test_runtime_state_loading_the_store();
+        let catalog = mj_controller::profile_catalog::ProfileCatalog::with_probe(Arc::new(|_| {
+            Box::pin(async {
+                Ok(mj_core::worker_launch::ProfileConfig {
+                    model: Some("available-model".into()),
+                    models: vec![mj_core::acp::SessionConfigChoice {
+                        value: "available-model".into(),
+                        name: "Available Model".into(),
+                        description: None,
+                    }],
+                    efforts: Vec::new(),
+                    observed_at: chrono::Utc::now().timestamp(),
+                })
+            })
+        }));
+        catalog.sync_now(&config).await;
+        let backend = Arc::new(
+            crate::server_runtime::api::ApiBackend::new(
+                runtime.session_manager.client(),
+                Arc::new(|_| None),
+                runtime.clone(),
+            )
+            .with_profile_catalog(catalog),
+        );
+        runtime.install_report_backend(&backend);
+        let request = serde_json::from_value(serde_json::json!({
+            "workspace_id": "default", "profile_id": "kimi", "provider": QuotaProvider::Moonshot,
+            "bundle_id": "", "target_template_id": "localhost", "additional_mounts": [], "title": ""
+        }))
+        .unwrap();
+        let error = runtime.start_create_session(request).await.unwrap_err();
+        assert!(error.to_string().contains("native guardian"), "{error:#}");
+        assert!(
+            mj_controller::database::load_state()
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+        let check = |target| mj_client::http::ProviderProfileSelectionRequest {
+            provider: QuotaProvider::Moonshot,
+            profile_id: Some("kimi".into()),
+            target_template_id: target,
+        };
+        assert_eq!(
+            runtime.select_provider_profile(check(None)).await.unwrap(),
+            "kimi"
+        );
+        assert_eq!(
+            runtime
+                .select_provider_profile(check(Some("localhost".into())))
+                .await
+                .unwrap(),
+            "compatible"
+        );
+    }
 
     #[tokio::test]
     #[cfg_attr(

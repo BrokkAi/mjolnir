@@ -245,7 +245,10 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
         ));
     }
 
-    let checkout = session.checkout();
+    let checkout = dashboard
+        .state
+        .checkout(&session.id)
+        .unwrap_or_else(|_| session.checkout());
     if let Some(worktree) = checkout.managed_worktree() {
         let kind = match worktree.kind {
             ManagedCheckoutKind::Worktree => "Worktree",

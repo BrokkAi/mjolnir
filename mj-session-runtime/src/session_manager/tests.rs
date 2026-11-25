@@ -1548,7 +1548,6 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
         relay_root.path().join("history-request.json"),
         serde_json::to_vec(&mj_core::history::HistoryRequest {
             request_id: "read-history".into(),
-            blame: None,
             query: mj_core::history::HistoryQuery::ReadSession {
                 session_id: "history-session".into(),
                 start: 0,
@@ -1556,6 +1555,9 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
                 role: None,
                 limit: 20,
                 max_chars: 64000,
+                tail: false,
+                before: None,
+                max_message_chars: None,
             },
         })
         .unwrap(),
@@ -1578,6 +1580,155 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
     assert!(!result.is_error, "{:?}", result.value);
     assert_eq!(result.value["data"]["messages"][0]["text"], text);
     assert!(worker.subagent_requests.is_empty());
+    worker.detach().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_search_history_excludes_the_controller_bound_caller_session() {
+    const CHILD: &str = "MJ_TEST_SEARCH_HISTORY_CALLER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "worker_search_history_excludes_the_controller_bound_caller_session",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let (_directory, connection) = {
+        let _held = crate::sessionwiki::tags::testing::lock();
+        crate::sessionwiki::tags::testing::isolated_index()
+    };
+    for session in [LEASED_RELAY_SESSION, "other-session"] {
+        crate::sessionwiki::tags::testing::index_row(&connection, session, "mjolnir");
+        connection
+            .execute(
+                "INSERT INTO messages(session_id, role, text) VALUES (?1, 'user', 'quokka habitat')",
+                [session],
+            )
+            .unwrap();
+    }
+    connection
+        .execute("INSERT INTO msgs(msgs) VALUES ('rebuild')", [])
+        .unwrap();
+    let relay_root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        relay_root.path().join("history-request.json"),
+        serde_json::to_vec(&mj_core::history::HistoryRequest {
+            request_id: "search-history".into(),
+            query: mj_core::history::HistoryQuery::SearchHistory {
+                query: "quokka".into(),
+                session_ids: None,
+                session_id: None,
+                role: None,
+                order: None,
+                limit: 20,
+                context_messages: 0,
+                max_chars: 16_000,
+                cursor: None,
+            },
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let mut worker = StandaloneSession::connect(&leased_relay_target(relay_root.path()))
+        .await
+        .unwrap();
+    let result_path = relay_root.path().join("history-result.json");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !result_path.exists() {
+            worker.sync().await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let result: mj_core::history::HistoryResult =
+        serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
+    assert!(!result.is_error, "{:?}", result.value);
+    let data = &result.value["data"];
+    let sessions = data["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{data}");
+    assert_eq!(sessions[0]["session_id"], "other-session");
+    assert_eq!(data["self_hits_omitted"], 1);
+    assert!(result.value.get("source").is_none());
+    worker.detach().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_history_poll_aborts_only_requests_the_worker_no_longer_lists() {
+    const CHILD: &str = "MJ_TEST_HISTORY_ABORT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "worker_history_poll_aborts_only_requests_the_worker_no_longer_lists",
+        );
+        return;
+    }
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let request_path = relay_root.path().join("history-request.json");
+    let mut worker = StandaloneSession::connect(&leased_relay_target(relay_root.path()))
+        .await
+        .unwrap();
+    // Written after connecting so the connection's own first poll cannot run it.
+    std::fs::write(
+        &request_path,
+        serde_json::to_vec(&mj_core::history::HistoryRequest {
+            request_id: "keep".into(),
+            query: mj_core::history::HistoryQuery::GetSessionBrief {
+                session_id: "history-session".into(),
+                max_chars: 16_000,
+            },
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let mut flags = std::collections::BTreeMap::new();
+    for id in ["keep", "gone"] {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = DropFlag(flag.clone());
+        let task = worker.history_jobs.spawn(async move {
+            let _guard = guard;
+            std::future::pending::<mj_core::history::HistoryResult>().await
+        });
+        worker.history_active.insert(id.into(), task);
+        flags.insert(id, flag);
+    }
+    let dropped = |id: &str| flags[id].load(std::sync::atomic::Ordering::SeqCst);
+    // Only "keep" is still listed, so only "gone" stops.
+    for _ in 0..3 {
+        worker.sync().await.unwrap();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dropped("gone") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!dropped("keep"));
+    assert_eq!(worker.history_active.keys().collect::<Vec<_>>(), ["keep"]);
+    std::fs::remove_file(&request_path).unwrap();
+    worker.sync().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dropped("keep") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(worker.history_active.is_empty());
     worker.detach().await.unwrap();
 }
 
@@ -2367,6 +2518,15 @@ fn relay_ack_race_peer(
     relay: Arc<Mutex<mj_worker::relay::DurableRelay>>,
     delay_ack: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 ) -> (RelayClient, tokio::task::JoinHandle<Vec<RelayCursor>>) {
+    relay_recording_peer(relay, delay_ack, None)
+}
+
+#[cfg(unix)]
+fn relay_recording_peer(
+    relay: Arc<Mutex<mj_worker::relay::DurableRelay>>,
+    delay_ack: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    calls: Option<Arc<Mutex<Vec<String>>>>,
+) -> (RelayClient, tokio::task::JoinHandle<Vec<RelayCursor>>) {
     use crate::worker_client::test_fixtures::duplex_relay_client;
     use mj_core::relay::{
         RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
@@ -2382,6 +2542,22 @@ fn relay_ack_race_peer(
         let mut delay_ack = delay_ack;
         while let Some(line) = lines.next_line().await.unwrap() {
             let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            if let Some(calls) = &calls {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(request.request.method_name().to_owned());
+                if matches!(request.request, RelayRequest::HistoryRequests) {
+                    assert!(
+                        lines
+                            .get_ref()
+                            .buffer()
+                            .windows(8)
+                            .any(|window| window == b"\"attach\""),
+                        "history and attach must arrive before either response"
+                    );
+                }
+            }
             let mut response = {
                 let mut relay = relay.lock().unwrap();
                 if let RelayRequest::Attach {
@@ -5356,6 +5532,96 @@ async fn turn_end_spills_bulk_details_and_late_updates_recover_full_inputs() {
     assert_eq!(terminal_outputs[0].exit_code, Some(23));
     assert!(terminal_outputs[0].output.text().len() > 64 * 1024);
 
+    drop(connection);
+    peer.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tick_reads_pipeline_without_lifecycle_guardian_consumption_and_retry_ack_gc() {
+    const CHILD: &str = "MJ_TEST_PIPELINED_TICK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "tick_reads_pipeline_without_lifecycle_guardian_consumption_and_retry_ack_gc",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let mut durable =
+        mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "test").unwrap();
+    durable
+        .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+            started_at_ms: 1,
+        })
+        .unwrap();
+    let relay = Arc::new(Mutex::new(durable));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (client, peer) = relay_recording_peer(relay.clone(), None, Some(calls.clone()));
+    let mut connection =
+        StandaloneSession::connect_inner(&leased_relay_target(root.path()), Some(client), None)
+            .await
+            .unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "acknowledge")
+    );
+    calls.lock().unwrap().clear();
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(*calls.lock().unwrap(), vec!["history_requests", "attach"]);
+    calls.lock().unwrap().clear();
+    connection.sync_reads(Some(None), false).await.unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["history_requests", "attach", "guardian_requests"]
+    );
+    calls.lock().unwrap().clear();
+    let (_, cpu) = connection.sync_reads(Some(None), true).await.unwrap();
+    assert!(cpu.is_some());
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            "history_requests",
+            "attach",
+            "guardian_requests",
+            "cpu_usage"
+        ]
+    );
+    calls.lock().unwrap().clear();
+    connection.last_ack_sent = None;
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["history_requests", "attach", "acknowledge"]
+    );
+    calls.lock().unwrap().clear();
+    connection.last_ack_sent = Some(Instant::now() - Duration::from_secs(61));
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["history_requests", "attach", "acknowledge"]
+    );
+    calls.lock().unwrap().clear();
+    relay
+        .lock()
+        .unwrap()
+        .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+            started_at_ms: 2,
+        })
+        .unwrap();
+    connection.sync_in_place().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "acknowledge")
+    );
     drop(connection);
     peer.await.unwrap();
 }

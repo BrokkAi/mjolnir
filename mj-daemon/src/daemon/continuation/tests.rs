@@ -90,7 +90,7 @@ pub(super) fn view(id: &str, completed: bool) -> ManagedSessionView {
 /// Marks the view's last turn as one the worker's own assessment found
 /// blocked by a provider quota, as a worker on the assessment protocol reports
 /// it. The daemon acts on that assessment and never classifies a turn itself.
-fn quota_assessed(v: &mut ManagedSessionView) {
+pub(super) fn quota_assessed(v: &mut ManagedSessionView) {
     use mj_core::assessment::{
         Action, Failure, Input, Judgment, Status, TurnAssessment, Verdict, Work,
     };
@@ -2817,7 +2817,8 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
         panic!("an old worker must wait on the source profile");
     };
     assert!(
-        wait.notice.contains("worker predates in-place restarts"),
+        wait.notice
+            .contains("worker predates credential-preserving in-place Move"),
         "{}",
         wait.notice
     );

@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"os"
@@ -615,18 +616,234 @@ func NewCommandID(prefix string) (string, error) {
 
 // --- serde enum encoding shared by the relay modules ---
 
-// relayMarshalJSON encodes v as serde_json does: without Go's HTML escaping
-// of <, > and &, and without a trailing newline. Relay digests hash these
-// bytes, so they must match the Rust encoding. (Go still escapes U+2028 and
-// U+2029, which serde_json writes raw.)
+// relayMarshalJSON encodes v as serde_json does (SerdeJSON). Relay digests
+// hash these bytes, and the Rust side recomputes them from serde's encoding,
+// so they must match it byte for byte.
 func relayMarshalJSON(v any) ([]byte, error) {
+	return SerdeJSON(v)
+}
+
+// SerdeJSON encodes v as serde_json::to_vec does, for every format a Rust
+// build reads or hashes: no trailing newline, collections as
+// SerdeCollections writes them, and strings with serde_json's minimal
+// escaping. encoding/json escapes U+2028 and U+2029 in every string, and a
+// type whose MarshalJSON calls json.Marshal escapes <, > and &; serde_json
+// escapes only the quote, the backslash and control characters. Format
+// rewrites each string that way and leaves numbers, member order and
+// everything else as encoding/json wrote it.
+func SerdeJSON(v any) ([]byte, error) {
 	var b bytes.Buffer
 	encoder := json.NewEncoder(&b)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
+	if err := encoder.Encode(SerdeCollections(v)); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+	encoded := jsontext.Value(bytes.TrimSuffix(b.Bytes(), []byte("\n")))
+	// Only string escaping changes here: names serde would also repeat and
+	// text a harness sent stay as they were written.
+	if err := encoded.Format(jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+// SerdeJSONPretty encodes v as serde_json::to_vec_pretty does: SerdeJSON's
+// bytes indented by two spaces.
+func SerdeJSONPretty(v any) ([]byte, error) {
+	compact, err := SerdeJSON(v)
+	if err != nil {
+		return nil, err
+	}
+	var b bytes.Buffer
+	if err := json.Indent(&b, compact, "", "  "); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+// SerdeCollections is v with every nil slice and map that serde would write
+// as [] or {} made empty, at any depth, so encoding/json writes what serde
+// writes. serde always writes a Vec, set or map, and refuses null for one when
+// it reads; encoding/json writes a nil slice or map as null. A Rust Option of
+// a collection is a pointer here, so nil still writes null. A field tagged
+// omitempty or omitzero is one serde skips when empty, so it is left alone.
+// Byte slices, and values whose type encodes itself (json.Marshaler,
+// encoding.TextMarshaler), keep their own encoding: such a type's MarshalJSON
+// owns its form, and the relay ones end in relayMarshalJSON.
+//
+// v itself is never modified; SerdeCollections copies only what it changes.
+func SerdeCollections(v any) any {
+	if v == nil {
+		return nil
+	}
+	normalized, changed := serdeCollectionsValue(reflect.ValueOf(v))
+	if !changed {
+		return v
+	}
+	return normalized.Interface()
+}
+
+var (
+	serdeJSONMarshalerType = reflect.TypeFor[json.Marshaler]()
+	serdeTextMarshalerType = reflect.TypeFor[interface{ MarshalText() ([]byte, error) }]()
+)
+
+// serdeEncodesItself is whether encoding/json may hand a value of this type
+// to its own MarshalJSON or MarshalText.
+func serdeEncodesItself(typ reflect.Type) bool {
+	if typ.Implements(serdeJSONMarshalerType) || typ.Implements(serdeTextMarshalerType) {
+		return true
+	}
+	if typ.Kind() != reflect.Pointer {
+		pointer := reflect.PointerTo(typ)
+		return pointer.Implements(serdeJSONMarshalerType) || pointer.Implements(serdeTextMarshalerType)
+	}
+	return false
+}
+
+// serdeEmptyCollection is an empty value for a nil slice or map that serde
+// writes as [] or {}, or invalid when value is not one.
+func serdeEmptyCollection(value reflect.Value) reflect.Value {
+	switch value.Kind() {
+	case reflect.Slice:
+		if value.IsNil() && value.Type().Elem().Kind() != reflect.Uint8 && !serdeEncodesItself(value.Type()) {
+			return reflect.MakeSlice(value.Type(), 0, 0)
+		}
+	case reflect.Map:
+		if value.IsNil() && !serdeEncodesItself(value.Type()) {
+			return reflect.MakeMap(value.Type())
+		}
+	}
+	return reflect.Value{}
+}
+
+func serdeCollectionsValue(value reflect.Value) (reflect.Value, bool) {
+	if !value.IsValid() || serdeEncodesItself(value.Type()) {
+		return value, false
+	}
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if value.IsNil() {
+			return value, false
+		}
+		inner, changed := serdeCollectionsValue(value.Elem())
+		if !changed {
+			return value, false
+		}
+		var normalized reflect.Value
+		if value.Kind() == reflect.Pointer {
+			normalized = reflect.New(value.Type().Elem())
+			normalized.Elem().Set(inner)
+		} else {
+			normalized = reflect.New(value.Type()).Elem()
+			normalized.Set(inner)
+		}
+		return normalized, true
+	case reflect.Struct:
+		return serdeCollectionsStruct(value)
+	case reflect.Slice, reflect.Array:
+		if value.Kind() == reflect.Slice && value.Type().Elem().Kind() == reflect.Uint8 {
+			return value, false
+		}
+		var normalized reflect.Value
+		for i := range value.Len() {
+			element := value.Index(i)
+			replacement := serdeEmptyCollection(element)
+			if !replacement.IsValid() {
+				var changed bool
+				if replacement, changed = serdeCollectionsValue(element); !changed {
+					continue
+				}
+			}
+			if !normalized.IsValid() {
+				if value.Kind() == reflect.Slice {
+					normalized = reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+				} else {
+					normalized = reflect.New(value.Type()).Elem()
+				}
+				reflect.Copy(normalized, value)
+			}
+			normalized.Index(i).Set(replacement)
+		}
+		if !normalized.IsValid() {
+			return value, false
+		}
+		return normalized, true
+	case reflect.Map:
+		var normalized reflect.Value
+		iterator := value.MapRange()
+		for iterator.Next() {
+			element := iterator.Value()
+			replacement := serdeEmptyCollection(element)
+			if !replacement.IsValid() {
+				var changed bool
+				if replacement, changed = serdeCollectionsValue(element); !changed {
+					continue
+				}
+			}
+			if !normalized.IsValid() {
+				normalized = reflect.MakeMapWithSize(value.Type(), value.Len())
+				copier := value.MapRange()
+				for copier.Next() {
+					normalized.SetMapIndex(copier.Key(), copier.Value())
+				}
+			}
+			normalized.SetMapIndex(iterator.Key(), replacement)
+		}
+		if !normalized.IsValid() {
+			return value, false
+		}
+		return normalized, true
+	}
+	return value, false
+}
+
+func serdeCollectionsStruct(value reflect.Value) (reflect.Value, bool) {
+	structType := value.Type()
+	var normalized reflect.Value
+	for i := range structType.NumField() {
+		field := structType.Field(i)
+		// encoding/json writes exported fields, and the exported fields of
+		// an embedded struct; an unexported field cannot be replaced.
+		if !field.IsExported() {
+			continue
+		}
+		name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "-" && options == "" {
+			continue
+		}
+		fieldValue := value.Field(i)
+		var replacement reflect.Value
+		if !serdeTagHasOption(options, "omitempty") && !serdeTagHasOption(options, "omitzero") {
+			replacement = serdeEmptyCollection(fieldValue)
+		}
+		if !replacement.IsValid() {
+			var changed bool
+			if replacement, changed = serdeCollectionsValue(fieldValue); !changed {
+				continue
+			}
+		}
+		if !normalized.IsValid() {
+			normalized = reflect.New(structType).Elem()
+			normalized.Set(value)
+		}
+		normalized.Field(i).Set(replacement)
+	}
+	if !normalized.IsValid() {
+		return value, false
+	}
+	return normalized, true
+}
+
+func serdeTagHasOption(options, option string) bool {
+	for options != "" {
+		var current string
+		current, options, _ = strings.Cut(options, ",")
+		if current == option {
+			return true
+		}
+	}
+	return false
 }
 
 // relayAdjacentJSON writes a serde adjacently tagged variant:

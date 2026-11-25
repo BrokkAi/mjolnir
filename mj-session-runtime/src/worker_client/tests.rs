@@ -2018,15 +2018,14 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
     let bin = scratch.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     // The stand-in AWS CLI answers at once, except for a session that names a
-    // file to wait for: its call finishes only after that file exists, and
-    // fails after its own bound otherwise.
+    // file to wait for: its call finishes only after that file exists. The
+    // test's own deadline bounds a regression that runs sessions serially.
     let aws = bin.join("aws");
     std::fs::write(
         &aws,
         "#!/bin/sh\n\
-         tries=0\n\
          while [ -n \"$MJ_AWS_WAIT_FOR\" ] && [ ! -e \"$MJ_AWS_WAIT_FOR\" ]; do\n\
-           tries=$((tries + 1)); [ $tries -gt 200 ] && exit 3; /bin/sleep 0.05\n\
+           /bin/sleep 0.05\n\
          done\n\
          exec /bin/cat \"$MJ_AWS_ASSUME_FIXTURE\"\n",
     )
@@ -2079,7 +2078,9 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
         target("fast-session", &fast_received, None),
     ];
 
-    let outcomes = reconcile_profile(&targets, None).await;
+    let outcomes = tokio::time::timeout(Duration::from_secs(30), reconcile_profile(&targets, None))
+        .await
+        .expect("the fast session completed while the slow one was still minting");
 
     assert_eq!(outcomes.len(), 2, "{outcomes:?}");
     assert!(
@@ -4246,7 +4247,7 @@ async fn a_worker_before_protocol_55_is_left_to_the_automatic_upgrade_and_then_w
     // failure says so; the old worker cannot withdraw either.
     assert_eq!(outcomes[0].step_failures.len(), 1, "{failure}");
     assert!(
-        failure.contains("cannot report the AWS profile"),
+        failure.contains("predates withdrawing AWS credentials"),
         "{failure}"
     );
     assert!(
@@ -5658,6 +5659,73 @@ async fn adoption_wait_reports_blockers_without_a_deadline_and_is_cancellable() 
     }
 }
 
+// Hard-won: #1673: a remote harness reload answered after the 15 s relay deadline was abandoned although the worker went on to commit it.
+#[tokio::test(start_paused = true)]
+async fn in_place_reload_waits_for_the_worker_past_the_control_deadline() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let released = release.clone();
+    let requested = Arc::new(tokio::sync::Notify::new());
+    let request_seen = requested.clone();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let envelope: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            envelope.request,
+            RelayRequest::RestartHarnessInPlace { .. }
+        ));
+        request_seen.notify_one();
+        let _permit = released.acquire().await.unwrap();
+        let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+            request_id: envelope.request_id,
+            protocol_version: envelope.protocol_version,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::HarnessRestartedInPlace,
+            },
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.unwrap();
+    });
+    let launch: mj_core::worker_launch::WorkerLaunchConfig =
+        serde_json::from_value(serde_json::json!({
+            "session_id": SESSION_ID,
+            "harness": "claude",
+            "bridge_command": "/usr/bin/false",
+            "bridge_args": [],
+            "environment": {},
+            "cwd": "workspace",
+            "execution_policy": true,
+        }))
+        .unwrap();
+    let work = mj_core::runtime::spawn(async move {
+        let result = client
+            .restart_harness_in_place(
+                "move-1",
+                "store-1",
+                Box::new(launch),
+                Some("candidate-1".into()),
+            )
+            .await;
+        (client, result)
+    });
+    requested.notified().await;
+    tokio::time::advance(RELAY_RPC_TIMEOUT * 4).await;
+    assert!(
+        !work.is_finished(),
+        "the control deadline must not cover the reload"
+    );
+    release.add_permits(1);
+    let (client, result) = work.await.unwrap();
+    result.unwrap();
+    assert!(client.abandoned.is_none());
+    peer.await.unwrap();
+}
+
 // Hard-won: #1625: cancelling RelayClient::connect waited for detach grace on a detached thread and leaked sleep proxies on process exit.
 #[cfg(unix)]
 #[tokio::test]
@@ -5766,10 +5834,10 @@ async fn aws_renewal_uses_the_pinned_profile_for_scoped_and_unscoped_sessions() 
         for (generation, expected) in [("existing", "original"), ("fresh", changed)] {
             let id = format!("{generation}-{changed}");
             let mut session = crate::database::test_fixtures::checkpoint_test_session(&id);
-            session.target = Some(Box::new(TargetLocator::LocalPodman {
+            session.target_template_id = "docker".into();
+            session.target = Some(Box::new(TargetLocator::LocalDocker {
                 container_id: "c".repeat(64),
                 borrowed_from: None,
-                workspace_storage: Default::default(),
             }));
             let root = scratch.path().join(&id);
             std::fs::create_dir(&root).unwrap();
@@ -5844,4 +5912,832 @@ sys.stdin.read()
         ))
     );
     assert_eq!(client.next_request, before);
+}
+
+#[cfg(unix)]
+// Hard-won: #1675: Create readiness persisted relay events before Create committed
+#[tokio::test]
+async fn create_readiness_uses_one_status_only_relay_at_the_negotiated_protocol() {
+    use crate::readiness::{NativeSessionProbe, NativeSessionReadiness};
+    use mj_core::relay::{
+        HarnessPreparation, RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL, RelayExecutionState,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let relay = DurableRelay::open(directory.path(), SESSION_ID, "1.0.0").unwrap();
+    let mut ready = relay.operational_state();
+    ready.native_session_id = Some("native".into());
+    ready.acp_ready = Some(true);
+    let mut preparing = ready.clone();
+    preparing.harness_preparation = Some(HarnessPreparation::Preparing {
+        step: "install".into(),
+        since_ms: 3,
+    });
+    let mut closed = preparing.clone();
+    closed.execution = RelayExecutionState::Closed;
+    let mut failed = closed.clone();
+    failed.harness_preparation = Some(HarnessPreparation::Failed {
+        step: "install".into(),
+        error: "unavailable".into(),
+        at_ms: 3,
+    });
+    let statuses = directory.path().join("statuses.json");
+    std::fs::write(
+        &statuses,
+        serde_json::to_vec(&[preparing, ready, closed, failed]).unwrap(),
+    )
+    .unwrap();
+    let protocol = RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL - 1;
+    let fixture = r#"
+import json, sys
+protocol = int(sys.argv[1])
+
+def respond(method, payload):
+    request = json.loads(sys.stdin.readline())
+    assert request["request"]["method"] == method, request
+    print(json.dumps(dict(request_id=request["request_id"], protocol_version=protocol,
+                          result="ok", payload=dict(type=method, data=payload))), flush=True)
+
+respond("hello", dict(negotiated=protocol, relay_version="old", session_id=sys.argv[2]))
+with open(sys.argv[3]) as statuses:
+    for status in json.load(statuses):
+        respond("status", status)
+assert not sys.stdin.readline()
+"#;
+    let spec = CommandSpec::new(
+        "python3",
+        [
+            "-c".into(),
+            fixture.into(),
+            protocol.to_string(),
+            SESSION_ID.into(),
+            statuses.to_string_lossy().into_owned(),
+        ],
+    );
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(NativeSessionProbe::protocol_version(&client), protocol);
+    let next_request = client.next_request;
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::Preparing { step, since_ms: 3 } if step == "install"
+    ));
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::Ready(id) if id == "native"
+    ));
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::Closed
+    ));
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::PreparationFailed { step, error }
+            if step == "install" && error == "unavailable"
+    ));
+    assert_eq!(client.next_request, next_request + 4);
+}
+
+// Exercises connection ownership at the relay protocol boundary: a snapshot
+// exists only in the proxy that began it, and failed bulk work must not poison
+// the control stream.
+#[cfg(unix)]
+#[test]
+fn bulk_transfers_preserve_control_connection_ownership() {
+    const CHILD: &str = "MJ_BULK_LANE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "bulk_transfers_preserve_control_connection_ownership",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    mj_core::targets::set_ssh_connection_sharing_for_test(Some(
+        mj_core::targets::SshSharingForTest::Disabled,
+    ));
+    let captured = CapturedLog::default();
+    tracing::subscriber::set_global_default(captured.clone()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join("requests");
+    let script = r#"
+import sys, json, os, base64
+session, log, protocol = sys.argv[1], sys.argv[2], int(sys.argv[3])
+snapshot = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    params = req["request"].get("params", {})
+    with open(log, "a") as f: f.write(str(os.getpid()) + " " + method + "\n")
+    if method == "hello":
+        payload = {"type":"hello", "data":{"negotiated":protocol,"relay_version":"bulk-test","session_id":session}}
+    elif method in ("skills_state", "install_skills"):
+        if method == "install_skills" and base64.b64decode(params["data"]) == b"fail":
+            sys.exit(1)
+        payload = {"type":"skills_state","data":{"present":True,"fingerprint":"test"}}
+    elif method in ("attachment_present", "file_attachment_present"):
+        payload = {"type":"attachment_present","data":{"present":False}}
+    elif method in ("install_attachment", "install_file_attachment"):
+        payload = {"type":"attachment_installed"}
+    elif method == "submit":
+        payload = {"type":"accepted","data":{"command_id":params["command_id"],"ordinal":1}}
+    elif method in ("read_attachment", "read_file_attachment"):
+        filename = params["reference"].get("filename", "")
+        if filename == "disconnect":
+            sys.exit(1)
+        if filename == "reject":
+            print(json.dumps({"request_id":req["request_id"],"protocol_version":protocol,"result":"error","error":{"code":"internal","message":"blob rejected permanently","retryable":False}}), flush=True)
+            continue
+        data = b"\x89PNG\r\n\x1a\nrecovered" if method == "read_attachment" else b"recovered-file"
+        if filename == "continued": data = b"continued"
+        payload = {"type":"attachment_data","data":{"data":base64.b64encode(data).decode()}}
+    elif method == "begin_live_baseline":
+        print(json.dumps({"request_id":req["request_id"],"protocol_version":protocol,"result":"ok","payload":{"type":"live_baseline_waiting","data":{"blockers":["held-turn"]}}}), flush=True)
+        snapshot = b" " * 70000 + b"invalid-json"
+        payload = {"type":"live_baseline_started","data":{"total_bytes":len(snapshot)}}
+    elif method == "read_live_baseline_page":
+        assert snapshot is not None
+        offset = params["offset"]
+        end = min(offset + 35000, len(snapshot))
+        payload = {"type":"live_baseline_page","data":{"page":{"offset":offset,"next_offset":end,"complete":end==len(snapshot),"chunk":base64.b64encode(snapshot[offset:end]).decode()}}}
+    else: raise AssertionError(method)
+    print(json.dumps({"request_id":req["request_id"],"protocol_version":protocol,"result":"ok","payload":payload}), flush=True)
+"#;
+    let local = CommandSpec::new(
+        "python3",
+        [
+            "-c".to_string(),
+            script.into(),
+            SESSION_ID.into(),
+            log.display().to_string(),
+            RELAY_PROTOCOL_VERSION.to_string(),
+        ],
+    );
+    let target = mj_core::targets::SshTarget {
+        destination: "bulk-fixture".into(),
+        ssh_args: Vec::new(),
+    };
+    let control = local
+        .clone()
+        .ssh_session(&target, mj_core::targets::SshTrafficClass::Control);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut client = RelayClient::connect(&control, SESSION_ID).await.unwrap();
+            let bulk = client.bulk_spec.as_ref().unwrap();
+            assert_eq!(bulk.args, control.args);
+            assert_eq!(
+                bulk.ssh_session.as_ref().unwrap().class,
+                mj_core::targets::SshTrafficClass::Bulk
+            );
+            client.install_skills(&vec![b'x'; 70000]).await.unwrap();
+            let bytes = b"\x89PNG\r\n\x1a\nimage";
+            let reference =
+                mj_core::attachment::AttachmentRef::new(bytes, "image/png".into(), 1, 1).unwrap();
+            mj_core::attachment::AttachmentStore::controller(SESSION_ID)
+                .unwrap()
+                .install(&reference, bytes)
+                .unwrap();
+            client.ensure_attachment(&reference).await.unwrap();
+            let file = mj_core::attachment::FileAttachmentRef::new(
+                b"file",
+                "test.txt",
+                "text/plain".into(),
+            )
+            .unwrap();
+            mj_core::attachment::AttachmentStore::controller(SESSION_ID)
+                .unwrap()
+                .install_file(&file, b"file")
+                .unwrap();
+            client
+                .submit(
+                    "batch",
+                    RelayCommand::Prompt {
+                        prompt: vec![
+                            reference.content_block(),
+                            file.content_block(),
+                            reference.content_block(),
+                            file.content_block(),
+                        ],
+                    },
+                )
+                .await
+                .unwrap();
+
+            let recovered_image = mj_core::attachment::AttachmentRef::new(
+                b"\x89PNG\r\n\x1a\nrecovered",
+                "image/png".into(),
+                1,
+                1,
+            )
+            .unwrap();
+            let recovered_file = mj_core::attachment::FileAttachmentRef::new(
+                b"recovered-file",
+                "recovered.txt",
+                "text/plain".into(),
+            )
+            .unwrap();
+            client
+                .cache_attachments(
+                    &[
+                        recovered_image.clone(),
+                        reference.clone(),
+                        recovered_image.clone(),
+                    ],
+                    &[recovered_file.clone(), file.clone(), recovered_file.clone()],
+                )
+                .await
+                .unwrap();
+            let store = mj_core::attachment::AttachmentStore::controller(SESSION_ID).unwrap();
+            assert!(store.contains(&recovered_image).unwrap());
+            assert!(store.contains_file(&recovered_file).unwrap());
+            // A second pass with everything cached must not open another proxy.
+            client
+                .cache_attachments(&[recovered_image], &[recovered_file])
+                .await
+                .unwrap();
+            let (progress, observed) = tokio::sync::watch::channel(None);
+            client.set_adoption_wait_progress(Some(progress));
+            let error = client.live_session_baseline().await.unwrap_err();
+            assert_eq!(*observed.borrow(), Some(vec!["held-turn".to_string()]));
+            assert!(
+                format!("{error:#}").contains("decode live recovery baseline"),
+                "{error:#}"
+            );
+            let error = client.install_skills(b"fail").await.unwrap_err();
+            assert!(!RelayTransportDead::marks(&error));
+            assert!(!RelayTransportDead::marks_failed_handshake(&error));
+            assert!(format!("{error:#}").contains("bulk relay connection failed"));
+            let rejected = mj_core::attachment::FileAttachmentRef::new(
+                b"reject",
+                "reject",
+                "text/plain".into(),
+            )
+            .unwrap();
+            let continued = mj_core::attachment::FileAttachmentRef::new(
+                b"continued",
+                "continued",
+                "text/plain".into(),
+            )
+            .unwrap();
+            client
+                .cache_attachments(&[], &[rejected.clone(), continued.clone()])
+                .await
+                .unwrap();
+            assert!(!store.contains_file(&rejected).unwrap());
+            assert!(store.contains_file(&continued).unwrap());
+            assert!(
+                captured
+                    .at(tracing::Level::WARN)
+                    .iter()
+                    .any(|line| line.contains("could not cache file attachment during recovery"))
+            );
+            let disconnected = mj_core::attachment::FileAttachmentRef::new(
+                b"disconnect",
+                "disconnect",
+                "text/plain".into(),
+            )
+            .unwrap();
+            let warnings_before = captured.at(tracing::Level::WARN).len();
+            let skipped = mj_core::attachment::FileAttachmentRef::new(
+                b"skip-after-disconnect",
+                "skip-after-disconnect",
+                "text/plain".into(),
+            )
+            .unwrap();
+            client
+                .cache_attachments(&[], &[disconnected.clone(), skipped])
+                .await
+                .unwrap();
+            let warnings = captured.at(tracing::Level::WARN);
+            assert_eq!(warnings.len(), warnings_before + 1);
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("could not cache attachments during recovery")
+            );
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("bulk relay connection failed")
+            );
+            assert!(client.abandoned.is_none());
+            client.skills_state().await.unwrap();
+            client.bulk_spec = Some(CommandSpec::new(
+                "sh",
+                ["-c", "echo bulk-handshake-diagnostic >&2; exit 1"],
+            ));
+            let error = client.install_skills(b"connect failure").await.unwrap_err();
+            assert!(!RelayTransportDead::marks(&error));
+            assert!(!RelayTransportDead::marks_failed_handshake(&error));
+            assert!(format!("{error:#}").contains("bulk-handshake-diagnostic"));
+            let warnings_before = captured.at(tracing::Level::WARN).len();
+            client
+                .cache_attachments(&[], &[disconnected])
+                .await
+                .unwrap();
+            let warnings = captured.at(tracing::Level::WARN);
+            assert_eq!(warnings.len(), warnings_before + 1);
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("could not cache attachments during recovery")
+            );
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("bulk-handshake-diagnostic")
+            );
+            assert!(client.abandoned.is_none());
+            client.skills_state().await.unwrap();
+            client.detach().await.unwrap();
+            let mut client = RelayClient::connect(&local, SESSION_ID).await.unwrap();
+            assert!(client.bulk_spec.is_none());
+            client.install_skills(b"local").await.unwrap();
+            client.skills_state().await.unwrap();
+            client.detach().await.unwrap();
+        });
+    let text = std::fs::read_to_string(log).unwrap();
+    let entries: Vec<_> = text
+        .lines()
+        .map(|line| line.split_once(' ').unwrap())
+        .collect();
+    let control_pid = entries[0].0;
+    assert!(
+        entries
+            .iter()
+            .filter(|(_, method)| matches!(*method, "attachment_present" | "skills_state"))
+            .take(3)
+            .all(|(pid, _)| *pid == control_pid)
+    );
+    assert!(
+        entries
+            .iter()
+            .filter(|(_, method)| matches!(
+                *method,
+                "install_attachment" | "begin_live_baseline" | "read_live_baseline_page"
+            ))
+            .all(|(pid, _)| *pid != control_pid)
+    );
+    let upload_pids: Vec<_> = entries
+        .iter()
+        .filter(|(_, method)| matches!(*method, "install_attachment" | "install_file_attachment"))
+        .map(|(pid, _)| *pid)
+        .collect();
+    assert_eq!(upload_pids.len(), 3);
+    assert_eq!(
+        upload_pids[1], upload_pids[2],
+        "one Bulk connection for the prompt"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|(_, method)| *method == "attachment_present")
+            .count(),
+        2
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|(_, method)| *method == "file_attachment_present")
+            .count(),
+        1
+    );
+    let downloads: Vec<_> = entries
+        .iter()
+        .filter(|(_, method)| matches!(*method, "read_attachment" | "read_file_attachment"))
+        .collect();
+    assert_eq!(downloads.len(), 5);
+    assert_eq!(
+        downloads[0].0, downloads[1].0,
+        "one Bulk connection for recovery"
+    );
+    assert_ne!(downloads[0].0, control_pid);
+    let snapshot_pids: std::collections::BTreeSet<_> = entries
+        .iter()
+        .filter(|(_, method)| matches!(*method, "begin_live_baseline" | "read_live_baseline_page"))
+        .map(|(pid, _)| pid)
+        .collect();
+    assert_eq!(snapshot_pids.len(), 1);
+    let local_entries = &entries[entries.len() - 3..];
+    assert!(
+        local_entries
+            .iter()
+            .all(|(pid, _)| *pid == local_entries[0].0)
+    );
+}
+
+#[tokio::test]
+async fn pipeline_reads_preserve_rejections_and_reuse_sequential_legacy_stream() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.protocol_version = 1;
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        // Do not answer until both requests arrive: stop-and-wait deadlocks.
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            requests.push(serde_json::from_str::<RelayRequestEnvelope>(&line).unwrap());
+        }
+        for (i, request) in requests.into_iter().enumerate() {
+            let body = if i == 0 {
+                RelayResponseBody::Error {
+                    error: mj_core::relay::relay_protocol_error(
+                        RelayErrorCode::Internal,
+                        "one read failed",
+                        false,
+                        None,
+                    ),
+                }
+            } else {
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentPresent { present: true },
+                }
+            };
+            let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: 1,
+                body,
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            writer.write_all(&bytes).await.unwrap();
+        }
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+            request_id: request.request_id,
+            protocol_version: 1,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::AttachmentPresent { present: false },
+            },
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.unwrap();
+    });
+    let mut replies = client
+        .call_many(vec![RelayRequest::Status, RelayRequest::Status])
+        .await
+        .unwrap()
+        .into_iter();
+    assert!(
+        replies
+            .next()
+            .unwrap()
+            .unwrap_err()
+            .downcast_ref::<RelayRejected>()
+            .is_some()
+    );
+    assert!(matches!(
+        replies.next().unwrap().unwrap(),
+        RelayResponsePayload::AttachmentPresent { present: true }
+    ));
+    assert!(client.abandoned.is_none());
+    client.call(RelayRequest::Status).await.unwrap();
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn pipeline_refuses_writes_before_wire_and_abandons_on_eof() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let next_request = client.next_request;
+    assert!(
+        client
+            .call_many(vec![
+                RelayRequest::Status,
+                RelayRequest::Acknowledge {
+                    through_ordinal: 1,
+                    through_digest: "a".repeat(64),
+                }
+            ])
+            .await
+            .is_err()
+    );
+    assert_eq!(client.next_request, next_request);
+    assert!(client.abandoned.is_none());
+    client.protocol_version = 1;
+    assert!(
+        client
+            .call_many(vec![RelayRequest::CpuUsage])
+            .await
+            .is_err()
+    );
+    assert_eq!(client.next_request, next_request);
+    assert!(client.abandoned.is_none());
+    drop(worker);
+    assert!(client.call_many(vec![RelayRequest::Status]).await.is_err());
+    assert!(client.abandoned.is_some());
+    assert!(client.call_many(vec![RelayRequest::Status]).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pipeline_abandons_on_shared_deadline_or_crossed_response() {
+    for crossed in [false, true] {
+        let (controller, worker) = tokio::io::duplex(65536);
+        let mut client = duplex_relay_client(controller, SESSION_ID);
+        client.request_timeout = Duration::from_secs(1);
+        let peer = mj_core::runtime::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            if crossed {
+                let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                    request_id: "wrong".into(),
+                    protocol_version: request.protocol_version,
+                    body: RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::AttachmentPresent { present: true },
+                    },
+                })
+                .unwrap();
+                bytes.push(b'\n');
+                writer.write_all(&bytes).await.unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+        let error = client
+            .call_many(vec![RelayRequest::Status, RelayRequest::Status])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(if crossed { "mismatch" } else { "timed out" }));
+        assert!(client.abandoned.is_some());
+        assert!(client.call(RelayRequest::Status).await.is_err());
+        peer.abort();
+        assert!(peer.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn submit_pipelines_deduplicated_image_and_file_presence_before_submit() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let image = mj_core::attachment::AttachmentRef::new(
+        b"\x89PNG\r\n\x1a\nimage",
+        "image/png".into(),
+        1,
+        1,
+    )
+    .unwrap();
+    let file =
+        mj_core::attachment::FileAttachmentRef::new(b"file", "a.txt", "text/plain".into()).unwrap();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            requests.push(serde_json::from_str::<RelayRequestEnvelope>(&line).unwrap());
+        }
+        assert!(matches!(
+            requests[0].request,
+            RelayRequest::AttachmentPresent { .. }
+        ));
+        assert!(matches!(
+            requests[1].request,
+            RelayRequest::FileAttachmentPresent { .. }
+        ));
+        for request in requests {
+            let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentPresent { present: true },
+                },
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            writer.write_all(&bytes).await.unwrap();
+        }
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(matches!(request.request, RelayRequest::Submit { .. }));
+        // The submission's application reply is irrelevant to presence ordering.
+        drop(writer);
+    });
+    assert!(
+        client
+            .submit(
+                "images",
+                RelayCommand::Prompt {
+                    prompt: vec![
+                        image.content_block(),
+                        file.content_block(),
+                        image.content_block(),
+                        file.content_block()
+                    ]
+                }
+            )
+            .await
+            .is_err()
+    );
+    peer.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn call_many_reads_real_worker_unix_server_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(root.path(), SESSION_ID, "test").unwrap();
+    durable
+        .record_observation(RelayObservation::Closed)
+        .unwrap();
+    drop(durable);
+    let config: mj_core::worker_launch::WorkerLaunchConfig =
+        serde_json::from_value(serde_json::json!({
+            "session_id": SESSION_ID, "harness": "codex", "harness_home": root.path(),
+            "bridge_command": "/usr/bin/false", "bridge_args": [], "environment": {},
+            "cwd": root.path(), "execution_policy": true
+        }))
+        .unwrap();
+    let daemon = mj_core::runtime::spawn(mj_worker::worker_runtime::run_daemon(
+        root.path().to_owned(),
+        config,
+    ));
+    let stream = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match tokio::net::UnixStream::connect(root.path().join("control.sock")).await {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    assert!(!daemon.is_finished(), "real worker exited before accepting");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let (controller, _unused) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let (reader, writer) = stream.into_split();
+    client.input = Some(Box::new(writer));
+    client.output = BufReader::new(Box::new(reader));
+    let mut replies = client
+        .call_many(vec![RelayRequest::Status, RelayRequest::HistoryRequests])
+        .await
+        .unwrap()
+        .into_iter();
+    assert!(
+        matches!(replies.next().unwrap().unwrap(), RelayResponsePayload::Status(state) if state.execution == mj_core::relay::RelayExecutionState::Closed)
+    );
+    assert!(
+        matches!(replies.next().unwrap().unwrap(), RelayResponsePayload::HistoryRequests { requests } if requests.is_empty())
+    );
+    client.status().await.unwrap();
+    drop(client);
+    daemon.abort();
+    assert!(daemon.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn pipeline_drains_replies_while_feeding_more_than_pipe_capacity() {
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let reference = mj_core::attachment::AttachmentRef::new(
+        b"\x89PNG\r\n\x1a\nimage",
+        "image/png".into(),
+        1,
+        1,
+    )
+    .unwrap();
+    let requests = vec![RelayRequest::AttachmentPresent { reference }; 1500];
+    let count = requests.len();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut request_bytes = 0;
+        let mut response_bytes = 0;
+        for _ in 0..count {
+            let mut line = String::new();
+            request_bytes += reader.read_line(&mut line).await.unwrap();
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let mut response = serde_json::to_vec(&RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentPresent { present: true },
+                },
+            })
+            .unwrap();
+            response.push(b'\n');
+            response_bytes += response.len();
+            // Match the worker: reply fully before reading its next request.
+            writer.write_all(&response).await.unwrap();
+        }
+        assert!(request_bytes > 64 * 1024);
+        assert!(response_bytes > 64 * 1024);
+    });
+    let replies = tokio::time::timeout(Duration::from_secs(10), client.call_many(requests))
+        .await
+        .expect("pipelined traffic must not deadlock bounded pipes")
+        .unwrap();
+    assert_eq!(replies.len(), count);
+    assert!(replies.into_iter().all(|reply| matches!(
+        reply.unwrap(),
+        RelayResponsePayload::AttachmentPresent { present: true }
+    )));
+    peer.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn pipeline_observation_keeps_its_deadline_before_a_long_attach_slot() {
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.request_timeout = Duration::from_secs(1);
+    let (seen, received) = tokio::sync::oneshot::channel();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, _writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<RelayRequestEnvelope>(&line)
+                .unwrap()
+                .request,
+            RelayRequest::CpuUsage
+        ));
+        seen.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let started = tokio::time::Instant::now();
+    let work = mj_core::runtime::spawn(async move {
+        let result = client
+            .call_many(vec![
+                RelayRequest::CpuUsage,
+                RelayRequest::Attach {
+                    after_ordinal: 0,
+                    after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                    known_state_digest: None,
+                },
+            ])
+            .await;
+        (client, result)
+    });
+    received.await.unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let (client, result) = work.await.unwrap();
+    assert!(format!("{:#}", result.unwrap_err()).contains("cpu_usage timed out after 1 seconds"));
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert!(client.abandoned.is_some());
+    peer.abort();
+    assert!(peer.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn readiness_long_poll_keeps_the_worker_hold_in_its_deadline() {
+    use crate::readiness::NativeSessionProbe;
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.request_timeout = Duration::from_secs(1);
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let request: RelayRequestEnvelope =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(matches!(
+            request.request,
+            RelayRequest::WaitForChange { .. }
+        ));
+        tokio::time::sleep(mj_core::relay::RELAY_CHANGE_WAIT_BOUND).await;
+        let mut frame = serde_json::to_vec(&RelayResponseEnvelope {
+            request_id: request.request_id,
+            protocol_version: request.protocol_version,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ChangeObserved {
+                    latest_ordinal: 0,
+                    state_digest: "same".into(),
+                    subagent_queue_changed: false,
+                    guardian_queue_changed: false,
+                },
+            },
+        })
+        .unwrap();
+        frame.push(b'\n');
+        writer.write_all(&frame).await.unwrap();
+    });
+    assert!(
+        client
+            .wait_readiness_change((0, "same".into()), std::future::pending())
+            .await
+            .unwrap()
+    );
+    assert!(client.abandoned.is_none());
+    peer.await.unwrap();
 }

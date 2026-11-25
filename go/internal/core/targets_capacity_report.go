@@ -167,8 +167,9 @@ type HostFilesystemRow struct {
 
 // HostCapacityRow is one row of the Targets capacity table.
 type HostCapacityRow struct {
-	ID   string `json:"id"`
-	Host string `json:"host"`
+	StorageWarning *string `json:"storage_warning,omitempty"`
+	ID             string  `json:"id"`
+	Host           string  `json:"host"`
 	// TargetIDs are the configured targets that deploy to this host or fleet.
 	TargetIDs []string               `json:"target_ids"`
 	Kind      DeploymentCapacityKind `json:"kind"`
@@ -221,6 +222,7 @@ func NewHostCapacityRow(target *DeploymentCapacityTarget, state *TargetCapacityS
 		}
 	}
 	row := HostCapacityRow{
+		StorageWarning:        target.StorageWarning,
 		ID:                    target.ID,
 		Host:                  target.Host,
 		TargetIDs:             append([]string{}, target.TargetIDs...),
@@ -390,6 +392,9 @@ func RenderHostCapacity(rows []HostCapacityRow, nowEpochSeconds uint64) string {
 				FormatResourceBytes(filesystem.AvailableBytes),
 				FormatResourceBytes(filesystem.TotalBytes),
 				StorageConditionFlag(filesystem.Condition)))
+		}
+		if row.StorageWarning != nil {
+			lines = append(lines, "  "+*row.StorageWarning)
 		}
 		if stale, ok := row.Staleness(nowEpochSeconds); ok {
 			lines = append(lines, "  "+stale)

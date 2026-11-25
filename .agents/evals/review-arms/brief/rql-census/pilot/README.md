@@ -123,9 +123,11 @@ read the diff in one command, so 25 of its 35 diffs were cut (writers too: 117 o
 rollouts carry the marker). `--writer-diff-reading` and `--reviewer-diff-reading` choose how each
 role reads the diff; they are independent, so a reviewer-only rerun keeps the accepted briefs.
 
-- `single-command` (default) is the Stage 2a prompt, byte for byte, and adds nothing to a job's
-  inputs, so the frozen Stage 2a artifacts still verify.
-- `bounded-reads-v2` lists numbered `git diff` reads of at most 32,000 bytes each (small files
+- `trees-and-diffstat` (default since 7345e9020) gives reviewers the baseline and captured tree
+  IDs plus the diffstat and lets the session choose its reads. It adds no diff-reading inputs.
+  The frozen Stage 2a artifacts used the old single-command prompt and verify only with the code
+  frozen at the Stage 2a worktree (`.mj/worktrees/rql-stage2a-42f04e093/`), not current master.
+- `bounded-reads-v2` keeps Stage 2a task wording and lists numbered `git diff` reads of at most 32,000 bytes each (small files
   batched, large files read in byte windows ending at line boundaries). Together they print the
   whole diff once. The patch bytes are pinned with `--full-index` (the session's history is cut
   short, so abbreviated `index` lines would differ in length from the planning clone's) and the

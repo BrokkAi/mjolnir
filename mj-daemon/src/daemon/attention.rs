@@ -321,8 +321,22 @@ pub(super) fn supports_question_dismissal(
 
 fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
     runtime.records.get(id).is_some_and(|record| {
+        // A sub-agent is judged by the checkout it borrows, which only its
+        // owner's record names.
+        let checkout = match runtime
+            .environment_owners
+            .get(id)
+            .filter(|owner| owner.as_str() != id)
+            .and_then(|owner| runtime.records.get(owner))
+        {
+            Some(owner) => mj_core::state::Checkout::Borrowed {
+                owner,
+                checkout: Box::new(owner.checkout()),
+            },
+            None => record.checkout(),
+        };
         record
-            .configuration_issue(&runtime.metadata.config)
+            .configuration_issue_in(&checkout, &runtime.metadata.config)
             .is_some()
     }) || runtime.sessions.get(id).is_some_and(|view| {
         matches!(
@@ -711,9 +725,7 @@ fn project_states(
             };
             // Waiting state can propagate through several rows. A row with
             // only inherited state has no notification to publish.
-            if let Some(mut card) = card
-                && !record.notifications_ignored
-            {
+            if let Some(mut card) = card {
                 if questions.contains(id)
                     && card.form.is_none()
                     && card
@@ -775,6 +787,9 @@ fn project_states(
             target.map(|target| (id.clone(), target))
         })
         .collect();
+    // Muting suppresses publication, but acknowledgement still clears the
+    // visible attention state using the computed card's exact target.
+    cards.retain(|id, _| !runtime.records[id].notifications_ignored);
     waiting_holders.retain(|id, _| ids.contains(id) && attention.get(id) == Some(&NeedsInput));
     AttentionProjection {
         states: attention,
@@ -1257,6 +1272,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 8dd7f63840: muting cards also removed the visible attention dismissal target.
     #[test]
     fn notification_stack_is_latched_during_work_but_failure_keeps_precedence() {
         use mj_core::assessment::{InferredQuestion, OpenRequest};
@@ -1379,12 +1395,20 @@ mod tests {
         ));
 
         next.records.get_mut("parent").unwrap().state = SessionState::Running;
-        assert_eq!(publish(&mut previous, &mut next), Some(card));
+        assert_eq!(publish(&mut previous, &mut next), Some(card.clone()));
         next.records
             .get_mut("parent")
             .unwrap()
             .notifications_ignored = true;
         assert!(publish(&mut previous, &mut next).is_none());
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::NeedsInput
+        );
+        assert_eq!(
+            next.metadata.notification_dismissals.get("parent"),
+            card.dismissal.as_ref()
+        );
         next.records
             .get_mut("parent")
             .unwrap()
@@ -2348,6 +2372,7 @@ mod tests {
                     SessionAttention::NeedsInput
                 );
                 assert_eq!(runtime.metadata.form_holders[id], "child");
+                assert!(!runtime.metadata.notification_dismissals.contains_key(id));
             }
             published = runtime.clone();
         }

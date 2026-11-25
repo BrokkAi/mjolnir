@@ -1,6 +1,6 @@
 //! Select native parents before handing discovered files to SessionWiki.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -27,6 +27,20 @@ pub(super) struct Snapshot {
     child_native_ids: BTreeSet<String>,
     /// Top-level sessions Mjolnir records, whether or not they are indexed.
     top_level_session_ids: BTreeSet<String>,
+    /// Every sub-agent keyed by its Mjolnir id and lowercased native id, so a
+    /// query for a child can say where its report lives instead of "absent".
+    child_pointers: BTreeMap<String, ChildPointer>,
+    /// Lowercased native id of each top-level session to its Mjolnir id. A
+    /// Mjolnir row's indexed path is synthetic, so its native UUID resolves
+    /// here and nowhere else.
+    native_to_session: BTreeMap<String, String>,
+}
+
+/// Where a sub-agent's work can be found when its transcript is not indexed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ChildPointer {
+    pub child_session_id: String,
+    pub parent_session_id: String,
 }
 
 impl Snapshot {
@@ -47,17 +61,114 @@ impl Snapshot {
             .filter_map(|id| state.sessions.get(id)?.native_session_id.as_deref())
             .map(str::to_ascii_lowercase)
             .collect();
-        let top_level_session_ids = state
+        let top_level_session_ids: BTreeSet<String> = state
             .sessions
             .keys()
             .filter(|id| !child_session_ids.contains(*id))
             .cloned()
             .collect();
+        let mut child_pointers = BTreeMap::new();
+        for (id, metadata) in state.subagents.iter() {
+            let pointer = ChildPointer {
+                child_session_id: id.clone(),
+                parent_session_id: metadata.parent_session_id.clone(),
+            };
+            if let Some(native) = state
+                .sessions
+                .get(id)
+                .and_then(|record| record.native_session_id.as_deref())
+            {
+                child_pointers.insert(native.to_ascii_lowercase(), pointer.clone());
+            }
+            child_pointers.insert(id.clone(), pointer);
+        }
+        let native_to_session = top_level_session_ids
+            .iter()
+            .filter_map(|id| {
+                let native = state.sessions.get(id)?.native_session_id.as_deref()?;
+                Some((native.to_ascii_lowercase(), id.clone()))
+            })
+            .collect();
         Self {
             child_session_ids,
             child_native_ids,
             top_level_session_ids,
+            child_pointers,
+            native_to_session,
         }
+    }
+
+    /// The child `id_or_prefix` names: an exact Mjolnir or native id first,
+    /// then a prefix that only one child shares.
+    pub(super) fn child_pointer(&self, id_or_prefix: &str) -> Option<&ChildPointer> {
+        self.exact_child_pointer(id_or_prefix).or_else(|| {
+            let prefix = id_or_prefix.to_ascii_lowercase();
+            let mut matches = self
+                .child_pointers
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, pointer)| pointer);
+            let first = matches.next()?;
+            // A child is keyed by both its Mjolnir and native ids.
+            matches.all(|pointer| pointer == first).then_some(first)
+        })
+    }
+
+    pub(super) fn exact_child_pointer(&self, id: &str) -> Option<&ChildPointer> {
+        self.child_pointers
+            .get(id)
+            .or_else(|| self.child_pointers.get(&id.to_ascii_lowercase()))
+    }
+
+    pub(super) fn exact_native_session_id(&self, id: &str) -> Option<&str> {
+        self.native_to_session
+            .get(&id.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    pub(super) fn native_session_ids(&self, id: &str) -> Vec<&str> {
+        let wanted = id.to_ascii_lowercase();
+        self.native_to_session
+            .iter()
+            .filter(|(native, _)| {
+                **native == wanted || (wanted.contains('-') && native.starts_with(&wanted))
+            })
+            .map(|(_, session)| session.as_str())
+            .collect()
+    }
+
+    /// The Mjolnir id of the top-level session whose native id is `id` (or,
+    /// for a dashed UUID prefix, uniquely starts with it). A bare hex prefix is
+    /// never read as a native id: it may be a prefix of a Mjolnir id.
+    pub(super) fn resolve_native_session_id(&self, id_or_prefix: &str) -> Option<&str> {
+        let wanted = id_or_prefix.to_ascii_lowercase();
+        if let Some(session) = self.native_to_session.get(&wanted) {
+            return Some(session);
+        }
+        if !wanted.contains('-') {
+            return None;
+        }
+        let mut matches = self
+            .native_to_session
+            .iter()
+            .filter(|(native, _)| native.starts_with(&wanted))
+            .map(|(_, session)| session.as_str());
+        let first = matches.next()?;
+        matches.all(|session| session == first).then_some(first)
+    }
+
+    /// The top-level session Mjolnir records under `id` or a prefix only it
+    /// has, whether or not SessionWiki has indexed it yet.
+    pub(super) fn known_top_level(&self, id_or_prefix: &str) -> Option<&str> {
+        if let Some(id) = self.top_level_session_ids.get(id_or_prefix) {
+            return Some(id);
+        }
+        let mut matches = self
+            .top_level_session_ids
+            .iter()
+            .filter(|id| id.starts_with(id_or_prefix));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first.as_str())
     }
 
     /// SessionWiki derives its key from the full path, while Mjolnir tracks
@@ -83,14 +194,35 @@ impl Snapshot {
         self.child_session_ids.contains(session_id)
     }
 
-    pub(super) fn is_known_top_level(&self, session_id: &str) -> bool {
-        self.top_level_session_ids.contains(session_id)
-    }
-
     #[cfg(test)]
     pub(super) fn for_test_top_level(session_id: &str) -> Self {
         Self {
             top_level_session_ids: BTreeSet::from([session_id.to_owned()]),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test_child(child: &str, parent: &str) -> Self {
+        let pointer = ChildPointer {
+            child_session_id: child.to_owned(),
+            parent_session_id: parent.to_owned(),
+        };
+        Self {
+            child_session_ids: BTreeSet::from([child.to_owned()]),
+            child_pointers: BTreeMap::from([(child.to_owned(), pointer)]),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test_native(session_id: &str, native_id: &str) -> Self {
+        Self {
+            top_level_session_ids: BTreeSet::from([session_id.to_owned()]),
+            native_to_session: BTreeMap::from([(
+                native_id.to_ascii_lowercase(),
+                session_id.to_owned(),
+            )]),
             ..Self::default()
         }
     }
@@ -156,6 +288,67 @@ pub(super) fn is_child(
             .with_context(|| format!("classify indexed {} session {}", row.tool, row.session_id));
     }
     Ok(false)
+}
+
+/// One query's view of which indexed rows are visible. A row whose source
+/// cannot be classified (a moved or deleted native file) is hidden for this
+/// query with a notice; unlike [`is_child`] callers that prune, a read must
+/// never fail wholesale because one row is unreadable. Each session is
+/// classified at most once per query.
+pub(super) struct QueryVisibility<'a> {
+    ownership: &'a Snapshot,
+    cache: &'a NativeScanCache,
+    hidden: HashMap<String, bool>,
+    notices: Vec<String>,
+}
+
+impl<'a> QueryVisibility<'a> {
+    pub(super) fn new(ownership: &'a Snapshot, cache: &'a NativeScanCache) -> Self {
+        Self {
+            ownership,
+            cache,
+            hidden: HashMap::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    pub(super) fn ownership(&self) -> &'a Snapshot {
+        self.ownership
+    }
+
+    /// Whether the query must leave `row` out: it is a child, or it could not
+    /// be classified (reported once as a notice and at WARN).
+    pub(super) fn is_child_lenient(&mut self, row: &sessionwiki::index::SessionRow) -> bool {
+        if let Some(hidden) = self.hidden.get(&row.session_id) {
+            return *hidden;
+        }
+        let hidden = match is_child(row, self.ownership, self.cache) {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::warn!(session_id = %row.session_id, error = %format!("{error:#}"),
+                    "skipping an indexed session whose source could not be classified");
+                self.notice(format!(
+                    "session {} was skipped: its source could not be classified ({})",
+                    row.session_id,
+                    error.root_cause()
+                ));
+                true
+            }
+        };
+        self.hidden.insert(row.session_id.clone(), hidden);
+        hidden
+    }
+
+    /// Report something the answer could not say on its own. Repeats collapse.
+    pub(super) fn notice(&mut self, notice: String) {
+        if !self.notices.contains(&notice) {
+            self.notices.push(notice);
+        }
+    }
+
+    pub(super) fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
+    }
 }
 
 impl Adapter for PreparedFiles {
@@ -291,16 +484,7 @@ pub(super) fn prune(
                 [id],
             )
             .context("remove a child session from the full-text index")?;
-        for table in [
-            "messages",
-            "touched",
-            "edits",
-            "archive",
-            "tags",
-            "notes",
-            "summaries",
-            "files",
-        ] {
+        for table in ["messages", "archive", "tags", "notes", "summaries", "files"] {
             transaction
                 .execute(&format!("DELETE FROM {table} WHERE session_id = ?1"), [id])
                 .with_context(|| format!("remove child session {id} from {table}"))?;
@@ -395,8 +579,7 @@ mod tests {
             10,
             &BTreeSet::new(),
             false,
-            &ownership,
-            &cache,
+            &mut QueryVisibility::new(&ownership, &cache),
         )
         .unwrap();
         assert_eq!(rows.len(), 1);
@@ -473,8 +656,7 @@ mod tests {
                 10,
                 &BTreeSet::new(),
                 false,
-                &ownership,
-                &cache,
+                &mut QueryVisibility::new(&ownership, &cache),
             )
             .unwrap();
             assert_eq!(rows.len(), 1, "pass {pass}");
@@ -664,10 +846,6 @@ mod tests {
             connection
                 .execute("INSERT INTO summaries VALUES (?1, 'summary', 'now')", [id])
                 .unwrap();
-            connection
-                .execute("INSERT INTO touched VALUES (?1, '/src/file')", [id])
-                .unwrap();
-            connection.execute("INSERT INTO edits(session_id, path, kind, snippet) VALUES (?1, '/src/file', 'write', 'edit')", [id]).unwrap();
         }
         connection
             .execute(
@@ -688,15 +866,7 @@ mod tests {
         };
         assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 4);
         assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 0);
-        for table in [
-            "files",
-            "messages",
-            "tags",
-            "notes",
-            "summaries",
-            "touched",
-            "edits",
-        ] {
+        for table in ["files", "messages", "tags", "notes", "summaries"] {
             let ids: Vec<String> = connection
                 .prepare(&format!("SELECT session_id FROM {table}"))
                 .unwrap()

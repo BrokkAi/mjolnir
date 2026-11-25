@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 155;
+const SCHEMA_VERSION: i64 = 159;
 
 pub mod web_push;
 pub use web_push::*;
@@ -205,3 +205,5 @@ pub fn is_busy_error(error: &anyhow::Error) -> bool {
 }
 
 mod container_size;
+mod target_secrets;
+pub use target_secrets::scrub_resolved_target_secrets;

@@ -56,6 +56,14 @@ pub(super) fn publish_git_setup(root: &std::path::Path, setup: tempfile::TempDir
         .file_name()
         .and_then(|name| name.to_str())
         .context("resolve accepted harness Git setup name")?;
+    publish_git_setup_name(root, name)
+}
+
+pub(in crate::worker_runtime) fn publish_git_setup_name(
+    root: &std::path::Path,
+    name: &str,
+) -> Result<()> {
+    mj_core::worker_launch::validate_candidate_id(name)?;
     mj_core::config::atomic_write(&root.join(CURRENT_GIT_SETUP), name.as_bytes())
         .context("publish accepted harness Git setup")
 }

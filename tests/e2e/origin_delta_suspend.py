@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--instance", required=True)
     parser.add_argument(
         "--case",
-        choices=["round-trip", "untracked", "detached", "late-file", "git-error", "raw", *RECOVERY_HOOKS],
+        choices=["history-only", "round-trip", "untracked", "detached", "late-file", "git-error", "raw", *RECOVERY_HOOKS],
         required=True,
     )
     args = parser.parse_args()
@@ -227,6 +227,50 @@ def main():
         checkout = Path(before["managed_worktree"]["worktree_root"])
         pid_path = Path(before["target"]["worker_root"]) / "worker.pid"
         worker_before = pid_path.read_text()
+
+        if args.case == "history-only":
+            prompt = "history-only conversation must survive"
+            run("message", "--session", session, prompt)
+
+            def transcript():
+                return run("transcript", "--session", session, "--json").stdout
+
+            wait_for(lambda: f"reliability reply: {prompt}" in transcript(), "recorded harness reply")
+            tracked = checkout / "README.md"
+            original = tracked.read_text()
+            git(checkout, "update-index", "--skip-worktree", "--", tracked.name)
+            tracked.write_text("workspace changes intentionally discarded\n")
+            external = lab.runtime_root / "external-worktree"
+            git(checkout, "worktree", "add", "--detach", external)
+            blocked = json.loads(run("suspend", "--session", session, "--dry-run", "--json").stdout)
+            kinds = {blocker["kind"] for blocker in blocked["blockers"]}
+            assert {"hidden_tracked_edits", "unrepresented_git_state"} <= kinds, blocked
+            run("suspend", "--session", session, "--history-only")
+            stopped = wait_for(lambda: row if (row := record())["state"] == "stopped" else None,
+                               "history-only suspend to finish")
+            assert not checkout.exists(), checkout
+            checkpoint = stopped["checkpoint"]
+            archive_path = Path(checkpoint["archive_path"])
+            assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == checkpoint["sha256"]
+            with zipfile.ZipFile(archive_path) as archive:
+                assert archive.testzip() is None
+                manifest = json.loads(archive.read("manifest.json"))
+                repository, = manifest["repositories"]
+                assert repository["review_refs_metadata_only"] is True, repository
+                for key in ("committed_bundle_path", "staged_patch_path", "unstaged_patch_path", "origin_delta_pack_path", "untracked_tar_path"):
+                    payload_path = repository.get(key)
+                    assert not payload_path or archive.read(payload_path) == b"", (key, repository)
+                canonical = json.loads(archive.read("canonical/session.json"))
+                assert prompt in json.dumps(canonical["transcript"])
+            run("resume", "--session", session, "--json")
+            wait_for(lambda: record()["state"] == "running", "history-only resume ready")
+            assert tracked.read_text() == original
+            notice = "Resumed from a history-only checkpoint into a fresh workspace checkout; prior workspace Git changes were not saved."
+            wait_for(lambda: notice in transcript(), "fresh checkout notice")
+            assert prompt in transcript()
+            assert external.exists(), "external worktree must not be removed"
+            print(json.dumps({"result": "passed", "case": args.case, "instance": args.instance}), flush=True)
+            return
 
         # Hard-won: #1676: a retained clone could not suspend after its original worker was lost
         if args.case in RECOVERY_HOOKS:

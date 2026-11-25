@@ -1641,3 +1641,102 @@ test('changed files loads selected patches and keeps the latest selection', asyn
   await firstPatch;
   assert.equal(view.textContent, 'GIT binary patch');
 });
+
+
+test('suspend blockers show readable titles, five paths, expandable remainder and fix', () => {
+  const context = vm.createContext({ el: (tag, cls = '', text = '') => {
+    const node = makeNode(tag);
+    node.className = cls;
+    node.textContent = text;
+    return node;
+  } });
+  const start = viewerSource.indexOf('function blockerTitle(');
+  const end = viewerSource.indexOf('  return section;', start) + '  return section;\n}'.length;
+  vm.runInContext(viewerSource.slice(start, end), context);
+  const node = context.suspendBlockerSection({
+    kind: 'hidden_tracked_edits', paths: Array.from({length: 7}, (_, i) => 'file-' + i),
+    remedy: 'Clear index flags.',
+  }, 0);
+  assert.equal(node.children[0].textContent, '1. Hidden tracked edits (7 items)');
+  assert.equal(node.children[1].children.length, 5);
+  assert.equal(node.children[2].tagName, 'DETAILS');
+  assert.equal(node.children[2].children[0].textContent, 'Show 2 more');
+  assert.equal(node.children[2].children[1].children.length, 2);
+  assert.equal(node.children[3].textContent, 'Fix: Clear index flags.');
+});
+
+test('suspend safe fix refreshes preflight and ask sends the cleanup prompt', async () => {
+  const nodes = [];
+  const make = (tag, cls = '', text = '') => {
+    const node = makeNode(tag);
+    node.className = cls;
+    node.textContent = text;
+    node.remove = () => {};
+    node.focus = () => {};
+    node.close = () => { node.closed = true; };
+    node.insertBefore = (child, before) => {
+      const index = node.children.indexOf(before);
+      node.children.splice(index < 0 ? node.children.length : index, 0, child);
+    };
+    node.prepend = child => node.children.unshift(child);
+    nodes.push(node);
+    return node;
+  };
+  let resolved = false;
+  const submissions = [];
+  const requests = [];
+  const preflight = { blockers: [{ kind: 'hidden_tracked_edits', paths: ['linked/file'], remedy: 'Clear both flags.' }] };
+  let nextSubmissionResult = { represented: false, status: 'Queued' };
+  const context = vm.createContext({
+    el: make, button: label => make('button', '', label),
+    openSessionDialog: () => make('dialog'),
+    settingsStatus: make('p'),
+    request: async (url, options) => {
+      requests.push({url, options});
+      if (options?.method === 'POST') {
+        resolved = true;
+        return { cleared_hidden_paths: ['linked/file'], moved_worktrees: [], skipped_worktrees: [], preflight };
+      }
+      return preflight;
+    },
+    sendSubmission: async body => {
+      submissions.push(body);
+      return nextSubmissionResult;
+    },
+  });
+  const titleStart = viewerSource.indexOf('function blockerTitle(');
+  const titleEnd = viewerSource.indexOf('  return section;', titleStart) + '  return section;\n}'.length;
+  vm.runInContext(viewerSource.slice(titleStart, titleEnd), context);
+  vm.runInContext(sourceBetween('function formatBlockerCleanupPrompt(', '/// The session menu'), context);
+  let notice = '';
+  const finished = context.confirmSessionSuspension({ id: 'session-1', state: 'running' }, text => { notice = text; });
+  await new Promise(resolve => setImmediate(resolve));
+  const fix = nodes.find(n => n.textContent === 'Fix safe blockers & retry');
+  assert.ok(fix);
+  await fix.onclick();
+  assert.equal(resolved, true);
+  assert.ok(requests.some(r => r.url.endsWith('/suspend-resolve-blockers') && r.options.method === 'POST'));
+  const history = nodes.filter(n => n.textContent === 'Suspend (history only)…').at(-1);
+  assert.ok(history);
+  history.onclick();
+  assert.ok(nodes.some(n => n.textContent.includes('Discard workspace Git changes')));
+  assert.ok(nodes.some(n => n.textContent === 'Removing the clone removes its shared .git directory, invalidating linked worktrees outside the clone (including locked ones) and discarding their unpushed commits and staged changes.'));
+  nodes.filter(n => n.textContent === 'Back').at(-1).onclick();
+  nodes.filter(n => n.textContent === 'Suspend (history only)…').at(-1).onclick();
+  nodes.filter(n => n.textContent === 'Suspend with history only').at(-1).onclick();
+  assert.equal((await finished).history_only, true);
+  const asked = context.confirmSessionSuspension({ id: 'session-1', state: 'running' }, text => { notice = text; });
+  await new Promise(resolve => setImmediate(resolve));
+  const ask = nodes.filter(n => n.textContent === 'Ask session to fix').at(-1);
+  nextSubmissionResult = { failed: true, represented: false, status: 'Not sent: Session stopped' };
+  await ask.onclick();
+  assert.equal(ask.disabled, false);
+  assert.equal(notice, '');
+  assert.ok(nodes.some(n => n.textContent.includes('Could not send cleanup request: Not sent: Session stopped')));
+  nextSubmissionResult = { represented: false, status: 'Queued' };
+  await ask.onclick();
+  await asked;
+  assert.equal(submissions[1].action, 'prompt');
+  assert.match(submissions[1].text, /Hidden tracked edits\n- linked\/file\nFix: Clear both flags/);
+  assert.match(notice, /Sent suspend-blocker/);
+});

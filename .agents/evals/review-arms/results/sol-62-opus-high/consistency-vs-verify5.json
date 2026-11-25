@@ -1,0 +1,27 @@
+{
+ "findings_in_both": 1928,
+ "diffs": 68,
+ "verdict_agreement": 0.89,
+ "confirmed_vs_not_agreement": 0.913,
+ "verdict_pairs": {
+  "confirmed -> confirmed": 1587,
+  "confirmed -> plausible": 35,
+  "confirmed -> rejected": 18,
+  "plausible -> confirmed": 68,
+  "plausible -> plausible": 23,
+  "plausible -> rejected": 15,
+  "rejected -> confirmed": 47,
+  "rejected -> plausible": 29,
+  "rejected -> rejected": 106
+ },
+ "severity_agreement_when_both_kept": 0.837,
+ "severity_pairs": {
+  "high -> high": 170,
+  "high -> medium": 30,
+  "low -> low": 476,
+  "low -> medium": 115,
+  "medium -> high": 52,
+  "medium -> low": 82,
+  "medium -> medium": 788
+ }
+}

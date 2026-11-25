@@ -20,7 +20,7 @@ func capacityOpen(t *testing.T, root string) *DurableRelay {
 	t.Helper()
 	relay := journalTestOpen(t, root, session, "test")
 	relay.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
-	relay.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, relay, core.HarnessKindCodex)
 	journalTestSessionConfigured(t, relay)
 	return relay
 }
@@ -155,7 +155,7 @@ func TestRetryDispatchesForEachHarnessAfterJevApproval(t *testing.T) {
 	for _, configuration := range configurations {
 		root := t.TempDir()
 		relay := capacityOpen(t, root)
-		relay.SetTurnVerdictHarness(configuration.harness)
+		setVerdictHarness(t, relay, configuration.harness)
 		relay.SetBackgroundWorkPolicy(configuration.policy)
 		if configuration.harness == core.HarnessKindKimi {
 			if err := relay.KimiBackgroundTasksChanged(nil, map[string]struct{}{}, map[string]struct{}{}); err != nil {

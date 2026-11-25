@@ -566,9 +566,11 @@ impl std::fmt::Debug for NativeGoalResumeAck {
     }
 }
 
+pub type RuntimeEvent = RuntimeEventWithReload<()>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum RuntimeEvent {
+pub enum RuntimeEventWithReload<Reload> {
     /// Worker-local lifetime message, never a persisted adapter event.
     #[serde(skip)]
     BridgeRetired {
@@ -796,6 +798,9 @@ pub enum RuntimeEvent {
     /// native session on a new bridge instead of stopping the worker.
     HarnessRestarting {
         message: String,
+        /// Worker-local transition, acknowledged before the replacement spawns.
+        #[serde(skip)]
+        reload: Option<Reload>,
     },
     Stopped,
 }

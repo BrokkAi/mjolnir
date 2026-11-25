@@ -1,5 +1,6 @@
 //! Durable controller-side state for Hel-managed sessions.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -1170,7 +1171,20 @@ impl ManagedWorktree {
         }
     }
 
-    fn validate(&self, session_id: &str, project_directory: Option<&Path>) -> Result<()> {
+    /// Where the session's project lives: the worktree root joined with the
+    /// project's path inside its source repository. The record stores no copy,
+    /// so this is the one place that path is computed. `None` only when the
+    /// source project is outside its repository, which validation rejects.
+    #[must_use]
+    pub fn checkout_directory(&self) -> Option<PathBuf> {
+        let relative = self
+            .source_project_directory
+            .strip_prefix(&self.source_repository)
+            .ok()?;
+        Some(crate::target_path::join(&self.worktree_root, relative))
+    }
+
+    fn validate(&self, session_id: &str, stored_project_directory: Option<&Path>) -> Result<()> {
         for (label, path) in [
             ("source project directory", &self.source_project_directory),
             ("source repository", &self.source_repository),
@@ -1205,11 +1219,10 @@ impl ManagedWorktree {
         if self.kind == ManagedCheckoutKind::Clone && self.branch.trim().is_empty() {
             bail!("managed clone has no starting branch");
         }
-        let relative = self
-            .source_project_directory
-            .strip_prefix(&self.source_repository)
-            .expect("source relationship checked above");
-        if project_directory != Some(self.worktree_root.join(relative).as_path()) {
+        // Records written before the path became derivable also store it.
+        if let Some(stored) = stored_project_directory
+            && self.checkout_directory().as_deref() != Some(stored)
+        {
             bail!("session project directory does not match its managed worktree");
         }
         match &self.target {
@@ -1507,10 +1520,25 @@ pub struct SessionBuildCache {
     /// policy and Nitro guests use mbx's automatic budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
-    /// A `[target] root` the host's mbx configuration relocates outside the
-    /// cache directory, mounted read-write at the same path as well.
+    /// The effective `[target] root` the session's mbx was provisioned with,
+    /// recorded for every new shared cache: the host's configured root, or
+    /// `<directory>/targets`. A root outside the cache directory is mounted
+    /// read-write at the same path as well (see
+    /// [`SessionBuildCache::mounted_target_root`]). Records from before this
+    /// was recorded hold only an outside root, or `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_root: Option<PathBuf>,
+}
+
+impl SessionBuildCache {
+    /// The recorded target root when it needs a mount of its own, because it
+    /// lies outside the cache directory. The one owner of that decision, for
+    /// provisioning, container recovery, and any other code that attaches the
+    /// cache's mounts.
+    pub fn mounted_target_root(&self) -> Option<&std::path::Path> {
+        let root = self.target_root.as_deref()?;
+        (!crate::target_path::is_within(root, &self.directory)).then_some(root)
+    }
 }
 
 /// How much disk Mjolnir's own copies of sessions use, and how much an
@@ -1645,6 +1673,11 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<Arc<crate::repository::ProjectBundleSnapshot>>,
     /// Existing project directory used directly by a local or SSH bare target.
+    /// Set only for an attached checkout (and, transiently, while a managed
+    /// checkout is planned). A managed checkout's path derives from
+    /// `managed_worktree`, and a sub-agent's from its environment owner; both
+    /// are read through [`State::checkout`]. Records written before that
+    /// carry a copy, which is still honored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_directory: Option<PathBuf>,
     /// Git worktree created and owned by Hel for this raw-project session.
@@ -2193,7 +2226,14 @@ impl SessionRecord {
     /// Cached verdict for an independent clone. Active checkouts are unknown
     /// until a new checkpoint binds an assessment to their exact contents.
     pub fn publication_state(&self) -> Option<PublicationState> {
-        let independent_clone = match self.checkout().effective() {
+        self.publication_state_in(&self.checkout())
+    }
+
+    /// [`Self::publication_state`] for the checkout `State` resolved for this
+    /// session, which is a borrowed one for a sub-agent: it owns no checkout
+    /// to publish.
+    pub fn publication_state_in(&self, checkout: &Checkout<'_>) -> Option<PublicationState> {
+        let independent_clone = match checkout {
             Checkout::ManagedWorktree { worktree, .. } => {
                 worktree.kind == ManagedCheckoutKind::Clone
             }
@@ -2252,7 +2292,7 @@ impl SessionRecord {
     pub fn target_runtime_settings<'a>(
         &'a self,
         config: &Config,
-    ) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
+    ) -> Result<Cow<'a, TargetRuntimeSettings>> {
         target_runtime_settings_for(
             &self.id,
             &self.target_template_id,
@@ -2275,6 +2315,17 @@ impl SessionRecord {
     /// Configuration drift belongs to this session, not the entire controller.
     /// The diagnostic contains only public identifiers, so both UIs can show it.
     pub fn configuration_issue(&self, config: &Config) -> Option<String> {
+        self.configuration_issue_in(&self.checkout(), config)
+    }
+
+    /// [`Self::configuration_issue`] for the checkout `State` resolved for
+    /// this session. A sub-agent borrows its owner's checkout, which the
+    /// record alone cannot name.
+    pub fn configuration_issue_in(
+        &self,
+        checkout: &Checkout<'_>,
+        config: &Config,
+    ) -> Option<String> {
         if !self.state.is_active() {
             return None;
         }
@@ -2287,7 +2338,7 @@ impl SessionRecord {
             )),
             Some(_) => {}
         }
-        if self.checkout().project_directory().is_none() && self.project_bundle(config).is_none() {
+        if checkout.project_directory().is_none() && self.project_bundle(config).is_none() {
             issues.push(format!("missing bundle {:?}", self.bundle_id));
         }
         if self.target_runtime.is_none() && !config.targets.contains_key(&self.target_template_id) {
@@ -2303,7 +2354,15 @@ impl SessionRecord {
     }
 
     pub fn validate_configuration(&self, config: &Config) -> Result<()> {
-        if let Some(issue) = self.configuration_issue(config) {
+        self.validate_configuration_in(&self.checkout(), config)
+    }
+
+    pub fn validate_configuration_in(
+        &self,
+        checkout: &Checkout<'_>,
+        config: &Config,
+    ) -> Result<()> {
+        if let Some(issue) = self.configuration_issue_in(checkout, config) {
             return Err(crate::refusal::Refusal::precondition(issue).into());
         }
         Ok(())
@@ -2642,6 +2701,24 @@ pub struct OperatorPresence {
     pub revision: u64,
 }
 
+/// The per-profile choices a new session starts from. The runtime feed flattens
+/// this into its metadata and [`State`] holds the same fields; every copy
+/// between them goes through [`State::launch_preferences`] and
+/// [`State::apply_launch_preferences`], whose exhaustive destructuring makes a
+/// new preference a compile error until each side carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPreferences {
+    #[serde(
+        default,
+        alias = "last_subagent_policy",
+        deserialize_with = "crate::subagent::deserialize_policy_map"
+    )]
+    pub last_subagent_policies: BTreeMap<String, crate::subagent::SubagentPolicy>,
+    /// The most recent Oracle choice for each profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_oracle_choices: BTreeMap<String, bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -2708,6 +2785,35 @@ impl State {
             .or_else(|| self.last_subagent_policies.get(""))
             .cloned()
     }
+    /// The remembered launch choices, as the runtime feed carries them.
+    pub fn launch_preferences(&self) -> LaunchPreferences {
+        let Self {
+            last_subagent_policies,
+            last_oracle_choices,
+            ..
+        } = self;
+        LaunchPreferences {
+            last_subagent_policies: last_subagent_policies.clone(),
+            last_oracle_choices: last_oracle_choices.clone(),
+        }
+    }
+
+    /// Replaces the remembered launch choices with the feed's. Returns whether
+    /// anything changed.
+    pub fn apply_launch_preferences(&mut self, preferences: LaunchPreferences) -> bool {
+        let LaunchPreferences {
+            last_subagent_policies,
+            last_oracle_choices,
+        } = preferences;
+        let changed = self.last_subagent_policies != last_subagent_policies
+            || self.last_oracle_choices != last_oracle_choices;
+        if changed {
+            self.last_subagent_policies = last_subagent_policies;
+            self.last_oracle_choices = last_oracle_choices;
+        }
+        changed
+    }
+
     /// The remembered Oracle choice for a profile; enabled when it has none.
     pub fn last_oracle_choice_for(&self, profile_id: &str) -> bool {
         self.last_oracle_choices
@@ -2791,13 +2897,14 @@ pub enum Checkout<'a> {
     Attached { path: &'a Path },
     /// A raw project worktree or clone created and retired by Mjolnir.
     ///
-    /// `project_directory` can be absent only on an incomplete legacy record;
-    /// ownership still follows the managed-worktree descriptor. For valid
-    /// records it can be below `worktree_root` when the project is a
-    /// subdirectory of its repository.
+    /// `project_directory` is derived from the descriptor
+    /// ([`ManagedWorktree::checkout_directory`]); a record's own copy, which
+    /// older versions stored, is borrowed when present. It can be below
+    /// `worktree_root` when the project is a subdirectory of its repository,
+    /// and is absent only for a descriptor that fails validation.
     ManagedWorktree {
         worktree: &'a ManagedWorktree,
-        project_directory: Option<&'a Path>,
+        project_directory: Option<Cow<'a, Path>>,
     },
     /// A bundle workspace cloned on the target and retired with its target.
     /// Its target path is platform-specific and is derived by provisioning.
@@ -2814,7 +2921,10 @@ fn derive_record_checkout(session: &SessionRecord) -> Checkout<'_> {
     if let Some(worktree) = &session.managed_worktree {
         return Checkout::ManagedWorktree {
             worktree,
-            project_directory: session.project_directory.as_deref(),
+            project_directory: match session.project_directory.as_deref() {
+                Some(stored) => Some(Cow::Borrowed(stored)),
+                None => worktree.checkout_directory().map(Cow::Owned),
+            },
         };
     }
     if let Some(path) = session.project_directory.as_deref() {
@@ -2858,12 +2968,12 @@ impl<'a> Checkout<'a> {
     /// The concrete repository directory when the record stores one.
     /// Bundle workspace paths are target-specific and are not in the record.
     #[must_use]
-    pub fn project_directory(&self) -> Option<&'a Path> {
+    pub fn project_directory(&self) -> Option<Cow<'a, Path>> {
         match self {
-            Self::Attached { path } => Some(*path),
+            Self::Attached { path } => Some(Cow::Borrowed(*path)),
             Self::ManagedWorktree {
                 project_directory, ..
-            } => *project_directory,
+            } => project_directory.clone(),
             Self::ManagedWorkspace => None,
             Self::Borrowed { checkout, .. } => checkout.project_directory(),
         }
@@ -3046,6 +3156,28 @@ impl State {
                 owner,
                 checkout: Box::new(owner.checkout()),
             })
+        }
+    }
+
+    /// [`SessionRecord::configuration_issue`] judged against the checkout this
+    /// session actually uses, which for a sub-agent is its owner's. A session
+    /// whose owner is unknown to this projection is judged by its own record.
+    pub fn configuration_issue(&self, session: &SessionRecord, config: &Config) -> Option<String> {
+        match self.checkout_for_record(&session.id, session) {
+            Ok(checkout) => session.configuration_issue_in(&checkout, config),
+            Err(_) => session.configuration_issue(config),
+        }
+    }
+
+    /// [`Self::configuration_issue`] as a refusal.
+    pub fn validate_session_configuration(
+        &self,
+        session: &SessionRecord,
+        config: &Config,
+    ) -> Result<()> {
+        match self.configuration_issue(session, config) {
+            Some(issue) => Err(crate::refusal::Refusal::precondition(issue).into()),
+            None => Ok(()),
         }
     }
 
@@ -3402,7 +3534,7 @@ impl State {
         self.validate()?;
         config.validate()?;
         for session in self.sessions.values() {
-            session.validate_configuration(config)?;
+            self.validate_session_configuration(session, config)?;
         }
         Ok(())
     }
@@ -3614,7 +3746,7 @@ pub fn target_runtime_settings_for<'a>(
     target: Option<&TargetLocator>,
     runtime: Option<&'a TargetRuntimeSettings>,
     config: &Config,
-) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
+) -> Result<Cow<'a, TargetRuntimeSettings>> {
     if let Some(runtime) = runtime {
         // How to reach the target follows the machine's current ssh
         // options; where it is stays as recorded (launch finding R3-7).

@@ -21,8 +21,8 @@ use mj_core::relay::WorkerHarnessStartupFailureKind;
 use mj_core::state::SessionState;
 
 use super::worker_binary::{
-    probe_worker_liveness, refresh_installed_worker_binary, replace_installed_worker_launch_config,
-    start_worker_durably, stop_worker_after_target_recovery,
+    probe_worker_liveness, refresh_installed_worker_binary, start_worker_durably,
+    stop_worker_after_target_recovery,
 };
 use super::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
 use super::{Controller, IdleWorkspaceLease};
@@ -219,7 +219,7 @@ impl Controller {
             }
             stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                 .context("stop the sub-agent's worker")?;
-            self.pull_parked_codex_login(session_id, session, &backend, executor)
+            self.harvest_parked_login(session_id, session, &backend, executor)
                 .await;
             let mut record = session.clone();
             record.state = if failure.is_some() {
@@ -249,29 +249,24 @@ impl Controller {
         .await
     }
 
-    /// Pull a refreshed Codex login from a session's staged home back into the
-    /// canonical profile store keyed by `session.last_profile`.
-    ///
-    /// Returns `Ok(true)` when a newer login was installed, `Ok(false)` when
-    /// no update applied (non-Codex, symlinked/shared login, missing file,
-    /// already up to date, or staged `ownership.json` belongs to another
-    /// profile), and `Err` when reading or installing fails.
-    pub(in crate::controller) async fn pull_staged_codex_login(
+    /// Adopt a copied native login after its writer has stopped. Shared links
+    /// and push-only exports are excluded by the core login descriptor.
+    pub(in crate::controller) async fn harvest_stopped_login(
         &self,
         session_id: &str,
         session: &mj_core::state::SessionRecord,
         backend: &targets::TargetLocator,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<bool> {
-        use mj_core::config::HarnessKind;
         #[derive(serde::Deserialize)]
         struct StagedOwnershipProfile {
             profile_id: String,
         }
 
-        if session.harness_kind != HarnessKind::Codex {
+        let kind = session.harness_kind;
+        let Some(relative_login) = mj_core::credentials::copied_login_relative_path(kind) else {
             return Ok(false);
-        }
+        };
         let Some(profile) = self.config.profiles.get(&session.last_profile) else {
             return Ok(false);
         };
@@ -280,17 +275,15 @@ impl Controller {
         }
         let launch = self
             .current_worker_launch_config(session_id, backend)
-            .context("resolve launch config to pull staged Codex login")?;
+            .context("resolve launch config to pull staged native login")?;
         let worker_root = crate::targets::worker_root(backend, session_id)?;
         let canonical_marker = profile.authentication_marker();
         let expected_profile = session.last_profile.clone();
         let bytes = match backend {
             targets::TargetLocator::LocalBare { .. } => {
                 let ownership_path = std::path::PathBuf::from(&worker_root).join("ownership.json");
-                let staged_path = mj_core::config::harness_authentication_marker(
-                    HarnessKind::Codex,
-                    &launch.harness_home,
-                );
+                let staged_path =
+                    mj_core::config::harness_authentication_marker(kind, &launch.harness_home);
                 if staged_path == canonical_marker {
                     return Ok(false);
                 }
@@ -310,7 +303,7 @@ impl Controller {
                                     tracing::warn!(
                                         expected_profile = %expected,
                                         staged_profile = %ownership.profile_id,
-                                        "skipping staged Codex login pull because ownership.json names another profile"
+                                        "skipping staged native login pull because ownership.json names another profile"
                                     );
                                     return Ok(None);
                                 }
@@ -322,28 +315,10 @@ impl Controller {
                                 });
                             }
                         }
-                        let metadata = match std::fs::symlink_metadata(&staged_path) {
-                            Ok(metadata) => metadata,
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                return Ok(None);
-                            }
-                            Err(error) => {
-                                return Err(error).with_context(|| {
-                                    format!("inspect staged Codex login {}", staged_path.display())
-                                });
-                            }
-                        };
-                        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                            return Ok(None);
-                        }
-                        std::fs::read(&staged_path)
-                            .with_context(|| {
-                                format!("read staged Codex login {}", staged_path.display())
-                            })
-                            .map(Some)
+                        mj_core::credentials::read_harvestable_copied_login(kind, &launch.harness_home)
                     })
                     .await
-                    .context("staged Codex login read task failed")??;
+                    .context("staged native login read task failed")??;
                 match maybe_bytes {
                     Some(bytes) => bytes,
                     None => return Ok(false),
@@ -355,7 +330,7 @@ impl Controller {
                 let staged_path = format!(
                     "{}/{}",
                     launch.harness_home.to_string_lossy().trim_end_matches('/'),
-                    HarnessKind::Codex.credential_file_name()
+                    relative_login.to_string_lossy()
                 );
                 let command = targets::locator_command(
                     targets::SshTrafficClass::Control,
@@ -363,25 +338,27 @@ impl Controller {
                     vec![
                         "sh".into(),
                         "-c".into(),
-                        "set -e; if [ -e \"$1\" ] || [ -L \"$1\" ]; then cat -- \"$1\"; fi; printf '\\0'; if [ ! -L \"$2\" ] && [ -f \"$2\" ]; then cat -- \"$2\"; fi".into(),
-                        "mj-pull-codex-login".into(),
+                        "set -e; if [ -e \"$1\" ] || [ -L \"$1\" ]; then cat -- \"$1\"; fi; printf '\\0'; if [ ! -L \"$3\" ] && [ ! -L \"$4\" ] && [ ! -L \"$2\" ] && [ -f \"$2\" ]; then cat -- \"$2\"; fi".into(),
+                        "mj-pull-native-login".into(),
                         ownership_path,
-                        staged_path,
+                        staged_path.clone(),
+                        launch.harness_home.to_string_lossy().into_owned(),
+                        std::path::Path::new(&staged_path).parent().context("staged login parent")?.to_string_lossy().into_owned(),
                     ],
                 )
-                .purpose("read staged Codex login");
+                .purpose("read staged native login");
                 let output = executor
                     .execute(&command)
-                    .context("execute staged Codex login read")?;
+                    .context("execute staged native login read")?;
                 if output.status != 0 {
                     anyhow::bail!(
-                        "read staged Codex login from target exited with status {}: {}",
+                        "read staged native login from target exited with status {}: {}",
                         output.status,
                         String::from_utf8_lossy(&output.stderr).trim()
                     );
                 }
                 let Some(sep) = output.stdout.iter().position(|&byte| byte == 0) else {
-                    anyhow::bail!("unexpected staged Codex login probe output without separator");
+                    anyhow::bail!("unexpected staged native login probe output without separator");
                 };
                 let ownership_bytes = &output.stdout[..sep];
                 let auth_bytes = &output.stdout[sep + 1..];
@@ -393,7 +370,7 @@ impl Controller {
                             session_id,
                             expected_profile = %expected_profile,
                             staged_profile = %ownership.profile_id,
-                            "skipping staged Codex login pull because ownership.json names another profile"
+                            "skipping staged native login pull because ownership.json names another profile"
                         );
                         return Ok(false);
                     }
@@ -404,30 +381,19 @@ impl Controller {
                 auth_bytes.to_vec()
             }
         };
-        let install = mj_core::credentials::install_credentials_if_newer(
-            HarnessKind::Codex,
-            &canonical_marker,
-            &bytes,
-        )
-        .await
-        .context("install staged Codex login into canonical store")?;
-        if install.installed {
-            tracing::info!(
-                session_id,
-                profile = %session.last_profile,
-                "pulled refreshed Codex login from staged home"
-            );
+        if !mj_core::credentials::harvestable_login_bytes(kind, &bytes)? {
+            return Ok(false);
         }
-        Ok(install.installed)
+        crate::worker_client::adopt_copied_login(profile, &bytes).await
     }
 
-    /// Pull a refreshed Codex login from a stopped sub-agent's staged home back
+    /// Pull a refreshed native login from a stopped sub-agent's staged home back
     /// into the canonical profile store before `Parked` is published (#1633).
     ///
     /// Keyed by `session.last_profile`, which is the profile the stopped home
     /// was staged for. Failures are logged rather than aborting `Parked`
     /// publication because the worker is already stopped.
-    async fn pull_parked_codex_login(
+    async fn harvest_parked_login(
         &self,
         session_id: &str,
         session: &mj_core::state::SessionRecord,
@@ -435,16 +401,109 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) {
         if let Err(error) = self
-            .pull_staged_codex_login(session_id, session, backend, executor)
+            .harvest_stopped_login(session_id, session, backend, executor)
             .await
         {
             tracing::warn!(
                 session_id,
                 profile = %session.last_profile,
                 error = format!("{error:#}"),
-                "could not pull parked Codex login"
+                "could not pull parked native login"
             );
         }
+    }
+
+    /// Finish a durable parked Move boot before admitting destination work.
+    pub(super) async fn settle_pending_parked_move_boot(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let Some(intent) = crate::database::load_worker_restart(session_id)? else {
+            return Ok(());
+        };
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
+            let owner = crate::worker_lifecycle::require(session_id)?;
+            let (backend, worker_root) = self.worker_placement(session_id)?;
+            let reconnect = targets::reconnect_plan(&backend, session_id)?
+                .commands
+                .into_iter()
+                .next()
+                .context("reconnect plan is empty")?;
+            let liveness = probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
+            let command = targets::locator_command(
+                mj_core::targets::SshTrafficClass::Control,
+                &backend,
+                vec!["cat".into(), format!("{worker_root}/launch.json")],
+            )
+            .purpose("read parked Move worker launch config");
+            let output = executor.execute(&command)?;
+            let output = targets::checked_command_output(&command, output)?;
+            let launch: mj_core::worker_launch::WorkerLaunchConfig =
+                serde_json::from_slice(&output.stdout).context("read staged parked Move launch")?;
+            let aws_profile = launch.environment.get("AWS_PROFILE").map(String::as_str);
+            let active_operation_id = if liveness.status == 0
+                && String::from_utf8_lossy(&liveness.stdout).trim() == "dead"
+            {
+                let target = self.state.sessions[session_id]
+                    .target
+                    .as_deref()
+                    .context("parked Move target disappeared")?;
+                owner.settle_dead_restart(target)?;
+                owner.begin_restart(target, String::new())?;
+                crate::database::advance_worker_restart(
+                    session_id,
+                    owner.operation_id(),
+                    crate::database::WorkerRestartPhase::Swapping,
+                )?;
+                crate::database::record_worker_restart_aws_profile(
+                    session_id,
+                    owner.operation_id(),
+                    aws_profile,
+                )?;
+                start_worker_durably(
+                    &owner,
+                    target,
+                    executor,
+                    &backend,
+                    &worker_root,
+                    &self.config.github,
+                )
+                .context(RESTART_FROM_PARKED.start)
+                .map_err(|error| explain_process_exhaustion(error, &backend, session_id))?;
+                owner.operation_id().to_owned()
+            } else {
+                intent.operation_id
+            };
+            executor.begin_resumable_work()?;
+            let observed = self
+                .observe_started_worker(
+                    session_id,
+                    executor,
+                    InstalledWorkerRestart {
+                        backend: &backend,
+                        worker_root: &worker_root,
+                        reconnect: &reconnect,
+                        launch: None,
+                        prepared: true,
+                        discard_queued_prompts: None,
+                        staged_aws_profile: Some(aws_profile),
+                        swap_admission: None,
+                        messages: &RESTART_FROM_PARKED,
+                    },
+                )
+                .await;
+            let held = executor.end_resumable_work("settle parked Move worker boot");
+            observed?;
+            held?;
+            crate::database::activate_worker_restart(session_id, &active_operation_id)?;
+            let active = crate::database::load_session_record(session_id)?
+                .context("parked Move boot session disappeared")?;
+            self.state.sessions.insert(session_id.to_owned(), active);
+            Ok(())
+        })
+        .await
     }
 
     /// Accept a durable wake, launch the worker, and observe native readiness.
@@ -452,11 +511,15 @@ impl Controller {
     /// accepted, a proved dead worker settles with its failure; uncertain
     /// liveness leaves the active record and boot intent for recovery.
     /// It never stops a worker that may have resumed accepted work.
+    // A Move stages a destination while preserving the parked source for rollback.
     pub async fn unpark_subagent_worker(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
-        profile_change: Option<(&str, &str)>,
+        move_destination: Option<(
+            &mj_core::state::SessionRecord,
+            mj_core::worker_launch::ParkedMoveLaunch,
+        )>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
@@ -502,23 +565,10 @@ impl Controller {
             }
             // Prepare using a local view of the chosen profile. The record
             // still names the source if staging fails or is interrupted.
-            if let Some((source, destination)) = profile_change {
-                ensure!(
-                    session.last_profile == source
-                        && session.harness_kind != mj_core::config::HarnessKind::OpenCode
-                        && self.config.enabled_profile(destination).is_some()
-                        && self.config.native_continuity(
-                            session.harness_kind,
-                            source,
-                            destination,
-                        )?,
-                    "the sub-agent's quota switch profiles changed before staging"
-                );
-            }
-            let destination_profile = profile_change.map(|(_, destination)| destination);
+            let previous_session = session.clone();
             let mut staging = Controller { config: self.config.clone(), state: self.state.clone() };
-            if let Some(profile) = destination_profile {
-                staging.state.sessions.get_mut(session_id).unwrap().last_profile = profile.to_owned();
+            if let Some((destination, _)) = move_destination.as_ref() {
+                staging.state.sessions.insert(session_id.to_owned(), (*destination).clone());
             }
             // Stage the current login even when the parked child kept its profile.
             let staged = staging.prepare_worker_files_for(
@@ -531,11 +581,11 @@ impl Controller {
             )
             .context("stage the current profile login for the parked sub-agent")?;
             staging.state.sessions.get_mut(session_id).unwrap().staged_aws_profile.clone_from(&staged.aws_profile);
-            let launch = staging.current_worker_launch_config(session_id, &backend)?;
+            let mut launch = staging.current_worker_launch_config(session_id, &backend)?;
+            launch.parked_move = move_destination.as_ref().map(|(_, parked)| parked.clone());
             refresh_installed_worker_binary(executor, &backend, session_id)
                 .context(RESTART_FROM_PARKED.replace)?;
-            replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
-                .context("install the current Mjolnir worker launch configuration")?;
+            staging.install_launch_config(session_id, &backend, &launch, executor)?;
             // Keep container startup concurrency bounded through native readiness,
             // while cancellation releases this observation without stopping a worker.
             let gate = super::provisioning::container_start_gate(&backend);
@@ -569,7 +619,7 @@ impl Controller {
                     target: *target.clone(),
                     desired_build: String::new(),
                 },
-                profile_change,
+                move_destination.as_ref().map(|(destination, _)| *destination),
                 Some(staged.aws_profile.as_deref()),
             )?;
             let observed = async {
@@ -604,6 +654,22 @@ impl Controller {
                 // The working-directory failure is written before the relay
                 // opens. If the marker is already present while the worker is
                 // still exiting, it is safe to settle without waiting for death.
+                if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead"
+                    && let Some((_, parked)) = move_destination.as_ref()
+                {
+                    let marker = format!("parked-move:{}", parked.operation_id);
+                    let started = format!("parked-move-started:{}", parked.operation_id);
+                    match super::lifecycle::origin_delta::read_wire::<mj_core::relay::RelaySnapshot>(
+                        &backend, session_id, &worker_root, mj_core::relay::RELAY_STATE_FILE, executor,
+                    ) {
+                        Ok(snapshot) if snapshot.as_ref().is_none_or(|snapshot| !snapshot.handled_commands.contains_key(&marker) && !snapshot.handled_commands.contains_key(&started)) => {}
+                        Ok(_) => return Err(error),
+                        Err(probe_error) => {
+                            tracing::warn!(session_id, error = format!("{probe_error:#}"), "could not prove the failed parked Move boot left its journal uncommitted");
+                            return Err(error);
+                        }
+                    }
+                }
                 let command = super::worker_binary::worker_exit_record_command(&backend, &worker_root);
                 let exited = executor.execute(&command)
                     .and_then(|output| mj_core::targets::checked_command_output(&command, output))
@@ -634,16 +700,13 @@ impl Controller {
                     let evidence = staged.login
                         .filter(|_| mj_core::credentials::text_reports_auth_failure(&detail))
                         .map(|staged_login| mj_core::subagent::WakeFailure::Authentication {
-                            profile_id: destination_profile.unwrap_or(&session.last_profile).to_owned(),
+                            profile_id: staging.state.sessions[session_id].last_profile.clone(),
                             staged_login,
                         });
-                    crate::database::fail_subagent_unpark(
-                        session_id,
-                        owner.operation_id(),
-                        SubagentUnparkFailure::Retryable {
-                            detail: &detail,
-                            evidence: evidence.as_ref(),
-                        },
+                    crate::database::fail_subagent_unpark_with_rollback(
+                        session_id, owner.operation_id(),
+                        SubagentUnparkFailure::Retryable { detail: &detail, evidence: evidence.as_ref() },
+                        move_destination.as_ref().map(|_| &previous_session),
                     )?;
                     anyhow::bail!("{detail}");
                 }
@@ -660,7 +723,7 @@ impl Controller {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(in crate::controller) mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -811,16 +874,28 @@ mod tests {
     /// are real. A detached launch must already have its active record and intent.
     struct WakeTarget {
         cancelled: AtomicBool,
+        dead_before_start: AtomicBool,
+        failed_boot_journal: Option<(std::path::PathBuf, FailedBootMarker)>,
         purposes: Mutex<Vec<String>>,
         admission: Mutex<Option<crate::upgrade::Work>>,
         gate: Arc<crate::upgrade::Gate>,
         observing: tokio::sync::Notify,
     }
 
+    #[derive(Clone, Copy)]
+    enum FailedBootMarker {
+        Absent,
+        Started,
+        Present,
+        Unreadable,
+    }
+
     impl WakeTarget {
         fn new() -> Self {
             Self {
                 cancelled: AtomicBool::new(false),
+                dead_before_start: AtomicBool::new(false),
+                failed_boot_journal: None,
                 purposes: Mutex::new(Vec::new()),
                 admission: Mutex::new(None),
                 gate: Arc::new(crate::upgrade::Gate::default()),
@@ -855,7 +930,49 @@ mod tests {
 
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
+            if matches!(
+                command.purpose.as_str(),
+                "install local worker launch configuration"
+                    | "replace stale Mjolnir worker launch config"
+                    | "read parked Move worker launch config"
+            ) {
+                return crate::targets::ProcessExecutor.execute(command);
+            }
             if command.purpose == "start detached Mjolnir worker" {
+                if let Some((path, marker)) = &self.failed_boot_journal {
+                    let mut snapshot =
+                        mj_core::relay::RelaySnapshot::new(LATCH_RELAY_SESSION.into());
+                    if matches!(
+                        marker,
+                        FailedBootMarker::Present | FailedBootMarker::Started
+                    ) {
+                        let receipt = if matches!(marker, FailedBootMarker::Started) {
+                            "parked-move-started:failed-boot-move"
+                        } else {
+                            "parked-move:failed-boot-move"
+                        };
+                        snapshot.handled_commands.insert(
+                            receipt.into(),
+                            mj_core::relay::HandledRelayCommand {
+                                accepted_ordinal: 0,
+                                terminal_identity: None,
+                                terminal_ordinal: None,
+                                outcome: None,
+                                failure: None,
+                            },
+                        );
+                    }
+                    let bytes = if matches!(marker, FailedBootMarker::Unreadable) {
+                        b"unreadable".to_vec()
+                    } else {
+                        serde_json::to_vec(&snapshot)?
+                    };
+                    std::fs::write(path, bytes)?;
+                    return Err(anyhow::anyhow!(
+                        "simulated destination harness startup failure"
+                    ));
+                }
+                self.dead_before_start.store(false, Ordering::SeqCst);
                 assert!(!self.gate.try_close(), "launch must hold admission");
                 assert_eq!(
                     crate::database::load_session_state(LATCH_RELAY_SESSION)?,
@@ -879,7 +996,11 @@ mod tests {
                 )
                 .into_bytes()
             } else if command.purpose == "probe Mjolnir worker daemon liveness" {
-                b"alive\n".to_vec()
+                if self.dead_before_start.load(Ordering::SeqCst) {
+                    b"dead\n".to_vec()
+                } else {
+                    b"alive\n".to_vec()
+                }
             } else {
                 Vec::new()
             };
@@ -895,7 +1016,15 @@ mod tests {
         }
 
         fn begin_resumable_work(&self) -> Result<()> {
-            if self.admission.lock().unwrap().take().is_some() {
+            let held = self.admission.lock().unwrap().take();
+            let yielded = held.is_some();
+            drop(held);
+            assert!(
+                self.gate.active_labels().is_empty(),
+                "resumable observation must yield daemon admission"
+            );
+            self.purposes.lock().unwrap().push("yield admission".into());
+            if yielded {
                 self.observing.notify_one();
             }
             Ok(())
@@ -903,6 +1032,10 @@ mod tests {
 
         fn end_resumable_work(&self, label: &'static str) -> Result<()> {
             *self.admission.lock().unwrap() = Some(self.gate.enter(label)?);
+            self.purposes
+                .lock()
+                .unwrap()
+                .push(format!("hold admission: {label}"));
             Ok(())
         }
     }
@@ -996,8 +1129,18 @@ mod tests {
                     target: *target,
                     desired_build: String::new(),
                 };
-                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None, None)
-                    .unwrap();
+                let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
+                let mut destination = previous.clone();
+                destination.last_profile = "moved-profile".into();
+                destination.harness_kind = mj_core::config::HarnessKind::Claude;
+                destination.native_session_id = None;
+                crate::database::begin_subagent_unpark(
+                    LATCH_RELAY_SESSION,
+                    &intent,
+                    Some(&destination),
+                    None,
+                )
+                .unwrap();
                 let detail = "workspace routing discovery unauthorized (401)";
                 let evidence = mj_core::subagent::WakeFailure::Authentication {
                     profile_id: "codex".into(),
@@ -1019,19 +1162,23 @@ mod tests {
                     crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
                     Some(SessionState::Running)
                 );
-                crate::database::fail_subagent_unpark(
+                crate::database::fail_subagent_unpark_with_rollback(
                     LATCH_RELAY_SESSION,
                     owner.operation_id(),
                     SubagentUnparkFailure::Retryable {
                         detail,
                         evidence: Some(&evidence),
                     },
+                    Some(&previous),
                 )
                 .unwrap();
                 let record = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
                     .unwrap()
                     .unwrap();
                 assert_eq!(record.state, SessionState::Parked);
+                assert_eq!(record.last_profile, previous.last_profile);
+                assert_eq!(record.harness_kind, previous.harness_kind);
+                assert_eq!(record.native_session_id, previous.native_session_id);
                 let saved = record.last_error.as_deref().unwrap();
                 assert!(saved.starts_with(detail), "{saved}");
                 assert_eq!(
@@ -1103,6 +1250,607 @@ mod tests {
                 .iter()
                 .any(|p| p == "stop Mjolnir worker daemon")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_move_starts_destination_in_the_existing_environment() {
+        if !isolated("parked_move_starts_destination_in_the_existing_environment") {
+            return;
+        }
+        parked_move_case(ParkedMoveCase::SameHarness).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subagent_move_parked_cross_harness_and_boot_recovery() {
+        if !isolated("subagent_move_parked_cross_harness_and_boot_recovery") {
+            return;
+        }
+        parked_move_case(ParkedMoveCase::CrossHarness).await;
+    }
+
+    pub(in crate::controller) enum ParkedMoveCase {
+        SameHarness,
+        CrossHarness,
+        DeadBoot,
+        LiveBoot,
+        Quota,
+        RecoveredQuota,
+    }
+
+    pub(in crate::controller) async fn parked_move_case(case: ParkedMoveCase) {
+        let cross_harness = matches!(case, ParkedMoveCase::CrossHarness);
+        let pending_boot = matches!(
+            case,
+            ParkedMoveCase::DeadBoot | ParkedMoveCase::LiveBoot | ParkedMoveCase::RecoveredQuota
+        );
+        let dead_boot = matches!(
+            case,
+            ParkedMoveCase::DeadBoot | ParkedMoveCase::RecoveredQuota
+        );
+        let quota = matches!(case, ParkedMoveCase::Quota | ParkedMoveCase::RecoveredQuota);
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = waking_controller(root.path(), 0);
+        let script_path = root.path().join(LATCH_RELAY_SESSION).join("hel");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        std::fs::write(
+            &script_path,
+            script
+                .lines()
+                .filter(|line| {
+                    !line.contains(mj_core::test_hooks::latch_relay::LATCH_RELAY_RUNNING)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut seed =
+            mj_worker::relay::DurableRelay::open(root.path(), LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "old-codex-thread".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+        seed.record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+        seed.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "previous-assignment".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::Submit {
+                command_id: "previous-assignment".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from(
+                        "Keep the previous implementation and continue its tests.",
+                    )],
+                },
+            },
+        });
+        assert_eq!(seed.claim_pending_commands(true).unwrap().len(), 1);
+        seed.record_command_completed(
+            "previous-assignment",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+        let mut history = mj_core::state::MaterializedSession::empty(LATCH_RELAY_SESSION);
+        for event in seed
+            .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+        {
+            let projected =
+                mj_transcript::projection::project_relay_event(&history, &event).unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
+                &mut history,
+                &event,
+                projected.mutation,
+            )
+            .unwrap();
+        }
+        crate::database::save_materialized_session(&history).unwrap();
+        drop(seed);
+
+        controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap()
+            .native_session_id = Some("old-codex-thread".into());
+        controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap()
+            .staged_aws_profile = Some("source-aws".into());
+        crate::database::save_session(&controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
+        let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        controller.config.profiles.insert(
+            "destination".into(),
+            controller.config.profiles["codex"].clone(),
+        );
+        if cross_harness {
+            controller
+                .config
+                .profiles
+                .get_mut("destination")
+                .unwrap()
+                .kind = mj_core::config::HarnessKind::Claude;
+        }
+        let mut operation =
+            super::super::move_session::test_fixtures::source_recovery_operation(&previous);
+        operation.in_place = true;
+        let executor = WakeTarget::new();
+        if quota {
+            operation.queue = mj_core::state::ResumeQueueDisposition::Start;
+            operation.quota_stop_reason = Some("quota exhausted".into());
+            operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+            operation.in_place_continuation_command_id = Some("saved-quota-continuation".into());
+        }
+        if pending_boot {
+            let mut destination = previous.clone();
+            destination.last_profile = "destination".into();
+            let mut staged = Controller {
+                config: controller.config.clone(),
+                state: controller.state.clone(),
+            };
+            staged
+                .state
+                .sessions
+                .insert(LATCH_RELAY_SESSION.into(), destination.clone());
+            let (backend, _) = staged.worker_placement(LATCH_RELAY_SESSION).unwrap();
+            let mut launch = staged
+                .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+                .unwrap();
+            launch
+                .environment
+                .insert("AWS_PROFILE".into(), "destination-aws".into());
+            launch.parked_move = Some(mj_core::worker_launch::ParkedMoveLaunch {
+                operation_id: operation.operation_id.clone(),
+                discard_native_session_id: None,
+                prompt_context: None,
+                discard_queued_prompts: operation.queue
+                    == mj_core::state::ResumeQueueDisposition::Discard,
+                quota_continuation: quota.then(|| mj_core::worker_launch::InitialWorkerCommand {
+                    command_id: "saved-quota-continuation".into(),
+                    command: RelayCommand::Prompt {
+                        prompt: mj_core::continuation::prompt_blocks(),
+                    },
+                    optional: false,
+                }),
+            });
+            launch
+                .write(&root.path().join(LATCH_RELAY_SESSION).join("launch.json"))
+                .unwrap();
+            let owner = crate::controller::test_support::worker_test_permit(
+                LATCH_RELAY_SESSION,
+                "interrupted parked Move boot",
+            )
+            .unwrap()
+            .unwrap();
+            owner
+                .scope_blocking(|| {
+                    crate::database::begin_subagent_unpark(
+                        LATCH_RELAY_SESSION,
+                        &crate::database::WorkerRestartIntent {
+                            operation_id: owner.operation_id().into(),
+                            target: *previous.target.clone().unwrap(),
+                            desired_build: String::new(),
+                        },
+                        Some(&destination),
+                        Some(Some("destination-aws")),
+                    )
+                })
+                .unwrap();
+            drop(owner);
+            controller.state = crate::database::load_state().unwrap();
+            operation.phase = mj_core::state::MovePhase::DestinationStarting;
+            operation.recovery_session = Some(previous.clone());
+            crate::database::save_move_operation(&operation).unwrap();
+            executor
+                .dead_before_start
+                .store(dead_boot, Ordering::SeqCst);
+            executor.end_resumable_work("recover parked Move").unwrap();
+        }
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        if pending_boot {
+            let outcome = controller
+                .recover_move_managed_controlled(
+                    &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                    operation.clone(),
+                    &executor,
+                    &channels.control,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+            assert!(
+                crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .is_none()
+            );
+            let starts = executor
+                .purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|purpose| purpose.as_str() == "start detached Mjolnir worker")
+                .count();
+            assert_eq!(starts, usize::from(dead_boot));
+            let events = executor.purposes.lock().unwrap();
+            let yielded = events
+                .iter()
+                .position(|event| event == "yield admission")
+                .expect("readiness must release admission");
+            let held = events
+                .iter()
+                .position(|event| event == "hold admission: settle parked Move worker boot")
+                .expect("completion must reacquire admission");
+            assert!(yielded < held);
+            if dead_boot {
+                let started = events
+                    .iter()
+                    .position(|event| event == "start detached Mjolnir worker")
+                    .unwrap();
+                assert!(
+                    started < yielded,
+                    "only readiness observation yields; worker start holds admission"
+                );
+            }
+            drop(events);
+            assert_eq!(
+                controller.state.sessions[LATCH_RELAY_SESSION]
+                    .staged_aws_profile
+                    .as_deref(),
+                Some("destination-aws")
+            );
+        } else {
+            controller
+                .execute_move(
+                    &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                    &mut operation,
+                    None,
+                    &executor,
+                    &channels.control,
+                    super::super::move_session::MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(
+            !executor.gate.try_close(),
+            "Move completion must hold daemon admission"
+        );
+        if cross_harness {
+            let events = executor.purposes.lock().unwrap();
+            let yielded = events
+                .iter()
+                .position(|event| event == "yield admission")
+                .expect("handoff generation yields admission");
+            let held = events
+                .iter()
+                .position(|event| event == "hold admission: commit parked Move destination")
+                .expect("destination commit reacquires admission");
+            let started = events
+                .iter()
+                .position(|event| event == "start detached Mjolnir worker")
+                .unwrap();
+            assert!(yielded < held && held < started);
+        }
+        let launch = mj_core::worker_launch::WorkerLaunchConfig::read(
+            &root.path().join(LATCH_RELAY_SESSION).join("launch.json"),
+        )
+        .unwrap();
+        let parked = launch
+            .parked_move
+            .as_ref()
+            .expect("parked Move launch envelope");
+        assert_eq!(parked.operation_id, operation.operation_id);
+        assert_eq!(
+            parked.discard_native_session_id.as_deref(),
+            cross_harness.then_some("old-codex-thread")
+        );
+        assert_eq!(
+            parked.discard_queued_prompts,
+            operation.queue == mj_core::state::ResumeQueueDisposition::Discard
+        );
+        if cross_harness {
+            assert!(
+                parked
+                    .prompt_context
+                    .as_deref()
+                    .unwrap()
+                    .contains("previous implementation")
+            );
+        } else {
+            assert_eq!(parked.prompt_context, None);
+        }
+        assert_eq!(
+            parked
+                .quota_continuation
+                .as_ref()
+                .map(|command| command.command_id.as_str()),
+            quota.then_some("saved-quota-continuation")
+        );
+        if let Some(command) = &parked.quota_continuation {
+            assert_eq!(
+                command.command,
+                RelayCommand::Prompt {
+                    prompt: mj_core::continuation::prompt_blocks()
+                }
+            );
+        }
+        assert_eq!(
+            launch.native_session_id.as_deref(),
+            (!cross_harness).then_some("old-codex-thread")
+        );
+        if cross_harness {
+            operation.phase = mj_core::state::MovePhase::DestinationStarting;
+            operation.in_place_harness_restarted = false;
+            crate::database::save_move_operation(&operation).unwrap();
+            let outcome = controller
+                .recover_move_managed_controlled(
+                    &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                    operation.clone(),
+                    &WakeTarget::new(),
+                    &channels.control,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+        }
+        channels.shutdown.shutdown().await.unwrap();
+        assert_eq!(
+            crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                .unwrap()
+                .unwrap()
+                .phase,
+            mj_core::state::MovePhase::Completed
+        );
+        let active = crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.last_profile, "destination");
+        assert_eq!(active.target, previous.target);
+        assert_eq!(active.state, SessionState::Running);
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_without_journal_marker_rolls_back_source() {
+        if !isolated("failed_parked_move_without_journal_marker_rolls_back_source") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Absent).await;
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_with_journal_marker_keeps_destination() {
+        if !isolated("failed_parked_move_with_journal_marker_keeps_destination") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Present).await;
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_with_started_marker_keeps_destination() {
+        if !isolated("failed_parked_move_with_started_marker_keeps_destination") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Started).await;
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_with_unreadable_journal_keeps_destination() {
+        if !isolated("failed_parked_move_with_unreadable_journal_keeps_destination") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Unreadable).await;
+    }
+
+    async fn failed_parked_boot_case(marker: FailedBootMarker) {
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = waking_controller(root.path(), 0);
+        let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        controller.config.profiles.insert(
+            "destination".into(),
+            controller.config.profiles["codex"].clone(),
+        );
+        let mut destination = previous.clone();
+        destination.last_profile = "destination".into();
+        let parked = mj_core::worker_launch::ParkedMoveLaunch {
+            operation_id: "failed-boot-move".into(),
+            discard_native_session_id: None,
+            prompt_context: None,
+            discard_queued_prompts: false,
+            quota_continuation: None,
+        };
+        let mut executor = WakeTarget::new();
+        executor.dead_before_start.store(true, Ordering::SeqCst);
+        executor.failed_boot_journal = Some((
+            root.path()
+                .join(LATCH_RELAY_SESSION)
+                .join(mj_core::relay::RELAY_STATE_FILE),
+            marker,
+        ));
+        let error = controller
+            .unpark_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                Some((&destination, parked)),
+                &executor,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("simulated destination harness startup failure"),
+            "{error:#}"
+        );
+        let active = crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        let rolled_back = matches!(marker, FailedBootMarker::Absent);
+        assert_eq!(
+            active.state,
+            if rolled_back {
+                SessionState::Parked
+            } else {
+                SessionState::Running
+            }
+        );
+        assert_eq!(
+            active.last_profile,
+            if rolled_back {
+                &previous.last_profile
+            } else {
+                &destination.last_profile
+            }
+            .as_str()
+        );
+        assert_eq!(
+            crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                .unwrap()
+                .is_some(),
+            !rolled_back
+        );
+        let mut operation =
+            super::super::move_session::test_fixtures::source_recovery_operation(&previous);
+        operation.operation_id = "failed-boot-move".into();
+        operation.in_place = true;
+        operation.phase = mj_core::state::MovePhase::DestinationStarting;
+        let outcome = controller
+            .finish_move_result(&mut operation, Err(error), &executor)
+            .unwrap();
+        assert_eq!(
+            outcome.outcome,
+            if rolled_back { "failed" } else { "interrupted" },
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn parked_move_failure_settlement_uses_the_durable_boot_state() {
+        if !isolated("parked_move_failure_settlement_uses_the_durable_boot_state") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = waking_controller(root.path(), 0);
+        let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        let mut operation =
+            super::super::move_session::test_fixtures::source_recovery_operation(&previous);
+        operation.in_place = true;
+        operation.phase = mj_core::state::MovePhase::DestinationStarting;
+        crate::database::save_move_operation(&operation).unwrap();
+        let owner = crate::controller::test_support::worker_test_permit(
+            LATCH_RELAY_SESSION,
+            "transient parked Move boot",
+        )
+        .unwrap()
+        .unwrap();
+        owner.scope_blocking(|| {
+            let intent = crate::database::WorkerRestartIntent {
+                operation_id: owner.operation_id().into(),
+                target: *previous.target.clone().unwrap(),
+                desired_build: String::new(),
+            };
+            crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None, None)
+                .unwrap();
+            // The controller still caches Parked, while boot acceptance is durable.
+            assert_eq!(
+                controller.state.sessions[LATCH_RELAY_SESSION].state,
+                SessionState::Parked
+            );
+            let outcome = controller
+                .finish_move_result(
+                    &mut operation,
+                    Err(anyhow::anyhow!("temporary readiness disconnect")),
+                    &WakeTarget::new(),
+                )
+                .unwrap();
+            assert_eq!(outcome.outcome, "interrupted", "{outcome:?}");
+            assert_eq!(
+                operation.phase,
+                mj_core::state::MovePhase::DestinationStarting
+            );
+            assert!(
+                crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .unwrap()
+                    .is_active()
+            );
+            assert!(
+                operation
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("temporary readiness disconnect")
+            );
+            crate::database::fail_subagent_unpark_with_rollback(
+                LATCH_RELAY_SESSION,
+                owner.operation_id(),
+                SubagentUnparkFailure::Retryable {
+                    detail: "worker exited",
+                    evidence: None,
+                },
+                Some(&previous),
+            )
+            .unwrap();
+            // Conversely, a stale Running cache must not retain a rolled-back boot.
+            assert_eq!(
+                controller.state.sessions[LATCH_RELAY_SESSION].state,
+                SessionState::Running
+            );
+            let outcome = controller
+                .finish_move_result(
+                    &mut operation,
+                    Err(anyhow::anyhow!("worker exited")),
+                    &WakeTarget::new(),
+                )
+                .unwrap();
+            assert_eq!(outcome.outcome, "failed", "{outcome:?}");
+            assert_eq!(operation.phase, mj_core::state::MovePhase::Failed);
+            assert_eq!(
+                controller.state.sessions[LATCH_RELAY_SESSION].state,
+                SessionState::Parked
+            );
+            operation.phase = mj_core::state::MovePhase::DestinationStarting;
+            crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None, None)
+                .unwrap();
+            crate::database::fail_subagent_unpark(
+                LATCH_RELAY_SESSION,
+                owner.operation_id(),
+                SubagentUnparkFailure::WorkingDirectoryUnavailable("checkout disappeared"),
+            )
+            .unwrap();
+            controller
+                .state
+                .sessions
+                .get_mut(LATCH_RELAY_SESSION)
+                .unwrap()
+                .state = SessionState::Running;
+            let outcome = controller
+                .finish_move_result(
+                    &mut operation,
+                    Err(anyhow::anyhow!("checkout disappeared")),
+                    &WakeTarget::new(),
+                )
+                .unwrap();
+            assert_eq!(outcome.outcome, "failed", "{outcome:?}");
+            assert_eq!(operation.phase, mj_core::state::MovePhase::Failed);
+            assert_eq!(
+                controller.state.sessions[LATCH_RELAY_SESSION].state,
+                SessionState::Error
+            );
+        });
     }
 
     // Hard-won: #1547: a woken child started with the login it parked with, which a renewal had revoked.
@@ -1744,7 +2492,7 @@ mod tests {
         )
         .unwrap();
 
-        let controller = Controller {
+        let mut controller = Controller {
             config,
             state: crate::database::load_state().unwrap(),
         };
@@ -1807,6 +2555,35 @@ mod tests {
             stale_b,
             "unrelated profile's canonical store must not be touched"
         );
+        // The same stopped-home ownership path also harvests nested non-Codex grants.
+        controller.config.profiles.get_mut("codex-a").unwrap().kind =
+            mj_core::config::HarnessKind::Kimi;
+        let mut stopped = child.clone();
+        stopped.harness_kind = mj_core::config::HarnessKind::Kimi;
+        controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap()
+            .harness_kind = mj_core::config::HarnessKind::Kimi;
+        let canonical = canonical_a.join("credentials/kimi-code.json");
+        let staged = launch.harness_home.join("credentials/kimi-code.json");
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(
+            &canonical,
+            b"{\"expires_at\":100,\"refresh_token\":\"old\"}",
+        )
+        .unwrap();
+        let refreshed = b"{\"expires_at\":200,\"refresh_token\":\"new\"}";
+        std::fs::write(&staged, refreshed).unwrap();
+        assert!(
+            controller
+                .harvest_stopped_login(LATCH_RELAY_SESSION, &stopped, &backend, &executor)
+                .await
+                .unwrap()
+        );
+        assert_eq!(std::fs::read(canonical).unwrap(), refreshed);
         let _targets = refresher.await.unwrap();
         shutdown.shutdown().await.unwrap();
     }

@@ -953,6 +953,18 @@ impl SubagentKind {
             Self::Oracle => format!("oracle:{key}"),
         }
     }
+
+    /// Distinguish startup groups by role without reusing the colon separator
+    /// from [`Self::request_key`], which relay command IDs reject.
+    #[must_use]
+    pub fn startup_request_key(self, key: &str) -> String {
+        let role = match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+            Self::Oracle => "oracle",
+        };
+        format!("{role}-{key}")
+    }
 }
 
 /// Durable ownership and launch intent for one child session.
@@ -1170,6 +1182,16 @@ impl SubagentRecord {
     pub fn is_child(&self, session_id: &str) -> bool {
         self.child_session_id == session_id
     }
+
+    /// Stable startup group for this child. The role distinguishes requests
+    /// that reuse the same caller-provided key, and the hyphenated role name
+    /// keeps every derived command ID valid in the relay protocol.
+    #[must_use]
+    pub fn startup_group_id(&self) -> String {
+        crate::continuation::GeneratedPrompt::subagent_spawn_id(
+            &self.kind.startup_request_key(&self.request_key),
+        )
+    }
 }
 
 /// The name a worker's sub-agent MCP server is registered under in every
@@ -1179,6 +1201,7 @@ pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 /// The name of the separate MCP server that offers the before-push review
 /// tools, so they reach the model as `mcp__mj-review__<tool>`. Claude loads
 /// its tools on demand because they are needed only when a push is near.
+pub use crate::claude_mcp::CLAUDE_MCP_SERVER;
 pub const REVIEW_MCP_SERVER: &str = "mj-review";
 
 /// The tools the review server lists, in the order it lists them.

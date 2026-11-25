@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 ///
 /// Every wrapper this builds keeps the target's stdin attached: the container
 /// engines are invoked with `exec -i` and `ssh` forwards stdin by default.
+///
+/// The spec crosses SSH gzipped. The decompression runs in the SSH shell, so
+/// it works with any worker version.
 pub fn export_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
-    export_command(locator, session_id, EXPORT_SPEC_STDIN)
+    export_command(locator, session_id, EXPORT_SPEC_STDIN).map(CommandSpec::gzip_ssh_stdin)
 }
 
 pub fn suspend_preflight_stdin_command(
@@ -47,6 +50,39 @@ pub fn suspend_preflight_stdin_command_with_binary(
     )
 }
 
+pub fn resolve_suspend_blockers_stdin_command(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<CommandSpec> {
+    resolve_suspend_blockers_stdin_command_with_binary(locator, session_id, "hel")
+}
+
+pub fn resolve_suspend_blockers_stdin_command_with_binary(
+    locator: &TargetLocator,
+    session_id: &str,
+    binary_name: &str,
+) -> Result<CommandSpec> {
+    ensure!(
+        !binary_name.is_empty() && !binary_name.contains('/') && !binary_name.contains(".."),
+        "invalid worker binary name {binary_name:?}"
+    );
+    let root = worker_root(locator, session_id)?;
+    let args = vec![
+        format!("{root}/{binary_name}"),
+        "worker".into(),
+        "resolve-suspend-blockers".into(),
+        "--spec".into(),
+        EXPORT_SPEC_STDIN.into(),
+    ];
+    crate::targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        locator,
+        session_id,
+        args,
+        "resolve suspend blockers target",
+    )
+}
+
 pub fn capture_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     checkpoint_stdin_command(
         locator,
@@ -56,6 +92,8 @@ pub fn capture_stdin_command(locator: &TargetLocator, session_id: &str) -> Resul
     )
 }
 
+/// Pack a captured checkpoint by streaming `CheckpointPackSpec` (which carries
+/// `canonical_session`) over stdin, gzipped across SSH.
 pub fn pack_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     checkpoint_stdin_command(
         locator,
@@ -63,6 +101,7 @@ pub fn pack_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<C
         "pack-checkpoint",
         "pack target checkpoint",
     )
+    .map(CommandSpec::gzip_ssh_stdin)
 }
 
 fn checkpoint_stdin_command(
@@ -99,19 +138,17 @@ pub fn export_command(
     )
 }
 
-pub fn restore_command(
-    locator: &TargetLocator,
-    session_id: &str,
-    spec_path: &str,
-) -> Result<CommandSpec> {
-    validate_checkpoint_path(locator, spec_path)?;
+/// Restore by streaming the spec to the worker's standard input, gzipped over
+/// SSH. The worker must be this controller's build: an older `restore-checkpoint`
+/// would read `-` as a file name.
+pub fn restore_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     let root = worker_root(locator, session_id)?;
     let args = vec![
         format!("{root}/hel"),
         "worker".into(),
         "restore-checkpoint".into(),
         "--spec".into(),
-        spec_path.into(),
+        EXPORT_SPEC_STDIN.into(),
     ];
     crate::targets::command_on_locator(
         SshTrafficClass::Bulk,
@@ -120,6 +157,7 @@ pub fn restore_command(
         args,
         "restore target checkpoint",
     )
+    .map(CommandSpec::gzip_ssh_stdin)
 }
 
 #[derive(Debug, Clone)]
@@ -163,8 +201,70 @@ impl VerifiedCheckpoint {
     }
 }
 
+/// A host staging archive on an SSH container host that was downloaded and
+/// verified but not yet removed. The caller owns its removal (see
+/// [`cleanup_host_staging`]) or promotes it in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedHostStaging {
+    /// Home-relative path of the staged archive on the SSH host.
+    pub staging_path: String,
+    /// The host's `$HOME`, reported by the staging command itself, when it
+    /// reported one.
+    pub remote_home: Option<String>,
+}
+
+/// Error context marking that the retained host staging file may still exist
+/// because its removal failed. An error without it means the file is gone or
+/// was never created.
+#[derive(Debug)]
+pub struct HostStagingNotRemoved;
+
+impl std::fmt::Display for HostStagingNotRemoved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("target checkpoint host staging may remain on the SSH host")
+    }
+}
+
+/// Whether the failed [`CheckpointTransfer::execute_retaining_host_staging`]
+/// left its host staging file in place.
+pub fn host_staging_may_remain(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<HostStagingNotRemoved>().is_some()
+}
+
+const REMOTE_HOME_MARKER: &str = "MJ_REMOTE_HOME=";
+
 impl CheckpointTransfer<'_> {
     pub fn execute(&self, executor: &impl CommandExecutor) -> Result<VerifiedCheckpoint> {
+        self.run(executor, false).map(|(verified, _)| verified)
+    }
+
+    /// The host staging path this transfer uses, when its target is a
+    /// container behind SSH: the only target whose archive is copied to the
+    /// SSH host before it is downloaded.
+    pub fn host_staging_path(&self) -> Option<Result<String>> {
+        self.locator
+            .container_endpoint()
+            .is_some_and(|endpoint| endpoint.ssh.is_some())
+            .then(|| remote_staging_path(self.session_id, self.operation_id))
+    }
+
+    /// [`Self::execute`], except that an SSH container target's host staging
+    /// archive is kept after verification so the caller can promote it
+    /// without uploading it again. The caller must remove it with
+    /// [`cleanup_host_staging`] or consume it. A failure removes the staging
+    /// file itself; [`host_staging_may_remain`] reports when that failed.
+    pub fn execute_retaining_host_staging(
+        &self,
+        executor: &impl CommandExecutor,
+    ) -> Result<(VerifiedCheckpoint, Option<RetainedHostStaging>)> {
+        self.run(executor, true)
+    }
+
+    fn run(
+        &self,
+        executor: &impl CommandExecutor,
+        retain_host_staging: bool,
+    ) -> Result<(VerifiedCheckpoint, Option<RetainedHostStaging>)> {
         validate_checkpoint_path(self.locator, self.remote_archive)?;
         let parent = self.destination.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
@@ -177,6 +277,15 @@ impl CheckpointTransfer<'_> {
             .into_temp_path();
         let path = temporary.to_path_buf();
         let staging = remote_staging_path(self.session_id, self.operation_id)?;
+        // While retained, the staging file outlives this call, so every later
+        // failure removes it before returning.
+        let abandon = |error: anyhow::Error| {
+            if retain_host_staging {
+                abandon_host_staging(self.locator, &staging, executor, error)
+            } else {
+                error
+            }
+        };
         let transfer_result = transfer_plan(
             self.locator,
             self.session_id,
@@ -186,36 +295,53 @@ impl CheckpointTransfer<'_> {
         )?
         .execute(executor)
         .context("download target checkpoint");
-        let staging_cleanup_result = cleanup_transfer_staging(self.locator, &staging, executor);
-        if let Err(error) = transfer_result {
-            return match staging_cleanup_result {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(error.context(format!(
-                    "clean target checkpoint host staging also failed: {cleanup:#}"
-                ))),
-            };
+        let remote_home = transfer_result
+            .as_ref()
+            .ok()
+            .and_then(|outputs| outputs.first())
+            .and_then(|output| parse_remote_home(&output.stdout));
+        if retain_host_staging {
+            if let Err(error) = transfer_result {
+                return Err(abandon(error));
+            }
+        } else {
+            let staging_cleanup_result = cleanup_host_staging(self.locator, &staging, executor);
+            if let Err(error) = transfer_result {
+                return match staging_cleanup_result {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(error.context(format!(
+                        "clean target checkpoint host staging also failed: {cleanup:#}"
+                    ))),
+                };
+            }
+            staging_cleanup_result.context("clean target checkpoint host staging")?;
         }
-        staging_cleanup_result.context("clean target checkpoint host staging")?;
-        let sha256 = checkpoint_sha256(&path).context("hash downloaded checkpoint")?;
-        ensure!(
-            sha256 == self.expected_sha256,
-            "target and controller checkpoint checksums differ for complete checkpoint archive: \
-             session={}, operation={}, expected_sha256={}, downloaded_sha256={}, downloaded_bytes={}; \
-             target archive retained at {}. The previous verified checkpoint was not replaced and \
-             the source workspace was not removed. Preserve the source and retry a fresh export; \
-             if this repeats, inspect the retained archive and its transfer path",
-            self.session_id,
-            self.operation_id,
-            self.expected_sha256,
-            sha256,
-            fs::metadata(&path)
-                .context("stat downloaded checkpoint")?
-                .len(),
-            self.remote_archive,
-        );
-        temporary
-            .persist(self.destination)
-            .map_err(|error| error.error)?;
+        let sha256 = match checkpoint_sha256(&path).context("hash downloaded checkpoint") {
+            Ok(sha256) => sha256,
+            Err(error) => return Err(abandon(error)),
+        };
+        if sha256 != self.expected_sha256 {
+            let downloaded_bytes = match fs::metadata(&path).context("stat downloaded checkpoint") {
+                Ok(metadata) => metadata.len(),
+                Err(error) => return Err(abandon(error)),
+            };
+            return Err(abandon(anyhow::anyhow!(
+                "target and controller checkpoint checksums differ for complete checkpoint archive: \
+                 session={}, operation={}, expected_sha256={}, downloaded_sha256={}, downloaded_bytes={}; \
+                 target archive retained at {}. The previous verified checkpoint was not replaced and \
+                 the source workspace was not removed. Preserve the source and retry a fresh export; \
+                 if this repeats, inspect the retained archive and its transfer path",
+                self.session_id,
+                self.operation_id,
+                self.expected_sha256,
+                sha256,
+                downloaded_bytes,
+                self.remote_archive,
+            )));
+        }
+        if let Err(error) = temporary.persist(self.destination) {
+            return Err(abandon(error.error.into()));
+        }
         // The bytes were already checksum-verified in this same directory and
         // the rename is atomic, so installation only has to make the copy
         // private and durable; re-reading it would hash the same archive again.
@@ -224,15 +350,27 @@ impl CheckpointTransfer<'_> {
             sync_directory(parent)
         })();
         if let Err(error) = post_install {
-            return Err(remove_failed_checkpoint_install(self.destination, error));
+            return Err(abandon(remove_failed_checkpoint_install(
+                self.destination,
+                error,
+            )));
         }
-        Ok(VerifiedCheckpoint {
-            session_id: self.session_id.to_owned(),
-            archive_path: self.destination.to_path_buf(),
-            sha256,
-            event_frontier: self.expected_event_frontier,
-            event_frontier_digest: self.expected_event_frontier_digest.to_owned(),
-        })
+        let retained = (retain_host_staging && self.host_staging_path().is_some()).then_some(
+            RetainedHostStaging {
+                staging_path: staging,
+                remote_home,
+            },
+        );
+        Ok((
+            VerifiedCheckpoint {
+                session_id: self.session_id.to_owned(),
+                archive_path: self.destination.to_path_buf(),
+                sha256,
+                event_frontier: self.expected_event_frontier,
+                event_frontier_digest: self.expected_event_frontier_digest.to_owned(),
+            },
+            retained,
+        ))
     }
 
     pub fn cleanup_plan(&self, gate: &VerifiedCheckpoint) -> Result<CommandPlan> {
@@ -244,11 +382,14 @@ impl CheckpointTransfer<'_> {
     }
 }
 
+/// Remove the host-side staging copy of an SSH container transfer. Other
+/// targets have none, so this does nothing for them.
+///
 /// SSH container transfers use a host-side copy because `scp` cannot address
-/// a path inside the container. The copy is disposable and must be removed as
-/// soon as it has been downloaded; the in-container archive remains gated by
-/// [`CheckpointTransfer::cleanup_plan`] until the local copy is verified.
-fn cleanup_transfer_staging(
+/// a path inside the container. The copy is disposable; the in-container
+/// archive remains gated by [`CheckpointTransfer::cleanup_plan`] until the
+/// local copy is verified.
+pub fn cleanup_host_staging(
     locator: &TargetLocator,
     staging: &str,
     executor: &impl CommandExecutor,
@@ -274,6 +415,34 @@ fn cleanup_transfer_staging(
     Ok(())
 }
 
+/// Remove retained host staging after `error`, reporting a removal failure
+/// both in the message and through [`host_staging_may_remain`].
+fn abandon_host_staging(
+    locator: &TargetLocator,
+    staging: &str,
+    executor: &impl CommandExecutor,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match cleanup_host_staging(locator, staging, executor) {
+        Ok(()) => error,
+        Err(cleanup) => error
+            .context(format!(
+                "clean target checkpoint host staging also failed: {cleanup:#}"
+            ))
+            .context(HostStagingNotRemoved),
+    }
+}
+
+/// The `$HOME` the staging command printed, if it printed an absolute one.
+fn parse_remote_home(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix(REMOTE_HOME_MARKER))
+        .map(str::trim)
+        .filter(|home| home.starts_with('/'))
+        .map(str::to_owned)
+}
+
 pub fn transfer_plan(
     locator: &TargetLocator,
     session_id: &str,
@@ -292,18 +461,28 @@ pub fn transfer_plan(
     let commands = if let Some(endpoint) = locator.container_endpoint() {
         let source = format!("{}:{remote_archive}", endpoint.container_id);
         if let Some(ssh) = endpoint.ssh {
+            // One SSH session creates the staging directory, copies the
+            // archive out of the container, and reports the host's `$HOME`,
+            // so a caller that promotes the staged file needs no further
+            // round trip to learn where the cache lives.
+            let script = format!(
+                "set -eu; (umask 077; mkdir -p -- .local/share/hel/transfers); \
+                 chmod 0700 .local/share/hel/transfers; \
+                 {} cp \"$1\" \"$2\"; printf '{REMOTE_HOME_MARKER}%s\\n' \"$HOME\"",
+                crate::targets::engine_shell_words(endpoint.engine)
+            );
             vec![
-                crate::targets::ssh_command(
-                    SshTrafficClass::Control,
-                    ssh,
-                    ["mkdir", "-p", ".local/share/hel/transfers"],
-                )
-                .purpose("create remote checkpoint staging directory"),
-                crate::targets::ssh_engine_command(
+                crate::targets::ssh_command_owned(
                     SshTrafficClass::Bulk,
                     ssh,
-                    endpoint.engine,
-                    ["cp", &source, staging],
+                    vec![
+                        "sh".to_owned(),
+                        "-c".to_owned(),
+                        script,
+                        "hel-checkpoint-stage".to_owned(),
+                        source,
+                        staging.to_owned(),
+                    ],
                 )
                 .purpose("stage remote container checkpoint"),
                 crate::targets::scp_download(ssh, staging, &local)

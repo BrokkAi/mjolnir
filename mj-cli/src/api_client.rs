@@ -781,13 +781,18 @@ impl ApiClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
+        let notice = response
+            .headers()
+            .get(mj_daemon::server::api::EXPORT_NOTICE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let bytes = response.bytes().await.context("read the export")?.to_vec();
         if content_type.starts_with("application/json") {
             let pushed =
                 serde_json::from_slice::<PushedBranch>(&bytes).context("read the pushed branch")?;
             return Ok(ExportResult::Branch(pushed));
         }
-        Ok(ExportResult::Bytes(bytes))
+        Ok(ExportResult::Bytes { bytes, notice })
     }
 
     pub(crate) fn suspend_preflight_query(dry_run: bool, without_checkpoint: bool) -> &'static str {
@@ -799,13 +804,34 @@ impl ApiClient {
         }
     }
 
+    pub(crate) async fn resolve_suspend_blockers(
+        &self,
+        session_id: &str,
+    ) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("/sessions/{session_id}/suspend-resolve-blockers"))),
+            )
+            .await?;
+        serde_json::from_slice(&response.bytes().await?)
+            .context("decode blocker remediation result")
+    }
     pub(crate) async fn suspend_preflight(
         &self,
         session_id: &str,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        let query = Self::suspend_preflight_query(dry_run, without_checkpoint);
+        let mut query = Self::suspend_preflight_query(dry_run, without_checkpoint).to_owned();
+        if history_only {
+            query.push_str(if query.is_empty() {
+                "?history_only=true"
+            } else {
+                "&history_only=true"
+            });
+        }
         let response = self
             .send(
                 self.http
@@ -832,6 +858,7 @@ impl ApiClient {
             "discard_untracked": consent.discard_untracked,
             "abort_operations": consent.abort_operations,
             "without_checkpoint": consent.without_checkpoint,
+            "history_only": consent.history_only,
         });
         if consent.confirm_no_checkpoint {
             payload["confirm_no_checkpoint"] = serde_json::json!(true);
@@ -1199,7 +1226,12 @@ fn waiting_notice(busy: Option<(usize, usize)>) -> String {
 /// What an export answered with.
 pub(crate) enum ExportResult {
     Branch(PushedBranch),
-    Bytes(Vec<u8>),
+    /// A patch or bundle, with the line the daemon added about what the patch
+    /// is relative to, if any.
+    Bytes {
+        bytes: Vec<u8>,
+        notice: Option<String>,
+    },
 }
 
 /// Refuse a response that does not name this contract, or names another major

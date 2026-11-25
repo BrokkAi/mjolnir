@@ -1,0 +1,12 @@
+Show each profile's remaining quota as the daemon last read it
+
+Usage: mj quota [OPTIONS]
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --profile <PROFILE>  Show only this profile; default lists every enabled profile
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --refresh            Ask the daemon to probe again, and wait for the fresh cycle's readings
+      --with-disabled      Include disabled profiles, probing once for any without a report
+      --json               Print the response as JSON instead of text
+  -h, --help               Print help

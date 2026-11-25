@@ -85,7 +85,8 @@ impl PollableWorkerInputs {
             || (self.config.profiles.get(&record.last_profile)
                 == config.profiles.get(&record.last_profile)
                 && self.config.github == config.github
-                && record.configuration_issue(&self.config) == record.configuration_issue(config)
+                && self.records.configuration_issue(record, &self.config)
+                    == self.records.configuration_issue(record, config)
                 && match (
                     record.target_runtime_settings(&self.config),
                     record.target_runtime_settings(config),
@@ -731,6 +732,28 @@ impl RuntimeState {
 }
 
 impl mj_controller::worker_client::CredentialSyncRuntime for RuntimeState {
+    fn pending_retired_logins(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<mj_core::credentials::PendingRetiredLogin>> {
+        mj_controller::database::pending_retired_logins(session_id)
+    }
+    fn clear_pending_retired_login(&self, session_id: &str, operation_id: &str) -> Result<()> {
+        mj_controller::database::clear_pending_retired_login(session_id, operation_id)
+    }
+    fn retired_login_move_active(&self, session_id: &str, operation_id: &str) -> Result<bool> {
+        mj_controller::database::retired_login_move_active(session_id, operation_id)
+    }
+
+    fn credential_profile(&self, profile_id: &str) -> Option<mj_core::config::HarnessProfile> {
+        self.owner()
+            .controller
+            .config
+            .profiles
+            .get(profile_id)
+            .cloned()
+    }
+
     fn credential_targets(
         &self,
     ) -> Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>> {

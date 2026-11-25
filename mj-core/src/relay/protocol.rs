@@ -318,6 +318,8 @@ pub enum RelayRequest {
     /// Idempotently release an in-place Move dispatch hold for `operation_id`
     /// on `expected_store_id` and resume queue promotion. Protocol 81.
     ReleaseInPlaceMoveDispatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_harness_restarted: Option<bool>,
         operation_id: String,
         expected_store_id: String,
     },
@@ -328,6 +330,8 @@ pub enum RelayRequest {
         operation_id: String,
         expected_store_id: String,
         launch_config: Box<crate::worker_launch::WorkerLaunchConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
     },
     CommandRetentionStatus,
     /// Freeze a coherent current-state recovery cut on this connection.
@@ -437,6 +441,14 @@ pub enum RelayRequest {
     /// Read this session's harness credential file as base64. The payload is
     /// connection-only and must never enter relay state or observations.
     ReadCredentials,
+    ReadRetiredLogins {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    AckRetiredLogin {
+        id: String,
+        fingerprint: String,
+    },
     /// Install a base64-encoded credential file into this session's harness
     /// home. The destination path is fixed by the worker launch config.
     InstallCredentials {
@@ -707,6 +719,8 @@ impl RelayRequest {
             Self::CpuUsage => "cpu_usage",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
+            Self::ReadRetiredLogins { .. } => "read_retired_logins",
+            Self::AckRetiredLogin { .. } => "ack_retired_login",
             Self::InstallCredentials { .. } => "install_credentials",
             Self::SkillsState => "skills_state",
             Self::InstallSkills { .. } => "install_skills",
@@ -744,6 +758,9 @@ impl RelayRequest {
     /// protocol 31.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::ReadRetiredLogins { .. } | Self::AckRetiredLogin { .. } => {
+                super::RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL
+            }
             Self::AntigravityStop { .. } => super::RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL,
             Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
                 super::RELAY_AWS_CREDENTIALS_PROTOCOL
@@ -757,9 +774,8 @@ impl RelayRequest {
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
-            Self::HistoryQuery { .. }
-            | Self::HistoryRequests
-            | Self::CompleteHistoryRequest { .. } => 16,
+            Self::HistoryQuery { query } => query.protocol_requirement().0,
+            Self::HistoryRequests | Self::CompleteHistoryRequest { .. } => 16,
             Self::GuardianRequests | Self::CompleteGuardianRequest { .. } => {
                 super::RELAY_GUARDIAN_REVIEW_PROTOCOL
             }
@@ -1180,6 +1196,14 @@ pub enum RelayResponsePayload {
     Credentials {
         data: String,
     },
+    RetiredLogins {
+        logins: Vec<crate::credentials::RetiredLoginSnapshot>,
+        #[serde(default)]
+        has_more: bool,
+        #[serde(default)]
+        deferred: bool,
+    },
+    RetiredLoginAcknowledged,
     /// Fingerprint of a session's synced skills trees. Not secret.
     SkillsState {
         present: bool,
@@ -1273,6 +1297,12 @@ pub enum RelayErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RelayErrorDetail {
+    ReloadInProgress {
+        operation_id: String,
+    },
+    ReloadFailedAfterCommit {
+        operation_id: String,
+    },
     Desynchronized {
         requested_after: u64,
         requested_digest: String,

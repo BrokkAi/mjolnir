@@ -1701,6 +1701,7 @@ fn new_session_profile_step_aligns_its_columns() {
     }
 }
 
+// Hard-won: #1681: provider groups read delegation preferences before resolving their profile.
 #[test]
 fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
     let mut config = config();
@@ -1716,7 +1717,20 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
         HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi")),
     );
     let claude_key = config.profiles["claude-1"].capabilities_key("claude-1");
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    config.subagents.straightforward = config.subagents.primary.clone();
+    let remembered = mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: true,
+        straightforward: None,
+        subtle: None,
+    };
+    let mut state = State::default();
+    state
+        .last_subagent_policies
+        .insert("codex-1".into(), remembered.clone());
+    state
+        .last_subagent_policies
+        .insert("claude-1".into(), mj_core::subagent::SubagentPolicy::None);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     dashboard.set_profile_capabilities(
         mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
             profiles: BTreeMap::from([(
@@ -1813,10 +1827,8 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
     assert_eq!(new_wizard(&dashboard).selected_provider(&dashboard), None);
     assert_eq!(
-        dashboard
-            .new_wizard_profile_id(new_wizard(&dashboard).profile)
-            .as_deref(),
-        Some("claude-1")
+        new_wizard(&dashboard).profile,
+        ProfileChoice::Profile("claude-1".into())
     );
     ready_key(&mut dashboard, key(KeyCode::Left));
     assert_eq!(
@@ -1829,8 +1841,8 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
     )));
 
     // Clicking the arrow on a collapsed provider expands it; clicking the
-    // provider name selects it without collapsing, and Enter advances with that
-    // provider selected for load-balancing.
+    // provider name selects it without collapsing, and Enter asks the daemon
+    // to resolve it before the next page loads the chosen profile's settings.
     click_project_text(&mut dashboard, &mut terminal, "▸ OPENAI");
     assert!(has_expanded_codex(&draw_lines(
         &mut dashboard,
@@ -1845,21 +1857,422 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
         new_wizard(&dashboard).selected_provider(&dashboard),
         Some(mj_core::config::QuotaProvider::OpenAI)
     );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let DashboardAction::SelectProviderProfile {
+        request,
+        generation,
+    } = ready_key(&mut dashboard, key(KeyCode::Enter))
+    else {
+        panic!("provider selection must resolve before advancing")
+    };
+    assert_eq!(request.provider, mj_core::config::QuotaProvider::OpenAI);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    assert!(!new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    dashboard.apply_provider_profile_selection(generation, Ok("codex-1".into()));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
-    assert_eq!(
-        new_wizard(&dashboard).selected_provider(&dashboard),
-        Some(mj_core::config::QuotaProvider::OpenAI)
+    assert_eq!(new_wizard(&dashboard).selected_provider(&dashboard), None);
+    assert_eq!(new_wizard(&dashboard).subagents.selected(), remembered);
+    // Refreshing the profile list must not substitute an earlier profile at
+    // the old index after the daemon resolved the launch identity.
+    let mut refreshed = (*dashboard.config).clone();
+    refreshed.profiles.insert(
+        "codex-0".into(),
+        HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/profiles/codex-0")),
     );
+    dashboard.set_config(refreshed);
+    dashboard.take_subagent_discovery();
     let action = dashboard.create_session_action_without_closing(new_wizard(&dashboard));
     assert!(matches!(
         action,
         DashboardAction::CreateSession {
             ref profile_id,
             provider: Some(mj_core::config::QuotaProvider::OpenAI),
+            subagents: Some(ref policy),
             ..
-        } if profile_id.is_empty()
+        } if profile_id == "codex-1" && policy == &remembered
     ));
+}
+
+/// Opens the wizard, has the daemon "resolve" `provider` to `profile_id`, and
+/// leaves the draft on the target page with that provider's pick.
+fn resolve_provider_to_target_page(
+    dashboard: &mut DashboardState,
+    provider: mj_core::config::QuotaProvider,
+    profile_id: &str,
+) {
+    ready_open_new_wizard(dashboard);
+    let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    wizard.step = WizardStep::Profile;
+    wizard.focused_provider = Some(provider);
+    wizard.profile_selection_request = None;
+    let DashboardAction::SelectProviderProfile { generation, .. } =
+        dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("select");
+    };
+    dashboard.apply_provider_profile_selection(generation, Ok(profile_id.into()));
+    assert_eq!(new_wizard(dashboard).step, WizardStep::Target);
+}
+
+/// Asks the daemon to check the target page's profile and target.
+fn request_target_page_check(dashboard: &mut DashboardState) -> (u64, String) {
+    let Mode::New(wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    let DashboardAction::SelectProviderProfile {
+        request,
+        generation,
+    } = dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("target check");
+    };
+    (generation, request.target_template_id.unwrap())
+}
+
+#[test]
+fn a_config_reload_keeps_the_resolved_profile_highlighted_when_profiles_are_inserted_before_it() {
+    use mj_core::config::QuotaProvider;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    resolve_provider_to_target_page(&mut dashboard, QuotaProvider::Anthropic, "claude-1");
+    let mut reloaded = (*dashboard.config).clone();
+    for id in ["aaa-claude", "aab-claude"] {
+        reloaded.profiles.insert(
+            id.into(),
+            HarnessProfile::new(HarnessKind::Claude, PathBuf::from("/profiles").join(id)),
+        );
+    }
+    dashboard.set_config(reloaded);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    press_back(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.expanded_providers.insert(QuotaProvider::Anthropic);
+    let wizard = new_wizard(&dashboard);
+    let items =
+        new_wizard_profile_items(&dashboard, &wizard.effective_expanded_providers(&dashboard));
+    let Some(ProfilePickerItem::Profile { id }) =
+        items.get(WizardDraft::profile_list_selected(wizard, &dashboard))
+    else {
+        panic!("a profile row is highlighted");
+    };
+    assert_eq!(id, "claude-1");
+}
+
+#[test]
+fn a_provider_reply_asked_before_a_config_reload_never_advances_the_page() {
+    use mj_core::config::QuotaProvider;
+    // The reload removes the chosen target: the stale reply is dropped, the
+    // question is not asked again for a target nobody chose, and the draft
+    // stays on the target page showing the target that replaced it.
+    let mut dashboard = DashboardState::new(
+        standard_local_targets_config(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    ready_open_new_wizard(&mut dashboard);
+    answer_target_checks(&mut dashboard, &[]);
+    resolve_provider_to_target_page(&mut dashboard, QuotaProvider::Anthropic, "claude-1");
+    let chosen = new_wizard(&dashboard).target.clone();
+    let (stale, asked_target) = request_target_page_check(&mut dashboard);
+    assert_eq!(asked_target, chosen);
+    let mut reloaded = (*dashboard.config).clone();
+    reloaded.targets.remove(&chosen);
+    dashboard.set_config(reloaded);
+    assert_ne!(new_wizard(&dashboard).target, chosen);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    assert_eq!(
+        dashboard.apply_provider_profile_selection(stale, Ok("claude-1".into())),
+        DashboardAction::None
+    );
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    assert_eq!(dashboard.take_prerequisite_check(), None);
+    assert_eq!(new_wizard(&dashboard).profile_selection_request, None);
+
+    // An unrelated reload leaves the question as it was: the old reply is
+    // dropped and the same question is asked under the new generation.
+    let (stale, target) = request_target_page_check(&mut dashboard);
+    let mut reloaded = (*dashboard.config).clone();
+    reloaded.profiles.insert(
+        "aaa-claude".into(),
+        HarnessProfile::new(HarnessKind::Claude, PathBuf::from("/profiles/aaa-claude")),
+    );
+    dashboard.set_config(reloaded);
+    assert_eq!(
+        dashboard.apply_provider_profile_selection(stale, Ok("claude-1".into())),
+        DashboardAction::None
+    );
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    let Some(DashboardAction::SelectProviderProfile {
+        request,
+        generation,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the unchanged question is asked again");
+    };
+    assert_ne!(generation, stale);
+    assert_eq!(request.target_template_id.as_deref(), Some(target.as_str()));
+    assert_eq!(request.profile_id.as_deref(), Some("claude-1"));
+    // The fresh reply is the one that counts (the target's sizing keeps the
+    // page open here, but the request is consumed).
+    dashboard.apply_provider_profile_selection(generation, Ok("claude-1".into()));
+    assert_eq!(new_wizard(&dashboard).profile_selection_request, None);
+    assert!(
+        !dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains("Could not select")),
+        "{:?}",
+        dashboard.notice()
+    );
+}
+
+#[test]
+fn a_target_removed_while_the_review_is_skipped_returns_the_draft_to_its_step_or_closes_it() {
+    let launching = |config: mj_core::config::Config| {
+        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+        ready_open_new_wizard(&mut dashboard);
+        answer_target_checks(&mut dashboard, &[]);
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new");
+        };
+        // The review was skipped: creation is submitted by closing the
+        // wizard, so a draft in `Launching` has not been accepted yet.
+        wizard.step = WizardStep::Launching;
+        wizard.remote_preflight_in_flight = true;
+        dashboard.invalidate_session_preflight();
+        dashboard
+    };
+
+    // One target of several goes: the draft returns to the target page
+    // showing the replacement, and the check that described the old target
+    // is cancelled.
+    let mut dashboard = launching(standard_local_targets_config());
+    let chosen = new_wizard(&dashboard).target.clone();
+    let generation = dashboard.session_preflight_generation();
+    let mut reloaded = (*dashboard.config).clone();
+    reloaded.targets.remove(&chosen);
+    dashboard.set_config(reloaded);
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert_ne!(wizard.target, chosen);
+    assert!(!wizard.remote_preflight_in_flight);
+    assert_ne!(dashboard.session_preflight_generation(), generation);
+    assert!(
+        dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains(&format!("{chosen} is no longer available"))),
+        "{:?}",
+        dashboard.notice()
+    );
+    dashboard.take_prerequisite_check();
+    drawn(&mut dashboard, 140, 40);
+
+    // The last target goes: the wizard closes with the reason.
+    let mut dashboard = launching(standard_local_targets_config());
+    let mut reloaded = (*dashboard.config).clone();
+    reloaded.targets.clear();
+    dashboard.set_config(reloaded);
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    assert!(dashboard.notice().is_some());
+    dashboard.take_prerequisite_check();
+    drawn(&mut dashboard, 140, 40);
+}
+
+#[test]
+fn a_draft_whose_target_vanished_without_a_reconcile_never_panics_in_launching() {
+    // Nothing reconciled this draft, as when a submitted launch outlives its
+    // configuration: the screens that read the target must tolerate its
+    // absence.
+    let mut dashboard = DashboardState::new(
+        standard_local_targets_config(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    ready_open_new_wizard(&mut dashboard);
+    answer_target_checks(&mut dashboard, &[]);
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.target = "removed".into();
+    for step in [
+        WizardStep::Launching,
+        WizardStep::Review,
+        WizardStep::ProjectDirectory,
+    ] {
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new");
+        };
+        wizard.step = step;
+        drawn(&mut dashboard, 140, 40);
+        dashboard.take_prerequisite_check();
+        let wizard = new_wizard(&dashboard);
+        dashboard.create_session_action_without_closing(wizard);
+    }
+}
+
+#[test]
+fn a_reply_settles_its_request_even_when_the_provider_group_has_gone() {
+    use mj_core::config::QuotaProvider;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    ready_open_new_wizard(&mut dashboard);
+    let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    wizard.step = WizardStep::Profile;
+    wizard.focused_provider = Some(QuotaProvider::Anthropic);
+    wizard.profile_selection_request = None;
+    let DashboardAction::SelectProviderProfile { generation, .. } =
+        dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("select");
+    };
+    // Discovery removes the focused group while the daemon is still working.
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.focused_provider = None;
+    assert!(!new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert_eq!(
+        dashboard.apply_provider_profile_selection(generation, Ok("claude-1".into())),
+        DashboardAction::None
+    );
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Profile);
+    assert_eq!(wizard.profile_selection_request, None);
+    assert!(wizard.profile_advance_enabled(&dashboard));
+}
+
+#[test]
+fn a_profile_that_changes_provider_between_pages_is_rechecked_against_current_membership() {
+    use mj_core::config::QuotaProvider;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    resolve_provider_to_target_page(&mut dashboard, QuotaProvider::Anthropic, "claude-1");
+    let (stale, _) = request_target_page_check(&mut dashboard);
+    let mut reloaded = (*dashboard.config).clone();
+    reloaded.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Codex;
+    dashboard.set_config(reloaded);
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Profile);
+    assert_eq!(wizard.resolved_profile, None);
+    assert_eq!(
+        dashboard.apply_provider_profile_selection(stale, Ok("claude-1".into())),
+        DashboardAction::None
+    );
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    assert_eq!(dashboard.take_prerequisite_check(), None);
+    assert!(
+        dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains("claude-1")),
+        "{:?}",
+        dashboard.notice()
+    );
+}
+
+#[test]
+fn new_session_profile_step_ignores_replaced_provider_requests_and_retries_failures() {
+    use mj_core::config::QuotaProvider;
+    use mj_core::subagent::SubagentPolicy;
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard
+        .state
+        .last_subagent_policies
+        .insert("claude-1".into(), SubagentPolicy::None);
+    ready_open_new_wizard(&mut dashboard);
+    let request = |dashboard: &mut DashboardState, provider| {
+        let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+            panic!("new");
+        };
+        wizard.step = WizardStep::Profile;
+        wizard.focused_provider = Some(provider);
+        wizard.profile_selection_request = None;
+        let DashboardAction::SelectProviderProfile { generation, .. } =
+            dashboard.advance_new_wizard(wizard)
+        else {
+            panic!("select");
+        };
+        generation
+    };
+    let old = request(&mut dashboard, QuotaProvider::OpenAI);
+    let current = request(&mut dashboard, QuotaProvider::Anthropic);
+    dashboard.apply_provider_profile_selection(old, Ok("codex-1".into()));
+    assert_eq!(
+        new_wizard(&dashboard)
+            .profile_selection_request
+            .as_ref()
+            .map(|selection| selection.generation),
+        Some(current)
+    );
+    dashboard.apply_provider_profile_selection(current, Err("quota unavailable".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert!(dashboard.notice().unwrap().contains("quota unavailable"));
+
+    let current = request(&mut dashboard, QuotaProvider::Anthropic);
+    dashboard.apply_provider_profile_selection(current, Ok("claude-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    assert_eq!(
+        new_wizard(&dashboard).subagents.create_selection(),
+        Some(SubagentPolicy::None)
+    );
+    // Target selection is another daemon decision. A replacement profile's
+    // saved policy must reach the review before Create can use it.
+    dashboard
+        .state
+        .last_subagent_policies
+        .insert("codex-1".into(), SubagentPolicy::Native);
+    let Mode::New(wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    let DashboardAction::SelectProviderProfile {
+        request: check,
+        generation,
+    } = dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("target check");
+    };
+    assert_eq!(check.profile_id.as_deref(), Some("claude-1"));
+    assert!(check.target_template_id.is_some());
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.set_step(WizardStep::Profile);
+    dashboard.apply_provider_profile_selection(generation, Ok("codex-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    wizard.set_step(WizardStep::Target);
+    let DashboardAction::SelectProviderProfile { generation, .. } =
+        dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("target check");
+    };
+    dashboard.apply_provider_profile_selection(generation, Ok("codex-1".into()));
+    assert_eq!(
+        new_wizard(&dashboard).subagents.create_selection(),
+        Some(SubagentPolicy::Native)
+    );
+    assert_ne!(new_wizard(&dashboard).step, WizardStep::Target);
+
+    let cancelled = request(&mut dashboard, QuotaProvider::OpenAI);
+    dashboard.cancel_modal();
+    ready_open_new_wizard(&mut dashboard);
+    dashboard.apply_provider_profile_selection(cancelled, Ok("codex-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    assert_eq!(new_wizard(&dashboard).profile_selection_request, None);
+
+    let old = request(&mut dashboard, QuotaProvider::OpenAI);
+    let first = dashboard.new_wizard_choice_at(0).unwrap();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.set_profile_choice(first);
+    dashboard.apply_provider_profile_selection(old, Ok("codex-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
 }
 
 #[test]
@@ -1886,18 +2299,14 @@ fn new_session_profile_step_reconciles_when_provider_discovery_completes() {
 
     // An expanded resolving group also stays open when a different provider's
     // profile is selected; discovery must reconcile every expanded group.
-    let original_profile = new_wizard(&dashboard).profile;
-    let claude = dashboard
-        .offered_profiles()
-        .position(|(id, _)| id == "claude-1")
-        .unwrap();
+    let original_profile = new_wizard(&dashboard).profile.clone();
     if let Mode::New(wizard) = &mut dashboard.mode {
-        wizard.set_profile(claude);
+        wizard.set_profile_choice(ProfileChoice::Profile("claude-1".into()));
     }
     let rendered = drawn(&mut dashboard, 120, 30).join("\n");
     assert!(rendered.contains("▾ OPENAI"), "{rendered}");
     if let Mode::New(wizard) = &mut dashboard.mode {
-        wizard.set_profile(original_profile);
+        wizard.set_profile_choice(original_profile);
     }
 
     // A stale focused "(resolving)" header clears back to the selected profile
@@ -3453,6 +3862,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
     );
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![mj_core::targets::DeploymentCapacityTarget {
+        stable_identity: None,
         id: "local".into(),
         host: "local".into(),
         target_ids: vec!["podman".into()],
@@ -3460,6 +3870,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         local: true,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(
@@ -4124,7 +4535,7 @@ fn availability_answers_update_a_wizard_and_spare_a_launch() {
     let last = dashboard.offered_profiles().count() - 1;
     let chosen = dashboard.nth_offered_profile(last).unwrap();
     match &mut dashboard.mode {
-        Mode::New(wizard) => wizard.profile = last,
+        Mode::New(wizard) => wizard.profile = ProfileChoice::Profile(chosen.clone()),
         _ => panic!("expected the new-session wizard"),
     }
     let first = dashboard.nth_offered_profile(0).unwrap();
@@ -4140,8 +4551,8 @@ fn availability_answers_update_a_wizard_and_spare_a_launch() {
     });
     let wizard = new_wizard(&dashboard);
     assert_eq!(
-        dashboard.nth_offered_profile(wizard.profile).as_deref(),
-        Some(chosen.as_str()),
+        wizard.profile,
+        ProfileChoice::Profile(chosen.clone()),
         "the wizard keeps its choice"
     );
     crate::test_support::drawn(&mut dashboard, 140, 40);
@@ -4177,15 +4588,9 @@ fn a_chosen_runtime_that_disappears_returns_the_wizard_to_its_step() {
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
 
     open_new_session_wizard(&mut dashboard);
-    let docker = dashboard
-        .config
-        .targets
-        .keys()
-        .position(|id| id == "docker")
-        .unwrap();
     match &mut dashboard.mode {
         Mode::New(wizard) => {
-            wizard.target = docker;
+            wizard.target = "docker".into();
             wizard.step = WizardStep::Bundle;
         }
         _ => panic!("expected the new-session wizard"),
@@ -4195,7 +4600,7 @@ fn a_chosen_runtime_that_disappears_returns_the_wizard_to_its_step() {
     });
     let wizard = new_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Target);
-    assert_ne!(nth_key(&dashboard.config.targets, wizard.target), "docker");
+    assert_ne!(wizard.target, "docker");
     assert!(
         dashboard
             .notice()
@@ -4299,16 +4704,8 @@ fn new_session_prefers_interactive_choices_over_newer_unattended_sessions() {
     );
     open_new_session_wizard(&mut dashboard);
     let wizard = new_wizard(&dashboard);
-    assert_eq!(
-        dashboard
-            .config
-            .enabled_profiles()
-            .nth(wizard.profile)
-            .unwrap()
-            .0,
-        "claude-1"
-    );
-    assert_eq!(nth_key(&dashboard.config.targets, wizard.target), "docker");
+    assert_eq!(wizard.profile, ProfileChoice::Profile("claude-1".into()));
+    assert_eq!(wizard.target, "docker");
     assert_eq!(
         nth_bundle_key(&dashboard.config, &dashboard.launch_recency, wizard.bundle),
         "interactive-project"
@@ -4381,10 +4778,7 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
     let mut dashboard =
         DashboardState::new(standard_local_targets_config(), state, BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
-    assert_eq!(
-        nth_key(&dashboard.config.targets, new_wizard(&dashboard).target),
-        "podman"
-    );
+    assert_eq!(new_wizard(&dashboard).target, "podman");
     answer_target_checks(&mut dashboard, &["podman", "docker"]);
     let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(profile.contains("New session · 1/3 profile"), "{profile}");
@@ -4393,10 +4787,7 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
     let wizard = new_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::ProjectDirectory);
     assert!(wizard.target_step_skipped);
-    assert_eq!(
-        nth_key(&dashboard.config.targets, wizard.target),
-        "localhost"
-    );
+    assert_eq!(wizard.target, "localhost");
     let project = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(
         project.contains("New session · 2/3 local project"),
@@ -4783,23 +5174,13 @@ fn selecting_a_row_skips_the_hidden_target() {
     answer_checks_without_docker(&mut dashboard);
     dashboard.handle_key(key(KeyCode::Enter));
     // Config order is docker, localhost, podman; the rows are the last two.
-    let position = |dashboard: &DashboardState, id: &str| {
-        dashboard
-            .config
-            .targets
-            .keys()
-            .position(|key| key == id)
-            .unwrap()
-    };
-    let localhost = position(&dashboard, "localhost");
-    let podman = position(&dashboard, "podman");
     let Mode::New(wizard) = &mut dashboard.mode else {
         panic!("expected the new-session wizard");
     };
-    wizard.target = localhost;
+    wizard.target = "localhost".into();
     captured_drawn(&mut dashboard, 160, 40);
     dashboard.handle_key(key(KeyCode::Down));
-    assert_eq!(new_wizard(&dashboard).target, podman);
+    assert_eq!(new_wizard(&dashboard).target, "podman");
     capture_detail(
         "selection",
         "podman (the next visible row; docker is hidden)",
@@ -5341,22 +5722,15 @@ fn target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets() {
     configuration
         .targets
         .insert("bare".into(), TargetTemplate::LocalBare);
-    let index = |id: &str| {
-        configuration
-            .targets
-            .keys()
-            .position(|key| key == id)
-            .unwrap()
-    };
-    let (bare, podman) = (index("bare"), index("podman"));
+    let (bare, podman) = ("bare", "podman");
     let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
     dashboard.begin_new();
-    let draw = |dashboard: &mut DashboardState, target: usize| {
+    let draw = |dashboard: &mut DashboardState, target: &str| {
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new session wizard")
         };
         wizard.step = WizardStep::Target;
-        wizard.target = target;
+        wizard.target = target.to_owned();
         let mut terminal = Terminal::new(TestBackend::new(140, 32)).unwrap();
         terminal.draw(|frame| render(frame, dashboard)).unwrap();
         let lines = buffer_lines(terminal.backend().buffer());
@@ -6150,7 +6524,7 @@ fn review_warns_once_and_offers_a_sandboxed_target() {
             panic!("new session wizard")
         };
         wizard.project_directory.set_value("/home/me/project");
-        wizard.target = 0; // localhost sorts before podman
+        wizard.target = "localhost".into();
         wizard.profile_step_skipped = false;
         wizard.target_step_skipped = false;
         wizard.step = WizardStep::Review;
@@ -6205,7 +6579,7 @@ fn review_warns_once_and_offers_a_sandboxed_target() {
         panic!("new session wizard")
     };
     assert_eq!(wizard.step, WizardStep::Target);
-    assert!(wizard.target != 0);
+    assert_ne!(wizard.target, "localhost");
 }
 
 // Hard-won: 01a64d2e8: trimming blank lines could remove the sandbox button row.
@@ -6521,15 +6895,11 @@ fn golden_create_delegation_availability_and_submission() {
             .last_subagent_policies
             .insert(String::new(), remembered.clone());
         dashboard.begin_new_wizard();
-        let dsh = dashboard
-            .config
-            .enabled_profiles()
-            .position(|(id, _)| id == "codex-1")
-            .unwrap();
+        let dsh = ProfileChoice::Profile("codex-1".into());
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new");
         };
-        WizardDraft::set_profile(wizard, dsh);
+        wizard.set_profile_choice(dsh);
         wizard.step = WizardStep::Review;
         dashboard.take_subagent_discovery();
         assert_eq!(new_wizard(&dashboard).subagents.selected(), expected);
@@ -6662,19 +7032,11 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         },
     );
     dashboard.begin_new_wizard();
-    let supported = dashboard
-        .config
-        .enabled_profiles()
-        .position(|(id, _)| id == "codex-1")
-        .unwrap();
-    let unsupported = dashboard
-        .config
-        .enabled_profiles()
-        .position(|(id, _)| id == "claude-1")
-        .unwrap();
+    let supported = ProfileChoice::Profile("codex-1".into());
+    let unsupported = ProfileChoice::Profile("claude-1".into());
     for (profile, expected) in [
         (
-            supported,
+            supported.clone(),
             SubagentPolicy::Mjolnir {
                 orchestrators: false,
                 straightforward: Some(Box::new(SubagentChoice {
@@ -6684,9 +7046,9 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
                 subtle: None,
             },
         ),
-        (unsupported, SubagentPolicy::Native),
+        (unsupported.clone(), SubagentPolicy::Native),
         (
-            supported,
+            supported.clone(),
             SubagentPolicy::Mjolnir {
                 orchestrators: false,
                 straightforward: Some(Box::new(SubagentChoice {
@@ -6700,7 +7062,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new");
         };
-        WizardDraft::set_profile(wizard, profile);
+        wizard.set_profile_choice(profile);
         dashboard.take_subagent_discovery();
         let Mode::New(wizard) = &dashboard.mode else {
             unreachable!()
@@ -6713,7 +7075,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     let Mode::New(wizard) = &mut dashboard.mode else {
         unreachable!()
     };
-    WizardDraft::set_profile(wizard, unsupported);
+    wizard.set_profile_choice(unsupported.clone());
     dashboard.take_subagent_discovery();
     let Mode::New(wizard) = &mut dashboard.mode else {
         unreachable!()
@@ -6721,7 +7083,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     wizard
         .subagents
         .apply(&Interaction::ComboBoxCommit(WizardControl::Subagents, 0));
-    WizardDraft::set_profile(wizard, supported);
+    wizard.set_profile_choice(supported.clone());
     dashboard.take_subagent_discovery();
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
@@ -6743,15 +7105,11 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     use mj_core::subagent::SubagentPolicy;
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_new_wizard();
-    let supported = dashboard
-        .config
-        .enabled_profiles()
-        .position(|(id, _)| id == "codex-1")
-        .unwrap();
+    let supported = ProfileChoice::Profile("codex-1".into());
     let Mode::New(wizard) = &mut dashboard.mode else {
         panic!("new");
     };
-    WizardDraft::set_profile(wizard, supported);
+    wizard.set_profile_choice(supported.clone());
     wizard.step = WizardStep::Review;
     let choice = SubagentChoice {
         model: "model".into(),
@@ -6917,7 +7275,7 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
     // The profile the wizard itself would open on.
     assert_eq!(
         Some(profile_id.clone()),
-        dashboard.nth_offered_profile(dashboard.default_new_profile_index())
+        dashboard.default_offered_profile_id()
     );
     assert!(carried.no_github_credentials);
     let note = carried.note.expect("the replaced profile is reported");
@@ -7022,4 +7380,99 @@ fn new_session_like_waits_for_the_git_identity_check() {
         dashboard.take_git_identity_followup(),
         Some(DashboardAction::CreateSession { .. })
     ));
+}
+
+#[test]
+fn borrowed_subagent_move_keeps_target_and_skips_target_edits() {
+    for orchestrator in [false, true] {
+        let mut session = running_session();
+        session.target_template_id = "localhost".into();
+        session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
+            straightforward: None,
+            subtle: None,
+        });
+        session.additional_mounts = vec![AdditionalMount {
+            source: PathBuf::from("/shared"),
+            destination: PathBuf::from("/shared"),
+            access: MountAccess::Ro,
+        }];
+        session.resource_allocation = Some(SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 8 << 30,
+        });
+        let mounts = session.additional_mounts.clone();
+        let resources = session.resource_allocation.clone();
+        let mut dashboard = dashboard_with_session(session.clone());
+        *dashboard.config = standard_local_targets_config();
+        dashboard
+            .config
+            .subagents
+            .primary
+            .push(mj_core::config::SubagentChoice {
+                model: "claude-sonnet".into(),
+                effort: None,
+            });
+        dashboard.config.subagents.straightforward = dashboard.config.subagents.primary.clone();
+        dashboard.state.subagents.insert(
+            session.id.clone(),
+            mj_core::subagent::SubagentMetadata {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                child_session_id: session.id.clone(),
+                parent_session_id: "parent".into(),
+                task_name: "Inspect parser".into(),
+                profile_id: session.last_profile.clone(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                request_key: "request-1".into(),
+                created_at: session.created_at.clone(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+                orchestrator,
+            },
+        );
+        dashboard.config.disabled_targets = dashboard.config.targets.keys().cloned().collect();
+        assert!(dashboard.offered_target_indices().is_empty());
+        dashboard
+            .state
+            .environment_owners
+            .insert(session.id.clone(), "parent".into());
+        dashboard.focus_sessions();
+        assert_eq!(dashboard.begin_move(), DashboardAction::None);
+        assert_eq!(
+            nth_key(&dashboard.config.targets, resume_wizard(&dashboard).target),
+            "localhost"
+        );
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        let DashboardAction::MoveSession {
+            target_template_id,
+            additional_mounts,
+            resource_allocation,
+            clear_resource_allocation,
+            subagents,
+            oracle,
+            ..
+        } = action
+        else {
+            panic!("subagent Move prepares directly from Profile");
+        };
+        assert_eq!(target_template_id, "localhost");
+        assert_eq!(additional_mounts, mounts);
+        assert_eq!(resource_allocation, resources);
+        assert!(!clear_resource_allocation);
+        dashboard.take_subagent_discovery();
+        let wizard = resume_wizard(&dashboard);
+        assert!(!wizard.subagents.orchestrators_available());
+        assert_eq!(wizard.step, WizardStep::Review);
+        assert!(wizard.target_step_skipped);
+        assert_eq!(wizard.subagent_choice_applies(&dashboard), orchestrator);
+        if !orchestrator {
+            assert!(subagents.is_none());
+            assert!(oracle.is_none());
+        }
+        press_back(&mut dashboard);
+        assert_eq!(resume_wizard(&dashboard).step, WizardStep::Profile);
+    }
 }

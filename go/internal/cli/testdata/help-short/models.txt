@@ -1,0 +1,13 @@
+Discover available models and efforts for a profile
+
+Usage: mj models [OPTIONS]
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --profile <PROFILE>  Profile whose harness to ask. Omitted lists the models every enabled profile offers, with the profiles supporting each
+      --model <MODEL>      List the efforts this model offers instead of the default model's
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --unrestricted       List every model the harness advertises, ignoring the profile's `models` allow-list. Use it to find the exact values to put there
+      --with-disabled      With no --profile, include disabled profiles in the aggregate
+      --json               Print the response as JSON instead of text
+  -h, --help               Print help

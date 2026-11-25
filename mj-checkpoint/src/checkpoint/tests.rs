@@ -74,13 +74,17 @@ fn empty_native_artifacts_allowed_only_for_unprompted_sessions() {
     assert!(artifacts.is_empty());
 }
 
-/// dsh-acp writes `sessions/<id>.json` atomically through a `.<id>.*.tmp` file
-/// and refuses `session/load` from any directory but the one the record names.
-/// A checkpoint keeps the record alone, and a restore at another workspace
-/// path names that path while keeping the rest of the record as it was.
+/// dsh-acp writes an ACP projection at `sessions/<id>.json`, while native DSH
+/// writes `dsh-home/sessions/<project-key>/<id>/session.v4.jsonl.zstd`. Both
+/// refuse a different workspace path. A checkpoint keeps both records, and a
+/// restore rewrites the projection and native log for its new workspace.
 #[test]
-fn dsh_checkpoint_keeps_the_session_record_and_restores_it_at_the_new_workspace() {
+fn dsh_checkpoint_relocates_the_projection_and_native_log() {
     const DSH_NATIVE: &str = "dsh-a17182fbf3f34a218842f9d5abb0702f";
+    assert_eq!(
+        restore::dsh_project_key(Path::new("/tmp/a b😀")).unwrap(),
+        "--tmp-a~0020b~D83D~DE00--"
+    );
     // A record as dsh-acp 0.2.0 wrote it, with its system prompt shortened.
     let record = serde_json::json!({
         "id": DSH_NATIVE,
@@ -116,29 +120,66 @@ fn dsh_checkpoint_keeps_the_session_record_and_restores_it_at_the_new_workspace(
     fs::write(sessions.join(format!(".{DSH_NATIVE}.0f3c.tmp")), b"{\"id\"").unwrap();
     fs::write(sessions.join("dsh-another.json"), b"{}").unwrap();
     fs::write(temp.path().join("AGENTS.md"), b"instructions").unwrap();
+    let native_header = serde_json::json!({
+        "type": "session",
+        "version": 4,
+        "id": DSH_NATIVE,
+        "createdAt": 1,
+        "cwd": "/old/workspace/project",
+        "isSeeded": false,
+        "delegationDepth": 0
+    });
+    let native_events = b"{\"type\":\"session/end-seed\",\"seq\":0,\"time\":1,\"data\":{}}\n";
+    let native_relative = Path::new("dsh-home")
+        .join("sessions")
+        .join(restore::dsh_project_key(Path::new("/old/workspace/project")).unwrap())
+        .join(DSH_NATIVE)
+        .join("session.v4.jsonl.zstd");
+    fs::create_dir_all(temp.path().join(native_relative.parent().unwrap())).unwrap();
+    let mut header_line = serde_json::to_vec(&native_header).unwrap();
+    header_line.push(b'\n');
+    let mut native_log = zstd::stream::encode_all(header_line.as_slice(), 0).unwrap();
+    native_log.extend(zstd::stream::encode_all(native_events.as_slice(), 0).unwrap());
+    fs::write(temp.path().join(&native_relative), &native_log).unwrap();
+    let other_native = Path::new("dsh-home")
+        .join("sessions")
+        .join(restore::dsh_project_key(Path::new("/old/workspace/project")).unwrap())
+        .join("dsh-another")
+        .join("session.v4.jsonl.zstd");
+    fs::create_dir_all(temp.path().join(other_native.parent().unwrap())).unwrap();
+    fs::write(temp.path().join(other_native), b"another session").unwrap();
 
     let artifacts =
         collect_native_artifacts(HarnessKind::Dsh, temp.path(), DSH_NATIVE, false).unwrap();
-    let relative = Path::new("sessions").join(format!("{DSH_NATIVE}.json"));
+    let projection = Path::new("sessions").join(format!("{DSH_NATIVE}.json"));
+    let mut expected_paths = [projection.clone(), native_relative.clone()];
+    expected_paths.sort();
     assert_eq!(
         artifacts
             .iter()
             .map(|artifact| artifact.relative_path.as_path())
             .collect::<Vec<_>>(),
-        [relative.as_path()]
+        expected_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>()
     );
 
-    let moved = temp.path().join("moved");
+    let moved = temp.path().join("moved workspace");
     assert_eq!(
-        restored_native_relative_path(HarnessKind::Dsh, &relative, Some(&moved)).unwrap(),
-        relative
+        restored_native_relative_path(HarnessKind::Dsh, &projection, Some(&moved)).unwrap(),
+        projection
     );
+    let projection_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.relative_path == projection)
+        .unwrap();
     let restored: serde_json::Value = serde_json::from_slice(
         &restored_native_artifact_bytes(
             HarnessKind::Dsh,
             DSH_NATIVE,
-            &relative,
-            &artifact_bytes(&artifacts[0]),
+            &projection,
+            &artifact_bytes(projection_artifact),
             Some(&moved),
             temp.path(),
         )
@@ -148,6 +189,35 @@ fn dsh_checkpoint_keeps_the_session_record_and_restores_it_at_the_new_workspace(
     let mut expected = record;
     expected["cwd"] = moved.to_str().unwrap().into();
     assert_eq!(restored, expected);
+
+    let moved_native = Path::new("dsh-home")
+        .join("sessions")
+        .join(restore::dsh_project_key(&moved).unwrap())
+        .join(DSH_NATIVE)
+        .join("session.v4.jsonl.zstd");
+    assert_eq!(
+        restored_native_relative_path(HarnessKind::Dsh, &native_relative, Some(&moved)).unwrap(),
+        moved_native
+    );
+    let native_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.relative_path == native_relative)
+        .unwrap();
+    let restored_native = restored_native_artifact_bytes(
+        HarnessKind::Dsh,
+        DSH_NATIVE,
+        &native_relative,
+        &artifact_bytes(native_artifact),
+        Some(&moved),
+        temp.path(),
+    )
+    .unwrap();
+    let unpacked = zstd::stream::decode_all(restored_native.as_slice()).unwrap();
+    let newline = unpacked.iter().position(|byte| *byte == b'\n').unwrap();
+    let (header, events) = (&unpacked[..newline], &unpacked[newline + 1..]);
+    let header: serde_json::Value = serde_json::from_slice(header).unwrap();
+    assert_eq!(header["cwd"], moved.to_str().unwrap());
+    assert_eq!(events, native_events);
 }
 
 /// OpenCode 2 keeps its logins in the same database as its sessions. A
@@ -2460,6 +2530,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     fs::create_dir_all(&memory_root).unwrap();
     fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -2485,6 +2556,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         excluded_environment: Vec::new(),
         cwd: spec.workspace_root.join("app"),
         additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
         native_session_id: Some(NATIVE.into()),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
@@ -5601,6 +5673,63 @@ fn origin_delta_cutoff_export_and_restore_round_trips_without_origin() {
 }
 
 #[test]
+fn origin_delta_capture_records_the_managed_launch_base_and_restore_puts_it_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec
+        .workspace_root
+        .join(&spec.repositories[0].relative_destination);
+    let cutoff = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["remote", "remove", "origin"]);
+    git(&checkout, &["config", "mj.remoteWorkspace", "true"]);
+    git(&checkout, &["config", "mj.baseCommit", &cutoff]);
+
+    // Provisioning marks the fresh workspace with its own HEAD as the base,
+    // which after a restore is not the base the session started from.
+    let restore_root = temp.path().join("restore-workspace");
+    let restore_checkout = restore_root.join(&spec.repositories[0].relative_destination);
+    fs::create_dir_all(&restore_checkout).unwrap();
+    git(&restore_checkout, &["init", "-b", "main"]);
+    git(
+        &restore_checkout,
+        &["fetch", checkout.to_str().unwrap(), &cutoff],
+    );
+    git(&restore_checkout, &["checkout", "-B", "main", "FETCH_HEAD"]);
+    git(&checkout, &["checkout", "-b", "later"]);
+    fs::write(checkout.join("later.txt"), "later\n").unwrap();
+    git(&checkout, &["add", "later.txt"]);
+    git(&checkout, &["commit", "-m", "later"]);
+    git(&restore_checkout, &["config", "mj.remoteWorkspace", "true"]);
+    git(
+        &restore_checkout,
+        &["config", "mj.baseCommit", &"1".repeat(40)],
+    );
+
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaCutoff {
+        exclude_commits: vec![cutoff.clone()],
+    };
+    spec.repositories[0].origin_override = None;
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let metadata = &archive.manifest.repositories[0].metadata;
+    assert_eq!(metadata.base_commit, cutoff);
+    assert!(!metadata.remote_workspace);
+
+    restore_repositories(&spec.output_path, &restore_root, &SystemGit).unwrap();
+    assert_eq!(git(&restore_checkout, &["config", "mj.baseCommit"]), cutoff);
+    assert_eq!(
+        git(&restore_checkout, &["rev-parse", "refs/mj/base"]),
+        cutoff
+    );
+    assert_eq!(
+        git(&restore_checkout, &["config", "mj.remoteWorkspace"]),
+        "true"
+    );
+}
+
+#[test]
 fn origin_delta_cutoff_export_allows_empty_pack_at_cutoff() {
     let temp = tempfile::tempdir().unwrap();
     let (mut spec, _) = fixture(temp.path());
@@ -5622,6 +5751,9 @@ fn origin_delta_cutoff_export_allows_empty_pack_at_cutoff() {
     let repository = &archive.manifest.repositories[0];
     assert!(repository.origin_delta_pack_path.is_none());
     assert!(repository.metadata.origin.is_empty());
+    // A checkout that is not a managed workspace records no base, as every
+    // archive written before the base was recorded does.
+    assert!(repository.metadata.base_commit.is_empty());
     let delta = repository
         .metadata
         .origin_delta

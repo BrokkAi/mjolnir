@@ -783,9 +783,10 @@ impl HarnessKind {
             Self::Grok => "GROK_HOME",
             Self::Muse => "XDG_CONFIG_HOME",
             Self::OpenCode => "XDG_CONFIG_HOME",
-            // dsh-acp has no home of its own; its data directory holds its
-            // sessions and would otherwise default to `.dsh-acp` inside the
-            // directory it runs in.
+            // Mjolnir gives dsh-acp this data directory and gives the pinned
+            // DSH runtime a private `dsh-home` beneath it. Otherwise dsh-acp
+            // would keep sessions in `.dsh-acp` under its working directory,
+            // and DSH would use the target account's `~/.dsh`.
             Self::Dsh => "DSH_ACP_DATA_DIR",
             Self::Antigravity => "MJ_ANTIGRAVITY_HOME",
         }
@@ -891,6 +892,10 @@ impl HarnessKind {
         match self {
             Self::Dsh => &[
                 (
+                    "DSH_ACP_DSH_HOME",
+                    "native DSH state lives under the profile home",
+                ),
+                (
                     "DSH_ACP_SYSTEM_PROMPT",
                     "put DSH's instructions in AGENTS.md in the profile home",
                 ),
@@ -961,8 +966,8 @@ impl HarnessKind {
     /// home, matching the provisioning allowlist the controller stages.
     pub const fn synced_skill_dirs(self) -> &'static [&'static str] {
         match self {
-            // dsh-acp reads no skills; its tree is staged like every other
-            // harness's and stays inert.
+            // DSH reads `.agents/skills`, not the generated `skills/` tree;
+            // this tree is staged like every other harness's and stays inert.
             Self::Codex
             | Self::Claude
             | Self::Kimi
@@ -987,7 +992,8 @@ impl HarnessKind {
     /// registers its built-in skills in memory, Grok caches its bundled skills
     /// under `bundled/skills/`, Muse writes its own under its data directory
     /// (`.data/muse/skills/` in a Mjolnir home), and OpenCode embeds its
-    /// built-in skill. DSH reads no skills at all.
+    /// built-in skill. DSH reads `.agents/skills`, which Mjolnir does not
+    /// manage as part of its generated `skills/` tree.
     pub const fn harness_owned_skill_paths(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
@@ -1039,7 +1045,7 @@ impl HarnessKind {
                 "Install it with `npm install -g @openai/codex` (Node.js 22 or newer)".to_owned()
             }
             Self::Claude => "Install it with `npm install -g @anthropic-ai/claude-code`".to_owned(),
-            Self::Dsh => "Install it with `npm install -g @brokkai/dsh-acp` (Node.js 22 or newer), or from a release archive at https://github.com/BrokkAi/dsh-acp/releases".to_owned(),
+            Self::Dsh => "Install it with `npm install -g @brokkai/dsh-acp` (Node.js 24.9 or newer); the package includes the pinned DSH runtime. A release archive needs @deepseek-ai/dsh 0.2.2-rc.5 installed separately: https://github.com/BrokkAi/dsh-acp/releases".to_owned(),
             other => format!("Install the {} CLI", other.display_name()),
         }
     }
@@ -1423,7 +1429,7 @@ impl HarnessKind {
             Self::Kimi | Self::Grok => &["sessions"],
             Self::Muse => &[".data/muse/sessions"],
             Self::OpenCode => &[".data/opencode"],
-            Self::Dsh => &["sessions"],
+            Self::Dsh => &["sessions", "dsh-home/sessions"],
             // agy's conversation database and, beside it, the files each
             // conversation owns, such as the full output of a long command.
             Self::Antigravity => &["antigravity-cli/conversations", "antigravity-cli/brain"],

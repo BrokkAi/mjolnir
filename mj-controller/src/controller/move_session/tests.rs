@@ -258,13 +258,13 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
 
 #[test]
 fn in_place_protocol_gate_and_deferred_notice_contract() {
-    assert!(ensure_worker_supports_in_place_move("s1", 81, false).is_ok());
-    let manual = ensure_worker_supports_in_place_move("s1", 80, false)
+    assert!(ensure_worker_supports_in_place_move("s1", 93, false).is_ok());
+    let manual = ensure_worker_supports_in_place_move("s1", 90, false)
         .unwrap_err()
         .to_string();
     assert!(manual.contains("mj restart --session s1"), "{manual}");
     assert!(manual.contains("Restart agent"), "{manual}");
-    let quota = ensure_worker_supports_in_place_move("s1", 80, true)
+    let quota = ensure_worker_supports_in_place_move("s1", 90, true)
         .unwrap_err()
         .to_string();
     assert!(quota.contains("Waiting for quota reset"), "{quota}");
@@ -433,6 +433,290 @@ fn recover_legacy_move_operation_probes_dead_source_and_handles_stopped_checkpoi
         controller.state.sessions["sess-stopped"].state,
         SessionState::Stopped
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn preparing_cross_harness_move_without_utility_profiles_succeeds() {
+    let name = crate::controller::test_support::test_name(
+        module_path!(),
+        "preparing_cross_harness_move_without_utility_profiles_succeeds",
+    );
+    if !super::test_fixtures::isolated_test_child(&name, "MJ_MOVE_NO_UTILITY_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join("checkout");
+    let source_home = dir.path().join("source-home");
+    let destination_home = dir.path().join("destination-home");
+    for path in [&checkout, &source_home, &destination_home] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+
+    let mut config = mj_core::config::Config::default();
+    config.profiles.clear();
+    config.profiles.insert(
+        "source".into(),
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, source_home),
+    );
+    config.profiles.insert(
+        "destination".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::OpenCode,
+            destination_home,
+        ),
+    );
+    config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+
+    let mut session = crate::controller::test_support::checkpoint_test_session("sess-no-utility");
+    session.harness_kind = mj_core::config::HarnessKind::Claude;
+    session.state = SessionState::Running;
+    session.last_profile = "source".into();
+    session.target_template_id = "local-bare".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: dir.path().join("worker").join(&session.id),
+    }));
+    session.project_directory = Some(checkout);
+    crate::database::save_session(&session).unwrap();
+
+    let mut controller = crate::controller::Controller {
+        config,
+        state: mj_core::state::State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    controller
+        .state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
+
+    let catalog =
+        crate::profile_catalog::ProfileCatalog::with_probe(crate::profile_catalog::counting_probe(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        ));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let selection = MoveSelection {
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
+            clear_resource_allocation: false,
+            session_id: session.id.clone(),
+            profile_id: Some("destination".into()),
+            target_template_id: None,
+            additional_mounts: None,
+            resource_allocation: None,
+            subagents: None,
+            oracle: None,
+            oracle_choice: None,
+        };
+        let preparation = controller
+            .prepare_move_session_controlled(&catalog, selection, &crate::targets::ProcessExecutor)
+            .await
+            .unwrap();
+        assert!(preparation.cross_harness);
+        assert!(preparation.in_place);
+        let relation: mj_core::subagent::SubagentRecord = serde_json::from_value(serde_json::json!({
+            "child_session_id": session.id, "parent_session_id": "parent",
+            "task_name": "move child", "profile_id": "source", "working_directory": "",
+            "initial_prompt": "work", "request_key": "move-child", "created_at": session.created_at
+        })).unwrap();
+        let parent = crate::controller::test_support::checkpoint_test_session("parent");
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(&session, &relation).unwrap();
+        controller
+            .state
+            .subagents
+            .insert(session.id.clone(), (&relation).into());
+        for state in [SessionState::Running, SessionState::Parked] {
+            controller
+                .state
+                .sessions
+                .get_mut(&session.id)
+                .unwrap()
+                .state = state;
+            let mut selection = preparation.selection.clone();
+            assert!(
+                controller
+                    .prepare_move_session_controlled(
+                        &catalog,
+                        selection.clone(),
+                        &crate::targets::ProcessExecutor
+                    )
+                    .await
+                    .unwrap()
+                    .in_place
+            );
+            selection.oracle = Some(!session.oracle);
+            let error = controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    selection,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot change delegation or oracle"),
+                "{error:#}"
+            );
+        }
+
+        controller.config.targets.insert(
+            "other-target".into(),
+            serde_json::from_value(serde_json::json!({"kind":"local-podman"})).unwrap(),
+        );
+        for (change, obstacle) in [
+            "target changed",
+            "attached mounts changed",
+            "resource allocation changed",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut selection = preparation.selection.clone();
+            match change {
+                0 => selection.target_template_id = Some("other-target".into()),
+                1 => {
+                    selection.additional_mounts = Some(vec![mj_core::targets::AdditionalMount {
+                        source: dir.path().to_owned(),
+                        destination: "/attached".into(),
+                        access: mj_core::targets::MountAccess::Ro,
+                    }])
+                }
+                _ => {
+                    selection.resource_allocation =
+                        Some(mj_core::state::SessionResourceAllocation::Container {
+                            cpus: 2,
+                            memory_bytes: 1024 * 1024 * 1024,
+                        })
+                }
+            }
+            let error = controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    selection,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(obstacle), "{error:#}");
+        }
+
+        controller.config.targets.insert(
+            "local-bare-yolo".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        let mut alias_selection = preparation.selection.clone();
+        alias_selection.target_template_id = Some("local-bare-yolo".into());
+        let error = controller
+            .prepare_move_session_controlled(
+                &catalog,
+                alias_selection,
+                &crate::targets::ProcessExecutor,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "sub-agent sessions can only move in place on their current target: target changed"
+            ),
+            "{error:#}"
+        );
+
+        let mut reviewer = relation.clone();
+        reviewer.reviewer_launch = Some(
+            controller
+                .reviewer_launch_config(&session.id, "source", 0, &[])
+                .unwrap(),
+        );
+        rusqlite::Connection::open(crate::database::database_path())
+            .unwrap()
+            .execute(
+                "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
+                rusqlite::params![session.id, serde_json::to_string(&reviewer).unwrap()],
+            )
+            .unwrap();
+        let error = controller
+            .prepare_move_session_controlled(
+                &catalog,
+                preparation.selection.clone(),
+                &crate::targets::ProcessExecutor,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer sessions cannot move to a different harness"),
+            "{error:#}"
+        );
+        let mut same_harness = preparation.selection.clone();
+        same_harness.profile_id = Some("source".into());
+        assert!(
+            controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    same_harness,
+                    &crate::targets::ProcessExecutor
+                )
+                .await
+                .unwrap()
+                .in_place
+        );
+
+        let mut orchestrator = relation;
+        orchestrator.orchestrator = true;
+        rusqlite::Connection::open(crate::database::database_path())
+            .unwrap()
+            .execute(
+                "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
+                rusqlite::params![session.id, serde_json::to_string(&orchestrator).unwrap()],
+            )
+            .unwrap();
+        controller
+            .state
+            .subagents
+            .insert(session.id.clone(), (&orchestrator).into());
+        controller
+            .state
+            .environment_owners
+            .insert(session.id.clone(), session.id.clone());
+        controller
+            .state
+            .sessions
+            .get_mut(&session.id)
+            .unwrap()
+            .subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: true,
+            straightforward: Some(Box::new(mj_core::config::SubagentChoice {
+                model: "destination-model".into(),
+                effort: None,
+            })),
+            subtle: None,
+        });
+        assert!(
+            controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    preparation.selection.clone(),
+                    &crate::targets::ProcessExecutor
+                )
+                .await
+                .unwrap()
+                .in_place
+        );
+    });
 }
 
 // Hard-won: #1631: retrying a partially started Move without --queue defaulted to Discard and was refused.
@@ -1070,4 +1354,1521 @@ fn parent_move_reports_only_workers_in_its_environment() {
             && !refusal.contains("owned")
             && !refusal.contains("depth-two")
     );
+}
+
+#[cfg(unix)]
+mod staged_in_place_tests {
+    use super::*;
+    use crate::controller::checkpoint::stand_in::*;
+    use crate::controller::move_session::test_fixtures::*;
+    use mj_core::config::HarnessKind;
+    use mj_worker::stand_in_relay::seed_source_relay;
+    use std::fs;
+
+    fn executor() -> RecordingProcessExecutor {
+        RecordingProcessExecutor::new(WorkerCheckpoint {
+            restore: mj_worker::checkpoint::restore_from_spec_file,
+            export: |mut input| {
+                Ok(serde_json::to_vec(
+                    &mj_worker::checkpoint::export_from_spec_reader(&mut input)?,
+                )?)
+            },
+        })
+    }
+
+    fn isolated(name: &str) -> bool {
+        if std::env::var_os("MJ_TEST_STAGED_MOVE_CHILD").is_some() {
+            return true;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), name),
+        )
+        .env("MJ_TEST_STAGED_MOVE_CHILD", "1")
+        .env("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS", "1")
+        .env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        )
+        .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+        .isolated_store(dir.path())
+        .run();
+        false
+    }
+
+    fn live_files(root: &std::path::Path) -> Vec<Vec<u8>> {
+        [
+            "launch.json",
+            "ownership.json",
+            "profile/settings.json",
+            "profile/source-only.txt",
+        ]
+        .map(|name| fs::read(root.join(name)).unwrap())
+        .into()
+    }
+
+    fn assert_candidates_empty(root: &std::path::Path) {
+        let path = root.join(mj_core::worker_launch::RELOAD_CANDIDATES_DIR);
+        if path.exists() {
+            assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn in_place_move_precommit_refusal_keeps_live_files_and_clears_fence() {
+        if isolated("in_place_move_precommit_refusal_keeps_live_files_and_clears_fence") {
+            run_case("refused");
+        }
+    }
+
+    #[test]
+    fn in_place_move_staged_success_promotes_destination_and_removes_candidate() {
+        if isolated("in_place_move_staged_success_promotes_destination_and_removes_candidate") {
+            run_case("success");
+        }
+    }
+
+    #[test]
+    fn subagent_move_live_same_harness_keeps_current_model() {
+        if isolated("subagent_move_live_same_harness_keeps_current_model") {
+            run_case("subagent-same");
+        }
+    }
+
+    #[test]
+    fn subagent_move_live_cross_harness_discards_spawn_model() {
+        if isolated("subagent_move_live_cross_harness_discards_spawn_model") {
+            run_case("subagent-cross");
+        }
+    }
+
+    #[test]
+    fn in_place_move_lost_reply_retry_skips_staging_and_restart() {
+        if isolated("in_place_move_lost_reply_retry_skips_staging_and_restart") {
+            run_case("lost-reply");
+        }
+    }
+
+    #[test]
+    fn in_place_move_failed_committed_reload_and_dead_recovery_settle_destination_error() {
+        if isolated(
+            "in_place_move_failed_committed_reload_and_dead_recovery_settle_destination_error",
+        ) {
+            run_case("failed");
+        }
+    }
+
+    #[test]
+    fn in_place_move_database_failure_after_commit_keeps_fence_until_recovery() {
+        if !isolated("in_place_move_database_failure_after_commit_keeps_fence_until_recovery") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        fs::write(relay_root.join("fail-in-place-after-commit"), "test").unwrap();
+        let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_destination_session BEFORE UPDATE ON sessions WHEN NEW.last_profile = 'claude-destination' BEGIN SELECT RAISE(ABORT, 'injected destination write failure'); END;").unwrap();
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = executor();
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let error = fixture
+                    .controller
+                    .execute_move(
+                        &admission,
+                        &mut operation,
+                        None,
+                        &executor,
+                        &channels.control,
+                        super::super::MoveSourceRelay::default(),
+                    )
+                    .await
+                    .unwrap_err();
+                channels.shutdown.shutdown().await.unwrap();
+                assert!(
+                    format!("{error:#}").contains("injected destination write failure"),
+                    "{error:#}"
+                );
+                assert!(operation.in_place_expected_store_id.is_some());
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_SOURCE_PROFILE
+                );
+                let receipt = mj_core::worker_launch::WorkerLaunchConfig::read(
+                    &fixture.worker_root.join("launch.json"),
+                )
+                .unwrap();
+                assert_eq!(
+                    receipt.accepted_reload_operation_id.as_deref(),
+                    Some(operation.operation_id.as_str())
+                );
+                let outcome = fixture
+                    .controller
+                    .finish_move_result(&mut operation, Err(error), &executor)
+                    .unwrap();
+                assert_eq!(outcome.outcome, "interrupted");
+                assert!(
+                    crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .in_place_expected_store_id
+                        .is_some()
+                );
+                connection
+                    .execute_batch("DROP TRIGGER reject_destination_session;")
+                    .unwrap();
+                fixture.controller.state = crate::database::load_state().unwrap();
+                let channels = start_source_relay_manager(&relay_root);
+                let outcome = fixture
+                    .controller
+                    .recover_move_managed_controlled(
+                        &admission,
+                        operation,
+                        &executor,
+                        &channels.control,
+                    )
+                    .await
+                    .unwrap();
+                channels.shutdown.shutdown().await.unwrap();
+                assert_eq!(outcome.outcome, "failed", "{outcome:?}");
+                let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                assert_eq!(session.state, SessionState::Error);
+                assert!(
+                    crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .in_place_expected_store_id
+                        .is_none()
+                );
+            });
+    }
+
+    // Hard-won: #1673: a reload failure was settled and its hold released after a daemon handoff had closed admission.
+    #[test]
+    fn in_place_move_reload_failure_after_admission_closed_settles_nothing() {
+        if !isolated("in_place_move_reload_failure_after_admission_closed_settles_nothing") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        fs::write(relay_root.join("reject-in-place-restart"), "test").unwrap();
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = RecordingProcessExecutor {
+                    refuse_resume: Some("in-place Move reload"),
+                    ..executor()
+                };
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let error = fixture
+                    .controller
+                    .execute_move(
+                        &admission,
+                        &mut operation,
+                        None,
+                        &executor,
+                        &channels.control,
+                        super::super::MoveSourceRelay::default(),
+                    )
+                    .await
+                    .unwrap_err();
+                channels.shutdown.shutdown().await.unwrap();
+                assert!(format!("{error:#}").contains("handoff"), "{error:#}");
+                // The successor daemon decides: the hold and fence stay, and
+                // nothing was written to the session record.
+                let hold =
+                    mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                        .unwrap()
+                        .operational_state()
+                        .in_place_move_hold
+                        .unwrap();
+                assert_eq!(hold.operation_id, operation.operation_id);
+                assert!(operation.in_place_expected_store_id.is_some());
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_SOURCE_PROFILE
+                );
+            });
+    }
+
+    // Hard-won: #1673: an unbounded in-place reload wait outlived daemon shutdown and cancellation.
+    #[test]
+    fn in_place_move_interrupt_during_reload_returns_promptly_and_recovery_settles() {
+        if !isolated("in_place_move_interrupt_during_reload_returns_promptly_and_recovery_settles")
+        {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        fs::write(relay_root.join("stall-in-place-restart-reply"), "test").unwrap();
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = executor();
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let requests = relay_root.join("in-place-move-requests.log");
+                let interrupt = async {
+                    // The worker has the reload and the reply is stalled.
+                    for _ in 0..200 {
+                        if fs::read_to_string(&requests)
+                            .is_ok_and(|log| log.contains("restart_harness_in_place"))
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    executor
+                        .shutdown
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    std::time::Instant::now()
+                };
+                let (result, interrupted_at) = tokio::join!(
+                    async {
+                        let result = fixture
+                            .controller
+                            .execute_move(
+                                &admission,
+                                &mut operation,
+                                None,
+                                &executor,
+                                &channels.control,
+                                super::super::MoveSourceRelay::default(),
+                            )
+                            .await;
+                        (result, std::time::Instant::now())
+                    },
+                    interrupt
+                );
+                let (result, returned_at) = result;
+                channels.shutdown.shutdown().await.unwrap();
+                assert!(
+                    returned_at.saturating_duration_since(interrupted_at)
+                        < std::time::Duration::from_secs(1),
+                    "interruption took {:?}",
+                    returned_at.saturating_duration_since(interrupted_at)
+                );
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains("interrupted"), "{error}");
+                // The worker's hold and our fence stay for recovery.
+                assert!(operation.in_place_expected_store_id.is_some());
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_SOURCE_PROFILE
+                );
+                let hold =
+                    mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                        .unwrap()
+                        .operational_state()
+                        .in_place_move_hold
+                        .unwrap();
+                assert!(hold.harness_restarted, "{hold:?}");
+                // The next daemon settles the Move from the hold.
+                fixture.controller.state = crate::database::load_state().unwrap();
+                let executor = self::executor();
+                let channels = start_source_relay_manager(&relay_root);
+                let outcome = fixture
+                    .controller
+                    .recover_move_managed_controlled(
+                        &admission,
+                        operation,
+                        &executor,
+                        &channels.control,
+                    )
+                    .await
+                    .unwrap();
+                channels.shutdown.shutdown().await.unwrap();
+                assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_DESTINATION_PROFILE
+                );
+            });
+    }
+
+    #[test]
+    fn in_place_move_cancelled_after_started_settles_destination_and_installs_recent_handoff() {
+        if !isolated(
+            "in_place_move_cancelled_after_started_settles_destination_and_installs_recent_handoff",
+        ) {
+            return;
+        }
+        use mj_core::relay::{
+            RelayCommand, RelayCommandOutcome, RelayRequest, RelayRequestEnvelope,
+            RelayResponseBody, RelayResponsePayload,
+        };
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Codex);
+        let source = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        let envelope = |request| RelayRequestEnvelope {
+            request_id: "cancel-seed".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request,
+        };
+        let mut seed =
+            mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        let history =
+            "Keep the source conversation context when cancellation retains destination ownership.";
+        seed.handle(envelope(RelayRequest::Submit {
+            command_id: "cmd-cancel-history".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                    history,
+                )],
+            },
+        }));
+        assert_eq!(seed.claim_pending_commands(true).unwrap().len(), 1);
+        seed.handle(envelope(RelayRequest::Submit {
+            command_id: "cmd-existing-user".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                    "existing queued user work",
+                )],
+            },
+        }));
+        let store = seed.operational_state().store_id.unwrap();
+        let held = seed.handle(envelope(RelayRequest::HoldInPlaceMoveDispatch {
+            operation_id: operation.operation_id.clone(),
+            expected_store_id: store.clone(),
+        }));
+        let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::InPlaceMoveDispatchHeld {
+                    captured_pending_command_ids,
+                },
+        } = held.body
+        else {
+            panic!("hold expected")
+        };
+        assert_eq!(captured_pending_command_ids, ["cmd-existing-user"]);
+        seed.record_command_completed(
+            "cmd-cancel-history",
+            RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+        drop(seed);
+        operation.in_place_expected_store_id = Some(store.clone());
+        operation.in_place_held_command_ids = captured_pending_command_ids;
+        crate::database::save_move_operation(&operation).unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let executor = executor();
+            let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+            let channels = start_source_relay_manager(&relay_root);
+            let mut relay = super::super::MoveSourceRelay::lease(&admission, &channels.control, LATCH_RELAY_SESSION).await.unwrap();
+            let owner = relay.owner().unwrap();
+            fixture.controller.apply_in_place_destination(&operation).unwrap();
+            let backend = mj_core::targets::TargetLocator::LocalBare { worker_root: fixture.worker_root.to_string_lossy().into_owned() };
+            let candidate = mj_core::relay::new_command_id("cancel-candidate").unwrap();
+            owner.scope_blocking(|| fixture.controller.prepare_worker_files_for(LATCH_RELAY_SESSION, &backend, fixture.worker_root.to_str().unwrap(), &executor, mj_worker_staging::worker_binary::WorkerFilePreparation::StageCandidate { operation_id: operation.operation_id.clone(), expected_store_id: store.clone(), candidate_id: candidate.clone() }, mj_worker_staging::worker_binary::LaunchHistory::Stored)).unwrap();
+            let launch = fixture.controller.current_worker_launch_config(LATCH_RELAY_SESSION, &backend).unwrap();
+            let conn = relay.0.as_mut().unwrap().connection_mut();
+            conn.client.restart_harness_in_place(&operation.operation_id, &store, Box::new(launch), Some(candidate)).await.unwrap();
+            let hold = conn.client.status().await.unwrap().in_place_move_hold.unwrap();
+            assert!(matches!(hold.reload_phase, Some(mj_core::relay::InPlaceReloadPhase::Started)));
+            // The reply was lost before the controller published destination B.
+            fixture.controller.state.sessions.insert(LATCH_RELAY_SESSION.into(), source);
+            assert_eq!(crate::database::load_session_record(LATCH_RELAY_SESSION).unwrap().unwrap().last_profile, IN_PLACE_SOURCE_PROFILE);
+            drop(relay);
+            channels.shutdown.shutdown().await.unwrap();
+            operation.cancellation_requested = true;
+            operation.queue = ResumeQueueDisposition::Start;
+            operation.quota_stop_reason = Some("quota exhausted".into());
+            operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+            operation.in_place_continuation_command_id = Some("cmd-must-not-continue".into());
+            crate::database::save_move_operation(&operation).unwrap();
+            let channels = start_source_relay_manager(&relay_root);
+            let outcome = fixture.controller.recover_move_managed_controlled(&admission, operation, &executor, &channels.control).await.unwrap();
+            channels.shutdown.shutdown().await.unwrap();
+            assert_eq!(outcome.outcome, "cancelled", "{outcome:?}");
+            assert!(outcome.error.as_deref().unwrap().contains("destination retained"));
+            let record = crate::database::load_session_record(LATCH_RELAY_SESSION).unwrap().unwrap();
+            assert_eq!(record.last_profile, IN_PLACE_DESTINATION_PROFILE);
+            assert_eq!(record.harness_kind, HarnessKind::Claude);
+            let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION).unwrap().unwrap();
+            assert!(operation.in_place_harness_restarted);
+            assert!(operation.in_place_expected_store_id.is_none());
+            assert!(operation.in_place_held_command_ids.is_empty());
+            let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(&fs::read(relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap()).unwrap();
+            assert!(snapshot.in_place_move_hold.is_none());
+            assert!(!snapshot.handled_commands.contains_key("cmd-must-not-continue"));
+            assert_eq!(snapshot.dispatches["cmd-existing-user"].state, mj_core::relay::RelayDispatchState::InFlight);
+            let context = snapshot.pending_prompt_context.unwrap();
+            assert!(context.text.contains(history), "{}", context.text);
+            assert_eq!(context.attached_command_id.as_deref(), Some("cmd-existing-user"));
+            let requests = fs::read_to_string(relay_root.join("in-place-move-requests.log")).unwrap();
+            assert!(!requests.contains("submit_front"));
+            assert!(!requests.contains("discard_held_move_commands"));
+        });
+    }
+
+    fn run_case(mode: &str) {
+        let _writer = crate::database::install_isolated_test_writer();
+        let destination_kind = if mode == "subagent-cross" {
+            HarnessKind::Codex
+        } else {
+            HarnessKind::Claude
+        };
+        let mut fixture = in_place_fixture(destination_kind, HarnessKind::Claude);
+        let source_session = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        if mode.starts_with("subagent-") {
+            let mut parent = source_session.clone();
+            parent.id = "parent-move".into();
+            parent.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: fixture.worker_root.parent().unwrap().join(&parent.id),
+            }));
+            crate::database::save_session(&parent).unwrap();
+            let relation: mj_core::subagent::SubagentRecord =
+                serde_json::from_value(serde_json::json!({
+                    "child_session_id": source_session.id, "parent_session_id": parent.id,
+                    "task_name": "move child", "profile_id": IN_PLACE_SOURCE_PROFILE,
+                    "working_directory": "", "initial_prompt": "work", "request_key": "live-child",
+                    "model": "stale-spawn-model", "created_at": source_session.created_at
+                }))
+                .unwrap();
+            crate::database::save_subagent_session(&source_session, &relation).unwrap();
+            fixture.controller.state = crate::database::load_state().unwrap();
+            let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                &relation.kind.startup_request_key(&relation.request_key),
+            );
+            let prompt = crate::database::startup_step_id(&group, "prompt");
+            let mut seed =
+                mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                    .unwrap();
+            seed.handle(mj_core::relay::RelayRequestEnvelope {
+                request_id: "seed-assignment".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: mj_core::relay::RelayRequest::Submit {
+                    command_id: prompt.clone(),
+                    command: mj_core::relay::RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                            "original assignment",
+                        )],
+                    },
+                },
+            });
+            assert_eq!(seed.claim_pending_commands(true).unwrap().len(), 1);
+            seed.record_command_completed(
+                &prompt,
+                mj_core::relay::RelayCommandOutcome::Prompt {
+                    work_facts: None,
+                    diagnostic: None,
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        }
+        let before = live_files(&fixture.worker_root);
+        let marker = match mode {
+            "refused" => Some("reject-in-place-restart"),
+            "lost-reply" => Some("lose-in-place-restart-reply"),
+            "failed" => Some("fail-in-place-after-commit"),
+            _ => None,
+        };
+        if let Some(marker) = marker {
+            fs::write(relay_root.join(marker), "test").unwrap();
+        }
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = executor();
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let result = fixture
+                    .controller
+                    .execute_move(
+                        &admission,
+                        &mut operation,
+                        None,
+                        &executor,
+                        &channels.control,
+                        super::super::MoveSourceRelay::default(),
+                    )
+                    .await;
+                channels.shutdown.shutdown().await.unwrap();
+                match mode {
+                    "refused" => {
+                        assert!(result.is_err());
+                        assert_eq!(live_files(&fixture.worker_root), before);
+                        assert_candidates_empty(&fixture.worker_root);
+                        assert!(operation.in_place_expected_store_id.is_none());
+                        assert!(operation.in_place_held_command_ids.is_empty());
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_SOURCE_PROFILE);
+                        assert_eq!(session.state, SessionState::Running);
+                        let relay = mj_worker::relay::DurableRelay::open(
+                            &relay_root,
+                            LATCH_RELAY_SESSION,
+                            "1.0.0",
+                        )
+                        .unwrap();
+                        assert!(relay.operational_state().in_place_move_hold.is_none());
+                    }
+                    "success" | "subagent-same" | "subagent-cross" => {
+                        result.unwrap();
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                        assert_eq!(session.state, SessionState::Running);
+                        assert_candidates_empty(&fixture.worker_root);
+                        let launch = mj_core::worker_launch::WorkerLaunchConfig::read(
+                            &fixture.worker_root.join("launch.json"),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            launch.accepted_reload_operation_id.as_deref(),
+                            Some(operation.operation_id.as_str())
+                        );
+                        if mode.starts_with("subagent-") {
+                            assert_eq!(launch.initial_model, None);
+                            assert_eq!(executor.move_stop_calls(), 0);
+                        }
+                        if destination_kind == HarnessKind::Claude {
+                            assert!(
+                                fs::read_to_string(
+                                    fixture.worker_root.join("profile/settings.json")
+                                )
+                                .unwrap()
+                                .contains("destination")
+                            );
+                        }
+                    }
+                    "lost-reply" => {
+                        assert!(result.is_err());
+                        assert!(operation.in_place_expected_store_id.is_some());
+                        assert_eq!(
+                            crate::database::load_session_record(LATCH_RELAY_SESSION)
+                                .unwrap()
+                                .unwrap()
+                                .last_profile,
+                            IN_PLACE_SOURCE_PROFILE
+                        );
+                        fs::write(
+                            fixture.worker_root.join("profile/settings.json"),
+                            "worker-configured destination",
+                        )
+                        .unwrap();
+                        fs::write(
+                            fixture.destination_home.join("settings.json"),
+                            "invalid canonical settings: staging must be skipped",
+                        )
+                        .unwrap();
+                        // A restart that already committed under an older worker
+                        // must settle forward without sending a new reload.
+                        let channels = crate::session_manager::spawn_session_manager().unwrap();
+                        let mut legacy =
+                            latch_relay_target(&relay_root, None, ReleaseSupport::Supported, false);
+                        legacy
+                            .spec
+                            .env
+                            .insert(LATCH_RELAY_MAX_PROTOCOL.into(), "92".into());
+                        channels.targets.send(vec![legacy]).unwrap();
+                        let outcome = fixture
+                            .controller
+                            .recover_move_managed_controlled(
+                                &admission,
+                                operation.clone(),
+                                &executor,
+                                &channels.control,
+                            )
+                            .await
+                            .unwrap();
+                        channels.shutdown.shutdown().await.unwrap();
+                        assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+                        assert_eq!(
+                            fs::read_to_string(fixture.worker_root.join("profile/settings.json"))
+                                .unwrap(),
+                            "worker-configured destination"
+                        );
+                        assert_eq!(
+                            crate::database::load_session_record(LATCH_RELAY_SESSION)
+                                .unwrap()
+                                .unwrap()
+                                .last_profile,
+                            IN_PLACE_DESTINATION_PROFILE
+                        );
+                        assert_eq!(
+                            fs::read_to_string(relay_root.join("in-place-move-requests.log"))
+                                .unwrap()
+                                .matches("restart_harness_in_place")
+                                .count(),
+                            1
+                        );
+                        assert_candidates_empty(&fixture.worker_root);
+                    }
+                    "failed" => {
+                        let error = result.unwrap_err();
+                        fixture
+                            .controller
+                            .finish_move_result(&mut operation, Err(error), &executor)
+                            .unwrap();
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                        assert_eq!(session.state, SessionState::Error);
+                        assert_eq!(
+                            session.last_error.as_deref(),
+                            Some("replacement harness failed after commit")
+                        );
+                        assert!(operation.in_place_expected_store_id.is_none());
+                        assert_eq!(operation.phase, MovePhase::Failed);
+                        let committed = live_files(&fixture.worker_root);
+                        // Recreate the daemon crash window: worker committed B and
+                        // wrote its exit failure, while the database still names A.
+                        crate::database::save_session(&source_session).unwrap();
+                        fixture
+                            .controller
+                            .state
+                            .sessions
+                            .insert(LATCH_RELAY_SESSION.into(), source_session);
+                        operation.phase = MovePhase::Capturing;
+                        operation.error = None;
+                        operation.in_place_expected_store_id =
+                            mj_worker::relay::DurableRelay::open(
+                                &relay_root,
+                                LATCH_RELAY_SESSION,
+                                "1.0.0",
+                            )
+                            .unwrap()
+                            .operational_state()
+                            .store_id;
+                        crate::database::save_move_operation(&operation).unwrap();
+                        let channels = start_source_relay_manager(&relay_root);
+                        let outcome = fixture
+                            .controller
+                            .recover_move_managed_controlled(
+                                &admission,
+                                operation.clone(),
+                                &executor,
+                                &channels.control,
+                            )
+                            .await
+                            .unwrap();
+                        channels.shutdown.shutdown().await.unwrap();
+                        assert_eq!(outcome.outcome, "failed", "{outcome:?}");
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                        assert_eq!(session.state, SessionState::Error);
+                        assert_eq!(
+                            session.last_error.as_deref(),
+                            Some("replacement harness failed after commit")
+                        );
+                        assert!(
+                            crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                                .unwrap()
+                                .unwrap()
+                                .in_place_expected_store_id
+                                .is_none()
+                        );
+                        assert_eq!(live_files(&fixture.worker_root), committed);
+                    }
+                    _ => unreachable!(),
+                }
+            });
+    }
+}
+
+mod direct_peer_route {
+    use std::collections::BTreeMap;
+    use std::io::Read;
+    use std::sync::Mutex;
+
+    use mj_core::ec2_records::Ec2InstanceRef;
+    use mj_core::state::GrantedMoveKey;
+    use mj_core::targets::{
+        CommandExecutor, CommandOutput, CommandSpec, DeadlinePause, SshTarget, TargetLocator,
+    };
+
+    use super::super::transport::DirectPeerConfig;
+    use super::super::transport::ec2_grant::{
+        Ec2ApiError, Ec2GrantKey, Ec2GrantRoute, Ec2GrantTarget, Ec2IngressRule,
+        Ec2InstanceNetwork, Ec2SecurityGroupClient,
+    };
+    use super::super::{drop_credentials_removed_by_transfer, try_build_direct_peer_config};
+    use super::KeepTransferOptions;
+
+    const HOST_KEY: &str = "ssh-ed25519 AAAAhost";
+
+    /// Answers each host's one probe call with `home`, a host key and, for
+    /// container hosts, the discovered host worker; records every call.
+    struct ProbeExecutor {
+        /// Substring of the SSH destination -> stdout of the probe.
+        replies: BTreeMap<&'static str, String>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl ProbeExecutor {
+        fn new(replies: &[(&'static str, Option<&str>)]) -> Self {
+            Self {
+                replies: replies
+                    .iter()
+                    .map(|(host, worker)| {
+                        let mut out = format!("/home/ubuntu\n{HOST_KEY}\n");
+                        out.push_str(worker.unwrap_or(""));
+                        out.push('\n');
+                        (*host, out)
+                    })
+                    .collect(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for ProbeExecutor {
+        fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            let line = command.args.join(" ");
+            self.calls.lock().unwrap().push(line.clone());
+            let stdout = self
+                .replies
+                .iter()
+                .find(|(host, _)| line.contains(**host))
+                .map(|(_, out)| out.clone().into_bytes())
+                .unwrap_or_default();
+            Ok(CommandOutput {
+                status: 0,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_without_deadline(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+    }
+
+    /// In-memory EC2 API; any rule call is a test failure.
+    #[derive(Default)]
+    struct FakeEc2 {
+        instances: BTreeMap<String, Ec2InstanceNetwork>,
+    }
+
+    impl Ec2SecurityGroupClient for FakeEc2 {
+        fn authorize_ingress(
+            &self,
+            _: &Ec2GrantKey,
+            _: &Ec2GrantRoute,
+            _: &str,
+        ) -> Result<(), Ec2ApiError> {
+            unreachable!("building a peer config never changes security groups")
+        }
+        fn revoke_ingress(&self, _: &Ec2GrantKey, _: &Ec2GrantRoute) -> Result<(), Ec2ApiError> {
+            unreachable!("building a peer config never changes security groups")
+        }
+        fn describe_ingress_rules(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Vec<Ec2IngressRule>, Ec2ApiError> {
+            unreachable!("building a peer config never reads security groups")
+        }
+        fn describe_instance(
+            &self,
+            instance_id: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Ec2InstanceNetwork, Ec2ApiError> {
+            self.instances
+                .get(instance_id)
+                .cloned()
+                .ok_or_else(|| Ec2ApiError::Other(format!("no instance {instance_id}")))
+        }
+    }
+
+    fn network(vpc: &str, private: &str, public: &str, sg: &str) -> Ec2InstanceNetwork {
+        Ec2InstanceNetwork {
+            vpc_id: Some(vpc.into()),
+            private_ip: Some(private.into()),
+            public_ip: Some(public.into()),
+            security_group_ids: vec![sg.into()],
+        }
+    }
+
+    fn ssh(destination: &str) -> SshTarget {
+        SshTarget {
+            destination: destination.into(),
+            ssh_args: vec![],
+        }
+    }
+
+    fn podman(destination: &str) -> TargetLocator {
+        TargetLocator::SshPodman {
+            ssh: ssh(destination),
+            container_id: "c1".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        }
+    }
+
+    fn nitro(destination: &str) -> TargetLocator {
+        TargetLocator::SshNitro {
+            ssh: ssh(destination),
+            container_id: "vm1".into(),
+            borrowed_from: None,
+        }
+    }
+
+    /// Records name `i-src` / `i-dst` by SSH destination host.
+    fn ec2_records(
+        locator: &TargetLocator,
+        known: &[(&str, &str, &str, Option<&str>)],
+    ) -> Option<Ec2InstanceRef> {
+        let ssh = match locator {
+            TargetLocator::SshPodman { ssh, .. }
+            | TargetLocator::SshNitro { ssh, .. }
+            | TargetLocator::SshBare { ssh, .. } => ssh,
+            _ => return None,
+        };
+        known
+            .iter()
+            .find(|(host, ..)| ssh.destination.ends_with(host))
+            .map(|(_, id, region, profile)| Ec2InstanceRef {
+                instance_id: (*id).into(),
+                region: (*region).into(),
+                aws_profile: profile.map(ToOwned::to_owned),
+            })
+    }
+
+    fn build(
+        source: &TargetLocator,
+        destination: &TargetLocator,
+        executor: &ProbeExecutor,
+        ec2: &FakeEc2,
+        known: &[(&str, &str, &str, Option<&str>)],
+    ) -> Option<DirectPeerConfig> {
+        try_build_direct_peer_config(
+            "op-1",
+            source,
+            "/work/src",
+            destination,
+            "/work/dst",
+            KeepTransferOptions::default(),
+            executor,
+            ec2,
+            &|locator| ec2_records(locator, known),
+        )
+    }
+
+    fn grant(sg: &str, cidr: &str, region: Option<&str>, profile: Option<&str>) -> Ec2GrantTarget {
+        Ec2GrantTarget::new(
+            Ec2GrantKey::ssh(sg, cidr),
+            Ec2GrantRoute::new(region.map(Into::into), profile.map(Into::into)),
+        )
+    }
+
+    const SRC_BIN: &str = "/home/ubuntu/.local/share/hel/workers/worker-binaries/abc/hel";
+    const DST_BIN: &str = "/home/ubuntu/.local/share/hel/microvm/hel";
+
+    #[test]
+    fn podman_and_nitro_hosts_in_one_vpc_talk_over_private_ips_with_per_grant_scope() {
+        let executor =
+            ProbeExecutor::new(&[("54.0.0.1", Some(SRC_BIN)), ("54.0.0.2", Some(DST_BIN))]);
+        let ec2 = FakeEc2 {
+            instances: BTreeMap::from([
+                (
+                    "i-src".into(),
+                    network("vpc-1", "10.0.0.5", "54.0.0.1", "sg-src"),
+                ),
+                (
+                    "i-dst".into(),
+                    network("vpc-1", "10.0.0.6", "54.0.0.2", "sg-dst"),
+                ),
+            ]),
+        };
+        let peer = build(
+            &podman("ubuntu@54.0.0.1"),
+            &nitro("ubuntu@54.0.0.2"),
+            &executor,
+            &ec2,
+            &[
+                ("54.0.0.1", "i-src", "us-east-2", Some("team")),
+                ("54.0.0.2", "i-dst", "us-east-2", Some("team")),
+            ],
+        )
+        .expect("podman and nitro hosts support direct Move");
+
+        assert_eq!(
+            executor.calls().len(),
+            2,
+            "one SSH probe per host, no extras"
+        );
+        assert_eq!(peer.source_address, "10.0.0.5");
+        assert_eq!(peer.destination_address, "10.0.0.6");
+        assert_eq!(peer.destination_ssh_destination, "ubuntu@10.0.0.6");
+        assert_eq!(peer.source_ssh_destination, "ubuntu@10.0.0.5");
+        let scoped = |sg: &str, cidr: &str| grant(sg, cidr, Some("us-east-2"), Some("team"));
+        assert_eq!(
+            peer.destination_ec2_grant,
+            Some(scoped("sg-dst", "10.0.0.5/32"))
+        );
+        assert_eq!(peer.source_ec2_grant, Some(scoped("sg-src", "10.0.0.6/32")));
+        // Stream commands run in the container; authorized_keys on the host.
+        assert_eq!(peer.source_worker_bin, "/work/src/hel");
+        assert_eq!(peer.destination_worker_bin, "/work/dst/hel");
+        assert_eq!(peer.source_host_worker_bin, SRC_BIN);
+        assert_eq!(peer.destination_host_worker_bin, DST_BIN);
+    }
+
+    #[test]
+    fn other_vpc_or_region_uses_public_ips_with_each_sides_region_and_profile() {
+        let executor =
+            ProbeExecutor::new(&[("54.0.0.1", Some(SRC_BIN)), ("54.0.0.2", Some(SRC_BIN))]);
+        let ec2 = FakeEc2 {
+            instances: BTreeMap::from([
+                (
+                    "i-src".into(),
+                    network("vpc-1", "10.0.0.5", "54.0.0.1", "sg-src"),
+                ),
+                (
+                    "i-dst".into(),
+                    network("vpc-2", "10.1.0.5", "54.0.0.2", "sg-dst"),
+                ),
+            ]),
+        };
+        let peer = build(
+            &podman("ubuntu@54.0.0.1"),
+            &podman("ubuntu@54.0.0.2"),
+            &executor,
+            &ec2,
+            &[
+                ("54.0.0.1", "i-src", "us-east-2", Some("a")),
+                ("54.0.0.2", "i-dst", "eu-west-1", None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(peer.source_address, "54.0.0.1");
+        assert_eq!(peer.destination_address, "54.0.0.2");
+        assert_eq!(peer.destination_ssh_destination, "ubuntu@54.0.0.2");
+        assert_eq!(
+            peer.destination_ec2_grant,
+            Some(grant("sg-dst", "54.0.0.1/32", Some("eu-west-1"), None))
+        );
+        assert_eq!(
+            peer.source_ec2_grant,
+            Some(grant("sg-src", "54.0.0.2/32", Some("us-east-2"), Some("a")))
+        );
+    }
+
+    #[test]
+    fn one_sided_ec2_grants_only_for_a_literal_ipv4_peer_never_a_hostname() {
+        let ec2 = FakeEc2 {
+            instances: BTreeMap::from([(
+                "i-dst".into(),
+                network("vpc-1", "10.0.0.6", "54.0.0.2", "sg-dst"),
+            )]),
+        };
+        let known = [("54.0.0.2", "i-dst", "us-east-2", None)];
+        let with_ip = build(
+            &podman("ubuntu@203.0.113.7"),
+            &podman("ubuntu@54.0.0.2"),
+            &ProbeExecutor::new(&[("203.0.113.7", Some(SRC_BIN)), ("54.0.0.2", Some(SRC_BIN))]),
+            &ec2,
+            &known,
+        )
+        .unwrap();
+        assert_eq!(
+            with_ip.destination_ec2_grant,
+            Some(grant("sg-dst", "203.0.113.7/32", Some("us-east-2"), None))
+        );
+        assert_eq!(with_ip.source_ec2_grant, None);
+
+        let with_name = build(
+            &podman("ubuntu@build.example.com"),
+            &podman("ubuntu@54.0.0.2"),
+            &ProbeExecutor::new(&[
+                ("build.example.com", Some(SRC_BIN)),
+                ("54.0.0.2", Some(SRC_BIN)),
+            ]),
+            &ec2,
+            &known,
+        )
+        .unwrap();
+        assert_eq!(
+            with_name.destination_ec2_grant, None,
+            "a hostname is not a CIDR"
+        );
+    }
+
+    #[test]
+    fn describe_failure_leaves_that_endpoint_without_a_grant_instead_of_failing_the_move() {
+        let peer = build(
+            &podman("ubuntu@203.0.113.7"),
+            &podman("ubuntu@54.0.0.2"),
+            &ProbeExecutor::new(&[("203.0.113.7", Some(SRC_BIN)), ("54.0.0.2", Some(SRC_BIN))]),
+            &FakeEc2::default(),
+            &[("54.0.0.2", "i-gone", "us-east-2", None)],
+        )
+        .expect("the Move still goes direct");
+        assert_eq!(peer.destination_ec2_grant, None);
+    }
+
+    #[test]
+    fn docker_apple_and_workerless_container_hosts_keep_the_daemon_stream() {
+        let docker = TargetLocator::SshDocker {
+            ssh: ssh("ubuntu@h1"),
+            container_id: "c".into(),
+            borrowed_from: None,
+        };
+        let apple = TargetLocator::SshAppleContainer {
+            ssh: ssh("ubuntu@h2"),
+            container_id: "c".into(),
+            borrowed_from: None,
+        };
+        let executor = ProbeExecutor::new(&[
+            ("h1", Some(SRC_BIN)),
+            ("h2", Some(SRC_BIN)),
+            ("h3", Some(SRC_BIN)),
+            ("h4", None),
+        ]);
+        let ec2 = FakeEc2::default();
+        assert!(build(&docker, &podman("ubuntu@h3"), &executor, &ec2, &[]).is_none());
+        assert!(build(&podman("ubuntu@h3"), &apple, &executor, &ec2, &[]).is_none());
+        assert!(
+            executor.calls().is_empty(),
+            "unsupported targets are not probed"
+        );
+        // No runnable host worker on the container host (e.g. another CPU
+        // architecture than the container's): fall back, do not guess a path.
+        assert!(
+            build(
+                &podman("ubuntu@h3"),
+                &nitro("ubuntu@h4"),
+                &executor,
+                &ec2,
+                &[]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn container_probe_discovers_the_host_worker_in_the_same_ssh_call() {
+        let executor = ProbeExecutor::new(&[("h1", Some(SRC_BIN)), ("h2", Some(DST_BIN))]);
+        build(
+            &podman("ubuntu@h1"),
+            &nitro("ubuntu@h2"),
+            &executor,
+            &FakeEc2::default(),
+            &[],
+        )
+        .unwrap();
+        let calls = executor.calls();
+        assert_eq!(calls.len(), 2);
+        let podman_probe = calls.iter().find(|call| call.contains("h1")).unwrap();
+        let nitro_probe = calls.iter().find(|call| call.contains("h2")).unwrap();
+        assert!(podman_probe.contains("worker-binaries"));
+        assert!(!podman_probe.contains("microvm/hel"));
+        assert!(nitro_probe.contains(".local/share/hel/microvm/hel"));
+        assert!(nitro_probe.contains("worker-binaries"));
+        for probe in [podman_probe, nitro_probe] {
+            assert!(probe.contains("worker authorized-keys --help"), "{probe}");
+        }
+    }
+
+    fn key(comment: &str) -> GrantedMoveKey {
+        GrantedMoveKey {
+            host: "h".into(),
+            comment: comment.into(),
+            private_key_path: None,
+            known_hosts_path: None,
+            authorized_keys_path: None,
+            worker_bin: None,
+            ssh_target: None,
+        }
+    }
+
+    #[test]
+    fn clean_transfer_drops_only_this_attempts_keys_and_dirty_keeps_all() {
+        let peer = |dirty: bool| {
+            let executor = ProbeExecutor::new(&[("h1", Some(SRC_BIN)), ("h2", Some(DST_BIN))]);
+            let peer = build(
+                &podman("ubuntu@h1"),
+                &nitro("ubuntu@h2"),
+                &executor,
+                &FakeEc2::default(),
+                &[],
+            )
+            .unwrap();
+            if dirty {
+                super::super::transport::mark_cleanup_dirty_for_test(&peer);
+            }
+            peer
+        };
+        let keys = || vec![key("carried"), key("this-1"), key("this-2")];
+
+        let mut clean = keys();
+        assert!(drop_credentials_removed_by_transfer(
+            &mut clean,
+            1,
+            Some(&peer(false))
+        ));
+        assert_eq!(
+            clean.iter().map(|k| k.comment.as_str()).collect::<Vec<_>>(),
+            ["carried"]
+        );
+
+        let mut dirty = keys();
+        assert!(!drop_credentials_removed_by_transfer(
+            &mut dirty,
+            1,
+            Some(&peer(true))
+        ));
+        assert_eq!(dirty.len(), 3);
+
+        let mut no_peer = vec![key("carried")];
+        assert!(!drop_credentials_removed_by_transfer(&mut no_peer, 1, None));
+        assert_eq!(no_peer.len(), 1);
+    }
+}
+
+/// The retained-source stop before a Move retry keeps the 15-second cleanup
+/// bound on every command and the executor's own cancellation: a person's
+/// cancel ends it (it is not marked shutdown-only), and so does shutdown.
+mod retained_source_stop {
+    use std::io::Read;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use mj_core::targets::{
+        CommandExecutor, CommandOutput, CommandSpec, DeadlinePause, TargetLocator,
+    };
+
+    struct BoundedProbe {
+        cancelled: bool,
+        bounds: Mutex<Vec<(Duration, bool)>>,
+    }
+
+    impl CommandExecutor for BoundedProbe {
+        fn execute(&self, _: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            anyhow::bail!("the stop must run through the bounded cleanup path")
+        }
+
+        fn execute_cleanup_with_timeout(
+            &self,
+            command: &CommandSpec,
+            timeout: Duration,
+        ) -> anyhow::Result<CommandOutput> {
+            self.bounds
+                .lock()
+                .unwrap()
+                .push((timeout, command.is_shutdown_only()));
+            if self.cancelled && !command.is_shutdown_only() {
+                anyhow::bail!("operation cancelled while {}", command.purpose);
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancelled
+        }
+
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+    }
+
+    #[test]
+    fn stop_keeps_the_cleanup_bound_and_the_executors_cancellation() {
+        let backend = TargetLocator::LocalBare {
+            worker_root: "/tmp/mj-retained-source-stop/retained-session".to_owned(),
+        };
+        let probe = BoundedProbe {
+            cancelled: false,
+            bounds: Mutex::default(),
+        };
+        super::super::stop_retained_source_worker(&backend, "retained-session", &probe).unwrap();
+        let bounds = probe.bounds.lock().unwrap().clone();
+        assert!(!bounds.is_empty());
+        assert!(
+            bounds
+                .iter()
+                .all(|bound| *bound == (Duration::from_secs(15), false)),
+            "{bounds:?}"
+        );
+
+        let cancelled = BoundedProbe {
+            cancelled: true,
+            bounds: Mutex::default(),
+        };
+        let error =
+            super::super::stop_retained_source_worker(&backend, "retained-session", &cancelled)
+                .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("operation cancelled"),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
+fn move_session_sealed_continuity_survives_config_changes_and_absent_native_identity() {
+    let state_a = sample_target("source");
+    let state_b = sample_target("destination");
+    let mut op = MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
+        transfer_route: Some(TransferRoute::SameHost),
+        consent: Default::default(),
+        skip_keep_paths: vec![PathBuf::from("cache/big.bin")],
+        granted_keys: Vec::new(),
+        granted_ec2_rules: Vec::new(),
+        in_place_expected_store_id: None,
+        in_place_continuation_command_id: None,
+        in_place_held_command_ids: Vec::new(),
+        in_place_harness_restarted: false,
+        deferred_environment_changes: Vec::new(),
+        source_snapshot: None,
+        source_checkpoint_only: false,
+        in_place: false,
+        operation_id: "op-cross-1".to_owned(),
+        selection: MoveSelection {
+            consent: Default::default(),
+            skip_keep_paths: vec![PathBuf::from("cache/big.bin")],
+            clear_resource_allocation: false,
+            session_id: "s1".to_owned(),
+            profile_id: Some("p2".to_owned()),
+            target_template_id: Some("podman".to_owned()),
+            additional_mounts: None,
+            resource_allocation: None,
+            subagents: None,
+            oracle: None,
+            oracle_choice: None,
+        },
+        source_profile_id: "p1".to_owned(),
+        source_target_template_id: "local".to_owned(),
+        source_target: Some(state_a),
+        source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: Some(state_b),
+        destination_native_session_id: None,
+        destination_store_id: Some("store-dest".to_owned()),
+        configuration_fingerprint: String::new(),
+        checkpoint: None,
+        recovery_session: None,
+        queue: ResumeQueueDisposition::Discard,
+        phase: MovePhase::DestinationStarting,
+        queue_admission_started: false,
+        queue_admission_finished: false,
+        cancellation_requested: false,
+        created_at: "2026-11-21T00:00:00Z".to_owned(),
+        updated_at: "2026-11-21T00:00:00Z".to_owned(),
+        error: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert(
+        "p1".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            dir.path().join("p1"),
+        ),
+    );
+    config.profiles.insert(
+        "p2".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            dir.path().join("p2"),
+        ),
+    );
+    let mut session = sample_session_record(SessionState::Running, sample_target("source"));
+    session.id = "s1".into();
+    session.last_profile = "p1".into();
+    session.native_session_id = None;
+    let mut controller = crate::controller::Controller {
+        config,
+        state: Default::default(),
+    };
+    controller.state.sessions.insert("s1".into(), session);
+    op.accepted_preparation = Some(Box::new(serde_json::from_value(serde_json::json!({
+        "selection":op.selection, "source_profile_id":"p1", "source_target_template_id":"local",
+        "cross_harness":false, "active":false, "queued_commands":[], "fingerprint":"sealed", "operation_id":"sealed",
+    })).unwrap()));
+    assert!(controller.move_native_continuity(&op).unwrap());
+    controller.apply_in_place_destination(&op).unwrap();
+    assert!(controller.state.sessions["s1"].native_session_id.is_none());
+    controller
+        .state
+        .sessions
+        .get_mut("s1")
+        .unwrap()
+        .native_session_id = Some("thread".into());
+    controller.apply_in_place_destination(&op).unwrap();
+    assert_eq!(
+        controller.state.sessions["s1"].native_session_id.as_deref(),
+        Some("thread")
+    );
+    op.accepted_preparation.as_mut().unwrap().cross_harness = true;
+    controller.apply_in_place_destination(&op).unwrap();
+    assert!(controller.state.sessions["s1"].native_session_id.is_none());
+    op.accepted_preparation = None;
+    assert!(!controller.move_native_continuity(&op).unwrap());
+}
+
+#[cfg(unix)]
+async fn recovered_parked_move_case(
+    name: &str,
+    case: crate::controller::subagent_park::tests::ParkedMoveCase,
+) {
+    const MARKER: &str = "MJ_TEST_REVIEW_PARKED_MOVE";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker-source");
+        std::fs::write(&worker, mj_core::worker_build::worker_build_stamp()).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), name),
+        )
+        .env(MARKER, "1")
+        .env("MJ_WORKER_BINARY", worker)
+        .env("MJ_INSTANCE", "review-parked-move")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    crate::controller::subagent_park::tests::parked_move_case(case).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_parked_move_starts_pending_dead_boot_before_completion() {
+    recovered_parked_move_case(
+        "recovered_parked_move_starts_pending_dead_boot_before_completion",
+        crate::controller::subagent_park::tests::ParkedMoveCase::DeadBoot,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_parked_move_observes_pending_live_boot_without_restarting() {
+    recovered_parked_move_case(
+        "recovered_parked_move_observes_pending_live_boot_without_restarting",
+        crate::controller::subagent_park::tests::ParkedMoveCase::LiveBoot,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parked_move_submits_saved_quota_continuation_before_completion() {
+    recovered_parked_move_case(
+        "parked_move_submits_saved_quota_continuation_before_completion",
+        crate::controller::subagent_park::tests::ParkedMoveCase::Quota,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_parked_move_submits_saved_quota_continuation_before_completion() {
+    recovered_parked_move_case(
+        "recovered_parked_move_submits_saved_quota_continuation_before_completion",
+        crate::controller::subagent_park::tests::ParkedMoveCase::RecoveredQuota,
+    )
+    .await;
 }

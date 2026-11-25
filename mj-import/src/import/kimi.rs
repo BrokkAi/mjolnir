@@ -319,10 +319,10 @@ pub(super) fn kimi_session_summary(
     let cwd = string("workDir")
         .or_else(|| string("cwd"))
         .map(PathBuf::from)
-        .filter(|cwd| cwd.is_absolute())
+        .filter(|cwd| mj_core::target_path::is_absolute_on_host_or_target(cwd))
         .or_else(|| {
             indexed_work_dir
-                .filter(|work_dir| work_dir.is_absolute())
+                .filter(|work_dir| mj_core::target_path::is_absolute_on_host_or_target(work_dir))
                 .map(Path::to_path_buf)
         });
     let title = title.unwrap_or_else(|| {

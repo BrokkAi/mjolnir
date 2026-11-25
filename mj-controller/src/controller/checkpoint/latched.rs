@@ -18,60 +18,6 @@ pub(in crate::controller) fn lost_wakes_notice(count: usize, missed: &str, reaso
 
 impl Controller {
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::controller) async fn checkpoint_session_latched_for_operation(
-        &self,
-        admission: &crate::recovery_gate::SessionAdmission,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        manager: Option<&SessionManagerControl>,
-        exclusivity: LatchExclusivity,
-        export_policy: CheckpointExportPolicy,
-        requested_operation_id: Option<&str>,
-        held_relay: Option<ControllerRelayLease>,
-    ) -> Result<LatchedCheckpoint> {
-        self.checkpoint_session_latched_for_operation_with_consent(
-            admission,
-            session_id,
-            executor,
-            manager,
-            exclusivity,
-            export_policy,
-            requested_operation_id,
-            held_relay,
-            &mj_core::suspend_consent::CaptureConsent::default(),
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_consent(
-        &self,
-        admission: &crate::recovery_gate::SessionAdmission,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        manager: Option<&SessionManagerControl>,
-        exclusivity: LatchExclusivity,
-        export_policy: CheckpointExportPolicy,
-        requested_operation_id: Option<&str>,
-        held_relay: Option<ControllerRelayLease>,
-        consent: &mj_core::suspend_consent::CaptureConsent,
-    ) -> Result<LatchedCheckpoint> {
-        self.checkpoint_session_latched_for_operation_with_delivery(
-            admission,
-            session_id,
-            executor,
-            manager,
-            exclusivity,
-            export_policy,
-            CheckpointDelivery::DownloadToDaemon,
-            requested_operation_id,
-            held_relay,
-            consent,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_delivery(
         &self,
         admission: &crate::recovery_gate::SessionAdmission,
@@ -132,6 +78,20 @@ impl Controller {
                     repository.origin_override = origin_override.clone();
                 }
             }
+        } else if export_policy == CheckpointExportPolicy::HistoryOnly {
+            let owner = self.state.workspace_owner(session_id).ok();
+            let managed_worktree = self
+                .state
+                .checkout(session_id)
+                .ok()
+                .and_then(|checkout| checkout.managed_worktree().cloned());
+            apply_history_only_policy(
+                &mut layout.repositories,
+                owner,
+                &self.config,
+                managed_worktree.as_ref(),
+                executor,
+            );
         } else if export_policy == CheckpointExportPolicy::SessionHandoff {
             for repository in &mut layout.repositories {
                 repository.capture = CheckpointRepositoryCapture::MetadataOnly;
@@ -190,12 +150,9 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let session_owns_managed_checkout = self
-            .state
-            .checkout(session_id)?
-            .managed_worktree()
-            .is_some();
-        session.validate_configuration(&self.config)?;
+        let checkout = self.state.checkout(session_id)?;
+        let session_owns_managed_checkout = checkout.managed_worktree().is_some();
+        session.validate_configuration_in(&checkout, &self.config)?;
         if let Some(target) = session.target.as_ref() {
             crate::worker_lifecycle::require(session_id)?.verify_target(target)?;
         }
@@ -758,14 +715,11 @@ impl Controller {
             )
         {
             return Ok(LatchedCheckpoint {
-                relay_protocol,
-                admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
                 artifact,
                 relay,
                 barrier_command_id,
                 cursor,
-                completion: CheckpointCompletion::HeldBarrier,
             });
         }
 
@@ -1029,7 +983,56 @@ impl Controller {
             let metadata = {
                 let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
                 let transfer_started = Instant::now();
-                let verified = transfer.execute(executor)?;
+                // Suspend on an SSH container host promotes the staged archive
+                // into the host snapshot cache in place instead of uploading
+                // the same bytes back, so the staging file outlives the
+                // download under a durable row that Destroy and the expiry
+                // sweep reclaim if this daemon stops first.
+                let mut retained_staging = None;
+                // The row is bookkeeping for crash recovery. If it cannot be
+                // recorded, suspend still completes: the staging file is
+                // removed at once and the host cache stays unpopulated.
+                let staging_row = match transfer.host_staging_path() {
+                    Some(staging_path) if exclusivity == LatchExclusivity::HoldThroughClose => {
+                        let staging_path = staging_path?;
+                        match super::record_host_staging_entry(
+                            session_id,
+                            &backend,
+                            &operation_id,
+                            &staging_path,
+                        ) {
+                            Ok(row_id) => Some(row_id),
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id,
+                                    error = %format!("{error:#}"),
+                                    "could not record host staging row; suspend will not promote into the host snapshot cache"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let verified = if let Some(row_id) = staging_row {
+                    match transfer.execute_retaining_host_staging(executor) {
+                        Ok((verified, retained)) => {
+                            retained_staging = retained.map(|retained| (retained, row_id));
+                            verified
+                        }
+                        Err(error) => {
+                            if crate::checkpoint_transfer::host_staging_may_remain(&error) {
+                                // Removal failed: the row stays for Destroy and expiry.
+                                super::notify_host_snapshot_cache_updated();
+                            } else {
+                                super::retire_host_staging_entry(row_id);
+                            }
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    transfer.execute(executor)?
+                };
                 tracing::info!(
                     session_id,
                     transfer_and_checksum_ms = transfer_started.elapsed().as_millis() as u64,
@@ -1047,7 +1050,20 @@ impl Controller {
                     );
                     Ok(())
                 };
+                // Every exit below that does not promote the retained staging
+                // file removes it first.
+                let release_staging = || {
+                    if let Some((retained, row_id)) = &retained_staging {
+                        super::release_host_staging(
+                            &backend,
+                            &retained.staging_path,
+                            *row_id,
+                            executor,
+                        );
+                    }
+                };
                 if let Err(error) = validate_transferred() {
+                    release_staging();
                     return Err(remove_uninstalled_checkpoint(&installed_archive, error));
                 }
                 // A checkpoint that still holds its barrier proves workspace
@@ -1071,6 +1087,7 @@ impl Controller {
                         }
                     });
                     if let Err(error) = revalidated {
+                        release_staging();
                         return Err(remove_uninstalled_checkpoint(
                             &installed_archive,
                             error.context(
@@ -1079,10 +1096,33 @@ impl Controller {
                         ));
                     }
                 }
+                // A bare SSH target's archive is already on the cache host:
+                // promote it before the cleanup below removes it.
+                let promotes_bare_archive = exclusivity == LatchExclusivity::HoldThroughClose
+                    && matches!(
+                        backend,
+                        targets::TargetLocator::SshBare { .. }
+                            | targets::TargetLocator::AwsEc2 { .. }
+                    );
+                if promotes_bare_archive {
+                    super::promote_host_snapshot_cache_best_effort(
+                        &super::HostCachePromotion {
+                            session_id,
+                            locator: &backend,
+                            source_host_path: &remote_archive,
+                            remove_source: false,
+                            known_remote_home: None,
+                            sha256: verified.sha256(),
+                            staging_row_id: None,
+                        },
+                        executor,
+                    );
+                }
                 if let Err(error) = transfer
                     .cleanup_plan(&verified)
                     .and_then(|plan| plan.execute(executor).map(|_| ()))
                 {
+                    release_staging();
                     return Err(remove_uninstalled_checkpoint(
                         &installed_archive,
                         error.context("clean target checkpoint staging"),
@@ -1093,13 +1133,28 @@ impl Controller {
                 target_files.handed_off();
                 // Best-effort atomic publish into host-owned snapshot cache
                 // before the session's environment (e.g. container) is retired.
-                if exclusivity == LatchExclusivity::HoldThroughClose {
+                if let Some((retained, row_id)) = &retained_staging {
+                    super::promote_host_snapshot_cache_best_effort(
+                        &super::HostCachePromotion {
+                            session_id,
+                            locator: &backend,
+                            source_host_path: &retained.staging_path,
+                            remove_source: true,
+                            known_remote_home: retained.remote_home.as_deref(),
+                            sha256: verified.sha256(),
+                            staging_row_id: Some(*row_id),
+                        },
+                        executor,
+                    );
+                } else if exclusivity == LatchExclusivity::HoldThroughClose
+                    && !promotes_bare_archive
+                    && transfer.host_staging_path().is_none()
+                {
                     super::publish_host_snapshot_cache_best_effort(
                         session_id,
                         &backend,
                         verified.archive_path(),
                         verified.sha256(),
-                        executor,
                     );
                 }
                 CheckpointMetadata {
@@ -1140,17 +1195,277 @@ impl Controller {
             }
         };
         Ok(LatchedCheckpoint {
-                relay_protocol,
-                admission: admission.clone(),
-                _worker_owner: crate::worker_lifecycle::require(session_id)?,
+            _worker_owner: crate::worker_lifecycle::require(session_id)?,
             artifact,
             relay,
             barrier_command_id,
             cursor,
-            completion,
         })
 
         }).await
+    }
+}
+
+fn apply_history_only_policy(
+    repositories: &mut [CheckpointRepositorySpec],
+    owner: Option<&SessionRecord>,
+    config: &mj_core::config::Config,
+    managed_worktree: Option<&mj_core::state::ManagedWorktree>,
+    executor: &impl CommandExecutor,
+) {
+    let bundle = owner.and_then(|owner| owner.project_bundle(config));
+    let network_sources = owner
+        .and_then(|owner| owner.project.as_deref())
+        .map(|project| &project.network_sources);
+    for repository in repositories {
+        if repository.capture != CheckpointRepositoryCapture::PlainDirectory {
+            repository.capture = CheckpointRepositoryCapture::MetadataOnly;
+        }
+        if repository.origin_override.is_none() {
+            repository.origin_override = history_only_origin_override(
+                &repository.id,
+                owner,
+                bundle,
+                network_sources,
+                managed_worktree,
+                executor,
+            );
+        }
+    }
+}
+
+fn history_only_origin_override(
+    repository_id: &str,
+    owner: Option<&SessionRecord>,
+    bundle: Option<&mj_core::config::ProjectBundle>,
+    network_sources: Option<
+        &std::collections::BTreeMap<String, mj_core::remote_git::NetworkGitSource>,
+    >,
+    managed_worktree: Option<&mj_core::state::ManagedWorktree>,
+    executor: &impl CommandExecutor,
+) -> Option<String> {
+    let accepted_project = owner.and_then(|owner| owner.project.as_deref());
+    let primary_repository_id = bundle.map(|bundle| bundle.primary_repo.as_str());
+    let accepted_source = |id: &str| {
+        accepted_project
+            .and_then(|project| project.network_sources.get(id))
+            .map(|source| source.fetch_url.clone())
+    };
+    accepted_source(repository_id)
+        .or_else(|| {
+            primary_repository_id
+                .filter(|primary| {
+                    repository_id == super::HOST_CHECKOUT_REPOSITORY && *primary != repository_id
+                })
+                .and_then(accepted_source)
+        })
+        .or_else(|| {
+            let source_id = if repository_id == super::HOST_CHECKOUT_REPOSITORY {
+                primary_repository_id.unwrap_or(repository_id)
+            } else {
+                repository_id
+            };
+            let repository = bundle?
+                .repositories
+                .iter()
+                .find(|repository| repository.id == source_id)?;
+            network_sources
+                .and_then(|sources| sources.get(source_id))
+                .map(|source| source.fetch_url.clone())
+                // `github_repositories` reports GitHub owner/name pairs for
+                // credential scoping; resolve_repository is the helper that
+                // returns the fetch URL this manifest must preserve.
+                .or_else(|| {
+                    mj_core::remote_git::resolve_repository(repository, executor)
+                        .ok()
+                        .map(|source| source.fetch_url)
+                })
+        })
+        .or_else(|| {
+            let is_primary = repository_id == super::HOST_CHECKOUT_REPOSITORY
+                || primary_repository_id == Some(repository_id);
+            is_primary
+                .then_some(managed_worktree)
+                .flatten()
+                .and_then(crate::controller::lifecycle::origin_delta::managed_origin_override)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::test_support::{
+        FIXTURE_FETCH_URL, checkout_with_network_remote, checkpoint_test_session, test_git,
+    };
+    use crate::targets::ProcessExecutor;
+    use mj_core::config::{ProjectBundle, ProjectRepository};
+    use mj_core::repository::ProjectBundleSnapshot;
+    use mj_core::state::{ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget};
+    use std::path::PathBuf;
+
+    #[test]
+    fn history_only_capture_preserves_managed_network_origin_provenance() {
+        let (source, _remote_parent, _remote) = checkout_with_network_remote();
+        let project_bundle = ProjectBundle {
+            primary_repo: "source-id".into(),
+            repositories: vec![ProjectRepository {
+                id: "source-id".into(),
+                github: None,
+                local: Some(source.path().to_path_buf()),
+                destination: PathBuf::from("project"),
+                git_ref: None,
+                mbx_namespace: None,
+            }],
+        };
+        let project =
+            crate::project_catalog::snapshot(&project_bundle, &ProcessExecutor, false).unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let root = tempfile::tempdir().unwrap();
+        let worktree = ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
+            source_project_directory: source.path().to_path_buf(),
+            source_repository: source.path().to_path_buf(),
+            worktree_root: root.path().join("managed-clone"),
+            branch: format!("mj/{session_id}"),
+            target: ManagedWorktreeTarget::Local,
+            base_commit: Some(test_git(source.path(), &["rev-parse", "HEAD"])),
+        };
+        super::super::super::worktree::create_managed_worktree(
+            &ProcessExecutor,
+            &worktree,
+            None,
+            super::super::super::worktree::PrimaryCheckoutRequirement::Any,
+        )
+        .unwrap();
+        test_git(&worktree.worktree_root, &["remote", "remove", "origin"]);
+
+        let mut owner = checkpoint_test_session(session_id);
+        owner.project = Some(
+            ProjectBundleSnapshot {
+                bundle: project_bundle,
+                identities: project.identities.clone(),
+                network_sources: project.network_sources.clone(),
+                plain_directories: Default::default(),
+            }
+            .into(),
+        );
+        owner.managed_worktree = Some(Box::new(worktree.clone()));
+
+        let mut repositories = vec![
+            CheckpointRepositorySpec {
+                id: super::super::HOST_CHECKOUT_REPOSITORY.into(),
+                relative_destination: PathBuf::from("project"),
+                capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                origin_override: None,
+            },
+            CheckpointRepositorySpec {
+                id: "plain-project".into(),
+                relative_destination: PathBuf::from("plain-project"),
+                capture: CheckpointRepositoryCapture::PlainDirectory,
+                origin_override: None,
+            },
+        ];
+        apply_history_only_policy(
+            &mut repositories,
+            Some(&owner),
+            &mj_core::config::Config::default(),
+            Some(&worktree),
+            &ProcessExecutor,
+        );
+
+        assert_eq!(
+            repositories[0].capture,
+            CheckpointRepositoryCapture::MetadataOnly
+        );
+        assert_eq!(
+            repositories[0].origin_override.as_deref(),
+            Some(FIXTURE_FETCH_URL)
+        );
+        assert_eq!(
+            repositories[1].capture,
+            CheckpointRepositoryCapture::PlainDirectory
+        );
+        // A secondary repository without a recorded or resolvable network source
+        // must never inherit the primary managed clone's origin.
+        let mut secondary_only = vec![CheckpointRepositorySpec {
+            id: "secondary-repo".into(),
+            relative_destination: PathBuf::from("secondary"),
+            capture: CheckpointRepositoryCapture::RemoteWorkspace,
+            origin_override: None,
+        }];
+        apply_history_only_policy(
+            &mut secondary_only,
+            Some(&owner),
+            &mj_core::config::Config::default(),
+            Some(&worktree),
+            &ProcessExecutor,
+        );
+        assert_eq!(
+            secondary_only[0].capture,
+            CheckpointRepositoryCapture::MetadataOnly
+        );
+        assert_eq!(secondary_only[0].origin_override, None);
+        let snapshot = mj_checkpoint::archive::collect_git_metadata_snapshot(
+            &mj_checkpoint::archive::SystemGit,
+            &worktree.worktree_root,
+            &mj_checkpoint::archive::GitCollectionSpec {
+                id: repositories[0].id.clone(),
+                relative_destination: repositories[0].relative_destination.clone(),
+                history: mj_checkpoint::archive::GitHistoryMode::NoBundle,
+                origin_override: repositories[0].origin_override.clone(),
+            },
+        )
+        .unwrap();
+        assert!(snapshot.metadata.review_refs_metadata_only);
+        assert_eq!(snapshot.metadata.origin, FIXTURE_FETCH_URL);
+
+        let manifest = mj_checkpoint::archive::ArchiveManifest {
+            schema_version: 1,
+            format: "hel-checkpoint".into(),
+            session: mj_checkpoint::archive::SessionManifest {
+                id: session_id.into(),
+                title: owner.title.clone(),
+                harness_kind: owner.harness_kind,
+                profile_id: owner.last_profile.clone(),
+                native_session_id: "native".into(),
+                created_at: owner.created_at.clone(),
+                checkpointed_at: owner.updated_at.clone(),
+                hel_version: "test".into(),
+                relay_version: String::new(),
+                adapter_version: String::new(),
+            },
+            target: mj_checkpoint::archive::TargetManifest {
+                template_id: "local-bare".into(),
+                target_kind: "local-bare".into(),
+                details: Default::default(),
+            },
+            bundle: mj_checkpoint::archive::BundleManifest {
+                id: owner.bundle_id.clone(),
+                primary_repository: repositories[0].id.clone(),
+            },
+            repositories: vec![mj_core::archive::RepositoryManifest {
+                metadata: snapshot.metadata,
+                committed_bundle_path: String::new(),
+                staged_patch_path: String::new(),
+                unstaged_patch_path: String::new(),
+                untracked_tar_path: String::new(),
+                conflicted_worktree_tar_path: None,
+                operation_state_tar_path: None,
+                linked_worktrees: Vec::new(),
+                origin_delta_pack_path: None,
+            }],
+            payloads: Vec::new(),
+        };
+        let accepted = crate::controller::network_git::bundle_from_manifest_for_session(
+            &manifest,
+            Some(&owner),
+            Some(&mj_core::config::Config::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.repositories[0].url.as_deref(),
+            Some(FIXTURE_FETCH_URL)
+        );
     }
 }
 

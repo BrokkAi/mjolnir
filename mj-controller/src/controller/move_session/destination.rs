@@ -93,6 +93,14 @@ pub(in crate::controller) fn destroy_prepared_environment(
 struct MoveCleanupExecutor<'a, E>(&'a E);
 
 impl<E: CommandExecutor> CommandExecutor for MoveCleanupExecutor<'_, E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<targets::CommandOutput> {
+        self.0.execute_to_file(command, output)
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         self.0.pause_deadline()
     }
@@ -118,6 +126,10 @@ impl<E: CommandExecutor> CommandExecutor for MoveCleanupExecutor<'_, E> {
 
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         self.0.execute_cleanup(command)
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.0.shutdown_interrupted()
     }
 }
 

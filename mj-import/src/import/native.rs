@@ -458,7 +458,7 @@ pub(super) struct NativeMetadata {
 pub(super) fn absolute_native_cwd(cwd: String) -> Option<PathBuf> {
     (!cwd.trim().is_empty())
         .then(|| PathBuf::from(cwd))
-        .filter(|cwd| cwd.is_absolute())
+        .filter(|cwd| mj_core::target_path::is_absolute_on_host_or_target(cwd))
 }
 
 pub(super) struct NativeCandidate {

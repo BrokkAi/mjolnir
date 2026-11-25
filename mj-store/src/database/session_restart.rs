@@ -580,6 +580,11 @@ pub fn try_commit_container_upgrade(
         let mut blockers = Vec::new();
         let mut pending_delegation = false;
         for peer in peers {
+            if super::session_move::load_move_operation_with(&tx, &peer.id)?
+                .is_some_and(|operation| operation.is_active())
+            {
+                blockers.push(format!("moving session {}", peer.id));
+            }
             if peer.id != session_id
                 && (peer.restarting_worker
                     || (peer.state != SessionState::Parked

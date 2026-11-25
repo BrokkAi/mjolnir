@@ -1,0 +1,85 @@
+{
+  "study": "mr-boxington PR/revision reviewer study: 47 PRs, 95 revisions per pass, 3 passes",
+  "sources": {
+    "data.json": {
+      "path": "/home/jonathan/winhome/Downloads/reviewcharts/data.json",
+      "sha256": "3c65c1ca90797a9bfe611fbd408a83aa300e51b5afb26cd4de205311b000ff6f"
+    },
+    "grok-summary.json": {
+      "path": "/home/jonathan/winhome/Downloads/reviewcharts/grok-summary.json",
+      "sha256": "19af28420c9b32547136a4f711f6e42bc770d050e61919c74f7f7fdbb7c0fd90"
+    },
+    "grok-method.txt": {
+      "path": "/home/jonathan/winhome/Downloads/reviewcharts/grok-method.txt",
+      "sha256": "a95ccf838eafdb36cb1a1f5ee339543eea5066d37e62d30f1ee963dc6ff8913a"
+    },
+    "grok-metrics.json": {
+      "path": "/home/jonathan/winhome/Downloads/reviewcharts/grok-metrics.json",
+      "sha256": "de7ae0d39534335b5bb103ea9d2e8e84d5e3e54a05555081bedcc04aeeb29e6b"
+    }
+  },
+  "grok": {
+    "source": "/home/jonathan/winhome/Downloads/reviewcharts/grok-summary.json",
+    "model": "Grok4.7/high",
+    "workflow_yield_projection": 32.060422832980976,
+    "workflow_projection_sensitivity": [
+      31.30577305493413,
+      34.62906504065041
+    ],
+    "sensitivity_is_ci": false,
+    "completed_reviews": 253,
+    "planned_reviews": 285,
+    "initial_cost_heads": 41,
+    "monthly_events": 73,
+    "monthly_cost": 36.236411813658535,
+    "projection_method": "For each Grok pass, calibrate its confirmed-material yield on PRs with every planned revision observed against the mean confirmed yield of Terra/high, DSF, Sol/high and Haiku (3passes each). Apply that ratio to the reference yield on missing/incomplete PRs; preserve any Grok material findings already observed there as a floor. Average the3pass projections. Four single-reference projections and uniform-PR expansion give sensitivity across assumptions, not a confidence interval.",
+    "projection_assumptions": "Grok/reference relative defect yield transfers from completed to missing PRs. Quota truncation follows PR order, so missingness is not random; no procedure here identifies unknown Grok-specific defects or grader uncertainty. Known observed partial findings never disappear.",
+    "single_review_estimate": {
+      "key": "grok47",
+      "initial_yield_mean": 19.45736006415397,
+      "yield_index": 66.33190930961581,
+      "estimated_yield": true,
+      "initial_pass_counts": null,
+      "yield_method": "Quota-truncated Grok workflow projection multiplied by Terra/high initial/workflow retention (88/145); assumes both missing-cohort transfer and the same initial/workflow retention for Grok.",
+      "cost_low": 0.49638920292682925,
+      "cost_high": 0.49638920292682925,
+      "source_sha256": "19af28420c9b32547136a4f711f6e42bc770d050e61919c74f7f7fdbb7c0fd90",
+      "coverage": "253/285 revision reviews; 41 observed initial heads/pass; yield projected to 47 PRs",
+      "cost_note": "Provider-reported API equivalent: observed first-pass mean across 41 initial heads; source monthly 73-event scenario divided by 73."
+    },
+    "historical_terra_initial_mean": 29.333333333333332,
+    "initial_workflow_retention": {
+      "initial_roots": 88,
+      "workflow_roots": 145
+    },
+    "formula": "Initial yield = 32.060422832980976 * 88/145; index = initial yield / (88/3) * 100; cost/review = 36.236411813658535 / 73.",
+    "cost_is_provider_reported_api_equivalent": true
+  },
+  "haiku": [
+    {
+      "key": "haiku",
+      "initial_yield_mean": 17.80229885057471,
+      "yield_index": 60.689655172413794,
+      "estimated_yield": true,
+      "cost_low": 0.04174083287234043,
+      "cost_high": 0.04174083287234043,
+      "yield_method": "Workflow material-root mean multiplied by Terra/high initial/workflow retention; assumes same retention for this model"
+    },
+    {
+      "key": "haiku55-xhigh",
+      "initial_yield_mean": 20.666666666666668,
+      "yield_index": 70.45454545454547,
+      "estimated_yield": false,
+      "cost_low": 0.1205776395744681,
+      "cost_high": 0.13161963829787235,
+      "yield_method": "Exact initial-head source references in accepted material-root grades"
+    }
+  ],
+  "display": {
+    "Kimi/high": "K3.1 Pro/high",
+    "historical_terra_point_omitted": true,
+    "direct_names": "Frontier models and Greptile solo references only; excluded from the numbered key",
+    "haiku_xhigh": "Numbered key entry, no direct name label",
+    "cost_bounds": "Ranges in the numbered key; no horizontal plot bars"
+  }
+}

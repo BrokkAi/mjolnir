@@ -383,9 +383,20 @@ fn worktree_choice_survives_reload_and_controls_creation() {
         "side"
     );
     assert_eq!(managed.kind, ManagedCheckoutKind::Clone);
+    // The record stores no path for a managed checkout; it derives from the
+    // descriptor.
     assert_eq!(
         controller.state.sessions[&record.id].project_directory,
-        Some(managed.worktree_root.join("nested"))
+        None
+    );
+    assert_eq!(
+        controller
+            .state
+            .checkout(&record.id)
+            .unwrap()
+            .project_directory()
+            .as_deref(),
+        Some(managed.worktree_root.join("nested").as_path())
     );
     crate::controller::test_support::worker_test_scope(&record.id, || {
         controller.cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
@@ -2571,6 +2582,117 @@ fn managed_raw_worktree_refuses_dirty_primary_and_skips_existing_worktree() {
     let linked = inspect_raw_project(&ProcessExecutor, &target, &existing).unwrap();
     assert!(!linked.primary_checkout);
 }
+/// Runs what ssh would hand the remote login shell, on this machine.
+#[cfg(unix)]
+struct LoopbackSsh {
+    commands: RefCell<usize>,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for LoopbackSsh {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        *self.commands.borrow_mut() += 1;
+        assert_eq!(command.program, "ssh");
+        ProcessExecutor.execute(&CommandSpec::new(
+            "sh",
+            ["-c".to_owned(), command.args.last().unwrap().clone()],
+        ))
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_remote_raw_project_is_inspected_in_one_ssh_command() {
+    let origin = committed_repository();
+    let root = tempfile::tempdir().unwrap();
+    let clone = root.path().join("user's clone");
+    test_git(
+        root.path(),
+        &[
+            "clone",
+            "-q",
+            &origin.path().to_string_lossy(),
+            &clone.to_string_lossy(),
+        ],
+    );
+    let target = ManagedWorktreeTarget::Ssh {
+        destination: "builder".into(),
+        ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
+    };
+    let inspect = |directory: &Path| {
+        let executor = LoopbackSsh {
+            commands: RefCell::new(0),
+        };
+        let inspection = inspect_raw_project(&executor, &target, directory);
+        assert_eq!(*executor.commands.borrow(), 1, "{}", directory.display());
+        inspection
+    };
+    // A branch with an upstream, asked from a subdirectory.
+    let branch = test_git(&clone, &["branch", "--show-current"]);
+    let inspection = inspect(&clone.join("nested")).unwrap();
+    assert_eq!(
+        inspection.upstream.as_deref(),
+        Some(format!("origin/{branch}").as_str())
+    );
+    assert_eq!(
+        inspection.source_project_directory,
+        inspection.source_repository.join("nested")
+    );
+    assert_eq!(
+        inspection.source_repository.file_name().unwrap(),
+        "user's clone"
+    );
+    assert!(inspection.primary_checkout);
+    // A branch without an upstream.
+    test_git(&clone, &["switch", "-q", "-c", "local-only"]);
+    assert_eq!(inspect(&clone).unwrap().upstream, None);
+    // A detached HEAD has no branch, and so no upstream to ask for.
+    test_git(&clone, &["switch", "-q", "--detach"]);
+    assert_eq!(inspect(&clone).unwrap().upstream, None);
+    // A linked worktree shares its Git directory with the primary checkout.
+    let linked = root.path().join("linked");
+    test_git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &linked.to_string_lossy(),
+        ],
+    );
+    assert!(!inspect(&linked).unwrap().primary_checkout);
+    // A directory outside any repository fails with Git's own words.
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let error = inspect(&outside).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("resolve raw project repository root failed with status 128"),
+        "{error:#}"
+    );
+}
 #[test]
 fn managed_worktree_preflight_preserves_colliding_branch_and_directory() {
     let repository = committed_repository();
@@ -3782,19 +3904,15 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
         kind: ManagedCheckoutKind::Worktree,
         target: ManagedWorktreeTarget::Local,
     };
-    let (upgraded_clone, upgraded_project_dir) = upgrade_legacy_worktree_to_clone(
-        &legacy_record,
-        "legacy-sess",
-        Some(&legacy_wt.join("subdir")),
-    );
+    let upgraded_clone = upgrade_legacy_worktree_to_clone(&legacy_record, "legacy-sess");
     assert_eq!(upgraded_clone.kind, ManagedCheckoutKind::Clone);
     assert_eq!(
         upgraded_clone.worktree_root,
         source.join(".mj/clones/legacy-sess")
     );
     assert_eq!(
-        upgraded_project_dir,
-        Some(source.join(".mj/clones/legacy-sess/subdir"))
+        upgraded_clone.checkout_directory(),
+        Some(source.join(".mj/clones/legacy-sess"))
     );
 
     let notices = restore_legacy_worktree_as_managed_clone(
@@ -3802,6 +3920,7 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
         &upgraded_clone,
         &archive_path,
         &verified.manifest,
+        None,
     )
     .unwrap();
 
@@ -3854,13 +3973,13 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
     mj_checkpoint::archive::write_archive_atomic(&originless_archive, &archive_input).unwrap();
     let verified_originless =
         mj_checkpoint::archive::read_archive_verified(&originless_archive).unwrap();
-    let (upgraded_originless, _) =
-        upgrade_legacy_worktree_to_clone(&legacy_record, "legacy-sess-2", None);
+    let upgraded_originless = upgrade_legacy_worktree_to_clone(&legacy_record, "legacy-sess-2");
     let notices_originless = restore_legacy_worktree_as_managed_clone(
         &ProcessExecutor,
         &upgraded_originless,
         &originless_archive,
         &verified_originless.manifest,
+        None,
     )
     .unwrap();
     assert!(notices_originless.is_empty());
@@ -4019,6 +4138,7 @@ fn legacy_clone_restore_repairs_nested_linked_worktree_after_publish_and_preserv
         &clone_record,
         &archive_path,
         &verified.manifest,
+        None,
     )
     .unwrap();
 
@@ -4144,4 +4264,218 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
         std::fs::read_to_string(restored.join("origin-only.txt")).unwrap(),
         "only on origin\n"
     );
+}
+
+#[test]
+fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_blockers() {
+    const TEST: &str =
+        "history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_blockers";
+    const CHILD: &str = "MJ_TEST_HISTORY_ONLY_FRESH_CLONE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .isolated_store(directory.path())
+            .env(CHILD, "1")
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    test_git(&origin, &["init", "--bare", "--initial-branch=main"]);
+
+    let source = temp.path().join("source");
+    let clone_out = Command::new("git")
+        .args(["clone"])
+        .arg(&origin)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(clone_out.status.success());
+    test_git(&source, &["config", "user.name", "Test"]);
+    test_git(&source, &["config", "user.email", "test@example.com"]);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    test_git(&source, &["add", "README.md"]);
+    test_git(&source, &["commit", "-m", "initial"]);
+    test_git(&source, &["push", "-u", "origin", "main"]);
+    let base_commit = test_git(&source, &["rev-parse", "HEAD"]);
+
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worktree_root = source.join(".mj").join("clones").join(session_id);
+    let worktree = ManagedWorktree {
+        kind: ManagedCheckoutKind::Clone,
+        source_project_directory: source.clone(),
+        source_repository: source.clone(),
+        worktree_root: worktree_root.clone(),
+        branch: format!("mj/{session_id}"),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: Some(base_commit),
+    };
+    create_managed_worktree(
+        &ProcessExecutor,
+        &worktree,
+        None,
+        PrimaryCheckoutRequirement::Any,
+    )
+    .unwrap();
+
+    test_git(
+        &worktree_root,
+        &["update-index", "--skip-worktree", "README.md"],
+    );
+    std::fs::write(worktree_root.join("README.md"), "discard this edit\n").unwrap();
+    let external = temp.path().join("external");
+    test_git(
+        &worktree_root,
+        &["worktree", "add", "--detach", external.to_str().unwrap()],
+    );
+    let origin_url = origin.to_string_lossy().into_owned();
+    let snapshot = mj_checkpoint::archive::collect_git_metadata_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &worktree_root,
+        &mj_checkpoint::archive::GitCollectionSpec {
+            id: "project".into(),
+            relative_destination: PathBuf::from("project"),
+            history: mj_checkpoint::archive::GitHistoryMode::NoBundle,
+            origin_override: Some(origin_url),
+        },
+    )
+    .unwrap();
+    assert!(snapshot.metadata.review_refs_metadata_only);
+    assert!(snapshot.committed_bundle.is_empty());
+    assert!(snapshot.staged_patch.is_empty());
+    assert!(snapshot.unstaged_patch.is_empty());
+    assert!(snapshot.linked_worktrees.is_empty());
+    let archive_path = temp.path().join("history.hel.zip");
+    let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 1,
+        event_frontier_digest: "a".repeat(64),
+        session: mj_core::archive::CanonicalSessionState {
+            execution: mj_core::archive::CanonicalExecutionState::Idle,
+            last_activity_at_ms: Some(1),
+            session_title: None,
+            configuration: Default::default(),
+        },
+        transcript: vec![mj_core::archive::CanonicalTranscriptItem {
+            stable_id: "system:history".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: mj_core::archive::CanonicalTranscriptBody::System {
+                text: "Conversation survives".into(),
+            },
+        }],
+        queued_prompts: Vec::new(),
+        mailbox: Default::default(),
+        native_use_evidence: None,
+    };
+    mj_checkpoint::archive::write_archive_hashed(
+        &archive_path,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: mj_core::archive::SessionManifest {
+                id: session_id.into(),
+                title: "Origin Seed".into(),
+                harness_kind: mj_core::config::HarnessKind::Codex,
+                profile_id: "codex".into(),
+                native_session_id: "native-1".into(),
+                created_at: "2026-11-21T00:00:00Z".into(),
+                checkpointed_at: "2026-11-21T00:00:00Z".into(),
+                hel_version: env!("CARGO_PKG_VERSION").into(),
+                relay_version: String::new(),
+                adapter_version: String::new(),
+            },
+            target: mj_core::archive::TargetManifest {
+                template_id: "local-bare".into(),
+                target_kind: "local-bare".into(),
+                details: Default::default(),
+            },
+            bundle: mj_core::archive::BundleManifest {
+                id: "project".into(),
+                primary_repository: "project".into(),
+            },
+            canonical_session: canonical.clone(),
+            native_artifacts: Vec::new(),
+            repositories: vec![snapshot.clone()],
+        },
+    )
+    .unwrap();
+    let verified = mj_checkpoint::archive::verify_archive_streaming(&archive_path).unwrap();
+
+    assert!(
+        verified.manifest.repositories[0]
+            .metadata
+            .review_refs_metadata_only
+    );
+    let archive = mj_checkpoint::archive::read_archive_verified(&archive_path).unwrap();
+    assert_eq!(archive.canonical_session().unwrap(), canonical);
+    std::fs::write(source.join("next.txt"), "new upstream head\n").unwrap();
+    test_git(&source, &["add", "next.txt"]);
+    test_git(&source, &["commit", "-m", "advance source"]);
+    let fresh_head = test_git(&source, &["rev-parse", "HEAD"]);
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Stopped;
+    session.managed_worktree = Some(Box::new(worktree.clone()));
+    crate::database::save_session(&session).unwrap();
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    // Retiring the owning clone deliberately leaves external checkouts alone.
+    std::fs::remove_dir_all(&worktree_root).unwrap();
+    let mut missing_base = worktree.clone();
+    missing_base.base_commit = Some("0000000000000000000000000000000000000001".into());
+    let restored_head = restore_managed_clone_fresh_head(&ProcessExecutor, &missing_base).unwrap();
+    assert_eq!(restored_head.as_deref(), Some(fresh_head.as_str()));
+    assert!(
+        restore_managed_clone_fresh_head(&ProcessExecutor, &missing_base)
+            .unwrap()
+            .is_none()
+    );
+    controller
+        .record_fresh_managed_clone_head(session_id, restored_head.unwrap())
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[session_id]
+            .managed_worktree
+            .as_ref()
+            .unwrap()
+            .base_commit
+            .as_deref(),
+        Some(fresh_head.as_str())
+    );
+    let persisted = crate::database::load_session_record(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted
+            .managed_worktree
+            .as_ref()
+            .unwrap()
+            .base_commit
+            .as_deref(),
+        Some(fresh_head.as_str())
+    );
+    mj_checkpoint::archive::restore_git_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &worktree_root,
+        &snapshot,
+    )
+    .unwrap();
+    assert_eq!(test_git(&worktree_root, &["rev-parse", "HEAD"]), fresh_head);
+    assert_eq!(
+        std::fs::read_to_string(worktree_root.join("README.md")).unwrap(),
+        "base\n"
+    );
+    assert!(external.exists());
 }

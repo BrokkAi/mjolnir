@@ -936,7 +936,9 @@ impl CommandExecutor for RootProbeExecutor {
                 stdout: format!("{}\n", self.worker).into_bytes(),
                 stderr: Vec::new(),
             }),
-            "probe Mjolnir worker root" | "stop Mjolnir worker daemon" => {
+            "probe Mjolnir worker root"
+            | "stop Mjolnir worker daemon"
+            | "remove a stopped borrowed-target sub-agent's private worker state" => {
                 ProcessExecutor.execute(command)
             }
             other => anyhow::bail!("unexpected command: {other}"),
@@ -1025,7 +1027,8 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
             "probe Mjolnir worker daemon liveness",
-            "stop Mjolnir worker daemon"
+            "stop Mjolnir worker daemon",
+            "remove a stopped borrowed-target sub-agent's private worker state"
         ]
     );
     let closed = &controller.state.sessions[session_id];
@@ -1155,7 +1158,8 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
             "probe Mjolnir worker daemon liveness",
-            "stop Mjolnir worker daemon"
+            "stop Mjolnir worker daemon",
+            "remove a stopped borrowed-target sub-agent's private worker state"
         ]
     );
     assert_eq!(state, SessionState::Stopped);
@@ -2268,11 +2272,11 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
     let arguments = release_arguments(release);
     assert_eq!(arguments[0], "native", "{release:?}");
     let checkout = checkout.to_string_lossy().into_owned();
-    // `$6` is the root newer mbx cleans with `clean --under`; the paths after
+    // `$5` is the root newer mbx cleans with `clean --under`; the paths after
     // it are the fallback for older mbx. A clone's root is its checkout.
-    assert_eq!(arguments[5], checkout, "the clone is the released root");
+    assert_eq!(arguments[4], checkout, "the clone is the released root");
     assert_eq!(
-        &arguments[6..],
+        &arguments[5..],
         [checkout],
         "the clone is the only fallback workspace"
     );
@@ -2458,27 +2462,21 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         executor.commands.lock().unwrap().clone()
     );
     let arguments = release_arguments(&releases[0]);
+    // Mode, the recorded store, and no recorded target root (the release script
+    // resolves any legacy in-cache root on the host or falls back to `<store>/targets`).
+    assert_eq!(&arguments[..3], ["shared", "/srv/mbx-cache", ""]);
     assert_eq!(
-        &arguments[..4],
-        [
-            "shared",
-            "/srv/mbx-cache",
-            "/srv/mbx-cache/.mjolnir/config",
-            "/srv/mbx-cache/.mjolnir/bin/mbx"
-        ]
-    );
-    assert_eq!(
-        arguments[4],
+        arguments[3],
         mj_core::config::data_dir()
             .join("mbx")
             .to_string_lossy()
             .as_ref()
     );
-    // `$6` is the session's own root for `mbx clean --under`; the
+    // `$5` is the session's own root for `mbx clean --under`; the
     // repository paths after it are the fallback for older mbx.
-    assert_eq!(arguments[5], format!("/workspace/{session_id}"));
+    assert_eq!(arguments[4], format!("/workspace/{session_id}"));
     assert_eq!(
-        &arguments[6..],
+        &arguments[5..],
         [
             format!("/workspace/{session_id}/app"),
             format!("/workspace/{session_id}/lib"),
@@ -2561,7 +2559,24 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
             .iter()
             .any(|command| command.purpose == "stop Mjolnir worker daemon")
     );
-    assert!(executor.position("rm -rf").is_none());
+    let cleanup = executor
+        .position("rm -rf")
+        .expect("the child's private worker state is removed");
+    let cleanup = executor.commands.lock().unwrap()[cleanup].clone();
+    assert!(
+        cleanup
+            .args
+            .iter()
+            .any(|argument| argument.contains(&format!("/workers/{session_id}"))),
+        "cleanup targets the child's private worker root: {cleanup:?}"
+    );
+    assert!(
+        !cleanup
+            .args
+            .iter()
+            .any(|argument| argument.contains("/workspace/")),
+        "cleanup never removes the workspace borrowed from the parent: {cleanup:?}"
+    );
     assert!(executor.releases().is_empty());
     assert!(!controller.state.sessions.contains_key(session_id));
 }
@@ -3388,7 +3403,7 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, true, false, &ProcessExecutor)
+        .suspend_preflight(session_id, true, false, false, &ProcessExecutor)
         .unwrap();
     assert_eq!(
         preflight.untracked.len(),
@@ -3420,6 +3435,25 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
             .as_deref()
             .is_some_and(|r| r.contains("merge"))
     );
+    git(&["update-index", "--skip-worktree", "--", "tracked.txt"]);
+    let history = controller
+        .suspend_preflight(session_id, true, false, true, &ProcessExecutor)
+        .unwrap();
+    assert!(!history.has_blockers());
+    assert!(history.operations.is_empty());
+    assert_eq!(history.untracked_count(), 0);
+    let fixed = controller
+        .resolve_suspend_blockers(session_id, &ProcessExecutor)
+        .unwrap();
+    assert_eq!(fixed.cleared_hidden_paths.len(), 1);
+    assert!(
+        !fixed
+            .preflight
+            .blockers
+            .iter()
+            .any(|b| b.kind == "hidden_tracked_edits")
+    );
+    assert!(git(&["ls-files", "-v"]).starts_with("H "));
 }
 
 #[test]
@@ -3518,7 +3552,7 @@ fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_i
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, false, false, &ProcessExecutor)
+        .suspend_preflight(session_id, false, false, false, &ProcessExecutor)
         .unwrap();
     let layout = controller
         .session_export_layout(session_id, &ProcessExecutor)
@@ -3673,6 +3707,7 @@ async fn suspend_without_checkpoint_runs_before_close_before_parent_teardown() {
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: true,
+        history_only: false,
         ..Default::default()
     };
     controller
@@ -3730,7 +3765,7 @@ fn suspend_preflight_without_checkpoint_skips_unreachable_target() {
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, false, true, &FailingExecutor)
+        .suspend_preflight(session_id, false, true, false, &FailingExecutor)
         .expect("without_checkpoint preflight must not contact unreachable target");
     let existing = preflight
         .existing_checkpoint
@@ -3788,6 +3823,7 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: false,
+        history_only: false,
         ..Default::default()
     };
     let err = controller
@@ -3904,7 +3940,7 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, false, false, &ProcessExecutor)
+        .suspend_preflight(session_id, false, false, false, &ProcessExecutor)
         .unwrap();
     let keep_paths: Vec<&std::path::Path> = preflight
         .keep_dir_entries
@@ -4074,7 +4110,7 @@ fn move_keep_preflight_and_capture_share_source_selection() {
         )
     };
     let (blocked, _) = controller
-        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .checkpoint_preflight(name, true, false, false, Some(&keep), &ProcessExecutor)
         .unwrap();
     let blocker = &blocked.blockers[0].remedy;
     assert!(blocker.contains("unrepresented worktree"), "{blocker}");
@@ -4092,7 +4128,7 @@ fn move_keep_preflight_and_capture_share_source_selection() {
     git(&["worktree", "remove", outside.to_str().unwrap()]);
 
     let (preflight, skips) = controller
-        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .checkpoint_preflight(name, true, false, false, Some(&keep), &ProcessExecutor)
         .unwrap();
     assert_eq!(skips, [(PathBuf::from("excluded"), 10)]);
     let lost = preflight.untracked_display_paths();
@@ -4144,6 +4180,83 @@ fn move_keep_preflight_and_capture_share_source_selection() {
         .check_origin_delta_preflight(name, &shown, Some(&keep), &ProcessExecutor)
         .unwrap();
     capture(current_worker).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
+    let name = "suspend_refusal_includes_paths_for_grouped_external_worktrees";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    let worktrees = [
+        directory.path().join("outside/first"),
+        directory.path().join("outside/second"),
+    ];
+    for worktree in &worktrees {
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["worktree", "add", "--detach"])
+            .arg(worktree)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Running;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(name),
+    }));
+    attach_local_managed_clone(&mut session, repo, origin);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+
+    let refusal = controller
+        .preflight_origin_delta_suspension(
+            name,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    let message = format!("{refusal:#}");
+    assert!(
+        message.contains("Cannot suspend until these blockers are resolved:"),
+        "{message}"
+    );
+    assert!(
+        message.contains("1. External worktrees & Git state (2 items)"),
+        "{message}"
+    );
+    for worktree in &worktrees {
+        assert!(
+            message.contains(&format!("\n  - {}", worktree.display())),
+            "refusal omitted bulleted {}: {message}",
+            worktree.display()
+        );
+    }
+    assert!(
+        message.contains("\n  Fix:"),
+        "refusal omitted Fix line: {message}"
+    );
+    assert!(
+        message.contains("worktree remove --force <path>"),
+        "refusal omitted grouped removal command: {message}"
+    );
 }
 
 #[cfg(unix)]
@@ -4394,6 +4507,271 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
     assert!(checkout.is_dir());
     assert!(!worker_root.join(wire::ACCEPTED).exists());
     assert!(!worker_root.join(wire::RESTART).exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_container_suspend_probe_records_rollback_for_recovery() {
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const NAME: &str = "cancelled_container_suspend_probe_records_rollback_for_recovery";
+    const FIXTURE: &str = "MJ_CANCELLED_CONTAINER_SUSPEND_FIXTURE";
+    const SESSION_ID: &str = "0123456789abcdef0123456789abcde5";
+
+    let Some(root) = std::env::var_os(FIXTURE).map(PathBuf::from) else {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "podman",
+            r#"set -eu
+root=$MJ_CANCELLED_CONTAINER_SUSPEND_FIXTURE
+cd "$root"
+case "$1 $2" in
+    "container exists")
+        if [ -f unreachable ]; then
+            echo "container storage unreachable" >&2
+            exit 125
+        fi
+        ;;
+    "container inspect") cat inspect.json ;;
+    "exec -i")
+        shift 3
+        case "$1 $2" in
+            "sh -c")
+                script=$(printf '%s' "$3" | sed 's|/var/lib/hel/workers/|workers/|g')
+                # Keep the script's $0 and positional arguments, mapping the
+                # worker root they name the same way.
+                shift 3
+                for argument do
+                    set -- "$@" "$(printf '%s' "$argument" | sed 's|/var/lib/hel/workers/|workers/|g')"
+                    shift
+                done
+                exec sh -c "$script" "$@"
+                ;;
+            "rm -f")
+                shift 3
+                for path do
+                    rm -f -- "workers/${path#/var/lib/hel/workers/}"
+                done
+                ;;
+            *) echo "unexpected container exec: $*" >&2; exit 125 ;;
+        esac
+        ;;
+    *) echo "unexpected podman command: $*" >&2; exit 125 ;;
+esac
+"#,
+        );
+        let paths = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&paths)))
+            .unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            NAME,
+        ))
+        .isolated_store(directory.path())
+        .env(FIXTURE, directory.path())
+        .env("PATH", path)
+        .run();
+        return;
+    };
+
+    #[derive(PartialEq, Eq)]
+    enum ProbeCancellation {
+        AtExistence,
+        AtReadmission,
+        Shutdown,
+    }
+
+    struct InterruptedProbe {
+        interrupted: AtomicBool,
+        cancellation: ProbeCancellation,
+        admission_released: AtomicBool,
+    }
+
+    impl CommandExecutor for InterruptedProbe {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            // Once cancelled, every command must run on the shutdown-only view.
+            if command.is_shutdown_only() {
+                return ProcessExecutor.execute(command);
+            }
+            if command.purpose == "check for Mjolnir session container"
+                && self.cancellation != ProbeCancellation::AtReadmission
+            {
+                assert!(self.admission_released.load(Ordering::SeqCst));
+                assert!(!self.interrupted.swap(true, Ordering::SeqCst));
+                anyhow::bail!("container existence check interrupted");
+            }
+            assert!(!self.cancellation_requested());
+            ProcessExecutor.execute(command)
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            assert!(command.is_shutdown_only() || !self.cancellation_requested());
+            ProcessExecutor.execute_with_stdin_without_deadline(command, input)
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.interrupted.load(Ordering::SeqCst)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn shutdown_interrupted(&self) -> bool {
+            self.cancellation == ProbeCancellation::Shutdown && self.cancellation_requested()
+        }
+
+        fn begin_resumable_work(&self) -> Result<()> {
+            assert!(!self.admission_released.swap(true, Ordering::SeqCst));
+            Ok(())
+        }
+
+        fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
+            assert!(self.admission_released.swap(false, Ordering::SeqCst));
+            if self.cancellation == ProbeCancellation::AtReadmission {
+                assert!(!self.interrupted.swap(true, Ordering::SeqCst));
+            }
+            Ok(())
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = stopped_podman_cleanup_controller(SESSION_ID);
+    let session = controller.state.sessions.get_mut(SESSION_ID).unwrap();
+    session.state = SessionState::Closing;
+    let checkout = root.join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::write(checkout.join("retained"), "uncheckpointed changes\n").unwrap();
+    session.project_directory = Some(checkout.clone());
+    let target = session.target.clone();
+    persist_controller_fixture(&mut controller);
+    let consent = mj_core::suspend_consent::SuspendConsent::default();
+    crate::database::save_suspension_intent(
+        &controller.state.sessions[SESSION_ID],
+        None,
+        Some(&consent),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("inspect.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "Config": {"Labels": {"dev.mj.managed": "true", "dev.mj.session": SESSION_ID}},
+            "State": {"Status": "running"}
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let worker_root = root.join("workers").join(SESSION_ID);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let probe = |cancellation| InterruptedProbe {
+        interrupted: AtomicBool::new(false),
+        cancellation,
+        admission_released: AtomicBool::new(false),
+    };
+    let interrupt_probe = |controller: &Controller, cancellation| {
+        let probe = probe(cancellation);
+        let outcome = controller.ensure_suspend_target_running(&admission, SESSION_ID, &probe);
+        assert!(probe.cancellation_requested(), "{outcome:?}");
+        assert!(!probe.admission_released.load(Ordering::SeqCst));
+        assert!(!worker_root.join(wire::REQUEST).exists());
+        outcome
+    };
+
+    let mut attempt = OriginDeltaSuspend::load(&controller, SESSION_ID, &ProcessExecutor).unwrap();
+    attempt.accept(&ProcessExecutor, true).unwrap();
+    let accepted: String = wire::read(&worker_root, wire::ACCEPTED).unwrap().unwrap();
+    interrupt_probe(&controller, ProbeCancellation::AtExistence).unwrap();
+    interrupt_probe(&controller, ProbeCancellation::AtReadmission).unwrap();
+    let shutdown = interrupt_probe(&controller, ProbeCancellation::Shutdown).unwrap_err();
+    let unreachable = root.join("unreachable");
+    std::fs::write(&unreachable, "").unwrap();
+    let failed_retry = interrupt_probe(&controller, ProbeCancellation::AtExistence).unwrap_err();
+    std::fs::remove_file(unreachable).unwrap();
+    assert!(format!("{shutdown:#}").contains("container existence check interrupted"));
+    assert!(format!("{failed_retry:#}").contains("container storage unreachable"));
+    for error in [shutdown, failed_retry] {
+        assert_eq!(
+            error.downcast_ref::<LifecycleFailureReason>(),
+            Some(&LifecycleFailureReason::SuspendPending),
+            "{error:#}"
+        );
+    }
+    assert!(!worker_root.join(wire::RESTART).exists());
+    assert_eq!(
+        wire::read::<String>(&worker_root, wire::ACCEPTED).unwrap(),
+        Some(accepted)
+    );
+
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    // Rollback belongs to the same managed recovery call that saw the
+    // interrupted probe. It also honors a reason already in durable storage.
+    for prior_reason in [None, Some("cancelled by the first suspend operation")] {
+        if let Some(reason) = prior_reason {
+            let session = controller.state.sessions.get_mut(SESSION_ID).unwrap();
+            session.state = SessionState::Closing;
+            crate::database::save_suspension_intent(session, None, Some(&consent)).unwrap();
+            attempt.accept(&ProcessExecutor, true).unwrap();
+            wire::write(
+                &worker_root,
+                wire::RESTART,
+                &SuspendReceipt {
+                    operation: wire::read(&worker_root, wire::ACCEPTED).unwrap().unwrap(),
+                    error: Some(reason.into()),
+                },
+            )
+            .unwrap();
+        }
+        let probe = probe(ProbeCancellation::AtExistence);
+        let error = controller
+            .recover_interrupted_close_managed(
+                &admission,
+                SESSION_ID,
+                &probe,
+                &manager.control,
+                &consent,
+                Some(Box::pin(async {
+                    panic!("cancelled suspend entered teardown")
+                })),
+                SuspendSettlement::Suspend,
+            )
+            .await
+            .unwrap_err();
+        assert!(probe.cancellation_requested());
+        assert!(!probe.admission_released.load(Ordering::SeqCst));
+        let expected = prior_reason.unwrap_or("operation cancelled before parked capture");
+        assert!(format!("{error:#}").contains(expected));
+        let record = crate::database::read_durable_session_record(SESSION_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, SessionState::Parked, "{error:#}");
+        assert_eq!(record.target, target);
+        for marker in [wire::ACCEPTED, wire::REQUEST, wire::RESTART] {
+            assert!(!worker_root.join(marker).exists(), "{marker}");
+        }
+    }
+    manager.shutdown.shutdown().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("retained")).unwrap(),
+        "uncheckpointed changes\n"
+    );
 }
 
 #[cfg(unix)]
@@ -4699,7 +5077,6 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_SESSION, close_cut_controller_with};
     use crate::controller::move_session::MoveSourceRelay;
     use mj_core::worker_suspend::{self as wire, WorkerIdentity};
-    use std::os::unix::fs::PermissionsExt;
 
     const NAME: &str = "origin_delta_move_reuses_the_source_lease_until_quiescence";
     const CHILD: &str = "MJ_TEST_ORIGIN_DELTA_MOVE_LEASE";
@@ -4731,8 +5108,14 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
     let worker_root = worker_root.clone();
     attach_local_managed_clone(session, clone, origin);
     persist_controller_fixture(&mut controller);
-
     std::fs::create_dir_all(&worker_root).unwrap();
+    let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
+    controller
+        .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+        .unwrap()
+        .write(&worker_root.join("launch.json"))
+        .unwrap();
+
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     let start = stat
         .rsplit_once(')')
@@ -4750,9 +5133,29 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
         },
     )
     .unwrap();
-    let worker = worker_root.join("hel");
-    std::fs::write(&worker, "#!/bin/sh\n[ \"$1 $2\" = 'worker quiesce' ] || exit 2\necho 'injected quiescence refusal' >&2\nexit 1\n").unwrap();
-    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    mj_core::test_hooks::install_fake_worker_from(
+        mj_core::test_hooks::script_only_fake_dispatcher(),
+        &worker_root,
+        "hel",
+        &format!(
+            r#"if [ "$1 $2" = "worker build-id" ]; then
+    echo "{}"
+    exit 0
+fi
+if [ "$1 $2" = "worker liveness" ]; then
+    [ "$3" = "--help" ] && exit 0
+    echo alive
+    exit 0
+fi
+if [ "$1 $2" = "worker quiesce" ]; then
+    echo "injected quiescence refusal" >&2
+    exit 1
+fi
+exit 2
+"#,
+            mj_core::worker_build::worker_build_stamp()
+        ),
+    );
 
     let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
     let mut source_relay =
@@ -4760,8 +5163,9 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
             .await
             .unwrap();
     let held_relay = source_relay.take().expect("Move holds the live relay");
-    let error = controller
-        .suspend_session_controlled_with_manager(
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        controller.suspend_session_controlled_with_manager(
             &admission,
             LATCH_RELAY_SESSION,
             &ProcessExecutor,
@@ -4775,9 +5179,11 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
             LatchExclusivity::HoldThroughClose,
             None,
             SuspendSettlement::Suspend,
-        )
-        .await
-        .unwrap_err();
+        ),
+    )
+    .await
+    .expect("origin-delta Move suspend must reuse the lease and finish")
+    .unwrap_err();
     assert!(
         format!("{error:#}").contains("injected quiescence refusal"),
         "{error:#}"
@@ -5490,6 +5896,71 @@ async fn legacy_closing_and_destroying_subagent_routes_through_archive_free_comp
     }
 }
 
+/// Answer the batched suspend probes as the target's shell would, so fakes
+/// check what the controller parses instead of a second copy of the framing.
+/// `file` is the target's wire directory, `worker_alive` the worker's state at
+/// the moment of the call, and `origin` what `git config --get
+/// remote.origin.url` prints in every checkout. Returns `None` for any other
+/// command.
+#[cfg(unix)]
+fn batched_suspend_probe_answer(
+    command: &mj_core::targets::CommandSpec,
+    file: impl Fn(&str) -> Option<Vec<u8>>,
+    worker_alive: impl Fn() -> bool,
+    origin: &str,
+) -> Option<mj_core::targets::CommandOutput> {
+    let joined = command.args.join(" ");
+    let after = |marker: &str| -> Option<Vec<String>> {
+        let (_, rest) = joined.split_once(marker)?;
+        Some(
+            rest.split_whitespace()
+                .map(|token| token.trim_matches('\'').to_owned())
+                .filter(|token| !token.is_empty())
+                .collect(),
+        )
+    };
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    let read = |name: &str| match file(name) {
+        Some(bytes) => (name.to_owned(), 0, text(&bytes)),
+        None => (name.to_owned(), 44, String::new()),
+    };
+    let frames: Vec<(String, i32, String)> =
+        if let Some(arguments) = after("mj-read-suspend-records") {
+            arguments[1..].iter().map(|name| read(name)).collect()
+        } else if let Some(arguments) = after("mj-read-suspend-origins") {
+            let accepted = read(mj_core::worker_suspend::ACCEPTED);
+            let mut frames = vec![("accepted".to_owned(), accepted.1, accepted.2)];
+            if accepted.1 != 0 {
+                frames.extend(
+                    (0..arguments.len() - 1)
+                        .map(|index| (format!("origin{index}"), 0, origin.to_owned())),
+                );
+            }
+            frames
+        } else if after("mj-wait-suspend-worker").is_some() {
+            if worker_alive() {
+                let progress = read(mj_core::worker_suspend::PROGRESS);
+                vec![
+                    ("alive".to_owned(), 0, "alive".to_owned()),
+                    ("progress".to_owned(), progress.1, progress.2),
+                ]
+            } else {
+                vec![("alive".to_owned(), 0, "dead".to_owned())]
+            }
+        } else {
+            return None;
+        };
+    let frames: Vec<_> = frames
+        .iter()
+        .map(|(name, status, stdout)| (name.as_str(), *status, stdout.as_str(), ""))
+        .collect();
+    Some(mj_core::targets::CommandOutput {
+        status: 0,
+        stdout: crate::targets::ssh_podman_probe_fixture(&frames),
+        stderr: Vec::new(),
+    })
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_through_target_locator() {
@@ -5534,17 +6005,18 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                 .unwrap()
                 .push((command.program.clone(), command.args.clone()));
             let joined = command.args.join(" ");
-            if joined.contains("remote.origin.url") {
-                return Ok(mj_core::targets::CommandOutput {
-                    status: 0,
-                    stdout: b"https://example.com/repo.git\n".to_vec(),
-                    stderr: Vec::new(),
-                });
-            }
             if self.failed_stop_observation == Some(command.purpose.as_str())
                 && (!self.lose_stop_reply || self.files.lock().unwrap().contains_key(wire::REQUEST))
             {
                 anyhow::bail!("SSH failed during {}", command.purpose);
+            }
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |name| self.files.lock().unwrap().get(name).cloned(),
+                || *self.worker_alive.lock().unwrap(),
+                "https://example.com/repo.git",
+            ) {
+                return Ok(answer);
             }
             if joined.contains("identity-alive")
                 || command.purpose == "probe Mjolnir worker daemon liveness"
@@ -5933,10 +6405,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     let manager = crate::session_manager::spawn_session_manager().unwrap();
     let admission = crate::controller::test_support::session_admission(session_id);
     for (worker_alive, command, lose_stop_reply) in [
-        (false, "read suspend record suspend-operation.json", false),
-        (false, READ_REQUEST, false),
+        (false, "read suspend acceptance and request", false),
         (true, READ_REQUEST, true),
-        (true, "read suspend record suspend-progress.json", false),
+        (true, "wait for suspend worker exit", false),
         (false, "probe Mjolnir worker daemon liveness", false),
     ] {
         *fake.worker_alive.lock().unwrap() = worker_alive;
@@ -6017,10 +6488,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
             assert_eq!(recorded, &serde_json::to_vec(&request).unwrap());
         } else {
             assert!(
-                matches!(
-                    command,
-                    "read suspend record suspend-operation.json" | READ_REQUEST
-                ) && !lose_stop_reply,
+                command == "read suspend acceptance and request" && !lose_stop_reply,
                 "the recorded stop disappeared during {command}"
             );
         }
@@ -6069,6 +6537,12 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     use mj_core::worker_suspend::{self as wire, SuspendRequest, WorkerIdentity};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    if !in_isolated_store(
+        "podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_through_container_exec",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
 
     type RecordedCommands = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 
@@ -6097,12 +6571,13 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
                 .unwrap()
                 .push((command.program.clone(), command.args.clone()));
             let joined = command.args.join(" ");
-            if joined.contains("config --get remote.origin.url") {
-                return Ok(mj_core::targets::CommandOutput {
-                    status: 0,
-                    stdout: b"https://example.com/app.git\n".to_vec(),
-                    stderr: Vec::new(),
-                });
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |name| self.files.lock().unwrap().get(name).cloned(),
+                || *self.worker_alive.lock().unwrap(),
+                "https://example.com/app.git",
+            ) {
+                return Ok(answer);
             }
             if joined.contains("worker identity-alive") {
                 let alive = *self.worker_alive.lock().unwrap();
@@ -6409,7 +6884,7 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
 
 #[cfg(unix)]
 #[tokio::test]
-async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local_target() {
+async fn wait_for_stop_runs_shutdown_only_commands_after_cancellation_on_non_local_target() {
     use mj_core::worker_suspend::{
         self as wire, SuspendProgress, SuspendReceipt, SuspendRequest, WorkerIdentity,
     };
@@ -6419,48 +6894,17 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
         atomic::{AtomicUsize, Ordering},
     };
 
-    struct CancelledExecutor;
-
-    impl CommandExecutor for CancelledExecutor {
-        fn execute(
-            &self,
-            _command: &mj_core::targets::CommandSpec,
-        ) -> Result<mj_core::targets::CommandOutput> {
-            anyhow::bail!("cancelled executor must not run target commands")
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-        ) -> Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-            _input: &mut (dyn std::io::Read + Send),
-        ) -> Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn cancellation_requested(&self) -> bool {
-            true
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            true
-        }
-
-        fn pause_deadline(&self) -> targets::DeadlinePause {
-            targets::DeadlinePause::none()
-        }
-    }
-
+    /// A target whose supervisor was cancelled by a person: it refuses every
+    /// command except those marked shutdown-only.
     #[derive(Clone, Default)]
     struct UncancelledTargetFake {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         alive_polls: Arc<AtomicUsize>,
+        cancelled: bool,
+        /// Daemon shutdown, which `shutdown_after_first_poll` starts while the
+        /// first liveness poll runs.
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        shutdown_after_first_poll: bool,
     }
 
     impl CommandExecutor for UncancelledTargetFake {
@@ -6475,19 +6919,31 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             &self,
             command: &mj_core::targets::CommandSpec,
         ) -> Result<mj_core::targets::CommandOutput> {
+            if self.cancelled && !command.is_shutdown_only() {
+                anyhow::bail!("cancelled executor must not run target commands");
+            }
+            if self.shutdown.load(Ordering::SeqCst) {
+                anyhow::bail!("interrupted by daemon shutdown");
+            }
             let joined = command.args.join(" ");
-            if joined.contains("identity-alive") {
-                // Alive on first poll, dead on second poll.
-                let poll = self.alive_polls.fetch_add(1, Ordering::SeqCst);
-                return Ok(mj_core::targets::CommandOutput {
-                    status: 0,
-                    stdout: if poll == 0 {
-                        b"alive\n".to_vec()
-                    } else {
-                        b"dead\n".to_vec()
-                    },
-                    stderr: Vec::new(),
-                });
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |name| self.files.lock().unwrap().get(name).cloned(),
+                // Alive on the first bounded wait, dead on the second.
+                || {
+                    let first = self.alive_polls.fetch_add(1, Ordering::SeqCst) == 0;
+                    if self.shutdown_after_first_poll {
+                        self.shutdown.store(true, Ordering::SeqCst);
+                    }
+                    first
+                },
+                "",
+            ) {
+                // Shutdown that begins while the command runs kills it.
+                if self.shutdown.load(Ordering::SeqCst) {
+                    anyhow::bail!("interrupted by daemon shutdown");
+                }
+                return Ok(answer);
             }
             for name in [
                 wire::ACCEPTED,
@@ -6533,8 +6989,16 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             self.execute_without_deadline(command)
         }
 
+        fn cancellation_requested(&self) -> bool {
+            self.cancelled
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
-            false
+            self.cancelled
+        }
+
+        fn shutdown_interrupted(&self) -> bool {
+            self.shutdown.load(Ordering::SeqCst)
         }
 
         fn pause_deadline(&self) -> targets::DeadlinePause {
@@ -6590,6 +7054,10 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let op = "origin-delta-suspend-cancel-1".to_owned();
     let target_fake = UncancelledTargetFake::default();
+    let cancelled_fake = UncancelledTargetFake {
+        cancelled: true,
+        ..target_fake.clone()
+    };
     {
         let mut files = target_fake.files.lock().unwrap();
         files.insert(wire::ACCEPTED.to_owned(), serde_json::to_vec(&op).unwrap());
@@ -6626,10 +7094,7 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let attempt =
         origin_delta::OriginDeltaSuspend::load(&controller, session_id, &target_fake).unwrap();
-    attempt
-        .wait_for_stop_with_uncancelled(&CancelledExecutor, &target_fake)
-        .await
-        .unwrap();
+    attempt.wait_for_stop(&cancelled_fake).await.unwrap();
     assert!(
         attempt
             .receipt(&target_fake)
@@ -6642,6 +7107,45 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
     assert_eq!(
         attempt.restart_reason(&target_fake).unwrap().as_deref(),
         Some("suspend was cancelled")
+    );
+
+    // Shutdown arriving after the person's cancel interrupts the wait at its
+    // next command, leaving the accepted request for the next daemon.
+    let interrupted_fake = UncancelledTargetFake {
+        files: Arc::new(Mutex::new(target_fake.files.lock().unwrap().clone())),
+        alive_polls: Arc::default(),
+        cancelled: true,
+        shutdown: Arc::default(),
+        shutdown_after_first_poll: true,
+    };
+    let interrupted = origin_delta::OriginDeltaSuspend::load(
+        &controller,
+        session_id,
+        &UncancelledTargetFake {
+            cancelled: false,
+            shutdown_after_first_poll: false,
+            ..interrupted_fake.clone()
+        },
+    )
+    .unwrap();
+    let error = interrupted
+        .wait_for_stop(&interrupted_fake)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("interrupted by daemon shutdown"),
+        "{error:#}"
+    );
+    assert_eq!(
+        error.downcast_ref::<LifecycleFailureReason>(),
+        Some(&LifecycleFailureReason::SuspendPending)
+    );
+    assert!(
+        interrupted_fake
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(wire::REQUEST)
     );
 }
 
@@ -6690,12 +7194,13 @@ fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_su
     impl CommandExecutor for RemotePreflightStageFake {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let joined = command.args.join(" ");
-            if joined.contains("remote.origin.url") {
-                return Ok(CommandOutput {
-                    status: 0,
-                    stdout: b"https://example.com/org/repo.git\n".to_vec(),
-                    stderr: Vec::new(),
-                });
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |_| None,
+                || false,
+                "https://example.com/org/repo.git",
+            ) {
+                return Ok(answer);
             }
             if joined.contains("uname") {
                 return Ok(CommandOutput {
@@ -6850,7 +7355,7 @@ fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_su
 
     let fake = RemotePreflightStageFake::default();
     let preflight = controller
-        .suspend_preflight(session_id, false, false, &fake)
+        .suspend_preflight(session_id, false, false, false, &fake)
         .expect("preflight must succeed by staging current worker when installed worker lacks subcommand");
     assert_eq!(*fake.old_preflight_calls.lock().unwrap(), 1);
     let staged = fake.staged_preflight_binaries.lock().unwrap();
@@ -6972,5 +7477,125 @@ fn checkpoint_report_roots_follow_the_environment_binding_after_owned_child_regi
             .unwrap(),
         [borrowed_root.join(borrowed_id)],
         "the environment retains the borrower report after the borrower is stopped and removed"
+    );
+}
+
+/// Parking a quiescent session after a refused suspend stops its worker under
+/// the failed-launch bound and the shutdown-only view, yields admission around
+/// the stop, and requires the readmission before anything durable is written:
+/// a handoff that closed admission leaves `Parked` unwritten for the next
+/// daemon.
+#[cfg(unix)]
+#[tokio::test]
+async fn parking_a_quiescent_session_yields_admission_and_stops_bounded_before_any_write() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    const NAME: &str =
+        "parking_a_quiescent_session_yields_admission_and_stops_bounded_before_any_write";
+    const SESSION_ID: &str = "parked-rollback-bounds";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
+    #[derive(Default)]
+    struct Probe {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for Probe {
+        fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+            self.events.lock().unwrap().push("unbounded".into());
+            anyhow::bail!("the worker stop must run through the bounded cleanup path")
+        }
+
+        fn execute_cleanup_with_timeout(
+            &self,
+            command: &CommandSpec,
+            timeout: Duration,
+        ) -> Result<CommandOutput> {
+            self.events.lock().unwrap().push(format!(
+                "stop bound={}s shutdown_only={}",
+                timeout.as_secs(),
+                command.is_shutdown_only()
+            ));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn begin_resumable_work(&self) -> Result<()> {
+            self.events.lock().unwrap().push("yield admission".into());
+            Ok(())
+        }
+
+        fn end_resumable_work(&self, _: &'static str) -> Result<()> {
+            self.events.lock().unwrap().push("readmit".into());
+            anyhow::bail!("the daemon handoff closed admission")
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let mut controller = stopped_podman_cleanup_controller(SESSION_ID);
+    controller.state.sessions.get_mut(SESSION_ID).unwrap().state = SessionState::Closing;
+    persist_controller_fixture(&mut controller);
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let probe = Probe::default();
+    let shutdown_only = probe.shutdown_only();
+    let cleanup =
+        shutdown_only.with_cleanup_timeout(crate::controller::FAILED_STARTUP_CLEANUP_TIMEOUT);
+    let error = anyhow::anyhow!("suspend refused");
+    let outcome = crate::worker_lifecycle::run_admitted(&admission, SESSION_ID, async {
+        controller.park_quiescent_session(SESSION_ID, &probe, &cleanup, &error)
+    })
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{outcome:#}").contains("the daemon handoff closed admission"),
+        "{outcome:#}"
+    );
+    assert_eq!(
+        *probe.events.lock().unwrap(),
+        [
+            "yield admission",
+            "stop bound=30s shutdown_only=true",
+            "readmit"
+        ]
+    );
+    assert_eq!(
+        controller.state.sessions[SESSION_ID].state,
+        SessionState::Closing,
+        "a refused readmission leaves the record for the next daemon"
     );
 }

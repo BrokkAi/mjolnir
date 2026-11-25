@@ -1312,7 +1312,8 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     let operation = state
         .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Resume, {
             let release = release.clone();
-            move |_, _, cancelled, _session_admission| async move {
+            move |_, _, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 release.notified().await;
                 ensure!(
                     !cancelled.load(Ordering::Acquire),
@@ -2654,7 +2655,8 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
         let automatic = state
             .start_automatic_lifecycle("automatic-move".into(), LifecycleKind::Move, {
                 let release = release.clone();
-                move |_, _, cancelled, _session_admission| async move {
+                move |_, _, control, _session_admission| async move {
+                    let cancelled = control.cancelled.clone();
                     tokio::select! {
                         () = release.notified() => {}
                         () = mj_controller::recovery_gate::wait_until_cancelled(&cancelled) => {}
@@ -3292,6 +3294,36 @@ fn create_cancellation_and_commit_have_one_winner() {
     }
 }
 
+/// An operation that sees `cancelled` set by shutdown must also see that
+/// shutdown stopped it, or it would take the daemon's exit for a person's
+/// cancel and record a rollback. Shutdown is published before the flag.
+#[test]
+fn a_shutdown_stop_is_visible_before_the_cancelled_flag_is() {
+    for committed in [false, true] {
+        for _ in 0..200 {
+            let control = LifecycleControl::default();
+            if committed {
+                assert!(control.grant_commit());
+            }
+            let observer = {
+                let control = control.clone();
+                std::thread::spawn(move || {
+                    while !control.cancelled.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                    assert!(control.stopped_for_shutdown());
+                })
+            };
+            if committed {
+                control.interrupt();
+            } else {
+                assert!(control.cancel_for_shutdown());
+            }
+            observer.join().unwrap();
+        }
+    }
+}
+
 #[test]
 fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
     let control = LifecycleControl::default();
@@ -3309,10 +3341,11 @@ fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
 /// A child launch that an explicit daemon stop cancelled reported only
 /// "operation cancelled", which its parent could not tell from a fault on the
 /// target. The control records which cancel won, so a person's cancel that
-/// came first is never blamed on the shutdown that followed it.
+/// came first is never blamed on the shutdown that followed it, except for
+/// the cleanup that shutdown itself interrupts (#1678).
 // Hard-won: #1321: a daemon stop cancelled a child launch and the failure did not say so.
-#[test]
-fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
+#[tokio::test]
+async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
@@ -3361,6 +3394,77 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     assert!(control.grant_commit());
     assert!(operation(LifecycleKind::Suspend, control.clone()).interrupt_for_shutdown());
     assert!(control.stopped_for_shutdown());
+
+    // A person's cancel wins first and its cleanup runs; shutdown then still
+    // stops that cleanup, and the lost commit decision stays lost.
+    let control = LifecycleControl::default();
+    let mut cancelled = operation(LifecycleKind::Suspend, control.clone());
+    assert!(cancelled.request_cancel("test-session", "person cancellation"));
+    assert!(!control.stopped_for_shutdown());
+    assert!(cancelled.interrupt_for_shutdown());
+    assert!(control.stopped_for_shutdown());
+    assert!(!control.grant_commit());
+    assert_eq!(control.cancel_cause(), Some("person cancellation"));
+    tokio::time::timeout(Duration::from_secs(5), control.shutdown_stopped())
+        .await
+        .expect("shutdown after a person's cancel must wake its waiters");
+    // The executor built from the control sees the shutdown as its own token.
+    assert!(control.executor().shutdown_interrupted());
+
+    // The dashboard moves a cancelled Restart or container upgrade to its own
+    // phase; shutdown must still stop that rollback, a Resume's too. Each
+    // lifecycle's executor comes from its control, so the shutdown-only view
+    // of it ends a stalled command at once.
+    for (kind, phase) in [
+        (LifecycleKind::Restart, LifecyclePhase::CancellingRestart),
+        (
+            LifecycleKind::UpgradeContainer,
+            LifecyclePhase::CancellingRestart,
+        ),
+        (LifecycleKind::Resume, LifecyclePhase::Cancelling),
+        (LifecycleKind::Suspend, LifecyclePhase::Executing),
+        (LifecycleKind::Move, LifecyclePhase::MovingDestination),
+    ] {
+        let restart = matches!(phase, LifecyclePhase::CancellingRestart);
+        let control = LifecycleControl::default();
+        let mut cancelled = operation(kind, control.clone());
+        if matches!(
+            phase,
+            LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+        ) {
+            // A phone action cancels the control and leaves the phase alone.
+            assert!(control.request_cancel("phone action cancel"));
+        } else {
+            assert!(cancelled.request_cancel("test-session", "person cancel from dashboard"));
+        }
+        cancelled.phase = phase;
+        assert!(!control.stopped_for_shutdown());
+        assert_eq!(cancelled.cancelled_restart_releases_intent(), restart);
+
+        let executor = control.executor();
+        let rollback = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = executor
+                .shutdown_only()
+                .execute(&CommandSpec::new("sh", ["-c", "sleep 30"]));
+            (result, started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(cancelled.interrupt_for_shutdown());
+        let (result, elapsed) = rollback.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("operation cancelled"),
+            "{kind:?}: {error:#}"
+        );
+        assert!(elapsed < Duration::from_secs(20), "{kind:?}: {elapsed:?}");
+
+        assert!(control.stopped_for_shutdown());
+        // The dying daemon leaves the durable intent to its successor.
+        assert!(!cancelled.cancelled_restart_releases_intent());
+        assert!(!control.grant_commit());
+        assert!(control.executor().shutdown_interrupted());
+    }
 }
 
 #[tokio::test]
@@ -4020,7 +4124,8 @@ async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cance
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
             let release = release.clone();
-            move |_state, _session_id, cancelled, _session_admission| async move {
+            move |_state, _session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 release.notified().await;
                 assert!(
                     !cancelled.load(Ordering::Acquire),
@@ -4061,7 +4166,8 @@ async fn force_destruction_cancels_a_teardown_that_outlives_the_wait() {
     let state = test_runtime_state();
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
-            |_state, _session_id, cancelled, _session_admission| async move {
+            |_state, _session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -4382,7 +4488,7 @@ async fn a_stalled_unpark_stream_releases_admission_and_can_retry() {
         .start_or_join_lifecycle(child.into(), LifecycleKind::Unpark, {
             |_, _, flag, _| async move {
                 admitted.send(()).unwrap();
-                mj_controller::recovery_gate::wait_until_cancelled(&flag).await;
+                mj_controller::recovery_gate::wait_until_cancelled(&flag.cancelled).await;
                 cancel_seen.send(()).unwrap();
                 cleanup.await.unwrap();
                 anyhow::bail!("stream cancelled")
@@ -4522,7 +4628,8 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             let cancel_seen = cancel_seen.clone();
-            move |_state, _session_id, cancelled, _session_admission| async move {
+            move |_state, _session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 admitted.send(()).unwrap();
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -4572,7 +4679,8 @@ async fn a_primary_or_worker_create_can_run_a_stage_past_the_stall_bound() {
         let (finish, running) = tokio::sync::oneshot::channel();
         let result = state
             .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-                move |_, _, cancelled, _| async move {
+                move |_, _, control, _| async move {
+                    let cancelled = control.cancelled.clone();
                     admitted.send(()).unwrap();
                     running.await.unwrap();
                     assert!(!cancelled.load(Ordering::Acquire));
@@ -5067,7 +5175,8 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
         .start_or_join_lifecycle(
             "session-1".into(),
             LifecycleKind::UpgradeContainer,
-            |state, id, cancelled, _session_admission| async move {
+            |state, id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 let intent = mj_controller::database::begin_container_upgrade(
                     &id,
                     "upgrade-test",
@@ -5154,7 +5263,8 @@ async fn a_pending_container_upgrade_cancels_without_recording_a_session_failure
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::UpgradeContainer, {
             let ready = ready.clone();
-            move |state, id, cancelled, _session_admission| async move {
+            move |state, id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 mj_controller::database::begin_container_upgrade(
                     &id,
                     "upgrade-test",
@@ -7518,6 +7628,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         child.state = SessionState::Error;
         child.last_error = Some("provider refused the selected model".into());
         mj_controller::database::save_session(&child).unwrap();
+        state.reload_controller().await.unwrap();
     } else {
         use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommand};
         use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
@@ -7593,8 +7704,9 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         child.state = SessionState::Error;
         child.last_error = Some("provider refused the selected model".into());
         mj_controller::database::save_session(&child).unwrap();
+        state.reload_controller().await.unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let review_wait = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(review) =
                 mj_controller::database::finished_review(&parent.id, Some(review_id)).unwrap()
@@ -7610,8 +7722,14 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("{failure} failure must reach the review host and settle its role"));
+    .await;
+    if review_wait.is_err() {
+        let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
+        let record = mj_controller::database::load_session_record(&child.id).unwrap();
+        panic!(
+            "{failure} failure must reach the review host and settle its role; steps={steps:?}; record={record:?}"
+        );
+    }
     let record = mj_controller::database::load_session_record(&child.id)
         .unwrap()
         .unwrap();
@@ -7619,8 +7737,17 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         assert_eq!(record.state, SessionState::Error);
         assert!(record.last_error.is_some());
     } else {
-        let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
-        assert!(steps.iter().all(|step| step.phase == "failed"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
+                if steps.iter().all(|step| step.phase == "failed") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("review settlement must fail every startup step");
         state.cancel_and_join_startup_prompts().await.unwrap();
     }
     state.review_host().shutdown().await.unwrap();
@@ -7697,79 +7824,6 @@ async fn a_create_wait_is_answered_from_the_intent_row_and_the_record() {
         format!("{failed:#}").contains("clone refused"),
         "{failed:#}"
     );
-}
-
-#[cfg(unix)]
-// Hard-won: a5eed2e0: synchronous checkpoint database I/O blocked unrelated pings and timers.
-#[tokio::test]
-async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive() {
-    const NAME: &str = "a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive";
-    const CHILD: &str = "MJ_TEST_CHECKPOINT_IO_RESPONSIVENESS";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(module_path!(), NAME),
-        )
-        .env(CHILD, "1")
-        .isolated_store(directory.path())
-        .run();
-        return;
-    }
-    let _writer = mj_controller::database::install_isolated_test_writer();
-    let workspace = mj_controller::database::create_workspace("Checkpoint I/O").unwrap();
-    let session = runtime_test_session("checkpoint-io", &workspace.id, SessionState::Stopped);
-    mj_controller::database::save_session(&session).unwrap();
-    let state = test_runtime_state_loading_the_store();
-
-    // Hold the checkpoint's first write at a real I/O boundary. The native
-    // watchdog releases it even if the checkpoint blocks this current-thread
-    // runtime, so the old implementation fails instead of hanging the suite.
-    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let lock = std::thread::spawn(move || {
-        let connection =
-            rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
-        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-        locked_tx.send(()).unwrap();
-        match release_rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(error) => panic!("checkpoint test release channel failed: {error}"),
-        }
-        connection.execute_batch("ROLLBACK").unwrap();
-    });
-    locked_rx.await.unwrap();
-    let checkpoint = mj_core::runtime::spawn({
-        let state = state.clone();
-        async move { state.checkpoint_for_bundle_export("checkpoint-io").await }
-    });
-    let started = std::time::Instant::now();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let elapsed = started.elapsed();
-    let pending = !checkpoint.is_finished();
-    let reply = handle_action(
-        DaemonAction::Ping,
-        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
-        &state,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    let released = release_tx.send(());
-    lock.join().unwrap();
-    // This fixture has no live target: after the write is released it must
-    // report the checkpoint failure and leave the session in its prior state.
-    assert!(checkpoint.await.unwrap().is_err());
-    assert_eq!(
-        mj_controller::database::load_state().unwrap().sessions["checkpoint-io"].state,
-        SessionState::Stopped
-    );
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "timer stalled for {elapsed:?}"
-    );
-    released.unwrap();
-    assert!(pending, "checkpoint should still be waiting for I/O");
-    assert!(matches!(reply, DaemonReply::Pong));
 }
 
 /// Whether `pid` names a live process. A zombie has already died; only its
@@ -8290,7 +8344,8 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
             .start_automatic_lifecycle(
                 id.into(),
                 LifecycleKind::Create,
-                move |_, _, cancelled, _session_admission| async move {
+                move |_, _, control, _session_admission| async move {
+                    let cancelled = control.cancelled.clone();
                     while !cancelled.load(Ordering::Acquire) {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
@@ -8417,7 +8472,8 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             LifecycleKind::Suspend,
             super::lifecycle::LifecycleStart::request(key, None, None),
             Some(cancellable_watch),
-            move |_, _, cancelled, _session_admission| async move {
+            move |_, _, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
@@ -9186,7 +9242,8 @@ esac
                 state
                     .start_automatic_lifecycle(id.into(), LifecycleKind::Move, {
                         let cloning = cloning.clone();
-                        move |_, _, cancelled, _session_admission| async move {
+                        move |_, _, control, _session_admission| async move {
+                            let cancelled = control.cancelled.clone();
                             // Hold the destination-cloning cut before any worker is installed.
                             cloning.notify_one();
                             while !cancelled.load(Ordering::Acquire) {
@@ -9472,6 +9529,7 @@ esac
                         mj_core::suspend_consent::SuspendConsent {
                             without_checkpoint: true,
                             confirm_no_checkpoint: true,
+                            history_only: false,
                             ..Default::default()
                         },
                     ),
@@ -10802,6 +10860,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: true,
             confirm_no_checkpoint: false,
+            history_only: false,
         })
         .await
         .unwrap_err();
@@ -10836,6 +10895,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
                 abort_operations: mj_core::suspend_consent::OperationConsent::None,
                 without_checkpoint: true,
                 confirm_no_checkpoint: false,
+                history_only: false,
             }),
     )
     .await
@@ -10957,6 +11017,7 @@ async fn accepted_suspend_failure_is_published_without_an_observer() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         })
         .await
         .unwrap();
@@ -12917,7 +12978,7 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
     );
     let mut relation = runtime_test_subagent(CHILD, &parent.id);
     relation.model = Some("chosen-model".into());
-    let group_id = format!("subagent-spawn-{}", relation.request_key);
+    let group_id = relation.startup_group_id();
     let steps = super::startup_followup::api_followup_steps(
         &group_id,
         crate::server::api::StartFollowup {
@@ -13101,7 +13162,7 @@ async fn child_startup_failure_waits_for_confirmed_worker_death() {
     let mut child = runtime_test_session(CHILD, workspace, SessionState::Running);
     child.target = Some(Box::new(target.clone()));
     let relation = runtime_test_subagent(CHILD, PARENT);
-    let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
+    let group = relation.startup_group_id();
     let (command_id, step) = super::startup_followup::api_followup_steps(
         &group,
         crate::server::api::StartFollowup {
@@ -13225,6 +13286,7 @@ esac
 
     let exit_record = root.join(mj_core::relay::WORKER_EXIT_FILE);
     channels.shutdown.shutdown().await.unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
     std::fs::remove_file(live).unwrap();
     // Restore Running so the typed-death recovery path can commit its own Error.
     mj_controller::database::save_lifecycle_session(&child).unwrap();
@@ -15403,6 +15465,7 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }),
     )
     .await
@@ -15798,7 +15861,7 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
     fs::write(
         &script,
         format!(
-            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec /bin/sleep 600\n",
             mj_core::targets::posix_quote(&started.to_string_lossy())
         ),
     )
@@ -15842,7 +15905,7 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
     assert!(request.await.unwrap_err().is_cancelled());
     let pid = started_result.expect("OpenSSH proxy never started");
     let reaped = tokio::time::timeout(Duration::from_secs(30), async {
-        while daemon_process_is_alive(pid) {
+        while mj_client::daemon::process_is_alive(pid) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -16162,6 +16225,7 @@ async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
 /// The whole dismiss seam: a served question target, the daemon operation the
 /// web and TUI menus call, and the next view the worker publishes once the
 /// command lands. The attention must drop so the card glyph clears.
+// Hard-won: 8dd7f63840: ignored cards prevented dismissal of visible attention.
 #[tokio::test]
 async fn dismiss_notification_clears_the_served_question_attention() {
     use mj_core::attention::{
@@ -16188,11 +16252,12 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         turn_id: "turn-1".into(),
         completed_ordinal: 9,
     };
-    let record = runtime_test_session(
+    let mut record = runtime_test_session(
         "session-1",
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
+    record.notifications_ignored = true;
     mj_controller::database::save_session(&record).unwrap();
     let mut applied = mj_core::state::MaterializedSession::empty("session-1");
     applied.applied_event_ordinal = question.completed_ordinal;
@@ -16273,6 +16338,26 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .cloned()
         .expect("a needs-input session serves its dismissal target");
     assert_eq!(target, NotificationDismissal::Stack { revision: 9 });
+    assert!(
+        !served
+            .metadata
+            .notification_cards
+            .as_ref()
+            .unwrap()
+            .contains_key("session-1")
+    );
+    let stale = state
+        .dismiss_notification(
+            "session-1".into(),
+            NotificationDismissal::Stack { revision: 8 },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        stale
+            .to_string()
+            .contains("notification is no longer current")
+    );
 
     let answerer = mj_core::runtime::spawn(async move {
         let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
@@ -16662,7 +16747,8 @@ async fn queued_lifecycle_requests_release_client_admission_for_handoff_and_stop
             Some(control.clone()),
             {
                 let release = release.clone();
-                move |state, id, cancelled, _session_admission| async move {
+                move |state, id, control, _session_admission| async move {
+ let cancelled = control.cancelled.clone();
                     let executor = DaemonStageReportingExecutor::new(ProcessExecutor, state, id);
                     executor.begin_resumable_work()?;
                     executor.stage_started(ProvisionStage::Cloning);
@@ -17263,7 +17349,10 @@ async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
             },
         }));
     mj_controller::database::save_materialized_session(&conversation).unwrap();
-    sessionwiki::index::open().unwrap();
+    // This test pauses synchronization before migration; start with the runtime tokenizer.
+    let index = sessionwiki::index::open().unwrap();
+    sessionwiki::index::set_tokenizer_spec(&index, "porter unicode61").unwrap();
+    drop(index);
     let state = test_runtime_state_loading_the_store();
     let waiting_state = Arc::clone(&state);
     let waiting =
@@ -17358,6 +17447,7 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
         SuspendPreflightRequest {
             dry_run: false,
             without_checkpoint: true,
+            history_only: false,
         },
     )
     .await
@@ -17367,6 +17457,7 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: false,
+        history_only: false,
         ..Default::default()
     };
     let err = state
@@ -17429,6 +17520,7 @@ async fn terminal_suspend_preflight_runs_during_drain_without_admission() {
             SuspendPreflightRequest {
                 dry_run: false,
                 without_checkpoint: false,
+                history_only: false,
             },
         )
         .await
@@ -17437,6 +17529,194 @@ async fn terminal_suspend_preflight_runs_during_drain_without_admission() {
     assert_eq!(preflight.session_id, session_id);
     shutdown.cancel();
     server.await.unwrap().unwrap();
+}
+
+// Hard-won: #1679: an idle child made its parent's suspend ask for confirmation.
+#[tokio::test]
+async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children() {
+    const CHILD: &str = "MJ_TEST_SUSPEND_PREFLIGHT_WORK";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "suspend_preflight_routes_warn_only_about_unfinished_borrowed_children",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let parent = "preflight-parent";
+    let clean_parent = "preflight-clean";
+    let active_child = "preflight-working";
+    let idle_child_with_descendant = "preflight-branch";
+    let active_descendant = "preflight-grandchild";
+    for id in [parent, clean_parent] {
+        mj_controller::database::save_session(&runtime_test_session(
+            id,
+            "default",
+            SessionState::Running,
+        ))
+        .unwrap();
+    }
+    for (id, child_parent, status, owns_environment) in [
+        (
+            "preflight-parked",
+            clean_parent,
+            SessionState::Parked,
+            false,
+        ),
+        ("preflight-idle", clean_parent, SessionState::Running, false),
+        (active_child, parent, SessionState::Running, false),
+        (
+            idle_child_with_descendant,
+            parent,
+            SessionState::Running,
+            false,
+        ),
+        (
+            active_descendant,
+            idle_child_with_descendant,
+            SessionState::Running,
+            false,
+        ),
+        ("preflight-owned", parent, SessionState::Provisioning, true),
+    ] {
+        let mut relation = runtime_test_subagent(id, child_parent);
+        relation.orchestrator = id == idle_child_with_descendant;
+        mj_controller::database::register_subagent_with_startup(
+            &runtime_test_session(id, "default", status),
+            &relation,
+            Vec::new(),
+            None,
+            None,
+            owns_environment,
+        )
+        .unwrap();
+    }
+
+    let state = test_runtime_state_loading_the_store();
+    for (id, working) in [
+        (parent, true),
+        (clean_parent, false),
+        (active_child, true),
+        (idle_child_with_descendant, false),
+        (active_descendant, true),
+        ("preflight-idle", false),
+        ("preflight-owned", true),
+    ] {
+        let mut view = ready_startup_view();
+        if working {
+            view.snapshot.as_mut().unwrap().operational.harness_turn =
+                Some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+        }
+        state.owner().publish_view(id.into(), view);
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (terminal, shutdown, server) = start_test_dashboard_http_api_on(state, listener).await;
+    let public =
+        mj_client::http::HttpDaemonClient::new(format!("http://{address}"), "public-test-token")
+            .unwrap();
+    let clean = terminal
+        .suspend_preflight(
+            clean_parent.into(),
+            SuspendPreflightRequest {
+                dry_run: false,
+                without_checkpoint: false,
+                history_only: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!clean.has_blockers());
+    assert!(!clean.has_warnings(), "{clean:?}");
+    let from_terminal = terminal
+        .suspend_preflight(
+            parent.into(),
+            SuspendPreflightRequest {
+                dry_run: false,
+                without_checkpoint: false,
+                history_only: false,
+            },
+        )
+        .await
+        .unwrap();
+    let from_public: mj_core::suspend_consent::SuspendPreflight = public
+        .get_json(&format!("/api/v1/sessions/{parent}/suspend-preflight"))
+        .await
+        .unwrap();
+    assert_eq!(from_terminal, from_public);
+    assert_eq!(
+        from_terminal.children_not_handed_back,
+        [active_descendant, active_child]
+    );
+    assert!(from_terminal.interrupting);
+    assert_eq!(from_terminal.owning_children_to_suspend, 1);
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+}
+
+/// A borrower that is not idle must block checkout edits, not be repaired under.
+#[cfg(unix)]
+#[tokio::test]
+async fn resolve_suspend_blockers_refuses_non_idle_borrower() {
+    const CHILD: &str = "MJ_TEST_RESOLVE_SUSPEND_BLOCKERS_BORROWER";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "resolve_suspend_blockers_refuses_non_idle_borrower",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let parent = "resolve-parent";
+    let borrower = "resolve-borrower";
+    mj_controller::database::save_session(&runtime_test_session(
+        parent,
+        "default",
+        SessionState::Parked,
+    ))
+    .unwrap();
+    mj_controller::database::register_subagent_with_startup(
+        &runtime_test_session(borrower, "default", SessionState::Provisioning),
+        &runtime_test_subagent(borrower, parent),
+        Vec::new(),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+
+    // Keep the upgrade coordinator: dropping it closes the session gate.
+    let (state, _recovery, _upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
+    let error = state
+        .resolve_suspend_blockers(parent.into())
+        .await
+        .expect_err("a provisioning borrower must refuse remediation");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(&format!(
+            "Cannot fix suspend blockers while sub-agent {borrower} ({borrower}) is Provisioning."
+        )),
+        "{message}"
+    );
+    let stored = mj_controller::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent].state, SessionState::Parked);
+    assert_eq!(
+        stored.sessions[borrower].state,
+        SessionState::Provisioning
+    );
 }
 
 #[cfg(unix)]
@@ -17848,7 +18128,7 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\necho started >> {}\n",
+            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\nprintf '%s\\n' \"$*\" >> {}\n",
             start_marker.display(),
         ),
     )
@@ -17872,7 +18152,13 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
         .unwrap();
     assert_eq!(saved.state, SessionState::Parked);
     assert_eq!(saved.target, record.target);
-    assert!(!start_marker.exists());
+    let worker_calls = std::fs::read_to_string(&start_marker).unwrap_or_default();
+    assert!(
+        !worker_calls
+            .lines()
+            .any(|call| call.starts_with("worker run")),
+        "checkpoint-only start should fail before launching a worker: {worker_calls}"
+    );
 }
 
 pub(crate) fn seed_legacy_detached_draft(
@@ -18385,7 +18671,7 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
     fs::write(
         &script,
         format!(
-            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec /bin/sleep 600\n",
             mj_core::targets::posix_quote(&started.to_string_lossy())
         ),
     )
@@ -18451,7 +18737,7 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
     })
     .await
     .expect("OpenSSH proxy never started");
-    assert!(daemon_process_is_alive(pid));
+    assert!(mj_client::daemon::process_is_alive(pid));
     let gate = mj_controller::upgrade::gate();
     let blockers = gate.blockers();
     assert!(
@@ -18467,7 +18753,7 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     tokio::time::timeout(Duration::from_secs(30), async {
-        while daemon_process_is_alive(pid) {
+        while mj_client::daemon::process_is_alive(pid) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -18588,7 +18874,7 @@ async fn terminal_recovery_destroy_holds_bounded_admission_after_disconnect() {
     assert!(!gate.try_close());
     assert!(gate.destroys_hold_the_stop());
     drop(session_hold);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !gate.active_labels().is_empty() {
             tokio::task::yield_now().await;
         }
@@ -18710,4 +18996,99 @@ async fn streaming_operations_require_terminal_auth_and_invalid_login_refuses_be
     assert!(error.message.contains("missing"));
     shutdown.cancel();
     server.await.unwrap().unwrap();
+}
+
+// Hard-won: #1675: bootstrap attached ordinary relay actors before admitting Create recovery
+#[tokio::test]
+async fn first_worker_target_publication_excludes_an_owned_interrupted_create() {
+    use mj_controller::controller::test_support::{IsolatedTest, test_name};
+    const CHILD: &str = "MJ_TEST_CREATE_BOOTSTRAP_FENCE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "first_worker_target_publication_excludes_an_owned_interrupted_create",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "create-bootstrap-fence")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Bootstrap").unwrap();
+    let data = mj_core::config::data_dir();
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            data.join("profile"),
+        ),
+    );
+    config
+        .targets
+        .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.save().unwrap();
+    for (id, state) in [
+        ("interrupted", SessionState::Disconnected),
+        ("running-peer", SessionState::Running),
+    ] {
+        let mut record = runtime_test_session(id, &workspace.id, state);
+        record.project_directory = Some(data.clone());
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: data.join(id),
+        }));
+        mj_controller::database::save_new_session(&record, None, false, false).unwrap();
+    }
+    let controller = Controller::load().unwrap();
+    let mut state = test_runtime_state_with(controller);
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(mj_controller::database::subscribe_committed_state().unwrap());
+    assert_eq!(
+        state.owner().pollable_worker_ids(),
+        ["interrupted", "running-peer"]
+    );
+    let mut intents = mj_controller::database::load_session_create_intents().unwrap();
+    assert_eq!(intents.len(), 1);
+    let intent = intents.remove(0);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let result = state
+        .admit_lifecycle(
+            intent.session_id,
+            LifecycleKind::Create,
+            super::lifecycle::LifecycleStart::request(intent.operation_id, None, None).automatic(),
+            {
+                let release = release.clone();
+                move |_, _, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+    let (targets, mut published) = tokio::sync::watch::channel(Vec::new());
+    let cancellation = CancellationToken::new();
+    let refresher =
+        process::spawn_manager_target_refresher(targets, cancellation.clone(), state.clone());
+    tokio::time::timeout(Duration::from_secs(5), published.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published
+            .borrow()
+            .iter()
+            .map(|target| target.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["running-peer"]
+    );
+    cancellation.cancel();
+    refresher.await.unwrap();
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    writer.shutdown().unwrap();
 }

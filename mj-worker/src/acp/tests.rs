@@ -60,6 +60,7 @@ for line in sys.stdin:
                 managed_subagent: false,
                 instruction_role: None,
                 subagent_mcp_socket: None,
+                claude_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
                 goal_recovery: Default::default(),
@@ -188,6 +189,7 @@ for line in sys.stdin:
                 managed_subagent: false,
                 instruction_role: None,
                 subagent_mcp_socket: None,
+                claude_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
                 goal_recovery: Default::default(),
@@ -341,6 +343,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -517,7 +520,7 @@ fn opencode_mcp_calls_always_reach_the_person() {
     }
 }
 
-/// agy 1.5.11 titles an MCP call `mcp_<server>_<tool>` and names no server in
+/// agy 1.5.15 titles an MCP call `mcp_<server>_<tool>` and names no server in
 /// the request, so a title cannot tell an owned tool from a lookalike. Its own
 /// `mcp(<server>/*)` grant can: the worker stages one per registered owned
 /// server in agy's project file and answers none of agy's requests itself.
@@ -651,6 +654,158 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
     std::fs::write(&project, "unchanged").unwrap();
     stage_antigravity_grants(&spec).unwrap();
     assert_eq!(std::fs::read_to_string(&project).unwrap(), "unchanged");
+}
+
+/// agy 1.5.15's terminal sandbox leaves an additional directory read-only
+/// unless the project file holds `write_file(<dir>/)` for it, so the worker
+/// stages one per directory. Each launch replaces what an earlier launch
+/// staged and keeps a person's own rules, even `write_file` ones.
+#[test]
+fn antigravity_additional_directories_are_granted_writes_and_replaced_each_launch() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("config/projects/default-cli-project.json");
+    let staged_record = home.path().join("mj-staged-write-grants.json");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    let own_write = format!(
+        "write_file({})",
+        home.path().join("personal").join("").display()
+    );
+    std::fs::write(
+        &project,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": "default-cli-project",
+            "permissionGrants": {
+                "permissionGrants": {
+                    "allow": ["command(gh pr list)", own_write],
+                    "deny": ["write_file(/never/)"]
+                },
+                "v2Migrated": true
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut spec = reload_fallback_spec(HarnessKind::Antigravity);
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    spec.environment.insert(
+        "MJ_ANTIGRAVITY_HOME".into(),
+        home.path().to_string_lossy().into_owned(),
+    );
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let user_home = home.path().join("user-home");
+    spec.environment
+        .insert(home_variable.into(), user_home.to_str().unwrap().into());
+    let rule = |directory: &Path| format!("write_file({})", directory.join("").display());
+    let allowed = |project: &Path| -> Vec<String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(project).unwrap()).unwrap();
+        value["permissionGrants"]["permissionGrants"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let clone = home.path().join("owner-clone");
+    let cache = home.path().join("tool-cache");
+    // A directory named twice is granted once, and the grant ends at its
+    // separator, so a same-prefix sibling stays outside it.
+    spec.additional_directories = vec![clone.clone(), cache.clone(), clone.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let staged = allowed(&project);
+    for directory in [&clone, &cache] {
+        assert_eq!(
+            staged.iter().filter(|r| **r == rule(directory)).count(),
+            1,
+            "{staged:?}"
+        );
+    }
+    assert!(
+        rule(&clone).ends_with(&format!("{})", std::path::MAIN_SEPARATOR)),
+        "{}",
+        rule(&clone)
+    );
+    assert!(staged.contains(&own_write), "{staged:?}");
+    let denied: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    assert_eq!(
+        denied["permissionGrants"]["permissionGrants"]["deny"],
+        serde_json::json!(["write_file(/never/)"])
+    );
+    assert_eq!(denied["permissionGrants"]["v2Migrated"], true);
+    // Staging again is stable.
+    stage_antigravity_grants(&spec).unwrap();
+    assert_eq!(allowed(&project), staged);
+    // A launch with other directories removes the earlier grants.
+    let mount = home.path().join("mount");
+    spec.additional_directories = vec![mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let replaced = allowed(&project);
+    assert!(replaced.contains(&rule(&mount)), "{replaced:?}");
+    assert!(replaced.contains(&own_write), "{replaced:?}");
+    for directory in [&clone, &cache] {
+        assert!(!replaced.contains(&rule(directory)), "{replaced:?}");
+    }
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&std::fs::read(&staged_record).unwrap()).unwrap(),
+        vec![rule(&mount)]
+    );
+    // A directory the person already granted themselves stays theirs: it is
+    // never recorded, so a later launch without it keeps the rule.
+    let granted = home.path().join("granted");
+    let mut own: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    own["permissionGrants"]["permissionGrants"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push(rule(&granted).into());
+    std::fs::write(&project, serde_json::to_vec(&own).unwrap()).unwrap();
+    spec.additional_directories = vec![granted.clone(), mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let both = allowed(&project);
+    assert_eq!(
+        both.iter().filter(|r| **r == rule(&granted)).count(),
+        1,
+        "{both:?}"
+    );
+    assert!(both.contains(&rule(&mount)), "{both:?}");
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&std::fs::read(&staged_record).unwrap()).unwrap(),
+        vec![rule(&mount)]
+    );
+    spec.additional_directories = vec![mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    assert!(allowed(&project).contains(&rule(&granted)));
+    // A launch with none leaves only the person's own write rules.
+    spec.additional_directories.clear();
+    stage_antigravity_grants(&spec).unwrap();
+    let cleared = allowed(&project);
+    assert!(cleared.contains(&own_write), "{cleared:?}");
+    assert!(!cleared.iter().any(|r| r == &rule(&mount)), "{cleared:?}");
+    // A rule recorded by a launch that crashed before it reached the project
+    // file is still removed once it did.
+    std::fs::write(&staged_record, serde_json::to_vec(&[rule(&clone)]).unwrap()).unwrap();
+    let mut crashed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    crashed["permissionGrants"]["permissionGrants"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push(rule(&clone).into());
+    std::fs::write(&project, serde_json::to_vec(&crashed).unwrap()).unwrap();
+    stage_antigravity_grants(&spec).unwrap();
+    assert!(!allowed(&project).contains(&rule(&clone)));
+    // A relative directory or the filesystem root fails visibly and changes
+    // nothing, instead of granting writes below the wrong directory.
+    let before = std::fs::read_to_string(&project).unwrap();
+    for bad in [
+        PathBuf::from("relative/directory"),
+        home.path().ancestors().last().unwrap().to_path_buf(),
+    ] {
+        spec.additional_directories = vec![mount.clone(), bad.clone()];
+        let error = stage_antigravity_grants(&spec).unwrap_err().to_string();
+        assert!(error.contains("additional directory"), "{bad:?}: {error}");
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), before);
+    }
 }
 
 #[test]
@@ -863,7 +1018,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         ("mcp  mj-review  set baseline", offers_review),
                         ("mcp  mj-review_  request review", false),
                         ("mcp  mj-agents  handback", offers("handback")),
-                        ("mcp  mj-memory  trace file src/lib.rs", true),
+                        ("mcp  mj-memory  read session abc123", true),
                         // A configured reviewer server is not Mjolnir's,
                         // whatever its name.
                         ("mcp  mj-tools  run", false),
@@ -896,7 +1051,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         None
                     );
                     assert_eq!(
-                        dsh_answer(&approvals, "mcp  mj-memory  search sessions").is_some(),
+                        dsh_answer(&approvals, "mcp  mj-memory  search history").is_some(),
                         guardian
                     );
                 }
@@ -1324,6 +1479,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1417,6 +1573,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1533,6 +1690,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1681,6 +1839,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -2183,6 +2342,7 @@ async fn answer_to_ext_request(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2390,6 +2550,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2794,6 +2955,7 @@ async fn policy_is_enforced_before_session_is_reported(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3082,6 +3244,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: plan.then(|| crate::acp::ContextReset {
             request_id: "restore".into(),
@@ -3156,6 +3319,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3440,6 +3604,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3863,6 +4028,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4468,6 +4634,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4804,6 +4971,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4948,6 +5116,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -5046,6 +5215,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -5420,6 +5590,7 @@ mod terminals {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -6016,6 +6187,7 @@ for line in sys.stdin:
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -6059,7 +6231,7 @@ for line in sys.stdin:
             .expect("the runtime must survive the first bridge's death");
         match event {
             RuntimeEvent::NativeAgent { event } => replay.push(event),
-            RuntimeEvent::HarnessRestarting { message } => restart_messages.push(message),
+            RuntimeEvent::HarnessRestarting { message, .. } => restart_messages.push(message),
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
@@ -6231,6 +6403,7 @@ for line in sys.stdin:
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
         instruction_role: None,
+        claude_mcp_socket: None,
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
@@ -6402,6 +6575,7 @@ while True:
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6459,7 +6633,7 @@ while True:
                     break;
                 }
             }
-            RuntimeEvent::HarnessRestarting { message } => {
+            RuntimeEvent::HarnessRestarting { message, .. } => {
                 assert!(
                     message.contains("reloading the native session"),
                     "{message}"
@@ -6557,6 +6731,7 @@ while True:
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6593,7 +6768,7 @@ while True:
                     .expect("the ACP runtime keeps reporting")
                     .expect("the event channel stays open");
                 match event {
-                    RuntimeEvent::HarnessRestarting { message } => {
+                    RuntimeEvent::HarnessRestarting { message, .. } => {
                         panic!("an acknowledged cancel must not restart the bridge: {message}")
                     }
                     RuntimeEvent::PromptFinished { request_id, .. } => {
@@ -6668,6 +6843,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6754,6 +6930,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -7004,6 +7181,7 @@ pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -7095,6 +7273,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -7254,6 +7433,7 @@ fn missing_native_session_spec(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -7665,6 +7845,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -8151,6 +8332,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -8600,6 +8782,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -9666,6 +9849,9 @@ for line in sys.stdin:
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
+            subagent_mcp_socket: None,
+            claude_mcp_socket: None,
+            managed_subagent: false,
             environment: bad_launch.environment.clone(),
             launch_config: Box::new(bad_launch),
             command: None,
@@ -9673,6 +9859,7 @@ for line in sys.stdin:
             additional_directories: Vec::new(),
             supervisor_spec: None,
             leases: None,
+            on_restart: None,
             resolved,
         })
         .await
@@ -9681,7 +9868,9 @@ for line in sys.stdin:
     let outcome = resolution
         .await
         .expect("reload reply channel should carry the startup failure");
-    let err = outcome.expect_err("replacement bridge startup failure must not ack Ok");
+    let ReloadResolution::RefusedBeforeCommit(err) = outcome else {
+        panic!("replacement bridge startup failure must not ack Started")
+    };
     assert!(
         err.contains("does not exist") || err.contains("nonexistent-reload-cwd"),
         "unexpected error: {err}"
@@ -9693,24 +9882,39 @@ for line in sys.stdin:
 #[cfg(unix)]
 #[tokio::test]
 async fn reload_launch_config_spawns_updated_command_args_and_writes_supervisor_spec() {
+    exercise_planned_reload_continuity(None, false).await;
+    exercise_planned_reload_continuity(Some("ses-initial"), false).await;
+}
+
+#[cfg(unix)]
+async fn exercise_planned_reload_continuity(resume: Option<&str>, fail_retirement: bool) {
     let _ = mj_harness_install::login_environment::initialize_from_parent();
     let temp = tempfile::tempdir().unwrap();
+    if fail_retirement {
+        std::fs::write(temp.path().join("fail-retirement"), "").unwrap();
+    }
     let bridge_script = |session_id: &str| {
         format!(
             r#"
 import json, sys
+from pathlib import Path
 for line in sys.stdin:
     req = json.loads(line)
     if "method" not in req or "id" not in req:
         continue
     m = req["method"]
+    with Path("{session_id}-methods").open("a") as methods:
+        methods.write(m + "\n")
     if m == "initialize":
-        res = {{"protocolVersion": 1}}
-    elif m == "session/new":
-        res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}]}}}}
+        res = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
+    elif m in ("session/new", "session/load"):
+        res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}, {{"id": "agent-full-access", "name": "Full access"}}]}}}}
     else:
         res = {{}}
     print(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}), flush=True)
+if "{session_id}" == "ses-initial":
+    Path("auth.json").write_text(json.dumps({{"last_refresh":"2026-11-25T00:00:00Z","tokens":{{"refresh_token":"retired-grant"}}}}))
+    if Path("fail-retirement").exists(): sys.exit(1)
 "#
         )
     };
@@ -9720,6 +9924,8 @@ for line in sys.stdin:
     });
     spec.cwd = temp.path().to_path_buf();
     spec.harness = HarnessKind::Codex;
+    spec.resume_session = Some("ses-initial".into());
+    spec.native_session_history = NativeSessionHistory::MayHaveHistory;
     spec.command = "python3".into();
     spec.args = vec!["-u".into(), "-c".into(), bridge_script("ses-initial")];
 
@@ -9739,15 +9945,60 @@ for line in sys.stdin:
     let mut next_launch =
         crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
     next_launch.cwd = temp.path().to_path_buf();
-    next_launch.harness = HarnessKind::Claude;
+    next_launch.harness = HarnessKind::Codex;
+    next_launch.native_session_id = resume.map(str::to_owned);
     let next_command = PathBuf::from("python3");
-    let next_args = vec!["-u".into(), "-c".into(), bridge_script("ses-reloaded")];
+    let next_args = vec![
+        "-u".into(),
+        "-c".into(),
+        format!(
+            "from pathlib import Path\nPath('replacement-spawned').touch()\n{}",
+            bridge_script("ses-reloaded")
+        ),
+    ];
+    let spawned = temp.path().join("replacement-spawned");
     let mut next_supervisor = crate::worker_runtime::AcpSupervisorSpec::from(&next_launch);
     next_supervisor.command = next_command.clone();
     next_supervisor.args = next_args.clone();
+    // Candidate preparation precedes the source's final refresh on stdin EOF.
+    let candidate = temp.path().join("reload-candidates/continuity");
+    std::fs::create_dir_all(candidate.join("profile")).unwrap();
+    let stale =
+        br#"{"last_refresh":"2026-11-24T00:00:00Z","tokens":{"refresh_token":"stale-grant"}}"#;
+    std::fs::write(temp.path().join("auth.json"), stale).unwrap();
+    std::fs::write(candidate.join("profile/auth.json"), stale).unwrap();
+    next_launch.write(&temp.path().join("launch.json")).unwrap();
+    next_launch.write(&candidate.join("launch.json")).unwrap();
+    let ownership = serde_json::json!({"version":3,"session_id":"session","profile_id":"source",
+        "bundle_id":"bundle","target_template_id":"target"});
+    for path in [
+        temp.path().join("ownership.json"),
+        candidate.join("ownership.json"),
+    ] {
+        std::fs::write(path, serde_json::to_vec(&ownership).unwrap()).unwrap();
+    }
+    let manifest = mj_core::worker_launch::ReloadCandidateManifest {
+        operation_id: "continuity".into(),
+        expected_store_id: "store".into(),
+        candidate_id: "continuity".into(),
+        harness: HarnessKind::Codex,
+        target_profile_home: temp.path().to_string_lossy().into_owned(),
+        clear_paths: vec!["auth.json".into()],
+        protected_paths: Vec::new(),
+        shared_login: None,
+        clear_github_token: false,
+    };
+    std::fs::write(
+        candidate.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
+            subagent_mcp_socket: None,
+            claude_mcp_socket: None,
+            managed_subagent: false,
             environment: next_launch.environment.clone(),
             command: Some(next_command),
             args: Some(next_args),
@@ -9755,34 +10006,260 @@ for line in sys.stdin:
             additional_directories: Vec::new(),
             supervisor_spec: Some(Box::new((supervisor_path.clone(), next_supervisor))),
             leases: None,
+            on_restart: Some(Box::new(HarnessReloadTransition {
+                commit: None,
+                harness: HarnessKind::Codex,
+                claude_login_path: None,
+                boundary_mailbox_hook_available: false,
+                mailbox_delivery_mode: None,
+                credentials: Err("fixture has no credentials".into()),
+                shared_credentials: crate::worker_runtime::SharedCredentials::new(Err(
+                    "fixture has no credentials".into(),
+                )),
+            })),
             resolved,
         })
         .await
         .unwrap();
 
-    resolution
+    if fail_retirement {
+        assert!(
+            matches!(resolution.await.unwrap(), ReloadResolution::RefusedBeforeCommit(message) if message.contains("retirement"))
+        );
+        assert!(runtime.await.unwrap().is_err());
+        assert!(candidate.exists());
+        assert!(
+            !temp
+                .path()
+                .join(mj_core::worker_launch::PENDING_RELOAD_FILE)
+                .exists()
+        );
+        assert!(!temp.path().join("retired-logins").exists());
+        assert!(
+            std::fs::read_to_string(temp.path().join("auth.json"))
+                .unwrap()
+                .contains("retired-grant")
+        );
+        while let Ok(event) = event_rx.try_recv() {
+            assert!(!matches!(event, RuntimeEvent::HarnessRestarting { .. }));
+        }
+        return;
+    }
+    let applied = loop {
+        match tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RuntimeEvent::HarnessRestarting {
+                reload: Some(reload),
+                ..
+            } => break reload.take().unwrap().1,
+            RuntimeEvent::SessionStarted { .. } => {
+                panic!("replacement opened before the restart barrier")
+            }
+            _ => {}
+        }
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), event_rx.recv())
+            .await
+            .is_err(),
+        "replacement must not emit bridge events while the restart barrier is held"
+    );
+    assert!(
+        !spawned.exists(),
+        "replacement process started before the barrier"
+    );
+    let pending = mj_core::worker_launch::PendingInPlaceReload {
+        operation_id: "continuity".into(),
+        expected_store_id: "store".into(),
+        candidate_id: "continuity".into(),
+        git_setup_name: None,
+    };
+    crate::worker_runtime::reload_commit::commit_pending_reload(temp.path(), &pending).unwrap();
+    crate::worker_runtime::reload_commit::apply_committed_reload(temp.path(), &pending).unwrap();
+    let retired = crate::worker_runtime::reload_commit::read_retired_logins(temp.path()).unwrap();
+    assert_eq!(retired.len(), 1);
+    assert!(String::from_utf8_lossy(&retired[0].bytes).contains("retired-grant"));
+    assert_eq!(
+        std::fs::read(temp.path().join("auth.json")).unwrap(),
+        retired[0].bytes
+    );
+    applied.send(Ok(None)).unwrap();
+
+    let resolution = resolution
         .await
-        .expect("reload reply channel should resolve")
-        .expect("replacement bridge should open cleanly");
+        .expect("reload reply channel should resolve");
+    assert!(
+        matches!(resolution, ReloadResolution::Started),
+        "{resolution:?}"
+    );
 
     let written_spec = std::fs::read_to_string(&supervisor_path).unwrap();
     assert!(
         written_spec.contains("ses-reloaded"),
         "expected updated supervisor spec on disk, got: {written_spec}"
     );
-    let mut saw_reloaded = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if format!("{event:?}").contains("ses-reloaded") {
-            saw_reloaded = true;
+    loop {
+        let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let RuntimeEvent::SessionStarted {
+            native_session_id, ..
+        } = event
+        {
+            assert_eq!(native_session_id, resume.unwrap_or("ses-reloaded"));
             break;
         }
     }
-    assert!(
-        saw_reloaded,
-        "replacement bridge should have opened with the new command/args (ses-reloaded)"
+    assert!(spawned.exists());
+    let methods = std::fs::read_to_string(temp.path().join("ses-reloaded-methods")).unwrap();
+    assert_eq!(
+        methods.lines().any(|method| method == "session/new"),
+        resume.is_none()
+    );
+    assert_eq!(
+        methods.lines().any(|method| method == "session/load"),
+        resume.is_some()
     );
     shutdown.cancel();
     let _ = runtime.await;
+}
+
+#[cfg(unix)]
+// Hard-won: d796c7d91: harness reload retained profile registration and omitted ACP tools.
+#[tokio::test]
+async fn reload_launch_config_refreshes_subagent_mcp_registration() {
+    let _ = mj_harness_install::login_environment::initialize_from_parent();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("agy");
+    let project = home.join("config/projects/default-cli-project.json");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::write(
+        &project,
+        r#"{"permissionGrants":{"permissionGrants":{"allow":[]}}}"#,
+    )
+    .unwrap();
+    let script = r#"
+import json, sys
+from pathlib import Path
+for line in sys.stdin:
+    req = json.loads(line)
+    if "id" not in req or "method" not in req:
+        continue
+    if req["method"] == "initialize":
+        res = {"protocolVersion": 1}
+    elif req["method"] == "session/new":
+        Path("mcp.json").write_text(json.dumps(req["params"]["mcpServers"]))
+        res = {"sessionId": "reload-tools", "modes": {"currentModeId": "agent", "availableModes": [{"id": "auto", "name": "Auto"}, {"id": "agent", "name": "Agent"}, {"id": "default", "name": "Default"}, {"id": "bypassPermissions", "name": "Bypass"}]}}
+    else:
+        res = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": res}), flush=True)
+"#;
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.cwd = temp.path().into();
+    spec.command = "python3".into();
+    spec.args = vec!["-u".into(), "-c".into(), script.into()];
+    spec.harness = HarnessKind::Claude;
+    let mut socket = worker_socket(SubagentMcpRole::Parent);
+    socket.review_tools = true;
+    socket.profile_registration = true;
+    spec.subagent_mcp_socket = Some(socket.clone());
+    let (commands, receiver) = mpsc::channel(8);
+    let (events, mut event_rx) = mpsc::channel(32);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let runtime =
+        mj_core::runtime::spawn(run_with_shutdown(spec, receiver, events, shutdown.clone()));
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Antigravity,
+        HarnessKind::Codex,
+    ] {
+        if harness != HarnessKind::Claude {
+            let mut config =
+                crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
+            config.cwd = temp.path().to_path_buf();
+            config.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            config.harness = harness;
+            config
+                .environment
+                .insert("MJ_ANTIGRAVITY_HOME".into(), home.to_str().unwrap().into());
+            socket.profile_registration = harness == HarnessKind::Codex;
+            let (resolved, resolution) = oneshot::channel();
+            commands
+                .send(CommandRequest::ReloadLaunchConfig {
+                    launch_config: Box::new(config),
+                    subagent_mcp_socket: Some(socket.clone()),
+                    claude_mcp_socket: None,
+                    managed_subagent: false,
+                    environment: BTreeMap::from([(
+                        "MJ_ANTIGRAVITY_HOME".into(),
+                        home.to_str().unwrap().into(),
+                    )]),
+                    command: None,
+                    args: None,
+                    additional_directories: vec![],
+                    supervisor_spec: None,
+                    leases: None,
+                    on_restart: None,
+                    resolved,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                tokio::time::timeout(crate::test_support::IO_TIMEOUT, resolution)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                ReloadResolution::Started
+            ));
+        }
+        loop {
+            let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
+                break;
+            }
+        }
+        let servers: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(temp.path().join("mcp.json")).unwrap())
+                .unwrap();
+        for name in ["mj-agents", "mj-review"] {
+            let server = servers
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == name);
+            assert_eq!(
+                server.is_some(),
+                harness == HarnessKind::Antigravity,
+                "{servers}"
+            );
+            if harness == HarnessKind::Antigravity {
+                let grants = std::fs::read_to_string(&project).unwrap();
+                assert!(grants.contains(&format!("mcp({name}/*)")), "{grants}");
+                if name == "mj-agents" {
+                    let args = server.unwrap()["args"].as_array().unwrap();
+                    for pair in [["--harness", "antigravity"], ["--role", "parent"]] {
+                        assert!(
+                            args.windows(2)
+                                .any(|args| args[0] == pair[0] && args[1] == pair[1]),
+                            "{args:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    shutdown.cancel();
+    runtime.await.unwrap().unwrap();
 }
 
 #[cfg(unix)]
@@ -9825,4 +10302,137 @@ fn reload_launch_config_clears_stale_accepted_config_selectors() {
     spec.initial_model = cross_harness.initial_model.clone();
     assert_eq!(spec.startup_model().as_deref(), Some("claude-sonnet"));
     assert!(spec.accepted_config.lock().unwrap().effort.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_launch_config_failed_retirement_refuses_before_destructive_commit() {
+    exercise_planned_reload_continuity(None, true).await;
+}
+
+#[test]
+fn claude_mcp_acp_registration_and_owned_mcp_contract() {
+    use agent_client_protocol::v1::schema::{PermissionOption, ToolKind};
+    use mj_core::claude_mcp::{CLAUDE_MCP_SERVER, ClaudeMcpCapabilities};
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Antigravity,
+        HarnessKind::Dsh,
+        HarnessKind::OpenCode,
+        HarnessKind::Grok,
+        HarnessKind::Kimi,
+        HarnessKind::Muse,
+    ] {
+        spec.harness = harness;
+        spec.claude_mcp_socket = Some(ClaudeMcpSocket {
+            path: "/worker/claude-mcp.sock".into(),
+            profile_registration: false,
+        });
+        let servers = extra_mcp(&spec);
+        let server = servers.iter().find_map(|s| match s {
+            McpServer::Stdio(s) if s.name == CLAUDE_MCP_SERVER => Some(s),
+            _ => None,
+        });
+        let capabilities = ClaudeMcpCapabilities::for_harness(harness);
+        assert_eq!(server.is_none(), capabilities.is_empty());
+        let owned = owned_acp_mcp_tools(&spec);
+        if let Some(server) = server {
+            assert_eq!(
+                server.args,
+                ClaudeMcpCapabilities::server_args(
+                    std::path::Path::new("/worker/claude-mcp.sock"),
+                    harness
+                )
+            );
+            assert_eq!(
+                owned
+                    .iter()
+                    .find(|(n, _)| n == CLAUDE_MCP_SERVER)
+                    .unwrap()
+                    .1,
+                capabilities.tool_names()
+            );
+            if harness == HarnessKind::Codex {
+                assert_eq!(
+                    serde_json::to_value(server).unwrap()["_meta"]["codex"]["defaultToolsApprovalMode"],
+                    "approve"
+                );
+            }
+        }
+        if harness == HarnessKind::Antigravity {
+            let home = tempfile::tempdir().unwrap();
+            spec.environment.insert(
+                if cfg!(windows) { "USERPROFILE" } else { "HOME" }.into(),
+                home.path().to_string_lossy().into_owned(),
+            );
+            spec.environment.insert(
+                harness.home_env().into(),
+                home.path().to_string_lossy().into_owned(),
+            );
+            stage_antigravity_grants(&spec).unwrap();
+            let project = home.path().join("config/projects/default-cli-project.json");
+            assert!(
+                std::fs::read_to_string(&project)
+                    .unwrap()
+                    .contains("mcp(mj-claude/*)")
+            );
+            spec.claude_mcp_socket
+                .as_mut()
+                .unwrap()
+                .profile_registration = true;
+            stage_antigravity_grants(&spec).unwrap();
+            assert!(
+                !std::fs::read_to_string(&project)
+                    .unwrap()
+                    .contains("mcp(mj-claude/*)")
+            );
+            spec.claude_mcp_socket
+                .as_mut()
+                .unwrap()
+                .profile_registration = false;
+        }
+        if harness == HarnessKind::Dsh {
+            let approvals = OwnedMcpApprovals::for_launch(&spec);
+            for (title, allowed) in capabilities
+                .tool_names()
+                .iter()
+                .map(|t| (format!("mcp  mj-claude  {}", t.replace('_', " ")), true))
+                .chain([
+                    (String::from("mcp  mj-claude  web fetch"), false),
+                    (String::from("mcp  foreign  monitor"), false),
+                ])
+            {
+                let request = RequestPermissionRequest::new(
+                    "native",
+                    ToolCallUpdate::new(
+                        "call",
+                        ToolCallUpdateFields::new()
+                            .title(title.clone())
+                            .kind(ToolKind::Other),
+                    ),
+                    vec![PermissionOption::new(
+                        "once",
+                        "Allow once",
+                        PermissionOptionKind::AllowOnce,
+                    )],
+                );
+                assert_eq!(approvals.response(&request).is_some(), allowed, "{title}");
+            }
+        }
+        spec.claude_mcp_socket
+            .as_mut()
+            .unwrap()
+            .profile_registration = true;
+        assert!(
+            !extra_mcp(&spec)
+                .iter()
+                .any(|s| matches!(s, McpServer::Stdio(s) if s.name == CLAUDE_MCP_SERVER))
+        );
+    }
 }

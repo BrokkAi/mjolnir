@@ -316,48 +316,6 @@ impl RuntimeState {
         self.session_manager.session(session_id.to_owned()).await
     }
 
-    /// Capture an archive for the API bundle export.
-    ///
-    /// The API's bundle export needs a fresh archive for a running session. Only
-    /// that session's own lifecycle operation can conflict with its checkpoint,
-    /// so this refuses when the session itself is mid-operation and returns a
-    /// [`SessionLifecycleBusy`] the export path can fall back on. It must not
-    /// take the process-wide lifecycle guard: that rejected every export while
-    /// any unrelated session anywhere was mid-lifecycle (#1010).
-    pub(crate) async fn checkpoint_for_bundle_export(
-        &self,
-        session_id: &str,
-    ) -> Result<mj_core::state::CheckpointMetadata> {
-        let _upgrade_work = mj_controller::upgrade::activity("bundle export checkpoint")?;
-        if let Some(busy) = self.session_lifecycle_busy(session_id) {
-            return Err(anyhow::Error::new(busy));
-        }
-        let session_admission = mj_controller::recovery_gate::SessionAdmission::Foreground(
-            self.session_gate
-                .enter_foreground(
-                    session_id,
-                    "checkpoint",
-                    mj_controller::recovery_gate::LifecycleOrigin::Person,
-                    &AtomicBool::new(false),
-                    &ProcessExecutor,
-                )
-                .await?,
-        );
-        let session_id = session_id.to_owned();
-        // Checkpoint capture and cleanup run synchronous filesystem, database
-        // and SSH operations between relay awaits. Keep the whole future,
-        // including its destructors, off the daemon's event loop.
-        let checkpoint = blocking(move || {
-            let mut controller = Controller::load()?;
-            mj_core::runtime::block_on(
-                controller.checkpoint_for_bundle_export(&session_admission, &session_id),
-            )?
-        })
-        .await?;
-        refresh_runtime_controller(self).await;
-        Ok(checkpoint)
-    }
-
     /// The lifecycle operation this specific session is running, if any, named
     /// along with its age. A checkpoint conflicts only with its own session's
     /// operations, never with another session's (#1010).

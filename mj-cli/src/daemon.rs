@@ -360,8 +360,16 @@ async fn connect_or_start_local() -> Result<DaemonClient> {
 /// [`connect_or_start`] again. The guard is taken by reference only so the
 /// requirement is visible at every call site.
 async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonClient> {
-    maybe_replace_stale_development_daemon(startup).await?;
-    let mut prior_unpublished = match prepare_existing_daemon(startup).await? {
+    let mut prepared = PreparedDaemonLaunch::default();
+    connect_or_start_prepared(startup, &mut prepared).await
+}
+
+async fn connect_or_start_prepared(
+    startup: &DaemonStartGuard,
+    prepared: &mut PreparedDaemonLaunch,
+) -> Result<DaemonClient> {
+    maybe_replace_stale_development_daemon(startup, prepared).await?;
+    let mut prior_unpublished = match prepare_existing_daemon(startup, prepared).await? {
         PreparedDaemon::Ready(client) => return Ok(client),
         PreparedDaemon::Launch { prior_unpublished } => prior_unpublished,
     };
@@ -393,7 +401,7 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
                 break;
             }
             // A daemon started outside this client's startup lock may be becoming ready.
-            match prepare_existing_daemon(startup).await? {
+            match prepare_existing_daemon(startup, prepared).await? {
                 PreparedDaemon::Ready(client) => return Ok(client),
                 PreparedDaemon::Launch {
                     prior_unpublished: prior,
@@ -409,7 +417,7 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
     }
 
     let log_path = data_dir().join("daemon.log");
-    let launched = launch_daemon(&log_path, prior_unpublished.as_ref()).await?;
+    let launched = launch_daemon(&log_path, prior_unpublished.as_ref(), prepared).await?;
     let launched_at = Instant::now();
     let label = launched.label();
     tracing::info!(daemon = %label, "launched the daemon");
@@ -659,6 +667,39 @@ pub(crate) fn daemon_runs_this_build(identity: &DaemonIdentity) -> Result<Option
     }))
 }
 
+/// Resolve launch prerequisites before releasing a healthy daemon. Retain placement
+/// too: container image probing must not run again after handoff.
+#[derive(Default)]
+struct PreparedDaemonLaunch {
+    placement: Option<(mj_core::config::DaemonConfig, ConfiguredPlacement)>,
+    login_environment: Option<Option<mj_harness_install::login_environment::Environment>>,
+}
+
+impl PreparedDaemonLaunch {
+    async fn resolve(
+        &mut self,
+        discover: impl FnOnce() -> Result<Option<mj_harness_install::login_environment::Environment>>
+        + Send
+        + 'static,
+    ) -> Result<()> {
+        if self.placement.is_none() {
+            let daemon = load_daemon_config().await.unwrap_or_default();
+            let placement = resolve_placement(&daemon).await?;
+            self.placement = Some((daemon, placement));
+        }
+        if matches!(self.placement, Some((_, ConfiguredPlacement::Host { .. })))
+            && self.login_environment.is_none()
+        {
+            self.login_environment = Some(
+                mj_core::runtime::spawn_blocking(discover)
+                    .await
+                    .context("prepare host daemon login environment task failed")??,
+            );
+        }
+        Ok(())
+    }
+}
+
 /// A session is an overlay on the account's login environment. Reconstruct that
 /// base instead of maintaining a second list of target, profile, harness and
 /// shell overrides here. The existing identity also covers older workers.
@@ -707,12 +748,17 @@ fn configure_host_daemon_environment(
 async fn launch_daemon(
     log_path: &Path,
     prior_unpublished: Option<&ContainerDaemonRecord>,
+    prepared: &mut PreparedDaemonLaunch,
 ) -> Result<LaunchedDaemon> {
     retire_legacy_node();
     // An unreadable file is the daemon's to report: it refuses to start and
     // says why, which is the answer this launch then shows.
-    let daemon = load_daemon_config().await.unwrap_or_default();
-    match resolve_placement(&daemon).await? {
+    prepared.resolve(host_daemon_login_environment).await?;
+    let (daemon, placement) = prepared
+        .placement
+        .take()
+        .expect("launch placement prepared");
+    match placement {
         ConfiguredPlacement::Host { reason: None } => {}
         ConfiguredPlacement::Host {
             reason: Some(reason),
@@ -738,6 +784,11 @@ async fn launch_daemon(
     if let Some(prior) = prior_unpublished {
         clear_container_owner(prior)?;
     }
+    let login_environment = prepared
+        .login_environment
+        .as_ref()
+        .expect("host environment prepared")
+        .clone();
     mj_core::runtime::spawn_blocking({
         let log_path = log_path.to_path_buf();
         move || -> Result<LaunchedDaemon> {
@@ -745,7 +796,7 @@ async fn launch_daemon(
             let log_offset = fs::metadata(&log_path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            let mut command = host_daemon_command()?;
+            let mut command = host_daemon_command(login_environment)?;
             command
                 // This switch makes the invoking development client authoritative. It
                 // has no meaning inside the persistent daemon or its child processes.
@@ -768,7 +819,9 @@ async fn launch_daemon(
     .context("spawn daemon task failed")?
 }
 
-fn host_daemon_command() -> Result<std::process::Command> {
+fn host_daemon_command(
+    login_environment: Option<mj_harness_install::login_environment::Environment>,
+) -> Result<std::process::Command> {
     use std::process::Command;
 
     let executable = daemon_launch_executable()?;
@@ -781,7 +834,6 @@ fn host_daemon_command() -> Result<std::process::Command> {
     #[cfg(unix)]
     std::os::unix::process::CommandExt::arg0(&mut command, "mj");
 
-    let login_environment = host_daemon_login_environment()?;
     #[cfg(target_os = "linux")]
     let scope = daemon_scope_launcher(login_environment.as_ref());
     configure_host_daemon_environment(&mut command, login_environment)?;
@@ -1284,7 +1336,10 @@ enum PreparedDaemon {
 /// running yet. A recorded daemon that does not answer is waited for until it
 /// answers or provably exits; starting another beside it could leave two
 /// daemons serving one instance.
-async fn prepare_existing_daemon(startup: &DaemonStartGuard) -> Result<PreparedDaemon> {
+async fn prepare_existing_daemon(
+    startup: &DaemonStartGuard,
+    prepared: &mut PreparedDaemonLaunch,
+) -> Result<PreparedDaemon> {
     let asked = Instant::now();
     let mut notice_at = asked + START_NOTICE_DELAY;
     loop {
@@ -1321,7 +1376,7 @@ async fn prepare_existing_daemon(startup: &DaemonStartGuard) -> Result<PreparedD
                         "the daemon is an older protocol or release, or its store needs a migration; replacing it"
                     ),
                 }
-                replace_daemon(startup, &metadata, &placement).await?;
+                replace_daemon(startup, &metadata, &placement, prepared).await?;
             }
             ExistingDaemon::Unanswered(metadata) => {
                 if Instant::now() >= notice_at {
@@ -1565,7 +1620,9 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
     // while the old one still runs.
     ensure_config_loads(&mj_core::config::config_path(), "restarted")?;
     let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    let mut prepared = PreparedDaemonLaunch::default();
     for attempt in 1..=RESTART_ATTEMPTS {
+        prepared.resolve(host_daemon_login_environment).await?;
         if let Err(error) = read_metadata_any()
             && daemon_not_running(&error).is_some()
             && let Some(record) = read_container_owner()?
@@ -1592,7 +1649,7 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
             // Clearing an untracked container record requires explicit stop --force.
             stop_daemon(&startup, &metadata, StopFallback::Restart).await?;
         }
-        let mut client = connect_or_start_holding(&startup).await?;
+        let mut client = connect_or_start_prepared(&startup, &mut prepared).await?;
         let status = client.status().await?;
         let identity = client.identity().await?;
         let runs_this_build = daemon_runs_this_build(&identity)?;
@@ -1901,7 +1958,10 @@ fn development_workers_changed_since(
     Ok(false)
 }
 
-async fn maybe_replace_stale_development_daemon(_startup: &DaemonStartGuard) -> Result<()> {
+async fn maybe_replace_stale_development_daemon(
+    _startup: &DaemonStartGuard,
+    _prepared: &mut PreparedDaemonLaunch,
+) -> Result<()> {
     if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
         return Ok(());
     }
@@ -1940,7 +2000,7 @@ async fn maybe_replace_stale_development_daemon(_startup: &DaemonStartGuard) -> 
                 "Mjolnir daemon {} is using an older development build; restarting it.",
                 metadata.pid
             ));
-            replace_daemon(_startup, &metadata, &placement).await
+            replace_daemon(_startup, &metadata, &placement, _prepared).await
         })
         .await?;
     Ok(())
@@ -1952,6 +2012,26 @@ async fn replace_daemon(
     startup: &DaemonStartGuard,
     metadata: &DaemonMetadata,
     placement: &DaemonPlacement,
+    prepared: &mut PreparedDaemonLaunch,
+) -> Result<()> {
+    replace_daemon_with_resolver(
+        startup,
+        metadata,
+        placement,
+        prepared,
+        host_daemon_login_environment,
+    )
+    .await
+}
+
+async fn replace_daemon_with_resolver(
+    startup: &DaemonStartGuard,
+    metadata: &DaemonMetadata,
+    placement: &DaemonPlacement,
+    prepared: &mut PreparedDaemonLaunch,
+    discover: impl FnOnce() -> Result<Option<mj_harness_install::login_environment::Environment>>
+    + Send
+    + 'static,
 ) -> Result<()> {
     mj_core::config::ensure_may_control_store(
         &data_dir(),
@@ -1961,6 +2041,7 @@ async fn replace_daemon(
         ),
     )?;
     ensure_config_loads(&mj_core::config::config_path(), "replaced")?;
+    prepared.resolve(discover).await?;
     ensure_container_owner_recorded(startup, metadata, placement).await?;
     // The replacement daemon pins this build's worker sources before it can
     // serve; for a new build that is seconds of copying and hashing. Do it
@@ -3380,7 +3461,12 @@ esac
                 .unwrap();
             let error = tokio::time::timeout(
                 Duration::from_secs(5),
-                replace_daemon(&startup, &metadata, &identity.placement),
+                replace_daemon(
+                    &startup,
+                    &metadata,
+                    &identity.placement,
+                    &mut PreparedDaemonLaunch::default(),
+                ),
             )
             .await
             .unwrap()
@@ -4161,6 +4247,65 @@ esac
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
     }
+    // Hard-won: 2.75.0: failed login discovery stopped a healthy daemon.
+    #[tokio::test]
+    async fn failed_host_login_preparation_never_requests_handoff() {
+        if crate::test_support::rerun_in_isolated_child(
+            "MJ_TEST_HOST_LOGIN_PREFLIGHT_FAILURE",
+            "daemon::tests::failed_host_login_preparation_never_requests_handoff",
+        ) {
+            return;
+        }
+        let (listener, metadata) = fake_daemon(std::process::id()).await;
+        let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+            .await
+            .unwrap();
+        let mut prepared = PreparedDaemonLaunch::default();
+        let error = replace_daemon_with_resolver(
+            &startup,
+            &metadata,
+            &DaemonPlacement::Host,
+            &mut prepared,
+            || anyhow::bail!("simulated login discovery failure"),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("simulated login discovery failure"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    // Hard-won: 2.75.0: discovery ran only after handoff and could fail there.
+    #[tokio::test]
+    async fn host_launch_reuses_prepared_login_environment() {
+        if crate::test_support::rerun_in_isolated_child(
+            "MJ_TEST_HOST_LOGIN_PREFLIGHT_REUSE",
+            "daemon::tests::host_launch_reuses_prepared_login_environment",
+        ) {
+            return;
+        }
+        let mut prepared = PreparedDaemonLaunch::default();
+        prepared
+            .resolve(|| {
+                let mut environment = mj_harness_install::login_environment::Environment::new();
+                environment.insert("MJ_TEST_PREPARED_LOGIN".into(), "restored".into());
+                Ok(Some(environment))
+            })
+            .await
+            .unwrap();
+        prepared
+            .resolve(|| panic!("login environment discovered twice"))
+            .await
+            .unwrap();
+        let command = host_daemon_command(prepared.login_environment.unwrap()).unwrap();
+        assert!(command.get_envs().any(|(key, value)| {
+            key == "MJ_TEST_PREPARED_LOGIN" && value == Some(std::ffi::OsStr::new("restored"))
+        }));
+    }
+
     // Hard-won: #1524: a session-launched daemon inherited staged profile homes.
     #[cfg(unix)]
     #[test]

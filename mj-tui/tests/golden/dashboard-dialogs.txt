@@ -27,7 +27,7 @@
 │Nothing needs you                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-action: Suspend { session_id: "session-1", consent: SuspendConsent { discard_untracked: None, abort_operations: None, without_checkpoint: false, confirm_no_checkpoint: false } }
+action: Suspend { session_id: "session-1", consent: SuspendConsent { discard_untracked: None, abort_operations: None, without_checkpoint: false, confirm_no_checkpoint: false, history_only: false } }
 
 === suspend dialog with untracked files (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -100,6 +100,126 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  pod  │You can resume this session later.                                    │             │
 │  │ No mess  │Raw checkout is kept in place; untracked files do not travel with the │             │
 │  │          │snapshot.                                                             │             │
+│             │                                                                      │  ───────────╯
+│             │c Cancel  ·  a Continue anyway                                        │  ───────────╮
+│             │                                                                      │             │
+│             │                                                                      │  o open.    │
+╰───────────  │                                                                      │  ───────────╯
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │                                                                      │             │
+│OPENAI       │  Cancel     Continue anyway                                          │             │
+│ + 2 refres  ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
+=== suspend dialog with blockers (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                                                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│ Create   O  │Session: session-1                                                    │             │
+│hel ───────  │Cannot suspend until these blockers are resolved:                     │  on.        │
+│› · ACP pre  │1. Hidden tracked edits (7 items)                                     │             │
+│  Idle  pod  │  - linked/file-1.txt                                                 │             │
+│  │ No mess  │  - linked/file-2.txt                                                 │             │
+│  │          │  - linked/file-3.txt                                                 │             │
+│             │  - linked/file-4.txt                                                 │  ───────────╯
+│             │  - linked/file-5.txt                                                 │  ───────────╮
+│             │  and 2 more (v to view all)                                          │             │
+│             │  Fix: Clear index flags in the linked checkout before suspending.    │  o open.    │
+╰───────────  │                                                                      │  ───────────╯
+╭ Targets ▾   │c Cancel  ·  f Fix safe blockers  ·  a Ask session to fix  ·  s       │  ──── ▁   ▄ ╮
+│  Host / fl  │Suspend (history only)…                                               │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │  Cancel                                                              │             │
+│OPENAI       │  Fix safe blockers                                                   │             │
+│ + 2 refres  │  Ask session to fix                                                  │             │
+╰───────────  │  Suspend (history only)…                                             │  ───────────╯
+╭ Notificati  ╰──────────────────────────────────────────────────────────────────────╯  ──── ▁   ▄ ╮
+│Nothing nee                                                                                       │
+╰───────────                                                                            ───────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
+=== suspend blockers expanded (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                                                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│ Create   O  │Session: session-1                                                    │             │
+│hel ───────  │Cannot suspend until these blockers are resolved:                     │  on.        │
+│› · ACP pre  │1. Hidden tracked edits (7 items)                                     │             │
+│  Idle  pod  │  - linked/file-1.txt                                                 │             │
+│  │ No mess  │  - linked/file-2.txt                                                 │             │
+│  │          │  - linked/file-3.txt                                                 │             │
+│             │  - linked/file-4.txt                                                 │  ───────────╯
+│             │  - linked/file-5.txt                                                 │  ───────────╮
+│             │  - linked/file-6.txt                                                 │             │
+│             │  - linked/file-7.txt                                                 │  o open.    │
+╰───────────  │  Fix: Clear index flags in the linked checkout before suspending.    │  ───────────╯
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │c Cancel  ·  f Fix safe blockers  ·  a Ask session to fix  ·  s       │             │
+╰───────────  │Suspend (history only)…                                               │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │  Cancel                                                              │             │
+│OPENAI       │  Fix safe blockers                                                   │             │
+│ + 2 refres  │  Ask session to fix                                                  │             │
+╰───────────  │  Suspend (history only)…                                             │  ───────────╯
+╭ Notificati  ╰──────────────────────────────────────────────────────────────────────╯  ──── ▁   ▄ ╮
+│Nothing nee                                                                                       │
+╰───────────                                                                            ───────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
+=== history-only external worktree warning (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│hel ───────  │Session: session-1                                                    │  on.        │
+│› · ACP pre  │Discard workspace Git changes and save session history only?          │             │
+│  Idle  pod  │Resuming will start from a fresh checkout with your conversation      │             │
+│  │ No mess  │history intact.                                                       │             │
+│  │          │Removing the clone removes its shared .git directory, invalidating    │             │
+│             │linked worktrees outside the clone (including locked ones) and        │  ───────────╯
+│             │discarding their unpushed commits and staged changes.                 │  ───────────╮
+│             │                                                                      │             │
+│             │b Back  ·  s Suspend with history only                                │  o open.    │
+╰───────────  │                                                                      │  ───────────╯
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │                                                                      │             │
+│OPENAI       │  Back     Suspend with history only                                  │             │
+│ + 2 refres  ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
+=== suspend dialog with backend-only warnings (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│hel ───────  │Session: session-1                                                    │  on.        │
+│› · ACP pre  │Save a recovery copy and release the environment.                     │             │
+│  Idle  pod  │You can resume this session later.                                    │             │
+│  │ No mess  │The current turn will be interrupted.                                 │             │
+│  │          │Sub-agent "native-child" has not handed back; suspending stops it.    │             │
 │             │                                                                      │  ───────────╯
 │             │c Cancel  ·  a Continue anyway                                        │  ───────────╮
 │             │                                                                      │             │
@@ -695,6 +815,176 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──                                                                                                                  ──╯
 Ent
 
+=== Usage known provider totals with partial coverage (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile All ▾                                                                                               │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total $11.200+ · last 24 clock hours · estimated API USD                                                    │    │
+│    │Anthropic $8.200+ · ~6.7% (partial) · OpenAI $3.000 · ~20.0%                                                │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
+│    │$50                                                                             ░░░                         │    │
+│    │                                                                                ░░░ ▄▄▄                     │    │
+│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
+│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
+│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
+│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
+│    │                                                                                                            │    │
+│    │Primary agents  $7.200+                                                                                     │    │
+│    │  claude-opus-5-5  $6.200+                                                                                  │  ──╯
+│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╮
+│    │                                                                                                            │    │
+│    │Orchestrators  $2.000+                                                                                      │    │
+│    │  gpt-6.1-sol  $2.000+                                                                                      │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Subtle subagents  $1.500+                                                                                   │    │
+│    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Straightforward subagents  $1.000+                                                                          │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
+│    │                                                                                                            │    │
+│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │  Refresh     Close                                                                                         │  ▄ ╮
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent
+
+=== Usage unknown plan weight (70x22) ===
+
+
+   ╭ × Usage by session ──────────────────────────────────────────╮
+   │Profile All ▾                                                 │
+   │                                                              │
+   │☐ Include suspended sessions                                  │
+   │                                                              │
+   │Total ? · last 24 clock hours · estimated API USD             │
+   │Anthropic $8.200+ · ~5.0% unweighted · OpenAI ? · ~20.0%      │
+   │Weekly quota consumed in window · all account use             │
+   │$50                 ▂                     ░ ▃                 │
+   │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
+   │    16  18  20  22  00  02  04  06  08  10  12  14            │
+   │                                                              │
+   │Primary agents  $7.200+                                       │
+   │  claude-opus-5-5  $6.200+                                    │
+   │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │
+   │Sub-agents included · profile filters turns · + partial · base│
+   │  Refresh     Close                                           │
+   ╰──────────────────────────────────────────────────────────────╯
+
+
+
+=== Usage missing idle account reading (70x17) ===
+
+
+   ╭ × Usage by session ──────────────────────────────────────────╮
+   │Profile All ▾                                                 │
+   │☐ Include suspended sessions                                  │
+   │Total ? · last 24 clock hours · estimated API USD             │
+   │Anthropic $8.200+ · quota n/a · OpenAI ? · ~20.0%             │
+   │Weekly quota consumed in window · all account use             │
+   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
+   │    16  18  20  22  00  02  04  06  08  10  12  14            │
+   │Primary agents  $7.200+                                       │
+   │  claude-opus-5-5  $6.200+                                    │
+   │Sub-agents included · profile filters turns · + partial · base│
+   │  Refresh     Close                                           │
+   ╰──────────────────────────────────────────────────────────────╯
+
+
+
+=== Usage many providers preserves details and chart footer (70x30) ===
+╭                                                                    ╮
+│                                                                    │
+╰  ╭ × Usage by session ──────────────────────────────────────────╮  ╯
+╭  │Profile All ▾                                                 │  ╮
+│  │                                                              │  │
+│  │☐ Include suspended sessions                                  │  │
+│  │                                                              │  │
+│  │Total ? · last 24 clock hours · estimated API USD             │  │
+╰  │Anthropic $8.200+ · ~6.7%                                     │  ╯
+╭  │retired-account-with-long-profile-name-00… $0.500 · quota n/a │  ╮
+│  │retired-account-with-long-profile-name-01… $0.500 · quota n/a │  │
+│  │retired-account-with-long-profile-name-02… $0.500 · quota n/a │  │
+╰  │retired-account-with-long-profile-name-03… $0.500 · quota n/a │  ╯
+╭  │retired-account-with-long-profile-name-04… $0.500 · quota n/a │  ╮
+│  │… 8 more provider rows (enlarge terminal)                     │  │
+│  │Weekly quota consumed in window · all account use             │  │
+╰  │$50                                       ░                   │  ╯
+╭  │                                          ░ ▄                 │  ╮
+│  │$25                 █ ▂                 ▅ ░ █                 │  │
+╰  │                  ▂ █ █ ▆             ▃ █ ░ █ █ ▁             │  ╯
+╭  │ $0     ▂ ▆ ▄     █ █ █ █ ▇ ▃ ░     ▅ █ █ ░ █ █ █ ▆           │  ╮
+│  │    16  18  20  22  00  02  04  06  08  10  12  14            │  │
+│  │                                                              │  │
+│  │Primary agents  $7.200+                                       │  │
+│  │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │  │
+╰  │Sub-agents included · profile filters turns · + partial · base│  ╯
+╭  │  Refresh     Close                                           │  ╮
+│  ╰──────────────────────────────────────────────────────────────╯  │
+╰                                                                    ╯
+E
+
+=== Usage unresolved and retained provider labels (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile All ▾                                                                                               │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
+│    │Anthropic $8.200+ · ~6.7% · retired-account (unconfigured) $0.500 · quota n/a · Codex (resolving) ? · ~20.0%│    │
+│    │Unattributed profile ? · quota n/a                                                                          │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
+│    │$50                                                                             ░░░                         │    │
+│    │                                                                                ░░░ ▄▄▄                     │    │
+│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
+│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
+│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
+│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
+│    │                                                                                                            │    │
+│    │Primary agents  $7.200+                                                                                     │  ──╯
+│    │  claude-opus-5-5  $6.200+                                                                                  │  ──╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
+│    │                                                                                                            │    │
+│    │Orchestrators  $2.000+                                                                                      │  ──╯
+│    │  gpt-6.1-sol  $2.000+                                                                                      │  ▄ ╮
+│    │                                                                                                            │    │
+│    │Subtle subagents  $1.500+                                                                                   │  ──╯
+│    │  gpt-6.1-sol  $1.500+                                                                                      │  ▄ ╮
+│    │                                                                                                            │    │
+│    │Straightforward subagents  $1.000+                                                                          │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
+│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │  Refresh     Close                                                                                         │  ▄ ╮
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent
+
+=== Usage unresolved and retained providers (70x17) ===
+
+
+   ╭ × Usage by session ──────────────────────────────────────────╮
+   │Profile All ▾                                                 │
+   │☐ Include suspended sessions                                  │
+   │Total ? · last 24 clock hours · estimated API USD             │
+   │Anthropic $8.200+ · ~6.7%                                     │
+   │… 2 more provider rows (enlarge terminal)                     │
+   │Weekly quota consumed in window · all account use             │
+   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
+   │    16  18  20  22  00  02  04  06  08  10  12  14            │
+   │Primary agents  $7.200+                                       │
+   │Sub-agents included · profile filters turns · + partial · base│
+   │  Refresh     Close                                           │
+   ╰──────────────────────────────────────────────────────────────╯
+
+
+
 === Usage by session All with model costs (120x36) ===
 ╭ W                                                                                                                  ──╮
 │ d                                                                                                                    │
@@ -704,6 +994,8 @@ Ent
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
+│    │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                                                               │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -712,20 +1004,18 @@ Ent
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │    │
 │    │Primary agents  $7.200+                                                                                     │    │
-│    │  claude-opus-5-5  $6.200+                                                                                  │    │
-│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
-│    │                                                                                                            │  ──╯
-│    │Orchestrators  $2.000+                                                                                      │  ──╮
-│    │  gpt-6.1-sol  $2.000+                                                                                      │    │
+│    │  claude-opus-5-5  $6.200+                                                                                  │  ──╯
+│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╮
 │    │                                                                                                            │    │
-│    │Subtle subagents  $1.500+                                                                                   │  ──╯
-│    │  gpt-6.1-sol  $1.500+                                                                                      │  ▄ ╮
+│    │Orchestrators  $2.000+                                                                                      │    │
+│    │  gpt-6.1-sol  $2.000+                                                                                      │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Subtle subagents  $1.500+                                                                                   │    │
+│    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Straightforward subagents  $1.000+                                                                          │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Straightforward subagents  $1.000+                                                                          │  ──╯
-│    │  gpt-6.1-sol  $1.000+                                                                                      │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Oracles  $0.500+                                                                                            │    │
-│    │  gpt-6.1-sol  $0.500+                                                                                      │    │
 │    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
 │    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
@@ -742,6 +1032,8 @@ Ent
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
+│    │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                                                               │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -749,21 +1041,19 @@ Ent
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │    │
-│    │                                                                                                            │    │
 │    │Reviewers  $7.100+                                                                                          │    │
-│    │  claude-opus-5-5  $7.100+                                                                                  │    │
-│    │                                                                                                            │  ──╯
-│    │Other subagents  $0.105+                                                                                    │  ──╮
+│    │  claude-opus-5-5  $7.100+                                                                                  │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Other subagents  $0.105+                                                                                    │    │
 │    │  gpt-6-luna  $0.105+                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Unclassified subagents  ?                                                                                   │  ──╯
-│    │  custom-model  ?                                                                                           │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Write release notes [claude]  $8.200+                                                                       │  ──╯
-│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │  ▄ ╮
+│    │                                                                                                            │  ──╯
+│    │Unclassified subagents  ?                                                                                   │  ▄ ╮
+│    │  custom-model  ?                                                                                           │    │
+│    │                                                                                                            │  ──╯
+│    │Write release notes [claude]  $8.200+                                                                       │  ▄ ╮
+│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
 │    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
 │    │    0 sub-agents · 3/5 turns reported                                                                       │    │
-│    │                                                                                                            │    │
 │    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
 │    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
@@ -780,14 +1070,14 @@ Ent
    │☐ Include suspended sessions                                  │
    │                                                              │
    │Total ? · last 24 clock hours · estimated API USD             │
+   │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                 │
+   │Weekly quota consumed in window · all account use             │
    │$50                 ▂                     ░ ▃                 │
    │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │                                                              │
-   │  gpt-6-luna  $0.105+                                         │
    │                                                              │
    │Unclassified subagents  ?                                     │
-   │  custom-model  ?                                             │
    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │
    │Sub-agents included · profile filters turns · + partial · base│
    │  Refresh     Close                                           │
@@ -804,14 +1094,14 @@ Ent
    │☐ Include suspended sessions                                  │
    │                                                              │
    │Total ? · last 24 clock hours · estimated API USD             │
+   │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                 │
+   │Weekly quota consumed in window · all account use             │
    │$50                 ▂                     ░ ▃                 │
    │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │                                                              │
-   │    gpt-6-luna  $0.105  tokens unknown                        │
    │    custom-model  ?  tokens unknown                           │
    │    2 sub-agents · 4/4 turns reported                         │
-   │                                                              │
    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │
    │Sub-agents included · profile filters turns · + partial · base│
    │  Refresh     Close                                           │
@@ -824,32 +1114,32 @@ Ent
 │ d                                                                                                                    │
 ╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
 ╭ S  │Profile All ▾                                                                                               │    │
-│ C  │        ╭Profile───╮                                                                                        │    │
-│he  │☐ Includ│All       │sessions                                                                                │    │
-│›   │        │claude    │                                                                                        │    │
-│    │Total ? │claude-1  │ock hours · estimated API USD                                                           │    │
-│    │$50     │codex     │                                                            ░░░                         │    │
-│    │        │codex-1   │                                                            ░░░ ▄▄▄                     │    │
-│    │$25     │codex-2   │                ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
-│    │        ╰──────────╯            ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
+│ C  │        ╭Profile──────╮                                                                                     │    │
+│he  │☐ Includ│All          │sions                                                                                │    │
+│›   │        │claude       │                                                                                     │    │
+│    │Total ? │claude-1     │ hours · estimated API USD                                                           │    │
+│    │Anthropi│claude-idle  │7% · OpenAI ? · ~20.0%                                                               │    │
+│    │Weekly q│codex        │n window · all account use                                                           │    │
+│    │$50     │codex-1      │                                                         ░░░                         │    │
+│    │        │codex-2      │                                                         ░░░ ▄▄▄                     │    │
+│    │$25     ╰─────────────╯             ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
+│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │    │
 │    │Primary agents  $7.200+                                                                                     │    │
-│    │  claude-opus-5-5  $6.200+                                                                                  │    │
-│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
-│    │                                                                                                            │  ──╯
-│    │Orchestrators  $2.000+                                                                                      │  ──╮
-│    │  gpt-6.1-sol  $2.000+                                                                                      │    │
+│    │  claude-opus-5-5  $6.200+                                                                                  │  ──╯
+│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╮
 │    │                                                                                                            │    │
-│    │Subtle subagents  $1.500+                                                                                   │  ──╯
-│    │  gpt-6.1-sol  $1.500+                                                                                      │  ▄ ╮
+│    │Orchestrators  $2.000+                                                                                      │    │
+│    │  gpt-6.1-sol  $2.000+                                                                                      │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Subtle subagents  $1.500+                                                                                   │    │
+│    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Straightforward subagents  $1.000+                                                                          │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Straightforward subagents  $1.000+                                                                          │  ──╯
-│    │  gpt-6.1-sol  $1.000+                                                                                      │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Oracles  $0.500+                                                                                            │    │
-│    │  gpt-6.1-sol  $0.500+                                                                                      │    │
 │    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
 │    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
@@ -866,6 +1156,8 @@ Ent
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
+│    │OpenAI ? · ~20.0%                                                                                           │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -874,20 +1166,18 @@ Ent
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │    │
 │    │Primary agents  $1.000                                                                                      │    │
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │    │
-│    │Orchestrators  $1.000                                                                                       │  ──╯
-│    │  gpt-6.1-sol  $1.000                                                                                       │  ──╮
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Straightforward subagents  $0.500                                                                           │    │
-│    │  gpt-6.1-sol  $0.500                                                                                       │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Oracles  $0.500                                                                                             │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Orchestrators  $1.000                                                                                       │    │
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Subtle subagents  $1.000                                                                                    │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
 │    │  gpt-6.1-sol  $0.500                                                                                       │    │
 │    │                                                                                                            │    │
+│    │Oracles  $0.500                                                                                             │    │
 │    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
 │    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
@@ -904,6 +1194,8 @@ Ent
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · Mon Nov 24 18:00–19:00 · estimated API USD                                                        │    │
+│    │OpenAI ? · ~1.2% (partial)                                                                                  │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -912,20 +1204,18 @@ Ent
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │    │
 │    │Primary agents  $1.000                                                                                      │    │
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │    │
-│    │Orchestrators  $1.000                                                                                       │  ──╯
-│    │  gpt-6.1-sol  $1.000                                                                                       │  ──╮
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Straightforward subagents  $0.500                                                                           │    │
-│    │  gpt-6.1-sol  $0.500                                                                                       │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Oracles  $0.500                                                                                             │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Orchestrators  $1.000                                                                                       │    │
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Subtle subagents  $1.000                                                                                    │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
 │    │  gpt-6.1-sol  $0.500                                                                                       │    │
 │    │                                                                                                            │    │
+│    │Oracles  $0.500                                                                                             │    │
 │    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
 │    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
@@ -942,6 +1232,8 @@ Ent
 │he  │☒ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
+│    │OpenAI ? · ~20.0%                                                                                           │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -950,20 +1242,18 @@ Ent
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │    │
 │    │Primary agents  $1.000                                                                                      │    │
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │    │
-│    │Orchestrators  $1.000                                                                                       │  ──╯
-│    │  gpt-6.1-sol  $1.000                                                                                       │  ──╮
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Straightforward subagents  $0.500                                                                           │    │
-│    │  gpt-6.1-sol  $0.500                                                                                       │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Oracles  $0.500                                                                                             │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Orchestrators  $1.000                                                                                       │    │
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Subtle subagents  $1.000                                                                                    │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
 │    │  gpt-6.1-sol  $0.500                                                                                       │    │
 │    │                                                                                                            │    │
+│    │Oracles  $0.500                                                                                             │    │
 │    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
 │    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
@@ -978,12 +1268,12 @@ Ent
    │Profile codex ▾                                               │
    │☒ Include suspended sessions                                  │
    │Total ? · last 24 clock hours · estimated API USD             │
+   │OpenAI ? · ~20.0%                                             │
+   │Weekly quota consumed in window · all account use             │
    │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │Primary agents  $1.000                                        │
    │  gpt-6.1-terra  $1.000                                       │
-   │                                                              │
-   │Orchestrators  $1.000                                         │
    │Sub-agents included · profile filters turns · + partial · base│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯

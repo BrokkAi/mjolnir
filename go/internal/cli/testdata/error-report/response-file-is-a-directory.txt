@@ -1,0 +1,4 @@
+Error: read prompt file testdata/error-report
+
+Caused by:
+    Is a directory (os error 21)

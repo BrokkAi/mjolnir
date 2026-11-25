@@ -840,46 +840,56 @@ details.block-fold > pre {
   margin: 0 10px 10px;
 }
 
-.entry.mailbox-entry {
+.entry.disclosure-entry {
   padding-top: 0;
   padding-bottom: 0;
 }
 
-details.mailbox-event {
+details.transcript-disclosure {
   border: 0;
   margin: 0;
   background: transparent;
 }
 
-details.mailbox-event > summary {
+details.transcript-disclosure > summary {
   padding: 4px 0;
   gap: 8px;
+  align-items: flex-start;
 }
 
-details.mailbox-event > summary::before {
+details.transcript-disclosure > summary::before {
   flex: 0 0 auto;
   margin: 0;
   transition: none;
 }
 
-details.mailbox-event[open] > summary::before {
+details.transcript-disclosure[open] > summary::before {
   content: '\25be';
   transform: none;
 }
 
-.mailbox-event-label {
+.disclosure-label {
   flex: 1;
   min-width: 0;
+}
+
+.disclosure-summary-line {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.mailbox-event .entry-time {
+.transcript-disclosure[open] .disclosure-summary-line {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.transcript-disclosure .entry-time {
   flex: 0 0 auto;
 }
 
-.mailbox-event > .entry-body {
+.transcript-disclosure > .entry-body {
   padding: 0 0 10px 20px;
 }
 

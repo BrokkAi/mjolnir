@@ -709,6 +709,7 @@ type DeploymentCapacityTarget struct {
 	// local targets write to. Empty for every other host, whose probes carry
 	// their own paths.
 	LocalStoragePaths []string
+	StorageWarning    *string
 	// ProbeError prevents a partial AWS fleet sample when one live instance
 	// cannot be probed yet.
 	ProbeError *string
@@ -3785,6 +3786,23 @@ func (l TargetsPodmanWorkspaceLocator) EffectiveKind() TargetsPodmanWorkspaceLoc
 	return l.Kind
 }
 
+// Equal is Rust's derived PartialEq: the zero kind equals container_layer,
+// only the variant's own fields count, and a helper compares by contents.
+func (l TargetsPodmanWorkspaceLocator) Equal(other TargetsPodmanWorkspaceLocator) bool {
+	kind := l.EffectiveKind()
+	if kind != other.EffectiveKind() {
+		return false
+	}
+	switch kind {
+	case TargetsPodmanWorkspaceLocatorVolume:
+		return l.Name == other.Name
+	case TargetsPodmanWorkspaceLocatorHostPath:
+		return l.Path == other.Path && slices.Equal(l.Helper, other.Helper) && l.Resource == other.Resource
+	default:
+		return true
+	}
+}
+
 // MarshalJSON writes serde's internally tagged form.
 func (l TargetsPodmanWorkspaceLocator) MarshalJSON() ([]byte, error) {
 	kind := l.EffectiveKind()
@@ -4047,6 +4065,43 @@ func (t *TargetsTargetTemplate) ImageHost() (ImageHost, *TargetsContainerTemplat
 		host.SSH = &ssh
 	}
 	return host, t.Container, true
+}
+
+// Equal is Rust's derived PartialEq on targets::TargetLocator: the same
+// variant with equal fields. Only the fields the kind carries count (those
+// MarshalJSON writes), the workspace storage compares as its Rust value, a
+// missing SSH target is the zero one, and argument lists compare by
+// contents. A locator of no known kind has no Rust value and equals nothing.
+func (l TargetsTargetLocator) Equal(other TargetsTargetLocator) bool {
+	if l.Kind != other.Kind {
+		return false
+	}
+	ssh := func() bool {
+		left, right := targetsSSHOrZero(l.SSH), targetsSSHOrZero(other.SSH)
+		return left.Destination == right.Destination && slices.Equal(left.SSHArgs, right.SSHArgs)
+	}
+	container := func() bool {
+		return l.ContainerID == other.ContainerID && configOptionalEqual(l.BorrowedFrom, other.BorrowedFrom)
+	}
+	switch l.Kind {
+	case TargetsTargetLocatorLocalBare:
+		return l.WorkerRoot == other.WorkerRoot
+	case TargetsTargetLocatorLocalPodman:
+		return container() && l.WorkspaceStorage.Equal(other.WorkspaceStorage)
+	case TargetsTargetLocatorLocalDocker, TargetsTargetLocatorAppleContainer:
+		return container()
+	case TargetsTargetLocatorAwsEc2:
+		return l.Profile == other.Profile && l.Region == other.Region && l.InstanceID == other.InstanceID &&
+			ssh() && l.Workspace == other.Workspace
+	case TargetsTargetLocatorSshBare:
+		return ssh() && l.Workspace == other.Workspace && configOptionalEqual(l.WorkerID, other.WorkerID)
+	case TargetsTargetLocatorSshPodman:
+		return ssh() && container() && l.WorkspaceStorage.Equal(other.WorkspaceStorage)
+	case TargetsTargetLocatorSshDocker, TargetsTargetLocatorSshAppleContainer, TargetsTargetLocatorSshNitro:
+		return ssh() && container()
+	default:
+		return false
+	}
 }
 
 // CPUAccounting: container placement includes borrowed workers: each can

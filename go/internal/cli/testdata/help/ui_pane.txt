@@ -1,0 +1,13 @@
+Set one support pane's size, as its title-bar control does
+
+Usage: mj ui pane [OPTIONS] <PANE> <SIZE>
+
+Arguments:
+  <PANE>  The pane to resize [possible values: sessions, targets, profiles]
+  <SIZE>  Its new size [possible values: minimized, standard, maximized]
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --json             Print the daemon's answer as JSON instead of text
+  -h, --help             Print help

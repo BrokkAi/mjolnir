@@ -93,6 +93,10 @@ pub fn accept_move_operation(operation: &MoveOperation) -> Result<()> {
     let operation = operation.clone();
     submit_database_write("accept Move", move |connection| {
         let tx = connection.transaction()?;
+        super::session_restart::ensure_no_peer_container_upgrade(
+            &tx,
+            &operation.selection.session_id,
+        )?;
         update_move_requests(&tx, &operation.selection)?;
         save_move_operation_with(&tx, &operation)?;
         tx.commit()?;
@@ -732,6 +736,75 @@ pub fn retained_move_environment(operation_id: &str) -> Result<Option<Environmen
         .map(Option::flatten)
 }
 
+/// Record immutable source ownership before asking a worker to retire it.
+pub fn record_pending_retired_login(
+    session_id: &str,
+    authorization: &mj_core::credentials::PendingRetiredLogin,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let auth = authorization.clone();
+    submit_database_write("record_pending_retired_login", move |connection| {
+        connection.execute(
+            "INSERT OR IGNORE INTO pending_retired_logins
+             (session_id, operation_id, source_profile_id, harness_kind, store_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                auth.operation_id,
+                auth.source_profile_id,
+                auth.harness_kind.id(),
+                auth.store_id
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn pending_retired_logins(
+    session_id: &str,
+) -> Result<Vec<mj_core::credentials::PendingRetiredLogin>> {
+    let connection = open_reader(&database_path())?;
+    let mut query = connection.prepare(
+        "SELECT operation_id, source_profile_id, harness_kind, store_id
+         FROM pending_retired_logins WHERE session_id=?1 ORDER BY operation_id",
+    )?;
+    let rows = query.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (operation_id, source_profile_id, harness, store_id) = row?;
+        Ok(mj_core::credentials::PendingRetiredLogin {
+            operation_id,
+            source_profile_id,
+            harness_kind: harness.parse()?,
+            store_id,
+        })
+    })
+    .collect()
+}
+
+pub fn clear_pending_retired_login(session_id: &str, operation_id: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    submit_database_write("clear_pending_retired_login", move |connection| {
+        connection.execute(
+            "DELETE FROM pending_retired_logins WHERE session_id=?1 AND operation_id=?2",
+            params![session_id, operation_id],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn retired_login_move_active(session_id: &str, operation_id: &str) -> Result<bool> {
+    Ok(load_move_operation(session_id)?
+        .is_some_and(|operation| operation.operation_id == operation_id && operation.is_active()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,6 +925,61 @@ mod tests {
             updated_at: session.updated_at.clone(),
             error: None,
         }
+    }
+
+    #[test]
+    fn borrowed_move_and_container_upgrade_are_transactionally_exclusive() {
+        const NAME: &str = "borrowed_move_and_container_upgrade_are_transactionally_exclusive";
+        const MARKER: &str = "MJ_TEST_MOVE_UPGRADE_FENCE";
+        if std::env::var_os(MARKER).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                NAME,
+            ))
+            .env(MARKER, "1")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        use super::super::tests::{session, test_subagent};
+        let _writer = install_isolated_test_writer();
+        let mut parent = session("parent-session", "project");
+        parent.state = SessionState::Running;
+        save_session(&parent).unwrap();
+        let mut child = session("borrower-session", "project");
+        child.state = SessionState::Parked;
+        save_subagent_session(&child, &test_subagent(&parent.id, &child.id)).unwrap();
+        let mut moving = operation(&child);
+        moving.in_place = true;
+        accept_move_operation(&moving).unwrap();
+        begin_container_upgrade(
+            &parent.id,
+            "upgrade",
+            Arc::default(),
+            crate::targets::container_upgrade_test_plan(&parent.id),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !try_commit_container_upgrade(&parent.id, "upgrade")
+                .unwrap()
+                .is_committed()
+        );
+        moving.phase = MovePhase::Completed;
+        save_move_operation(&moving).unwrap();
+        assert!(
+            try_commit_container_upgrade(&parent.id, "upgrade")
+                .unwrap()
+                .is_committed()
+        );
+        moving.phase = MovePhase::Capturing;
+        assert!(
+            accept_move_operation(&moving)
+                .unwrap_err()
+                .to_string()
+                .contains("being upgraded")
+        );
     }
 
     #[test]

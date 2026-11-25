@@ -397,6 +397,8 @@ impl DashboardState {
         } else {
             None
         };
+        let is_subagent = matches!(&self.mode, Mode::Resume(wizard)
+            if self.state.subagents.contains_key(&wizard.session_id));
         let config = self.config.clone();
         let oracle_choices = self.state.last_oracle_choices.clone();
         let (draft, profile) = self.review_subagent_draft()?;
@@ -405,6 +407,10 @@ impl DashboardState {
             draft.refresh_create(&profile, &config, remembered.as_ref(), remembered_oracle);
         } else {
             draft.update_choices(&profile, &config);
+            // Depth-one orchestrators may delegate workers, but cannot add another level.
+            if is_subagent {
+                draft.orchestrators_configured = false;
+            }
         }
         None
     }
@@ -417,11 +423,15 @@ impl ResumeWizard {
             .then(|| self.subagents.selected())
     }
 
-    /// Move always shows delegation, including the reason Mjolnir is unavailable.
+    /// Move shows delegation for primary sessions and orchestrators.
     /// A plain resume keeps the session's own policy.
     pub(crate) fn subagent_choice_applies(&self, dashboard: &DashboardState) -> bool {
-        let _ = dashboard;
         self.moving
+            && !dashboard
+                .state
+                .subagents
+                .get(&self.session_id)
+                .is_some_and(|child| !child.orchestrator)
     }
 
     /// The policy a Move request carries: `None` keeps the session's own, so

@@ -27,8 +27,12 @@ pub(crate) use launch::TOOL_CACHE_DIRECTORY_VARIABLES;
 pub(crate) use launch::read_claude_login_fingerprint;
 use launch::*;
 pub use launch::{
-    ClaudeLoginIdentity, ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket,
+    ClaudeLoginIdentity, ClaudeMcpSocket, ContextReset, LaunchSpec, ReviewerMcpServer,
+    SubagentMcpSocket,
 };
+#[cfg(unix)]
+pub(crate) use launch::{launch_claude_mcp_socket, launch_subagent_mcp_socket};
+pub(crate) use launch::{launch_extra_mcp_servers, launch_subagent_policy};
 pub use opencode_logins::ImportedLogins;
 use permissions::*;
 use session::*;
@@ -36,8 +40,14 @@ use session_config::*;
 pub use verdict_client::VerdictSource;
 
 use crate::relay::NativeSessionHistory;
+#[cfg(unix)]
+use crate::worker_runtime::{HarnessReload, HarnessReloadTransition};
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
+
+#[cfg(unix)]
+pub type RuntimeEvent = mj_core::acp::RuntimeEventWithReload<HarnessReload>;
+
 pub mod antigravity_tasks;
 mod antigravity_usage;
 mod claude_usage;
@@ -275,6 +285,26 @@ fn remove_session_failure(update: &mut SessionUpdate) {
 }
 
 #[derive(Debug)]
+pub enum ReloadResolution {
+    Started,
+    RefusedBeforeCommit(String),
+    FailedAfterCommit(String),
+}
+
+impl ReloadResolution {
+    fn failed(committed: bool, message: String) -> Self {
+        if committed {
+            Self::FailedAfterCommit(message)
+        } else {
+            Self::RefusedBeforeCommit(message)
+        }
+    }
+    fn refused(message: String) -> Self {
+        Self::RefusedBeforeCommit(message)
+    }
+}
+
+#[derive(Debug)]
 pub enum CommandRequest {
     ClearContext {
         request_id: String,
@@ -321,13 +351,18 @@ pub enum CommandRequest {
     /// without stopping the worker daemon or its non-harness processes.
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        subagent_mcp_socket: Option<SubagentMcpSocket>,
+        claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
+        managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
         args: Option<Vec<String>>,
         additional_directories: Vec<PathBuf>,
         supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
         leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
-        resolved: oneshot::Sender<std::result::Result<(), String>>,
+        #[cfg(unix)]
+        on_restart: Option<Box<HarnessReloadTransition>>,
+        resolved: oneshot::Sender<ReloadResolution>,
     },
     CancelTurnFor {
         request_id: String,
@@ -431,14 +466,19 @@ pub(super) enum SessionRestart {
     /// Restart only the harness bridge under a new launch configuration.
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        subagent_mcp_socket: Option<SubagentMcpSocket>,
+        claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
+        managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
         args: Option<Vec<String>>,
         additional_directories: Vec<PathBuf>,
         supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
         leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
+        #[cfg(unix)]
+        on_restart: Option<Box<HarnessReloadTransition>>,
         resume_session: Option<String>,
-        resolved: oneshot::Sender<std::result::Result<(), String>>,
+        resolved: oneshot::Sender<ReloadResolution>,
     },
     Clear {
         reset: ContextReset,
@@ -478,13 +518,18 @@ impl Eq for SessionRestart {}
 
 struct LaunchConfigReload {
     launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+    subagent_mcp_socket: Option<SubagentMcpSocket>,
+    claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
+    managed_subagent: bool,
     environment: BTreeMap<String, String>,
     command: Option<PathBuf>,
     args: Option<Vec<String>>,
     additional_directories: Vec<PathBuf>,
     supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
     leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
-    resolved: oneshot::Sender<std::result::Result<(), String>>,
+    #[cfg(unix)]
+    on_restart: Option<Box<HarnessReloadTransition>>,
+    resolved: oneshot::Sender<ReloadResolution>,
 }
 
 struct BridgeRestart {
@@ -507,7 +552,7 @@ struct BridgeSessionOpen<'a> {
     replacing_previous_bridge: bool,
     replace_unused_codex_thread: bool,
     first_replaced_unused_native_session_id: &'a mut Option<String>,
-    pending_reload_ack: &'a mut Option<oneshot::Sender<std::result::Result<(), String>>>,
+    pending_reload_ack: &'a mut Option<oneshot::Sender<ReloadResolution>>,
 }
 
 async fn run_inner(
@@ -525,13 +570,20 @@ async fn run_inner(
     // A new worker starts from the relay journal's latest native session ID.
     // Within this worker, restore readiness can first see any replacement.
     let mut first_replaced_unused_native_session_id = None;
-    let mut pending_reload_ack: Option<oneshot::Sender<std::result::Result<(), String>>> = None;
+    let mut pending_reload_ack: Option<oneshot::Sender<ReloadResolution>> = None;
+    #[cfg(unix)]
+    let mut pending_reload_transition: Option<Box<HarnessReloadTransition>> = None;
     let mut _active_reload_leases: Option<Box<dyn std::fmt::Debug + Send + Sync>> = None;
     let mut rollback = None;
+    let mut reload_committed = false;
+    let mut pending_supervisor_spec: Option<
+        Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>,
+    > = None;
     loop {
         if shutdown.is_cancelled() {
             if let Some(resolved) = pending_reload_ack.take() {
-                let _ = resolved.send(Err(
+                let _ = resolved.send(ReloadResolution::failed(
+                    reload_committed,
                     "ACP runtime shut down before replacement bridge opened".into(),
                 ));
             }
@@ -546,13 +598,73 @@ async fn run_inner(
                 }
                 BridgeRestartNotice::Unexpected => ACP_BRIDGE_LOST_WARNING,
             };
-            emit_runtime_event(
-                &events,
-                RuntimeEvent::HarnessRestarting {
-                    message: message.to_owned(),
-                },
-            )
-            .await?;
+            #[cfg(unix)]
+            let (reload, applied) = match pending_reload_transition.take() {
+                Some(transition) => {
+                    let (reload, applied) = HarnessReload::new(*transition);
+                    (Some(reload), Some(applied))
+                }
+                None => (None, None),
+            };
+            let restarting = RuntimeEvent::HarnessRestarting {
+                message: message.to_owned(),
+                #[cfg(unix)]
+                reload,
+                #[cfg(not(unix))]
+                reload: None,
+            };
+            #[cfg(unix)]
+            let notification = if let Some(applied) = applied {
+                // The replacement can run native hooks as soon as it starts.
+                // Wait for the coordinator to retire the old state and install
+                // the new harness state before starting the process.
+                // Once handed to the coordinator, retirement is owned by that
+                // decision. Wait for its typed outcome even during shutdown.
+                async {
+                    emit_runtime_event(&events, restarting).await?;
+                    match applied
+                        .await
+                        .context("coordinator stopped while applying harness reload")?
+                    {
+                        Ok(Some(runtime)) => {
+                            reload_committed = runtime.committed;
+                            pending_supervisor_spec = None;
+                            spec.environment = runtime.environment;
+                            spec.subagent_mcp_socket = runtime.subagent_mcp_socket;
+                            spec.claude_mcp_socket = runtime.claude_mcp_socket;
+                            spec.managed_subagent = runtime.managed_subagent;
+                            Ok(())
+                        }
+                        Ok(None) => Ok(()),
+                        Err(resolution) => {
+                            if let Some(resolved) = pending_reload_ack.take() {
+                                let _ = resolved.send(resolution);
+                            }
+                            anyhow::bail!("coordinator could not apply harness reload")
+                        }
+                    }
+                }
+                .await
+            } else {
+                emit_runtime_event(&events, restarting).await
+            };
+            #[cfg(not(unix))]
+            let notification = emit_runtime_event(&events, restarting).await;
+            if let Err(error) = notification {
+                if let Some(resolved) = pending_reload_ack.take() {
+                    let _ = resolved.send(ReloadResolution::failed(
+                        reload_committed,
+                        format!("{error:#}"),
+                    ));
+                }
+                return Err(error);
+            }
+        }
+        if let Some(supervisor) = pending_supervisor_spec.take() {
+            let (path, spec) = *supervisor;
+            // Staged transitions wrote the finalized spec in the coordinator.
+            // Legacy callers without a transition still publish after retirement.
+            spec.write_spec(&path)?;
         }
         let opened = Arc::new(Mutex::new(None));
         let result = run_bridge(
@@ -607,7 +719,8 @@ async fn run_inner(
             result => match result {
                 Ok(None) => {
                     if let Some(resolved) = pending_reload_ack.take() {
-                        let _ = resolved.send(Err(
+                        let _ = resolved.send(ReloadResolution::failed(
+                            reload_committed,
                             "ACP runtime stopped before replacement bridge opened".into(),
                         ));
                     }
@@ -616,7 +729,10 @@ async fn run_inner(
                 Ok(Some(restart)) => restart,
                 Err(error) => {
                     if let Some(resolved) = pending_reload_ack.take() {
-                        let _ = resolved.send(Err(format!("{error:#}")));
+                        let _ = resolved.send(ReloadResolution::failed(
+                            reload_committed,
+                            format!("{error:#}"),
+                        ));
                     }
                     return Err(error);
                 }
@@ -661,12 +777,17 @@ async fn run_inner(
         restart_notice = Some(restart.notice);
         if let Some(LaunchConfigReload {
             launch_config,
+            subagent_mcp_socket,
+            claude_mcp_socket,
+            managed_subagent,
             environment,
             command,
             args,
             additional_directories,
             supervisor_spec,
             leases,
+            #[cfg(unix)]
+            on_restart,
             resolved,
         }) = restart.reload_launch_config
         {
@@ -678,14 +799,7 @@ async fn run_inner(
             } else {
                 mj_harness_install::login_environment::with_overrides(&environment).await
             };
-            if let Some(supervisor) = supervisor_spec {
-                let (supervisor_path, supervisor_spec) = *supervisor;
-                if let Err(error) = supervisor_spec.write_spec(&supervisor_path) {
-                    let _ =
-                        resolved.send(Err(format!("write updated ACP supervisor spec: {error:#}")));
-                    return Err(error);
-                }
-            }
+            pending_supervisor_spec = supervisor_spec;
             match resolved_environment {
                 Ok(environment) => {
                     spec.apply_reload_accepted_config(&launch_config);
@@ -704,11 +818,24 @@ async fn run_inner(
                     spec.approval_choices = launch_config.approval_choices();
                     spec.instruction_role = InstructionRole::from_launch(&launch_config);
                     spec.project_memory = launch_config.project_memory.clone();
+                    spec.subagent_mcp_socket = subagent_mcp_socket;
+                    spec.claude_mcp_socket = claude_mcp_socket;
+                    spec.managed_subagent = managed_subagent;
+                    spec.subagent_policy = launch_subagent_policy(&launch_config);
+                    spec.extra_mcp_servers = launch_extra_mcp_servers(&launch_config);
                     _active_reload_leases = leases;
+                    reload_committed = false;
                     pending_reload_ack = Some(resolved);
+                    #[cfg(unix)]
+                    {
+                        pending_reload_transition = on_restart;
+                    }
                 }
                 Err(error) => {
-                    let _ = resolved.send(Err(format!("{error:#}")));
+                    let _ = resolved.send(ReloadResolution::failed(
+                        reload_committed,
+                        format!("{error:#}"),
+                    ));
                     return Err(error);
                 }
             }
@@ -838,35 +965,57 @@ async fn run_bridge(
         }
     };
     let opened_now = opened.lock().expect("opened session lock poisoned").clone();
+    let planned_reload = matches!(&result, Ok(Some(SessionRestart::ReloadLaunchConfig { .. })));
+    let mut retirement_error = None;
     let restarting = matches!(&result, Ok(Some(_))) || (result.is_err() && opened_now.is_some());
     // Dropping the transport closes the supervisor's stdin. Give it time to
     // terminate and reap the complete bridge process group before killing the
-    // supervisor itself as a last resort. A planned restart already decided
-    // to kill the child, so a non-zero exit is the expected outcome.
+    // supervisor itself as a last resort. Planned reloads require its successful
+    // retirement acknowledgement; killing that owner cannot prove its writers
+    // are gone and must never authorize destructive promotion.
     if !child_reaped {
         if restarting {
             let exited = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(Ok(_)) => true,
+                Ok(Ok(status)) => {
+                    if planned_reload && !status.success() {
+                        retirement_error = Some(anyhow!(
+                            "ACP supervisor did not confirm bridge retirement: {status}"
+                        ));
+                    }
+                    true
+                }
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, "wait for retiring ACP supervisor");
+                    if planned_reload {
+                        retirement_error =
+                            Some(anyhow!("wait for retiring ACP supervisor: {error}"));
+                    } else {
+                        tracing::warn!(%error, "wait for retiring ACP supervisor");
+                    }
                     false
                 }
-                Err(_) => false,
+                Err(_) => {
+                    if planned_reload {
+                        retirement_error = Some(anyhow!(
+                            "ACP supervisor timed out before confirming bridge retirement"
+                        ));
+                    }
+                    false
+                }
             };
             if !exited {
                 if let Err(error) = child.kill().await {
-                    tracing::warn!(
-                        operation = "acp_bridge_restart",
-                        %error,
-                        "could not kill ACP bridge during planned restart"
-                    );
+                    if planned_reload {
+                        retirement_error = Some(anyhow!("could not retire ACP bridge: {error}"));
+                    } else {
+                        tracing::warn!(%error, "could not kill ACP bridge during restart");
+                    }
                 }
                 if let Err(error) = child.wait().await {
-                    tracing::warn!(
-                        operation = "acp_bridge_restart",
-                        %error,
-                        "could not reap ACP bridge during planned restart"
-                    );
+                    if planned_reload {
+                        retirement_error = Some(anyhow!("could not retire ACP bridge: {error}"));
+                    } else {
+                        tracing::warn!(%error, "could not reap ACP bridge during restart");
+                    }
                 }
             }
         } else {
@@ -931,6 +1080,12 @@ async fn run_bridge(
         result = result
             .map_err(|error| error.context(format!("{BRIDGE_STDERR_CONTEXT}\n{stderr_tail}")));
     }
+    if let Some(error) = retirement_error {
+        if let Ok(Some(SessionRestart::ReloadLaunchConfig { resolved, .. })) = result {
+            let _ = resolved.send(ReloadResolution::refused(format!("{error:#}")));
+        }
+        return Err(error);
+    }
     match result {
         Ok(None) => Ok(None),
         Ok(Some(SessionRestart::Clear { reset, previous })) => Ok(Some(BridgeRestart {
@@ -945,12 +1100,17 @@ async fn run_bridge(
         })),
         Ok(Some(SessionRestart::ReloadLaunchConfig {
             launch_config,
+            subagent_mcp_socket,
+            claude_mcp_socket,
+            managed_subagent,
             environment,
             command,
             args,
             additional_directories,
             supervisor_spec,
             leases,
+            #[cfg(unix)]
+            on_restart,
             resume_session,
             resolved,
         })) => Ok(Some(BridgeRestart {
@@ -958,12 +1118,17 @@ async fn run_bridge(
             resume_session,
             reload_launch_config: Some(LaunchConfigReload {
                 launch_config,
+                subagent_mcp_socket,
+                claude_mcp_socket,
+                managed_subagent,
                 environment,
                 command,
                 args,
                 additional_directories,
                 supervisor_spec,
                 leases,
+                #[cfg(unix)]
+                on_restart,
                 resolved,
             }),
             native_session_used: opened_now

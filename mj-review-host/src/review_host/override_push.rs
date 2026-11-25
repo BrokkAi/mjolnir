@@ -133,7 +133,14 @@ async fn run_override(
 
     let declined = overrides
         .iter()
-        .map(|entry| format!("- Finding: {}\n  Reason: {}", entry.finding, entry.reason))
+        // Continuation lines cannot impersonate a field or section boundary.
+        .map(|entry| {
+            format!(
+                "- Finding: {}\n  Reason: {}",
+                entry.finding.replace('\n', "\n    "),
+                entry.reason.replace('\n', "\n    "),
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let declined = mj_review::bound_tail(&declined, NOTICE_OVERRIDES_BYTES, "overrides");

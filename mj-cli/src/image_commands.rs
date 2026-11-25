@@ -16,10 +16,24 @@ pub(crate) struct ImageArgs {
 
 #[derive(Debug, Subcommand)]
 enum ImageCommand {
+    /// Print a Containerfile baking every pinned harness into a base image.
+    Base(BaseArgs),
     /// Build, push, and assign an image from the repository's mise recipe.
     Build(BuildArgs),
     /// Compare published project images with the repository's current recipe.
     Status(StatusArgs),
+}
+
+#[derive(Debug, Args)]
+struct BaseArgs {
+    #[arg(long)]
+    base: String,
+    #[arg(long)]
+    platform: String,
+    #[arg(long, default_value = "")]
+    user: String,
+    #[arg(long, default_value = "/")]
+    workdir: String,
 }
 
 #[derive(Debug, Args)]
@@ -78,6 +92,22 @@ fn collect(path: Option<PathBuf>) -> Result<(PathBuf, BTreeMap<String, String>)>
 
 pub(crate) async fn run(args: ImageArgs) -> Result<()> {
     let (path, bundle, target, name, print, status) = match args.command {
+        ImageCommand::Base(args) => {
+            let base = mj_harness_install::session_image::ImageBase {
+                reference: args.base,
+                user: args.user,
+                workdir: args.workdir,
+                ..Default::default()
+            };
+            print!(
+                "{}",
+                mj_harness_install::session_image::session_base_containerfile(
+                    &base,
+                    &args.platform
+                )?
+            );
+            return Ok(());
+        }
         ImageCommand::Build(args) => (
             args.path,
             args.bundle,
@@ -217,7 +247,7 @@ fn render_status(status: &[ImageStatus]) -> String {
                 entry.image,
                 match entry.current {
                     Some(true) => "current".to_owned(),
-                    Some(false) => "recipe changed".to_owned(),
+                    Some(false) => "out of date".to_owned(),
                     None if entry.no_builder =>
                         format!("unknown (no builder for {})", entry.platform),
                     None => "unknown (use --target ID)".to_owned(),
@@ -240,15 +270,21 @@ mod tests {
             ),
             user: "hel".into(),
             workdir: "/workspace".into(),
+            ..Default::default()
         };
         let mise = mj_harness_install::session_image::MiseArtifact { version: "2026.11.9".into(), url: "https://github.com/jdx/mise/releases/download/v2026.11.9/mise-v2026.11.9-linux-x64-musl".into(), sha256: "e55de2c37a08a9dfdb3ca95490f90f914b5ef362b62761f1bb2110e5d57210f7".into() };
         let files = BTreeMap::from([
             (".nvmrc".into(), "24\n".into()),
             ("mise.toml".into(), "[tools]\npython = \"3.15\"\n".into()),
         ]);
-        let text =
-            mj_harness_install::session_image::containerfile(&base, "linux/amd64", &mise, &files)
-                .unwrap();
+        let text = mj_harness_install::session_image::containerfile(
+            &base,
+            "linux/amd64",
+            &mise,
+            &files,
+            &[],
+        )
+        .unwrap();
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "image-build-print", &text);
     }
 

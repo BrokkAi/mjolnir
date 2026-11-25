@@ -122,6 +122,7 @@ fn is_default_subtle_subagents(value: &bool) -> bool {
 
 /// Launch directive that makes the Nitro engine's mbx settings authoritative.
 pub const SESSION_NITRO_MBX_ENV: &str = "MJ_SESSION_NITRO_MBX";
+pub const SESSION_MBX_BIN_ENV: &str = "MJ_MBX_BIN";
 pub const MBX_REMOTE_ENV_PREFIX: &str = "MBX_REMOTE_";
 pub const MBX_REMOTE_ENVIRONMENT: [&str; 3] =
     ["MBX_REMOTE_URL", "MBX_REMOTE_NAMESPACE", "MBX_REMOTE_MODE"];
@@ -164,6 +165,10 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_move: Option<ParkedMoveLaunch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_reload_operation_id: Option<String>,
     /// Chosen from the target locator, never from ambient container detection.
     #[serde(
         default,
@@ -289,6 +294,14 @@ pub struct WorkerLaunchConfig {
     pub cwd: PathBuf,
     #[serde(default)]
     pub additional_directories: Vec<PathBuf>,
+    /// Ancestor and owner workspace roots that stay writable when a borrowed
+    /// child's `working_directory` moves `cwd` below its owner's checkout. The
+    /// harness sandbox and ACP session grant them, but they are kept apart from
+    /// `additional_directories` so multi-repository review discovery and
+    /// Muse's single-repository check see only the repositories the session
+    /// was launched with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_directories: Vec<PathBuf>,
     #[serde(default)]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -326,6 +339,20 @@ pub struct WorkerLaunchConfig {
     /// discarded while parsing, so they never reach `Debug` output.
     #[serde(default, skip_serializing)]
     pub observe_policy: Option<serde::de::IgnoredAny>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParkedMoveLaunch {
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard_native_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_context: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub discard_queued_prompts: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_continuation: Option<InitialWorkerCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -429,9 +456,10 @@ pub struct ReviewerLaunchConfig {
     pub harness: HarnessKind,
     pub bridge_command: PathBuf,
     pub bridge_args: Vec<String>,
-    /// Harness environment without its home variable: the worker fills that in
-    /// from the staged reviewer directory it owns.
-    #[serde(default)]
+    /// Read only, for records written before the launch took the profile's
+    /// environment from the live profile. It is never written again: the
+    /// values were resolved secrets that the record outlived.
+    #[serde(default, skip_serializing)]
     pub environment: std::collections::BTreeMap<String, String>,
     /// Variables the worker removes from the reviewer's environment after it
     /// adds the target's login environment; see
@@ -637,12 +665,32 @@ impl WorkerLaunchConfig {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent)?;
         let body = serde_json::to_vec_pretty(self)?;
-        std::fs::write(path, body)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        let temporary = parent.join(format!(
+            ".launch-{}.tmp",
+            crate::relay::new_command_id("write")?
+        ));
+        let mut created = false;
+        let result = (|| -> Result<()> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            created = true;
+            file.write_all(&body)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, path)?;
+            crate::config::sync_directory(parent)?;
+            Ok(())
+        })();
+        if result.is_err() && created {
+            let _ = std::fs::remove_file(&temporary);
         }
+        result?;
         Ok(())
     }
 }
@@ -750,6 +798,31 @@ pub fn offers_review_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_launch_write_atomically_replaces_private_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("launch.json");
+        std::fs::write(&path, "old launch").unwrap();
+        let mut old = std::fs::File::open(&path).unwrap();
+        let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        launch.write(&path).unwrap();
+        assert_ne!(
+            old.metadata().unwrap().ino(),
+            path.metadata().unwrap().ino()
+        );
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        let mut previous = String::new();
+        std::io::Read::read_to_string(&mut old, &mut previous).unwrap();
+        assert_eq!(previous, "old launch");
+        assert!(WorkerLaunchConfig::read(&path).is_ok());
+        let blocked = dir.path().join("directory");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(launch.write(&blocked).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
 
     #[test]
     fn legacy_cpu_wire_and_launch_default_to_process_tree() {
@@ -1209,4 +1282,52 @@ mod tests {
             assert_eq!(launch.subagents, expected);
         }
     }
+}
+
+pub const RELOAD_CANDIDATES_DIR: &str = "reload-candidates";
+pub const PENDING_RELOAD_FILE: &str = "pending-reload.json";
+pub const RELOAD_CANDIDATE_MANIFEST_FILE: &str = "manifest.json";
+
+pub fn validate_candidate_id(candidate_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !candidate_id.is_empty()
+            && candidate_id != "."
+            && candidate_id != ".."
+            && !candidate_id.contains(['/', '\\', ':', '\0']),
+        "unsafe reload candidate ID"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadSharedLogin {
+    pub relative_marker: String,
+    pub source_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadCandidateManifest {
+    pub operation_id: String,
+    pub expected_store_id: String,
+    pub candidate_id: String,
+    pub harness: HarnessKind,
+    pub target_profile_home: String,
+    pub clear_paths: Vec<String>,
+    pub protected_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_login: Option<ReloadSharedLogin>,
+    #[serde(default)]
+    pub clear_github_token: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingInPlaceReload {
+    pub operation_id: String,
+    pub expected_store_id: String,
+    pub candidate_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_setup_name: Option<String>,
 }

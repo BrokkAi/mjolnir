@@ -162,7 +162,14 @@ def ensure_workspace():
     with open(REPO.parent / ".repo-setup.lock", "w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         if WORKSPACE_RECORD.exists():
-            return
+            cached = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
+            # The daemon owns workspace identity; a prior study's cache can outlive its row.
+            listed = subprocess.run([str(MJX), "workspaces", "list", "--json"],
+                                    capture_output=True, check=True)
+            current = json.loads(listed.stdout)["workspaces"]
+            if any(workspace["id"] == cached for workspace in current):
+                return
+            print("Cached verifier workspace is absent; selecting Review arms verify again", file=sys.stderr)
         WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"],
                            capture_output=True, check=True)

@@ -1,3 +1,25 @@
+function blockerTitle(kind) {
+  return {"untracked": "Untracked items", "operation_in_progress": "Git operation in progress", "dirty_submodule": "Dirty submodule", "missing_managed_origin": "Missing Git origin", "origin_removed_by_teardown": "Origin depends on clone", "unrepresented_git_state": "External worktrees & Git state", "hidden_tracked_edits": "Hidden tracked edits", "intent_to_add": "Intent-to-add files", "untracked_submodule_registration": "Untracked submodule registration", "tracked_keep_files": "Tracked .mj/keep files"}[kind] || kind;
+}
+function suspendBlockerSection(b, index) {
+  const section = el('section');
+  const paths = b.paths || [];
+  section.append(el('strong', '', `${index + 1}. ${blockerTitle(b.kind)} (${paths.length} items)`));
+  const pathList = el('ul');
+  for (const path of paths.slice(0, 5)) pathList.append(el('li', '', path));
+  section.append(pathList);
+  if (paths.length > 5) {
+    const details = el('details');
+    details.append(el('summary', '', `Show ${paths.length - 5} more`));
+    const rest = el('ul');
+    for (const path of paths.slice(5)) rest.append(el('li', '', path));
+    details.append(rest);
+    section.append(details);
+  }
+  section.append(el('p', '', `Fix: ${b.remedy}`));
+  return section;
+}
+
 import { renderMarkdown } from './markdown.js';
 import { renderToolOutput } from './tool-output.js';
 
@@ -3409,6 +3431,7 @@ function targetOracleConfigured(draft) {
 }
 
 function orchestratorsChoiceApplies(draft) {
+  if (draft?.sessionId && isSubagentSession(sessionById(draft.sessionId))) return false;
   return snapshot?.orchestrators_configured === true
     && shownDelegation(draft, draft.subagents).mode === 'mjolnir';
 }
@@ -5662,12 +5685,12 @@ function freshMoveDraft(session) {
     workspaceId: session.workspace_id || selectedWorkspaceId(),
     sessionId: session.id,
     profileId: recovery?.destination_profile_id || session.profile_id || snapshot.profiles[0]?.id || '',
-    targetId: (queueLocked && recoveryTarget) || compatible.includes(recoveryTarget)
+    targetId: isSubagentSession(session) ? session.target_id || '' : (queueLocked && recoveryTarget) || compatible.includes(recoveryTarget)
       ? recoveryTarget
       : compatible.includes(session.target_id) ? session.target_id : compatible[0] || '',
-    clearResourceAllocation: recovery?.clear_resource_allocation === true,
-    destinationAdditionalMounts: recovery ? (recovery.destination_additional_mounts || []) : null,
-    destinationResourceAllocation: recovery ? (recovery.destination_resource_allocation ?? null) : null,
+    clearResourceAllocation: !isSubagentSession(session) && recovery?.clear_resource_allocation === true,
+    destinationAdditionalMounts: !isSubagentSession(session) && recovery ? (recovery.destination_additional_mounts || []) : null,
+    destinationResourceAllocation: !isSubagentSession(session) && recovery ? (recovery.destination_resource_allocation ?? null) : null,
     queueLocked,
     preparation: null,
     preparing: false,
@@ -5692,7 +5715,13 @@ function freshMoveDraft(session) {
 
 /// The delegation policy a Move prepare request carries: null keeps the
 /// session's own.
+function moveDelegationApplies(draft) {
+  const session = sessionById(draft.sessionId);
+  return !isSubagentSession(session) || session.subagent_orchestrator === true;
+}
+
 function moveSubagentChange(draft) {
+  if (!moveDelegationApplies(draft)) return null;
   // A stored Native that the destination shows as None is untouched.
   const shown = shownDelegation(draft, draft.subagents);
   return JSON.stringify(shown) === JSON.stringify(shownDelegation(draft, draft.storedSubagents)) ? null : shown;
@@ -5814,7 +5843,8 @@ function moveAvailabilityError(draft) {
   if (availabilityMissing(snapshot.profiles.find(profile => profile.id === draft.profileId))) {
     return 'Choose an available profile before moving.';
   }
-  if (!targetLaunchable(draft.targetId)) {
+  const session = sessionById(draft.sessionId);
+  if (isSubagentSession(session) ? !draft.targetId : !targetLaunchable(draft.targetId)) {
     return 'Choose an available target before moving.';
   }
   return '';
@@ -5837,6 +5867,10 @@ function renderMoveForm() {
   const recoveryTarget = session.move_recovery?.destination_target_template_id;
   if (!moveDraft || moveDraft.sessionId !== session.id) moveDraft = freshMoveDraft(session);
   const draft = moveDraft;
+  if (isSubagentSession(session)) {
+    draft.targetId = session.target_id || '';
+    draft.clearResourceAllocation = false;
+  }
   const preparation = draft.preparation;
   const availabilityError = moveAvailabilityError(draft);
   moveProgress.textContent = preparation ? 'Review the destination and confirm the interruption.' : 'Choose a compatible destination. The source is not changed during preparation.';
@@ -5875,29 +5909,35 @@ function renderMoveForm() {
         input.disabled = true;
       }
     }
-    moveStep.append(targetPicker);
+    if (isSubagentSession(session)) {
+      moveStep.append(el('p', 'dim', `Target: ${session.target_id} (sub-agents move in place on their current target)`));
+    } else {
+      moveStep.append(targetPicker);
+    }
 
-    renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
+    if (moveDelegationApplies(draft)) renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
       draft.preparation = null;
     });
-    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
-    const clearResources = el('label', 'field-inline');
-    const clearResourcesInput = document.createElement('input');
-    clearResourcesInput.type = 'checkbox';
-    clearResourcesInput.checked = draft.clearResourceAllocation;
-    clearResourcesInput.disabled = draft.queueLocked;
-    clearResourcesInput.onchange = () => {
-      draft.clearResourceAllocation = clearResourcesInput.checked;
-      draft.filesReviewed = false;
-      draft.workspaceSelection.acknowledge_large_transfer = false;
-      draft.preparation = null;
-    };
-    clearResources.append(clearResourcesInput, el('span', '', 'Clear inherited resource sizing and use destination defaults'));
-    moveStep.append(clearResources);
-    if (draft.queueLocked) {
-      moveStep.append(el('p', 'dim', 'The destination and resource settings are locked to the existing destination because queue admission already began.'));
+    if (!isSubagentSession(session)) {
+      moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
+      const clearResources = el('label', 'field-inline');
+      const clearResourcesInput = document.createElement('input');
+      clearResourcesInput.type = 'checkbox';
+      clearResourcesInput.checked = draft.clearResourceAllocation;
+      clearResourcesInput.disabled = draft.queueLocked;
+      clearResourcesInput.onchange = () => {
+        draft.clearResourceAllocation = clearResourcesInput.checked;
+        draft.filesReviewed = false;
+        draft.workspaceSelection.acknowledge_large_transfer = false;
+        draft.preparation = null;
+      };
+      clearResources.append(clearResourcesInput, el('span', '', 'Clear inherited resource sizing and use destination defaults'));
+      moveStep.append(clearResources);
+      if (draft.queueLocked) {
+        moveStep.append(el('p', 'dim', 'The destination and resource settings are locked to the existing destination because queue admission already began.'));
+      }
+      moveStep.append(el('p', 'dim', 'Use this only when intentionally removing the current container or host sizing. Attached directories stay fixed to this workspace in the web viewer.'));
     }
-    moveStep.append(el('p', 'dim', 'Use this only when intentionally removing the current container or host sizing. Attached directories stay fixed to this workspace in the web viewer.'));
     moveNextButton.textContent = 'Prepare move';
   } else {
     const target = snapshot.targets.find(item => item.id === (preparation.selection.target_template_id || session.target_id));
@@ -5985,7 +6025,7 @@ function renderMoveForm() {
   }
   if (availabilityError) moveStep.append(el('p', 'move-warning', availabilityError));
   const busy = draft.preparing || draft.committing;
-  moveNextButton.disabled = busy || Boolean(availabilityError) || (!preparation && !!subagentSelectionError(draft))
+  moveNextButton.disabled = busy || Boolean(availabilityError) || (!preparation && moveDelegationApplies(draft) && !!subagentSelectionError(draft))
     || (preparation?.active === true && !draft.acknowledge)
     || (preparation?.workspace?.blockers || []).length > 0 || moveStorageProblems(draft).length > 0;
   moveBackButton.disabled = busy;
@@ -5995,7 +6035,7 @@ function renderMoveForm() {
 async function prepareMove() {
   const draft = moveDraft;
   if (!draft || draft.preparing) return;
-  const error = moveAvailabilityError(draft) || subagentSelectionError(draft);
+  const error = moveAvailabilityError(draft) || (moveDelegationApplies(draft) && subagentSelectionError(draft));
   if (error) {
     moveError.textContent = error;
     return;
@@ -6016,12 +6056,12 @@ async function prepareMove() {
         profile_id: draft.profileId || null,
         target_template_id: draft.targetId || null,
         // A bare target has fixed host resources, so inherited sizing must go.
-        clear_resource_allocation: draft.clearResourceAllocation || targetIsBare(draft.targetId),
+        clear_resource_allocation: !isSubagentSession(sessionById(draft.sessionId)) && (draft.clearResourceAllocation || targetIsBare(draft.targetId)),
         additional_mounts: draft.destinationAdditionalMounts,
         resource_allocation: draft.destinationResourceAllocation,
         subagents: moveSubagentChange(draft),
-        oracle: draft.oracle === draft.storedOracle ? null : draft.oracle,
-        oracle_choice: JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
+        oracle: !moveDelegationApplies(draft) || draft.oracle === draft.storedOracle ? null : draft.oracle,
+        oracle_choice: !moveDelegationApplies(draft) || JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
       }),
     });
     if (draft.preparation.container_upgrade) {
@@ -6902,7 +6942,28 @@ function buildShownSuspendConsent(preflight) {
   };
 }
 
-function confirmSessionSuspension(session) {
+function formatBlockerCleanupPrompt(blockers) {
+  let text = 'Inspect and resolve these suspend blockers. Preserve or push wanted work, then report when ready to suspend.\n';
+  for (const blocker of blockers) {
+    text += `\n${blockerTitle(blocker.kind)}\n`;
+    for (const path of blocker.paths || []) text += `- ${path}\n`;
+    text += `Fix: ${blocker.remedy}\n`;
+  }
+  return text;
+}
+function blockerResolutionSummary(response) {
+  let text = `Cleared flags on ${response.cleared_hidden_paths.length} paths; moved ${response.moved_worktrees.length} worktrees; skipped ${response.skipped_worktrees.length} worktrees.`;
+  if (response.moved_worktrees?.length) {
+    const moves = response.moved_worktrees.map(m => `${m.from} -> ${m.to}`).join(', ');
+    text += ` Moved: ${moves}.`;
+  }
+  if (response.skipped_worktrees?.length) {
+    text += ` Skipped: ${response.skipped_worktrees.join('; ')}.`;
+  }
+  return text;
+}
+
+function confirmSessionSuspension(session, onNotice = () => {}) {
   if (!session) return Promise.resolve(null);
   return new Promise(resolve => {
     const dialog = openSessionDialog('session-suspend-dialog', 'Suspend session');
@@ -6919,9 +6980,12 @@ function confirmSessionSuspension(session) {
     dialog.append(controls);
     cancel.focus();
 
-    request(`/api/v1/sessions/${encodeURIComponent(session.id)}/suspend-preflight`)
-      .then(preflight => {
+    const body = el('div');
+    dialog.insertBefore(body, controls);
+    const renderPreflight = preflight => {
         statusNode.remove();
+        body.replaceChildren();
+        controls.replaceChildren(cancel);
         const blockers = preflight.blockers || [];
         const untrackedCount = (preflight.untracked?.length || 0)
           + (preflight.nested_repositories?.length || 0)
@@ -6929,24 +6993,82 @@ function confirmSessionSuspension(session) {
           + (preflight.keep_dir_entries?.length || 0);
         const ops = preflight.operations || [];
         if (blockers.length) {
-          dialog.insertBefore(el('p', 'danger', 'Cannot suspend until these blockers are resolved:'), controls);
-          const list = el('ul');
-          for (const b of blockers) {
-            list.append(el('li', '', `${b.kind}: ${b.remedy}`));
+          body.append(el('p', 'danger', 'Cannot suspend until these blockers are resolved:'));
+          const list = el('div');
+          for (const [index, b] of blockers.entries()) {
+            const section = suspendBlockerSection(b, index);
+            list.append(section);
           }
-          dialog.insertBefore(list, controls);
+          body.append(list);
+          if (blockers.some(b => ['hidden_tracked_edits', 'unrepresented_git_state'].includes(b.kind))) {
+            const fix = button('Fix safe blockers & retry', 'primary');
+            fix.onclick = async () => {
+              controls.replaceChildren(cancel);
+              body.replaceChildren(el('p', 'dim', 'Fixing safe blockers…'));
+              try {
+                const response = await request(`/api/v1/sessions/${encodeURIComponent(session.id)}/suspend-resolve-blockers`, { method: 'POST' });
+                renderPreflight(response.preflight);
+                body.prepend(el('p', 'dim', blockerResolutionSummary(response)));
+              } catch (error) {
+                renderPreflight(preflight);
+                body.prepend(el('p', 'danger', `Could not fix safe blockers: ${error?.message || error}`));
+              }
+            };
+            controls.append(fix);
+          }
+          if (!['stopped', 'failed', 'lost', 'archived'].includes(session.lifecycle || session.state)) {
+            const ask = button('Ask session to fix', 'secondary');
+            ask.onclick = async () => {
+              ask.disabled = true;
+              try {
+                const pending = await sendSubmission({ action: 'prompt', session_id: session.id, text: formatBlockerCleanupPrompt(blockers) });
+                if (!pending || (!pending.represented && pending.status !== 'Queued')) {
+                  ask.disabled = false;
+                  body.prepend(el('p', 'danger', `Could not send cleanup request: ${pending?.status || 'request failed'}`));
+                  return;
+                }
+                finish(null);
+                onNotice('Sent suspend-blocker cleanup request.');
+              } catch (error) {
+                ask.disabled = false;
+                body.prepend(el('p', 'danger', `Could not send cleanup request: ${error?.message || error}`));
+              }
+            };
+            controls.append(ask);
+          }
+          const history = button('Suspend (history only)…', 'secondary');
+          history.onclick = () => {
+            body.replaceChildren(
+              el('p', 'danger', 'Discard workspace Git changes and save session history only?'),
+              el('p', '', 'Resuming will start from a fresh checkout with your conversation history intact.'),
+              el('p', 'danger', 'Removing the clone removes its shared .git directory, invalidating linked worktrees outside the clone (including locked ones) and discarding their unpushed commits and staged changes.'));
+            if (preflight.interrupting) body.append(el('p', '', 'The current turn will be interrupted.'));
+            const unfinished = preflight.children_not_handed_back?.length || 0;
+            if (unfinished) body.append(el('p', '', `${unfinished} sub-agents have not handed back; suspending stops them.`));
+            const owning = preflight.owning_children_to_suspend || 0;
+            if (owning) body.append(el('p', 'danger', owning === 1
+              ? "Suspending also suspends one child with its own environment and drops that child's untracked files."
+              : `Suspending also suspends ${owning} children with their own environments and drops their untracked files.`));
+            const back = button('Back', 'secondary');
+            back.onclick = () => renderPreflight(preflight);
+            const confirm = button('Suspend with history only', 'danger');
+            confirm.onclick = () => finish({ history_only: true });
+            controls.replaceChildren(back, confirm);
+            back.focus();
+          };
+          controls.append(history);
           return;
         }
-        dialog.insertBefore(el('p', '', 'Save a recovery copy and release the environment. You can resume this session later.'), controls);
+        body.append(el('p', '', 'Save a recovery copy and release the environment. You can resume this session later.'));
         if (preflight.raw) {
-          dialog.insertBefore(el('p', 'dim', 'Raw checkout is kept in place; untracked files and unsupported Git state do not travel with the snapshot.'), controls);
+          body.append(el('p', 'dim', 'Raw checkout is kept in place; untracked files and unsupported Git state do not travel with the snapshot.'));
         }
         if (ops.length) {
           const names = ops.map(op => op.kind).join(', ');
-          dialog.insertBefore(el('p', 'danger', `In-progress Git operation (${names}) will be aborted, discarding conflict resolution.`), controls);
+          body.append(el('p', 'danger', `In-progress Git operation (${names}) will be aborted, discarding conflict resolution.`));
         }
         if (untrackedCount > 0) {
-          dialog.insertBefore(el('p', 'danger', `${untrackedCount} untracked ${untrackedCount === 1 ? 'item' : 'items'} will not be kept (ignored files are never kept).`), controls);
+          body.append(el('p', 'danger', `${untrackedCount} untracked ${untrackedCount === 1 ? 'item' : 'items'} will not be kept (ignored files are never kept).`));
           const list = el('ul');
           const paths = [
             ...(preflight.untracked || []).map(e => e.path),
@@ -6955,7 +7077,7 @@ function confirmSessionSuspension(session) {
             ...(preflight.keep_dir_entries || []).map(e => `.mj/keep/${e.path}`),
           ];
           for (const p of paths.slice(0, 10)) list.append(el('li', '', p));
-          dialog.insertBefore(list, controls);
+          body.append(list);
           if (paths.length > 10) {
             const remaining = paths.slice(10);
             const details = el('details');
@@ -6963,26 +7085,26 @@ function confirmSessionSuspension(session) {
             const moreList = el('ul');
             for (const p of remaining) moreList.append(el('li', '', p));
             details.append(moreList);
-            dialog.insertBefore(details, controls);
+            body.append(details);
           }
         }
         if (preflight.keep_dir_bytes > 0) {
-          dialog.insertBefore(el('p', 'dim', `.mj/keep/ size: ${preflight.keep_dir_bytes} bytes (not saved on suspend).`), controls);
+          body.append(el('p', 'dim', `.mj/keep/ size: ${preflight.keep_dir_bytes} bytes (not saved on suspend).`));
         }
         if (session?.chat_phase === 'running' || preflight.interrupting) {
-          dialog.insertBefore(el('p', '', 'The current turn will be interrupted.'), controls);
+          body.append(el('p', '', 'The current turn will be interrupted.'));
         }
         const unfinishedChildren = preflight.children_not_handed_back?.length ?? session.verdict?.unfinished_children ?? 0;
         if (unfinishedChildren > 0) {
-          dialog.insertBefore(el('p', '', unfinishedChildren === 1
+          body.append(el('p', '', unfinishedChildren === 1
             ? '1 sub-agent has not handed back; suspending stops it.'
-            : `${unfinishedChildren} sub-agents have not handed back; suspending stops them.`), controls);
+            : `${unfinishedChildren} sub-agents have not handed back; suspending stops them.`));
         }
         const owningChildren = preflight.owning_children_to_suspend || 0;
         if (owningChildren > 0) {
-          dialog.insertBefore(el('p', '', owningChildren === 1
+          body.append(el('p', '', owningChildren === 1
             ? "Suspending also suspends one child with its own environment and drops that child's untracked files."
-            : `Suspending also suspends ${owningChildren} children with their own environments and drops their untracked files.`), controls);
+            : `Suspending also suspends ${owningChildren} children with their own environments and drops their untracked files.`));
         }
         const hasWarnings = untrackedCount > 0 || ops.length > 0 || preflight.raw || preflight.interrupting || unfinishedChildren > 0 || owningChildren > 0;
         const confirmLabel = untrackedCount > 0
@@ -6991,7 +7113,9 @@ function confirmSessionSuspension(session) {
         const confirmBtn = button(confirmLabel, hasWarnings ? 'danger' : 'primary');
         confirmBtn.onclick = () => finish(buildShownSuspendConsent(preflight));
         controls.append(confirmBtn);
-      })
+    };
+    request(`/api/v1/sessions/${encodeURIComponent(session.id)}/suspend-preflight`)
+      .then(renderPreflight)
       .catch(err => {
         statusNode.textContent = `Could not check workspace: ${err?.message || err}`;
       });
@@ -9518,7 +9642,7 @@ function toolDetailFold(sessionId, stableId, version) {
 
 /// Rewrite one entry's row.
 ///
-/// Thinking and mailbox events are collapsed by default, and which folds the
+/// Thinking and system disclosures are collapsed by default, and which folds the
 /// reader had opened is recorded and restored, so an update does not snap shut
 /// something they were part way through reading.
 function paintEntry(node, entry, unansweredPrompt) {
@@ -9535,20 +9659,22 @@ function paintEntry(node, entry, unansweredPrompt) {
   const time = entryTimestamp(entry);
   if (time) heading.append(time);
 
-  const events = entry.mailbox_events || [];
+  const disclosures = entry.disclosures || [];
   // Thinking is background: it is there for someone who wants it, and closed
   // for everyone else.
-  if (events.length) {
-    node.classList.add('mailbox-entry');
-    node.replaceChildren(...events.map((lines, index) => {
-      const fold = el('details', 'block-fold mailbox-event');
-      fold.dataset.foldKey = `mailbox-${index}`;
+  if (disclosures.length) {
+    node.classList.add('disclosure-entry');
+    node.replaceChildren(...disclosures.map((disclosure, index) => {
+      const fold = el('details', 'block-fold transcript-disclosure');
+      fold.dataset.foldKey = `disclosure-${index}`;
       const summary = el('summary');
-      summary.append(el('span', 'mailbox-event-label', lines[0]));
+      const label = el('span', 'disclosure-label');
+      for (const line of disclosure.summary) label.append(el('span', 'disclosure-summary-line', line));
+      summary.append(label);
       const time = entryTimestamp(entry);
       if (time) summary.append(time);
       const body = el('div', 'entry-body');
-      body.append(renderToolOutput(lines.join('\n')));
+      body.append(el('pre', 'entry-text', disclosure.body.join('\n')));
       fold.append(summary, body);
       return fold;
     }));
@@ -10753,7 +10879,7 @@ async function runSessionAction(dataset, errorNode, extra) {
   }
   if (dataset.action === 'suspend') {
     const session = sessionById(dataset.id);
-    const consent = await confirmSessionSuspension(session);
+    const consent = await confirmSessionSuspension(session, notice => { errorNode.textContent = notice; });
     if (consent === null) return false;
     extra = { ...extra, suspend_consent: consent };
   }

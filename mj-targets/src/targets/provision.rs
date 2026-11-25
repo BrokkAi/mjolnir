@@ -68,13 +68,14 @@ pub fn provision_plan_named(
         }
         TargetTemplate::LocalPodman(container) => {
             validate_container_template(container)?;
-            commands.push(podman_container_run(
+            commands.push(podman_container_run_gated(
                 container,
                 name,
                 session_id,
                 additional_mounts,
                 None,
                 &workspace,
+                crate::image_pull_gate::launch_image_gate(template),
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -185,13 +186,14 @@ pub fn provision_plan_named(
         TargetTemplate::SshPodman { ssh, container } => {
             validate_ssh(ssh)?;
             validate_container_template(container)?;
-            commands.push(podman_container_run(
+            commands.push(podman_container_run_gated(
                 container,
                 name,
                 session_id,
                 additional_mounts,
                 Some(ssh),
                 &workspace,
+                crate::image_pull_gate::launch_image_gate(template),
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::SshContainer {

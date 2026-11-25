@@ -61,8 +61,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
-    dashboard_worker_targets, interrupted_destroy_session_ids, interrupted_suspend_session_ids,
-    spawn_image_refresher, unowned_interrupted_lifecycles,
+    interrupted_destroy_session_ids, interrupted_suspend_session_ids, spawn_image_refresher,
+    unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -108,8 +108,12 @@ pub struct LifecycleControl {
     state: Arc<AtomicU8>,
     pub cancelled: Arc<AtomicBool>,
     cancel_cause: Arc<Mutex<Option<&'static str>>>,
-    /// Woken when shutdown stops the operation, for waiters that must end then.
-    shutdown_stop: Arc<tokio::sync::Notify>,
+    /// Cancelled once, and never reset, when daemon shutdown stops the
+    /// operation, whether or not a person already cancelled it. It is
+    /// independent of `state`, which keeps deciding commit versus cancel, so a
+    /// shutdown after a person's cancel interrupts the cancel's cleanup
+    /// without reopening the commit.
+    shutdown: CancellationToken,
 }
 
 const LIFECYCLE_OPEN: u8 = 0;
@@ -145,25 +149,27 @@ impl LifecycleControl {
             .is_ok();
         if accepted {
             *cancel_cause = Some(cause);
-            self.cancelled.store(true, Ordering::Release);
+            // Shutdown is published before the flag the executor reads, so an
+            // operation that sees `cancelled` for a shutdown cancel also sees
+            // `stopped_for_shutdown()` and never takes it for a person's cancel.
             if cancelled == LIFECYCLE_CANCELLED_FOR_SHUTDOWN {
-                self.shutdown_stop.notify_waiters();
+                self.shutdown.cancel();
             }
+            self.cancelled.store(true, Ordering::Release);
         }
         accepted
     }
 
     /// Completes once shutdown has stopped the operation.
     pub(crate) async fn shutdown_stopped(&self) {
-        loop {
-            let notified = self.shutdown_stop.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.stopped_for_shutdown() {
-                return;
-            }
-            notified.await;
-        }
+        self.shutdown.cancelled().await;
+    }
+
+    /// The operation's executor. Its commands stop for a person's cancel or
+    /// for shutdown; its shutdown-only view stops for shutdown alone.
+    pub(crate) fn executor(&self) -> CancellableProcessExecutor {
+        CancellableProcessExecutor::new(self.cancelled.clone())
+            .with_shutdown_cancellation(self.shutdown.clone())
     }
 
     /// Commit the operation, unless a cancel was accepted first. Only the
@@ -205,8 +211,16 @@ impl LifecycleControl {
     /// or not it committed. This is not a cancel: the operation fails where it
     /// is, and the next daemon finishes it from its durable record.
     fn interrupt(&self) {
+        // Shutdown first: see `cancel_as`.
+        self.shutdown.cancel();
         self.cancelled.store(true, Ordering::Release);
-        self.shutdown_stop.notify_waiters();
+    }
+
+    /// Stop the cleanup of an operation a person already cancelled, because
+    /// the daemon is exiting. The commit decision stays as the cancel left it;
+    /// the person's cancel already set the flag the executor reads.
+    fn interrupt_cancelled_cleanup(&self) {
+        self.shutdown.cancel();
     }
 
     /// Whether daemon shutdown is what stopped the operation's commands, so a
@@ -214,11 +228,7 @@ impl LifecycleControl {
     /// (#1321). A committed operation's commands are stopped only by
     /// [`Self::interrupt`].
     pub fn stopped_for_shutdown(&self) -> bool {
-        match self.state.load(Ordering::Acquire) {
-            LIFECYCLE_CANCELLED_FOR_SHUTDOWN => true,
-            LIFECYCLE_COMMITTED => self.cancelled.load(Ordering::Acquire),
-            _ => false,
-        }
+        self.shutdown.is_cancelled()
     }
 }
 
@@ -305,10 +315,14 @@ pub struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
     inactivity_changed: tokio::sync::Notify,
-    mbx_install_wake: crate::daemon::mbx_service::InstallWake,
     projects: Arc<mj_controller::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     session_gate: Arc<RecoveryGate>,
+    /// Per-workspace-owner gate serializing borrower sub-agent registration
+    /// against checkout-mutating blocker remediation. Weak references reclaim
+    /// entries automatically once no caller holds the gate.
+    borrower_registration_gates:
+        Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::RwLock<()>>>>,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.
@@ -740,8 +754,17 @@ impl ActiveLifecycle {
         !self.kind.cancelled_only_by_its_owner() && durable != Some(SessionState::StartupCleanup)
     }
 
+    /// Whether a person's cancel of this restart ends it by releasing its
+    /// durable intent. A shutdown that interrupted the rollback leaves the
+    /// intent, and the image pin it holds, to the next daemon.
+    fn cancelled_restart_releases_intent(&self) -> bool {
+        matches!(self.phase, LifecyclePhase::CancellingRestart)
+            && !self.control.stopped_for_shutdown()
+    }
+
     /// Stop this operation for daemon shutdown. An operation that can still be
-    /// cancelled is cancelled. A committed one is interrupted, because the
+    /// cancelled is cancelled. One a person already cancelled has its cleanup
+    /// stopped. A committed one is interrupted, because the
     /// next daemon finishes it from its record, except a committed create,
     /// which is a moment from `Running` and finishes. An uncommitted create
     /// is stopped without rolling back (see `stopped_for_shutdown`): its
@@ -754,6 +777,16 @@ impl ActiveLifecycle {
             return true;
         }
         if self.cancel_with(LifecycleControl::cancel_for_shutdown) {
+            return true;
+        }
+        // A person's cancel already won, so the operation is rolling back,
+        // whichever phase the canceller left it in (a phone action cancels
+        // the control without changing the phase). Shutdown still stops that
+        // cleanup's commands; the commit decision stays lost. A create's
+        // rollback runs to completion regardless.
+        if self.kind != LifecycleKind::Create && self.control.cancel_accepted() && self.is_running()
+        {
+            self.control.interrupt_cancelled_cleanup();
             return true;
         }
         let interruptible = self.kind != LifecycleKind::Create
@@ -883,7 +916,6 @@ mod close_workspace;
 pub(crate) mod create;
 mod lifecycle;
 pub(crate) mod mailbox_delivery;
-pub(crate) mod mbx_service;
 mod purge;
 pub(crate) mod push_delivery;
 mod resume;

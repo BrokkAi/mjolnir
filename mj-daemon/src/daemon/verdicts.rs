@@ -28,6 +28,75 @@ fn children(runtime: &RuntimeProjection) -> Children<'_> {
     children
 }
 
+/// The sub-agents a suspend would stop before they hand back: the unfinished
+/// members of each branch under `parent`, not the branch roots that hold them.
+/// A branch root that has handed back is not named for its busy descendants.
+pub(super) fn unfinished_suspend_children(
+    runtime: &RuntimeProjection,
+    parent: &str,
+) -> Vec<String> {
+    let unfinished_branch = |id: &str| {
+        runtime
+            .verdicts
+            .get(id)
+            .is_some_and(|verdict| verdict.unfinished || verdict.unfinished_children > 0)
+    };
+    let mut borrowed: Vec<_> = runtime
+        .subagents
+        .iter()
+        .filter(|(id, child)| {
+            child.parent_session_id == parent
+                && runtime
+                    .environment_owners
+                    .get(*id)
+                    .is_some_and(|owner| owner != *id)
+                && unfinished_branch(id)
+        })
+        .filter_map(|(id, _)| runtime.records.get(id))
+        .filter(|record| !record.archived)
+        .collect();
+    borrowed.sort_unstable_by(|left, right| {
+        (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id))
+    });
+
+    let prefix = mj_core::native_agent::owner_view_id_prefix(parent);
+    let native = runtime
+        .native_agents
+        .keys_with_prefix(&prefix)
+        .filter(|id| {
+            runtime.native_agents[*id].agent.parent_session_id.is_none() && unfinished_branch(id)
+        });
+    let roots = borrowed
+        .into_iter()
+        .map(|child| child.id.as_str())
+        .chain(native.map(String::as_str));
+
+    // The verdict's own `unfinished` flag is the sole judge of each member.
+    let children = children(runtime);
+    let mut seen = BTreeSet::new();
+    let mut named = Vec::new();
+    for root in roots {
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if runtime.verdicts.get(id).is_some_and(|v| v.unfinished) {
+                named.push(id.to_owned());
+            }
+            pending.extend(
+                children
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .map(|(id, _)| *id),
+            );
+        }
+    }
+    named
+}
+
 fn interrupt_targets<'a>(
     root: &'a str,
     runtime: &RuntimeProjection,
@@ -976,6 +1045,10 @@ mod tests {
         }
         project(&mut capture, &Default::default(), None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
+        assert_eq!(
+            unfinished_suspend_children(&capture, "parent"),
+            [mj_core::native_agent::view_id("parent", "active")]
+        );
 
         let before = capture.clone();
         capture.records.get_mut("parent").unwrap().last_profile = "destination-profile".into();
@@ -984,6 +1057,7 @@ mod tests {
         capture.native_agents.insert(id.clone(), retained);
         project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 0);
+        assert!(unfinished_suspend_children(&capture, "parent").is_empty());
 
         let before = capture.clone();
         let active = capture.native_agents.get_mut(&id).unwrap();
@@ -991,6 +1065,67 @@ mod tests {
         active.agent.availability = mj_core::native_agent::NativeAgentAvailability::Available;
         project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
+
+        let before = capture.clone();
+        let mut descendant = native("descendant", true, NativeAgentState::Running);
+        descendant.agent.parent_session_id = Some("finished".into());
+        capture
+            .native_agents
+            .insert(descendant.agent.view_id(), descendant);
+        project(&mut capture, &before, None, None);
+        assert_eq!(
+            unfinished_suspend_children(&capture, "parent"),
+            [id, mj_core::native_agent::view_id("parent", "descendant")]
+        );
+    }
+
+    #[test]
+    fn suspend_names_the_unfinished_descendant_not_the_branch_that_handed_back() {
+        let mut capture = RuntimeProjection::default();
+        capture.metadata.config = super::super::tests::runtime_test_config().into();
+        for id in ["parent", "child", "grandchild", "sibling"] {
+            insert_running_session(&mut capture, id);
+            let view = capture.sessions.get_mut(id).unwrap();
+            view.connected = true;
+            view.operational.as_mut().unwrap().harness_turn = None;
+            capture
+                .environment_owners
+                .insert(id.into(), "parent".into());
+        }
+        capture.records.get_mut("child").unwrap().state = SessionState::Parked;
+        insert_subagent_link(&mut capture, "parent", "child");
+        insert_subagent_link(&mut capture, "parent", "sibling");
+        insert_subagent_link(&mut capture, "child", "grandchild");
+        let set_busy = |capture: &mut RuntimeProjection, id: &str, busy: bool| {
+            capture
+                .sessions
+                .get_mut(id)
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap()
+                .harness_turn = busy.then_some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+        };
+        let mut previous = RuntimeProjection::default();
+        let mut observed = Vec::new();
+        for (grandchild, sibling) in [(false, false), (true, false), (true, true)] {
+            set_busy(&mut capture, "grandchild", grandchild);
+            set_busy(&mut capture, "sibling", sibling);
+            project(&mut capture, &previous, None, None);
+            observed.push(unfinished_suspend_children(&capture, "parent"));
+            previous = capture.clone();
+        }
+        // Parked and idle children stay silent; a busy grandchild is named
+        // without its finished parent, beside any other unfinished branch
+        // and in a stable order.
+        assert_eq!(
+            observed,
+            [
+                Vec::<String>::new(),
+                vec!["grandchild".to_owned()],
+                vec!["grandchild".to_owned(), "sibling".to_owned()],
+            ]
+        );
     }
 
     #[test]

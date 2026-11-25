@@ -1,6 +1,39 @@
 use super::*;
 
 impl DurableRelay {
+    /// Validate the authoritative scan and reserve its idle state under one lock.
+    #[cfg(unix)]
+    pub(crate) fn reserve_idle_after_antigravity_refresh(
+        &mut self,
+        envelope: RelayRequestEnvelope,
+        synced_epoch: Option<u64>,
+    ) -> RelayResponseEnvelope {
+        if let Some(body) = self.envelope_rejection(&envelope) {
+            return RelayResponseEnvelope {
+                request_id: envelope.request_id,
+                protocol_version: envelope.protocol_version,
+                body,
+            };
+        }
+        let RelayRequest::ReserveIdle { command_id } = &envelope.request else {
+            unreachable!("idle reservation only")
+        };
+        if !self.has_handled_command(command_id)
+            && (synced_epoch.is_none()
+                || (self.background_work == BackgroundWorkPolicy::AntigravityTasks
+                    && synced_epoch != Some(self.antigravity_hook_epoch())))
+        {
+            return RelayResponseEnvelope {
+                request_id: envelope.request_id,
+                protocol_version: envelope.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::IdleReservation { ordinal: None },
+                },
+            };
+        }
+        self.handle(envelope)
+    }
+
     pub fn handle(&mut self, envelope: RelayRequestEnvelope) -> RelayResponseEnvelope {
         self.handle_with_antigravity_stop_baseline(envelope, None)
     }
@@ -50,7 +83,7 @@ impl DurableRelay {
     /// version admits. `Some` is the response to send instead of handling.
     /// [`Self::take_deferred_attach`] consults the same checks so an attach it
     /// defers is one the normal path would have accepted.
-    pub(super) fn envelope_rejection(
+    pub(crate) fn envelope_rejection(
         &self,
         envelope: &RelayRequestEnvelope,
     ) -> Option<RelayResponseBody> {
@@ -170,9 +203,14 @@ impl DurableRelay {
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
             RelayRequest::ReleaseInPlaceMoveDispatch {
+                expected_harness_restarted,
                 operation_id,
                 expected_store_id,
-            } => match self.release_in_place_move_dispatch(operation_id, expected_store_id)? {
+            } => match self.release_in_place_move_dispatch(
+                operation_id,
+                expected_store_id,
+                *expected_harness_restarted,
+            )? {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
@@ -345,6 +383,8 @@ impl DurableRelay {
             | RelayRequest::SlopcopLoginState
             | RelayRequest::InstallSlopcopLogin { .. }
             | RelayRequest::RemoveSlopcopLogin
+            | RelayRequest::ReadRetiredLogins { .. }
+            | RelayRequest::AckRetiredLogin { .. }
             | RelayRequest::ReadCredentials
             | RelayRequest::InstallCredentials { .. }
             | RelayRequest::SkillsState

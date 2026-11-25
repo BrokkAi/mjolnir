@@ -19,6 +19,8 @@ pub use mj_core::relay::*;
 mod background;
 #[cfg(test)]
 pub(crate) use background::AirTaskFixture;
+#[cfg(unix)]
+pub(crate) use background::ReserveIdleAntigravityCheck;
 mod checkpoint_hold;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InPlaceHarnessRestartDecision {
@@ -268,6 +270,7 @@ pub struct DurableRelay {
     /// journal: every bridge start records its own `AgentInitialized`.
     session_setup: bool,
     checkpoint_only: bool,
+    pending_parked_move: Option<mj_core::worker_launch::ParkedMoveLaunch>,
     /// Active in-place harness restart operation ID serialized with the hold.
     in_place_harness_restart_in_flight: Option<String>,
     /// Live reviewer leases share this owner's atomic checkpoint decision.
@@ -663,7 +666,7 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
     ) -> Result<Self> {
-        Self::open_with_harness(root, session_id, relay_version, false, None, &[])
+        Self::open_with_harness(root, session_id, relay_version, false, None, &[], None)
     }
 
     /// Open a live relay with its harness delivery mode established before
@@ -682,6 +685,27 @@ impl DurableRelay {
             false,
             Some(harness),
             initial_commands,
+            None,
+        )
+    }
+
+    /// Defer queue promotion until the destination session commits its Move prefix.
+    pub fn open_for_harness_with_parked_move(
+        root: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        relay_version: impl Into<String>,
+        harness: mj_core::config::HarnessKind,
+        initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
+        parked_move: Option<&mj_core::worker_launch::ParkedMoveLaunch>,
+    ) -> Result<Self> {
+        Self::open_with_harness(
+            root,
+            session_id,
+            relay_version,
+            false,
+            Some(harness),
+            initial_commands,
+            parked_move,
         )
     }
 
@@ -713,6 +737,7 @@ impl DurableRelay {
             true,
             None,
             initial_commands,
+            None,
         )
     }
 
@@ -728,6 +753,7 @@ impl DurableRelay {
             true,
             None,
             &[],
+            None,
         )?;
         relay
             .submit_command(command_id, RelayCommand::ClearQueuedPrompts)?
@@ -742,6 +768,7 @@ impl DurableRelay {
         checkpoint_only: bool,
         harness: Option<mj_core::config::HarnessKind>,
         initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
+        parked_move: Option<&mj_core::worker_launch::ParkedMoveLaunch>,
     ) -> Result<Self> {
         let root = root.into();
         let session_id = session_id.into();
@@ -1023,6 +1050,13 @@ impl DurableRelay {
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
             session_setup: false,
             checkpoint_only,
+            pending_parked_move: parked_move
+                .filter(|parked| {
+                    !snapshot
+                        .handled_commands
+                        .contains_key(&format!("parked-move:{}", parked.operation_id))
+                })
+                .cloned(),
             reviewer_admissions: BTreeMap::new(),
             next_reviewer_admission: 0,
             steering_supported: None,
@@ -1561,7 +1595,6 @@ impl DurableRelay {
         self.mailbox_delivery_mode = mode;
     }
 
-    #[cfg(unix)]
     pub(crate) fn in_place_move_hold_active(&self) -> bool {
         self.snapshot.in_place_move_hold.is_some()
     }
@@ -2118,8 +2151,11 @@ impl DurableRelay {
     /// [`Self::offer_settle_facts`]: the same observation, taken at the same
     /// point, as for a prompt that is finishing. Each arm names the condition
     /// its settling site tests.
-    pub fn event_settles_autonomous_turn(&self, event: &mj_core::acp::RuntimeEvent) -> bool {
-        use mj_core::acp::RuntimeEvent;
+    pub fn event_settles_autonomous_turn<R>(
+        &self,
+        event: &mj_core::acp::RuntimeEventWithReload<R>,
+    ) -> bool {
+        use mj_core::acp::RuntimeEventWithReload as RuntimeEvent;
         if self.snapshot.active_prompt.is_some()
             || self.snapshot.autonomous_harness_turn().is_none()
         {

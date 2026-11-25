@@ -1,0 +1,496 @@
+
+high-medium-low
+
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/low              total  134.67
+  gpt-6.2-sol/medium           total  213.67
+  Terra/high                   total   89.67
+  gpt-6.2-sol/low+gpt-6.2-sol/low total  165.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total  230.67
+  gpt-6.2-sol/low+Terra/high   total  156.83
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  248.00
+  gpt-6.2-sol/medium+Terra/high total  226.69
+  Terra/high+Terra/high        total  112.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total  179.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  238.78
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high total  177.94
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  258.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high total  238.81
+  gpt-6.2-sol/low+Terra/high+Terra/high total  166.44
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  266.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high total  257.28
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  232.28
+  Terra/high+Terra/high+Terra/high total  124.75
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +79.00 (95% +60.67 to +99.33); diffs better 58, worse 1, tied 11
+  Terra/high - gpt-6.2-sol/low: -45.00 (95% -55.58 to -34.83); diffs better 3, worse 47, tied 20
+  gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +30.33 (95% +22.67 to +38.67); diffs better 44, worse 0, tied 26
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +96.00 (95% +75.56 to +118.33); diffs better 62, worse 0, tied 8
+  gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +22.17 (95% +15.11 to +30.03); diffs better 35, worse 0, tied 35
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +113.33 (95% +89.00 to +139.33); diffs better 61, worse 0, tied 9
+  gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +92.03 (95% +71.94 to +113.92); diffs better 61, worse 1, tied 8
+  Terra/high+Terra/high - gpt-6.2-sol/low: -22.67 (95% -32.50 to -12.83); diffs better 11, worse 31, tied 28
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +44.33 (95% +32.00 to +57.67); diffs better 44, worse 0, tied 26
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +104.11 (95% +81.67 to +128.00); diffs better 62, worse 0, tied 8
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +43.28 (95% +31.08 to +56.47); diffs better 45, worse 0, tied 25
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +123.67 (95% +97.33 to +151.78); diffs better 62, worse 0, tied 8
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +104.14 (95% +82.07 to +128.31); diffs better 62, worse 0, tied 8
+  gpt-6.2-sol/low+Terra/high+Terra/high - gpt-6.2-sol/low: +31.78 (95% +21.61 to +43.28); diffs better 35, worse 0, tied 35
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +131.33 (95% +102.67 to +162.33); diffs better 62, worse 0, tied 8
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +122.61 (95% +96.83 to +150.53); diffs better 61, worse 0, tied 9
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low: +97.61 (95% +76.00 to +120.67); diffs better 61, worse 1, tied 8
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low: -9.92 (95% -20.67 to +0.92); diffs better 20, worse 27, tied 23
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/low+gpt-6.2-sol/low total  165.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total  230.67
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  248.00
+  Terra/high+Terra/high        total  112.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total  179.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +65.67 (95% +50.11 to +82.78); diffs better 52, worse 3, tied 15
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +83.00 (95% +63.67 to +103.67); diffs better 50, worse 1, tied 19
+  Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low: -53.00 (95% -66.00 to -40.50); diffs better 2, worse 46, tied 22
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low+gpt-6.2-sol/low: +14.00 (95% +8.67 to +20.00); diffs better 23, worse 0, tied 47
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/medium           total  213.67
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  248.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  266.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +34.33 (95% +26.33 to +43.00); diffs better 49, worse 0, tied 21
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +52.33 (95% +39.33 to +66.67); diffs better 49, worse 0, tied 21
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  248.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  266.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium+gpt-6.2-sol/medium: +18.00 (95% +12.33 to +24.33); diffs better 32, worse 0, tied 38
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total  179.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  238.78
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  258.33
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  266.00
+  Terra/high+Terra/high+Terra/high total  124.75
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +59.78 (95% +46.00 to +74.67); diffs better 48, worse 1, tied 21
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +79.33 (95% +61.78 to +97.78); diffs better 48, worse 1, tied 21
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +87.00 (95% +66.00 to +109.00); diffs better 43, worse 0, tied 27
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: -54.25 (95% -69.75 to -39.25); diffs better 1, worse 36, tied 33
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  Terra/high+Terra/high        total  112.00
+  gpt-6.2-sol/low+Terra/high+Terra/high total  166.44
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  232.28
+  Terra/high+Terra/high+Terra/high total  124.75
+  gpt-6.2-sol/low+Terra/high+Terra/high - Terra/high+Terra/high: +54.44 (95% +42.00 to +67.33); diffs better 48, worse 0, tied 22
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Terra/high+Terra/high: +120.28 (95% +96.72 to +144.50); diffs better 62, worse 0, tied 8
+  Terra/high+Terra/high+Terra/high - Terra/high+Terra/high: +12.75 (95% +8.67 to +17.17); diffs better 29, worse 0, tied 41
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/low+Terra/high+Terra/high total  166.44
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  232.28
+  Terra/high+Terra/high+Terra/high total  124.75
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: +65.83 (95% +51.33 to +81.61); diffs better 58, worse 1, tied 11
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: -41.69 (95% -52.86 to -30.86); diffs better 5, worse 39, tied 26
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  Sol/medium                   total   49.50
+  gpt-6.2-sol/low              total  134.67
+  gpt-6.2-sol/medium           total  213.67
+  gpt-6.2-sol/low - Sol/medium: +85.17 (95% +71.83 to +98.50); diffs better 60, worse 0, tied 10
+  gpt-6.2-sol/medium - Sol/medium: +164.17 (95% +136.00 to +194.33); diffs better 66, worse 0, tied 4
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  Sol/medium+Terra/high+Terra/high total  121.17
+  gpt-6.2-sol/low+Terra/high+Terra/high total  166.44
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  232.28
+  gpt-6.2-sol/low+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +45.28 (95% +34.58 to +56.39); diffs better 47, worse 1, tied 22
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +111.11 (95% +89.58 to +133.19); diffs better 61, worse 0, tied 9
+
+high-medium
+
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/low              total   70.33
+  gpt-6.2-sol/medium           total  112.00
+  Terra/high                   total   54.92
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   85.67
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total  118.78
+  gpt-6.2-sol/low+Terra/high   total   83.50
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  127.00
+  gpt-6.2-sol/medium+Terra/high total  118.11
+  Terra/high+Terra/high        total   68.50
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   94.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  122.33
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high total   93.39
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  130.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high total  122.26
+  gpt-6.2-sol/low+Terra/high+Terra/high total   89.83
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  134.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high total  130.36
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  120.89
+  Terra/high+Terra/high+Terra/high total   76.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +41.67 (95% +27.00 to +58.67); diffs better 34, worse 1, tied 35
+  Terra/high - gpt-6.2-sol/low: -15.42 (95% -24.75 to -7.00); diffs better 7, worse 25, tied 38
+  gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +15.33 (95% +10.00 to +21.00); diffs better 29, worse 0, tied 41
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +48.44 (95% +33.11 to +66.22); diffs better 38, worse 0, tied 32
+  gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +13.17 (95% +8.36 to +18.56); diffs better 26, worse 0, tied 44
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +56.67 (95% +38.33 to +77.33); diffs better 37, worse 1, tied 32
+  gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +47.78 (95% +32.64 to +64.86); diffs better 38, worse 0, tied 32
+  Terra/high+Terra/high - gpt-6.2-sol/low: -1.83 (95% -9.50 to +5.50); diffs better 15, worse 13, tied 42
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +23.67 (95% +15.00 to +33.33); diffs better 29, worse 0, tied 41
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +52.00 (95% +35.67 to +70.33); diffs better 39, worse 0, tied 31
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +23.06 (95% +14.72 to +32.39); diffs better 29, worse 0, tied 41
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +59.67 (95% +40.89 to +80.78); diffs better 38, worse 0, tied 32
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +51.93 (95% +35.72 to +70.19); diffs better 39, worse 0, tied 31
+  gpt-6.2-sol/low+Terra/high+Terra/high - gpt-6.2-sol/low: +19.50 (95% +12.33 to +27.72); diffs better 26, worse 0, tied 44
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +63.67 (95% +43.00 to +86.67); diffs better 37, worse 1, tied 32
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +60.03 (95% +41.67 to +81.03); diffs better 38, worse 0, tied 32
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low: +50.56 (95% +34.67 to +68.33); diffs better 38, worse 0, tied 32
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low: +5.67 (95% -2.33 to +13.83); diffs better 19, worse 10, tied 41
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   85.67
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total  118.78
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  127.00
+  Terra/high+Terra/high        total   68.50
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   94.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +33.11 (95% +21.00 to +47.33); diffs better 32, worse 4, tied 34
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +41.33 (95% +26.33 to +58.00); diffs better 31, worse 2, tied 37
+  Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low: -17.17 (95% -27.00 to -8.33); diffs better 5, worse 22, tied 43
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low+gpt-6.2-sol/low: +8.33 (95% +4.67 to +12.67); diffs better 16, worse 0, tied 54
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/medium           total  112.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  127.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  134.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +15.00 (95% +9.33 to +21.67); diffs better 24, worse 0, tied 46
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +22.00 (95% +13.33 to +32.00); diffs better 24, worse 0, tied 46
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  127.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  134.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium+gpt-6.2-sol/medium: +7.00 (95% +3.67 to +11.00); diffs better 14, worse 0, tied 56
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   94.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  122.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  130.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  134.00
+  Terra/high+Terra/high+Terra/high total   76.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +28.33 (95% +17.11 to +41.22); diffs better 25, worse 4, tied 41
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +36.00 (95% +22.11 to +51.33); diffs better 25, worse 2, tied 43
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +40.00 (95% +24.00 to +57.00); diffs better 24, worse 2, tied 44
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: -18.00 (95% -29.50 to -8.00); diffs better 3, worse 15, tied 52
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  Terra/high+Terra/high        total   68.50
+  gpt-6.2-sol/low+Terra/high+Terra/high total   89.83
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  120.89
+  Terra/high+Terra/high+Terra/high total   76.00
+  gpt-6.2-sol/low+Terra/high+Terra/high - Terra/high+Terra/high: +21.33 (95% +12.78 to +31.44); diffs better 27, worse 0, tied 43
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Terra/high+Terra/high: +52.39 (95% +36.11 to +70.44); diffs better 36, worse 0, tied 34
+  Terra/high+Terra/high+Terra/high - Terra/high+Terra/high: +7.50 (95% +4.25 to +11.17); diffs better 18, worse 0, tied 52
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/low+Terra/high+Terra/high total   89.83
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  120.89
+  Terra/high+Terra/high+Terra/high total   76.00
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: +31.06 (95% +20.22 to +43.39); diffs better 32, worse 2, tied 36
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: -13.83 (95% -22.53 to -6.39); diffs better 8, worse 18, tied 44
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  Sol/medium                   total   40.50
+  gpt-6.2-sol/low              total   70.33
+  gpt-6.2-sol/medium           total  112.00
+  gpt-6.2-sol/low - Sol/medium: +29.83 (95% +19.17 to +41.00); diffs better 34, worse 7, tied 29
+  gpt-6.2-sol/medium - Sol/medium: +71.50 (95% +52.00 to +93.67); diffs better 43, worse 0, tied 27
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  Sol/medium+Terra/high+Terra/high total   76.50
+  gpt-6.2-sol/low+Terra/high+Terra/high total   89.83
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  120.89
+  gpt-6.2-sol/low+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +13.33 (95% +6.19 to +21.58); diffs better 22, worse 6, tied 42
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +44.39 (95% +30.39 to +60.08); diffs better 34, worse 0, tied 36
+
+high
+
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/low              total   11.33
+  gpt-6.2-sol/medium           total   21.00
+  Terra/high                   total    7.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   13.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total   21.11
+  gpt-6.2-sol/low+Terra/high   total   12.67
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total   23.00
+  gpt-6.2-sol/medium+Terra/high total   21.22
+  Terra/high+Terra/high        total    8.67
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   15.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total   21.22
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high total   14.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total   23.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high total   21.33
+  gpt-6.2-sol/low+Terra/high+Terra/high total   13.67
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total   24.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high total   23.00
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   21.33
+  Terra/high+Terra/high+Terra/high total   10.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +9.67 (95% +4.00 to +16.67); diffs better 11, worse 0, tied 59
+  Terra/high - gpt-6.2-sol/low: -4.33 (95% -9.33 to -0.33); diffs better 1, worse 6, tied 63
+  gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +2.00 (95% +0.67 to +3.67); diffs better 6, worse 0, tied 64
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +9.78 (95% +4.00 to +16.56); diffs better 11, worse 0, tied 59
+  gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +1.33 (95% +0.22 to +3.11); diffs better 4, worse 0, tied 66
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +11.67 (95% +5.00 to +20.00); diffs better 11, worse 0, tied 59
+  gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +9.89 (95% +4.33 to +16.67); diffs better 11, worse 0, tied 59
+  Terra/high+Terra/high - gpt-6.2-sol/low: -2.67 (95% -8.00 to +2.00); diffs better 4, worse 6, tied 60
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +3.67 (95% +1.00 to +6.67); diffs better 6, worse 0, tied 64
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +9.89 (95% +4.22 to +16.89); diffs better 11, worse 0, tied 59
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +3.00 (95% +1.11 to +5.33); diffs better 7, worse 0, tied 63
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +11.67 (95% +5.00 to +20.00); diffs better 11, worse 0, tied 59
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +10.00 (95% +4.33 to +17.11); diffs better 11, worse 0, tied 59
+  gpt-6.2-sol/low+Terra/high+Terra/high - gpt-6.2-sol/low: +2.33 (95% +0.44 to +5.22); diffs better 4, worse 0, tied 66
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +12.67 (95% +5.33 to +22.00); diffs better 11, worse 0, tied 59
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +11.67 (95% +5.00 to +20.00); diffs better 11, worse 0, tied 59
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low: +10.00 (95% +4.33 to +17.00); diffs better 11, worse 0, tied 59
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low: -1.33 (95% -6.67 to +3.67); diffs better 4, worse 5, tied 61
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   13.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total   21.11
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total   23.00
+  Terra/high+Terra/high        total    8.67
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   15.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +7.78 (95% +3.00 to +13.78); diffs better 10, worse 0, tied 60
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +9.67 (95% +3.67 to +17.00); diffs better 10, worse 0, tied 60
+  Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low: -4.67 (95% -10.67 to +0.33); diffs better 1, worse 6, tied 63
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low+gpt-6.2-sol/low: +1.67 (95% +0.33 to +3.33); diffs better 5, worse 0, tied 65
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/medium           total   21.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total   23.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total   24.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +2.00 (95% +0.33 to +4.67); diffs better 4, worse 0, tied 66
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +3.00 (95% +0.33 to +7.00); diffs better 4, worse 0, tied 66
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total   23.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total   24.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium+gpt-6.2-sol/medium: +1.00 (95% +0.00 to +2.67); diffs better 2, worse 0, tied 68
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   15.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total   21.22
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total   23.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total   24.00
+  Terra/high+Terra/high+Terra/high total   10.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +6.22 (95% +2.00 to +11.56); diffs better 7, worse 0, tied 63
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +8.00 (95% +2.67 to +14.67); diffs better 7, worse 0, tied 63
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +9.00 (95% +3.00 to +16.00); diffs better 7, worse 0, tied 63
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: -5.00 (95% -11.00 to +0.00); diffs better 1, worse 5, tied 64
+diffs 70; verdicts ['confirmed']; severities ['high']
+  Terra/high+Terra/high        total    8.67
+  gpt-6.2-sol/low+Terra/high+Terra/high total   13.67
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   21.33
+  Terra/high+Terra/high+Terra/high total   10.00
+  gpt-6.2-sol/low+Terra/high+Terra/high - Terra/high+Terra/high: +5.00 (95% +1.33 to +9.89); diffs better 9, worse 0, tied 61
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Terra/high+Terra/high: +12.67 (95% +5.67 to +20.67); diffs better 12, worse 0, tied 58
+  Terra/high+Terra/high+Terra/high - Terra/high+Terra/high: +1.33 (95% +0.33 to +2.67); diffs better 4, worse 0, tied 66
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/low+Terra/high+Terra/high total   13.67
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   21.33
+  Terra/high+Terra/high+Terra/high total   10.00
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: +7.67 (95% +2.89 to +13.56); diffs better 10, worse 0, tied 60
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: -3.67 (95% -8.56 to +0.11); diffs better 3, worse 5, tied 62
+diffs 70; verdicts ['confirmed']; severities ['high']
+  Sol/medium                   total    9.50
+  gpt-6.2-sol/low              total   11.33
+  gpt-6.2-sol/medium           total   21.00
+  gpt-6.2-sol/low - Sol/medium: +1.83 (95% -2.50 to +6.50); diffs better 6, worse 4, tied 60
+  gpt-6.2-sol/medium - Sol/medium: +11.50 (95% +4.67 to +19.83); diffs better 11, worse 1, tied 58
+diffs 70; verdicts ['confirmed']; severities ['high']
+  Sol/medium+Terra/high+Terra/high total   12.33
+  gpt-6.2-sol/low+Terra/high+Terra/high total   13.67
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   21.33
+  gpt-6.2-sol/low+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +1.33 (95% -1.11 to +4.50); diffs better 5, worse 3, tied 62
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +9.00 (95% +3.67 to +15.50); diffs better 10, worse 0, tied 60
+
+medium
+
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/low              total   59.00
+  gpt-6.2-sol/medium           total   91.00
+  Terra/high                   total   47.92
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   72.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total   97.67
+  gpt-6.2-sol/low+Terra/high   total   70.83
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  104.00
+  gpt-6.2-sol/medium+Terra/high total   96.89
+  Terra/high+Terra/high        total   59.83
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   79.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  101.11
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high total   79.06
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  107.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high total  100.93
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.17
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  110.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high total  107.36
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   99.56
+  Terra/high+Terra/high+Terra/high total   66.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +32.00 (95% +20.00 to +46.67); diffs better 32, worse 1, tied 37
+  Terra/high - gpt-6.2-sol/low: -11.08 (95% -18.17 to -4.42); diffs better 7, worse 25, tied 38
+  gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +13.33 (95% +8.67 to +18.33); diffs better 26, worse 0, tied 44
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +38.67 (95% +26.11 to +53.44); diffs better 37, worse 0, tied 33
+  gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +11.83 (95% +7.14 to +17.14); diffs better 23, worse 0, tied 47
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +45.00 (95% +30.00 to +62.33); diffs better 36, worse 1, tied 33
+  gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +37.89 (95% +25.53 to +52.50); diffs better 37, worse 0, tied 33
+  Terra/high+Terra/high - gpt-6.2-sol/low: +0.83 (95% -6.00 to +7.83); diffs better 15, worse 12, tied 43
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +20.00 (95% +12.33 to +28.67); diffs better 26, worse 0, tied 44
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +42.11 (95% +28.67 to +57.44); diffs better 38, worse 0, tied 32
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +20.06 (95% +12.47 to +28.50); diffs better 26, worse 0, tied 44
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +48.00 (95% +32.67 to +65.44); diffs better 37, worse 0, tied 33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +41.93 (95% +28.74 to +57.28); diffs better 38, worse 0, tied 32
+  gpt-6.2-sol/low+Terra/high+Terra/high - gpt-6.2-sol/low: +17.17 (95% +10.39 to +25.22); diffs better 23, worse 0, tied 47
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +51.00 (95% +34.00 to +70.33); diffs better 36, worse 1, tied 33
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +48.36 (95% +33.28 to +66.11); diffs better 37, worse 0, tied 33
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low: +40.56 (95% +27.50 to +55.56); diffs better 37, worse 0, tied 33
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low: +7.00 (95% -0.42 to +14.75); diffs better 18, worse 8, tied 44
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   72.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total   97.67
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  104.00
+  Terra/high+Terra/high        total   59.83
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   79.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +25.33 (95% +15.00 to +37.78); diffs better 29, worse 4, tied 37
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +31.67 (95% +19.00 to +46.33); diffs better 29, worse 2, tied 39
+  Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low: -12.50 (95% -20.00 to -5.50); diffs better 6, worse 22, tied 42
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low+gpt-6.2-sol/low: +6.67 (95% +3.33 to +10.67); diffs better 13, worse 0, tied 57
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/medium           total   91.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  104.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  110.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +13.00 (95% +8.33 to +18.33); diffs better 22, worse 0, tied 48
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +19.00 (95% +11.67 to +27.00); diffs better 22, worse 0, tied 48
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  104.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  110.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium+gpt-6.2-sol/medium: +6.00 (95% +3.33 to +9.33); diffs better 14, worse 0, tied 56
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   79.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  101.11
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  107.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  110.00
+  Terra/high+Terra/high+Terra/high total   66.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +22.11 (95% +12.11 to +33.67); diffs better 22, worse 5, tied 43
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +28.00 (95% +15.89 to +41.67); diffs better 23, worse 3, tied 44
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +31.00 (95% +17.00 to +47.00); diffs better 21, worse 2, tied 47
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: -13.00 (95% -22.25 to -4.75); diffs better 3, worse 13, tied 54
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  Terra/high+Terra/high        total   59.83
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.17
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   99.56
+  Terra/high+Terra/high+Terra/high total   66.00
+  gpt-6.2-sol/low+Terra/high+Terra/high - Terra/high+Terra/high: +16.33 (95% +10.11 to +23.44); diffs better 25, worse 0, tied 45
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Terra/high+Terra/high: +39.72 (95% +28.22 to +52.06); diffs better 35, worse 0, tied 35
+  Terra/high+Terra/high+Terra/high - Terra/high+Terra/high: +6.17 (95% +3.42 to +9.25); diffs better 16, worse 0, tied 54
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.17
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   99.56
+  Terra/high+Terra/high+Terra/high total   66.00
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: +23.39 (95% +15.11 to +32.72); diffs better 31, worse 2, tied 37
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: -10.17 (95% -16.14 to -4.86); diffs better 7, worse 16, tied 47
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  Sol/medium                   total   31.00
+  gpt-6.2-sol/low              total   59.00
+  gpt-6.2-sol/medium           total   91.00
+  gpt-6.2-sol/low - Sol/medium: +28.00 (95% +17.67 to +38.83); diffs better 35, worse 6, tied 29
+  gpt-6.2-sol/medium - Sol/medium: +60.00 (95% +43.67 to +78.33); diffs better 41, worse 0, tied 29
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  Sol/medium+Terra/high+Terra/high total   64.17
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.17
+  gpt-6.2-sol/medium+Terra/high+Terra/high total   99.56
+  gpt-6.2-sol/low+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +12.00 (95% +5.39 to +19.39); diffs better 22, worse 5, tied 43
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +35.39 (95% +24.33 to +47.39); diffs better 33, worse 0, tied 37
+
+low
+
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/low              total   64.33
+  gpt-6.2-sol/medium           total  101.67
+  Terra/high                   total   34.75
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   79.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total  111.89
+  gpt-6.2-sol/low+Terra/high   total   73.33
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  121.00
+  gpt-6.2-sol/medium+Terra/high total  108.58
+  Terra/high+Terra/high        total   43.50
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   85.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  116.44
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high total   84.56
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  128.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high total  116.55
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.61
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  132.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high total  126.92
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  111.39
+  Terra/high+Terra/high+Terra/high total   48.75
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +37.33 (95% +24.33 to +52.00); diffs better 40, worse 5, tied 25
+  Terra/high - gpt-6.2-sol/low: -29.58 (95% -38.50 to -21.00); diffs better 3, worse 36, tied 31
+  gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +15.00 (95% +10.00 to +20.67); diffs better 28, worse 0, tied 42
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +47.56 (95% +34.22 to +62.44); diffs better 45, worse 0, tied 25
+  gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +9.00 (95% +4.89 to +13.67); diffs better 17, worse 0, tied 53
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +56.67 (95% +39.33 to +75.67); diffs better 42, worse 3, tied 25
+  gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +44.25 (95% +29.94 to +60.11); diffs better 43, worse 4, tied 23
+  Terra/high+Terra/high - gpt-6.2-sol/low: -20.83 (95% -29.33 to -12.50); diffs better 4, worse 30, tied 36
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low: +20.67 (95% +13.33 to +29.00); diffs better 28, worse 0, tied 42
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low: +52.11 (95% +37.89 to +68.22); diffs better 47, worse 0, tied 23
+  gpt-6.2-sol/low+gpt-6.2-sol/low+Terra/high - gpt-6.2-sol/low: +20.22 (95% +13.11 to +28.11); diffs better 31, worse 0, tied 39
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +64.00 (95% +46.44 to +83.11); diffs better 45, worse 0, tied 25
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +52.21 (95% +37.69 to +68.29); diffs better 47, worse 0, tied 23
+  gpt-6.2-sol/low+Terra/high+Terra/high - gpt-6.2-sol/low: +12.28 (95% +6.61 to +18.61); diffs better 17, worse 0, tied 53
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low: +67.67 (95% +47.67 to +89.33); diffs better 45, worse 2, tied 23
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+Terra/high - gpt-6.2-sol/low: +62.58 (95% +44.17 to +82.58); diffs better 45, worse 3, tied 22
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low: +47.06 (95% +32.00 to +63.83); diffs better 43, worse 4, tied 23
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low: -15.58 (95% -24.75 to -6.67); diffs better 7, worse 26, tied 37
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/low+gpt-6.2-sol/low total   79.33
+  gpt-6.2-sol/low+gpt-6.2-sol/medium total  111.89
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  121.00
+  Terra/high+Terra/high        total   43.50
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   85.00
+  gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +32.56 (95% +21.44 to +44.89); diffs better 35, worse 5, tied 30
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low: +41.67 (95% +26.33 to +58.00); diffs better 35, worse 5, tied 30
+  Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low: -35.83 (95% -47.67 to -24.83); diffs better 2, worse 33, tied 35
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/low+gpt-6.2-sol/low: +5.67 (95% +3.00 to +8.67); diffs better 13, worse 0, tied 57
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/medium           total  101.67
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  121.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  132.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +19.33 (95% +13.67 to +25.67); diffs better 36, worse 0, tied 34
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium: +30.33 (95% +21.00 to +40.67); diffs better 36, worse 0, tied 34
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium total  121.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  132.00
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/medium+gpt-6.2-sol/medium: +11.00 (95% +7.00 to +15.67); diffs better 23, worse 0, tied 47
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   85.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium total  116.44
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  128.33
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium total  132.00
+  Terra/high+Terra/high+Terra/high total   48.75
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +31.44 (95% +21.33 to +42.67); diffs better 32, worse 1, tied 37
+  gpt-6.2-sol/low+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +43.33 (95% +29.67 to +58.44); diffs better 32, worse 4, tied 34
+  gpt-6.2-sol/medium+gpt-6.2-sol/medium+gpt-6.2-sol/medium - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: +47.00 (95% +30.00 to +65.00); diffs better 30, worse 3, tied 37
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low: -36.25 (95% -49.50 to -23.50); diffs better 2, worse 28, tied 40
+diffs 70; verdicts ['confirmed']; severities ['low']
+  Terra/high+Terra/high        total   43.50
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.61
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  111.39
+  Terra/high+Terra/high+Terra/high total   48.75
+  gpt-6.2-sol/low+Terra/high+Terra/high - Terra/high+Terra/high: +33.11 (95% +23.56 to +43.11); diffs better 35, worse 0, tied 35
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Terra/high+Terra/high: +67.89 (95% +50.56 to +86.33); diffs better 47, worse 0, tied 23
+  Terra/high+Terra/high+Terra/high - Terra/high+Terra/high: +5.25 (95% +2.83 to +8.00); diffs better 14, worse 0, tied 56
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.61
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  111.39
+  Terra/high+Terra/high+Terra/high total   48.75
+  gpt-6.2-sol/medium+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: +34.78 (95% +22.67 to +48.00); diffs better 40, worse 4, tied 26
+  Terra/high+Terra/high+Terra/high - gpt-6.2-sol/low+Terra/high+Terra/high: -27.86 (95% -37.67 to -18.64); diffs better 3, worse 30, tied 37
+diffs 70; verdicts ['confirmed']; severities ['low']
+  Sol/medium                   total    9.00
+  gpt-6.2-sol/low              total   64.33
+  gpt-6.2-sol/medium           total  101.67
+  gpt-6.2-sol/low - Sol/medium: +55.33 (95% +42.00 to +69.67); diffs better 44, worse 0, tied 26
+  gpt-6.2-sol/medium - Sol/medium: +92.67 (95% +70.83 to +116.83); diffs better 51, worse 0, tied 19
+diffs 70; verdicts ['confirmed']; severities ['low']
+  Sol/medium+Terra/high+Terra/high total   44.67
+  gpt-6.2-sol/low+Terra/high+Terra/high total   76.61
+  gpt-6.2-sol/medium+Terra/high+Terra/high total  111.39
+  gpt-6.2-sol/low+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +31.94 (95% +22.72 to +41.56); diffs better 35, worse 0, tied 35
+  gpt-6.2-sol/medium+Terra/high+Terra/high - Sol/medium+Terra/high+Terra/high: +66.72 (95% +49.83 to +84.67); diffs better 47, worse 0, tied 23
+
+Three low compared with one medium
+
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/medium           total  213.67
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total  179.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/medium: -34.67 (95% -48.67 to -21.67); diffs better 13, worse 40, tied 17
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/medium           total  112.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low total   94.00
+  gpt-6.2-sol/low+gpt-6.2-sol/low+gpt-6.2-sol/low - gpt-6.2-sol/medium: -18.00 (95% -31.00 to -6.67); diffs better 8, worse 21, tied 41

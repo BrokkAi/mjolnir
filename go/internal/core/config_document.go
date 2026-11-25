@@ -575,6 +575,25 @@ func tomlEditSet(table tomlEditTableLike, key string, item tomlEditItem) {
 	}
 }
 
+// TomlEditSetRootString is the toml_edit edit mj-worker-staging's
+// `point_config_at_catalog` makes to a staged Codex `config.toml`: text read
+// as a toml_edit Document, its root key set to the string value, and the
+// document rendered back. A key that already holds a value keeps that
+// value's decoration (`*item = Item::Value(replacement)` with the old decor);
+// a new key is appended to the root's values with toml_edit's defaults.
+func TomlEditSetRootString(text, key, value string) (string, error) {
+	document, err := parseTomlEditDocument(text)
+	if err != nil {
+		return "", err
+	}
+	replacement := &tomlEditValue{kind: tomlEditString, repr: tomlString(value)}
+	if existing, ok := document.root.get(key).(*tomlEditValue); ok {
+		replacement.decor = existing.decor
+	}
+	tomlEditSet(document.root, key, replacement)
+	return document.String(), nil
+}
+
 func (t *tomlEditInlineTable) keys() []string { return t.items.keys() }
 
 func (t *tomlEditInlineTable) get(key string) tomlEditItem {

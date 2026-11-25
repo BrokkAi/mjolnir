@@ -163,18 +163,20 @@ impl RuntimeState {
             LifecycleKind::UpgradeContainer,
             super::lifecycle::LifecycleStart { phase, ..super::lifecycle::LifecycleStart::request(request_key, None, None) },
             Some(acceptance),
-            move |state, session_id, cancelled, session_admission| async move {
+            move |state, session_id, control, session_admission| async move {
+ let cancelled = control.cancelled.clone();
                 if let Some(settings) = &settings {
                     state.validate_container_settings_size(&session_id, settings.resource_allocation.as_ref()).await?;
                 }
                 let admitted = blocking({
                     let session_id = session_id.clone();
                     let cancelled = cancelled.clone();
+                    let control = control.clone();
                     move || {
                         if let Some(intent) = existing { return Ok(intent); }
                         let operation_id = new_command_id("container-upgrade")?;
                         let controller = Controller::load()?;
-                        let executor = CancellableProcessExecutor::new(cancelled.clone());
+                        let executor = control.executor();
                         if let Some(settings) = settings {
                             let plan = controller.plan_container_settings_replacement(&session_id, &operation_id, &settings, &executor)?
                                 .context("container settings or preservation preflight changed; review settings again")?;
@@ -199,7 +201,7 @@ impl RuntimeState {
                 let intent = admitted?;
                 state.bind_restart_intent(&session_id, &intent.operation_id)?;
                 accepted.send_replace(Some(Ok(())));
-                state.restart_admitted(&session_admission, session_id, cancelled, Some(intent), false).await
+                state.restart_admitted(&session_admission, session_id, control, Some(intent), false).await
             },
         ).await?;
         let runtime = self.clone();

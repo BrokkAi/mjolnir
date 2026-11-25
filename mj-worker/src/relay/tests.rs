@@ -1647,6 +1647,84 @@ fn a_locally_created_empty_native_session_has_no_history() {
     assert!(!relay.native_session_may_have_history());
 }
 
+// Hard-won: #1701: a used prior native session made a fresh non-resumed open look like it had history.
+#[test]
+fn fresh_non_resumed_open_clears_native_use_after_a_used_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "old-antigravity".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.mark_native_session_used().unwrap();
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::MayHaveHistory
+    );
+
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "new-claude-id".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    assert!(!relay.snapshot.native_session_used);
+    assert_eq!(
+        relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+        NativeSessionUse::Unused
+    );
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::CreatedHereUnused
+    );
+
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "resumed-claude".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    assert!(relay.snapshot.native_session_used);
+    assert_eq!(
+        relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+        NativeSessionUse::Used
+    );
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::MayHaveHistory
+    );
+
+    // No version-1 evidence for this id: the sticky flag still protects it.
+    relay.snapshot.native_use_evidence = None;
+    relay.snapshot.native_session_used = true;
+    relay.snapshot.native_session_id = Some("same-id".into());
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "same-id".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    assert!(relay.snapshot.native_session_used);
+    assert_eq!(
+        relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+        NativeSessionUse::Unknown
+    );
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::MayHaveHistory
+    );
+}
+
 #[test]
 fn a_dispatched_prompt_gives_the_native_session_history() {
     let temp = tempfile::tempdir().unwrap();
@@ -11409,7 +11487,7 @@ fn forms_opened_during_bridge_startup_survive_session_open_and_ack_pruning() {
 #[cfg(unix)]
 #[test]
 fn clear_bridge_retirement_releases_resumes_before_success_or_rollback() {
-    use mj_core::acp::RuntimeEvent;
+    use crate::acp::RuntimeEvent;
     for replacement_succeeds in [false, true] {
         for replacement_has_resume in [false, true] {
             let temp = tempfile::tempdir().unwrap();
@@ -11484,9 +11562,10 @@ fn clear_bridge_retirement_releases_resumes_before_success_or_rollback() {
 #[cfg(unix)]
 #[test]
 fn old_bridge_retirement_preserves_replacement_terminal_admission() {
-    use mj_core::acp::RuntimeEvent;
+    use crate::acp::RuntimeEvent;
     for lifecycle in [
         RuntimeEvent::HarnessRestarting {
+            reload: None,
             message: "old bridge exited".into(),
         },
         RuntimeEvent::ContextClearing {

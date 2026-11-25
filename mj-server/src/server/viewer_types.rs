@@ -256,6 +256,7 @@ impl ViewerSnapshot {
                 let checkout = state
                     .checkout(&session.id)
                     .expect("viewer session has a valid checkout owner");
+                let configuration_issue = session.configuration_issue_in(&checkout, config);
                 let resume_refusals = targets
                     .iter()
                     .filter_map(|target_id| {
@@ -353,13 +354,14 @@ impl ViewerSnapshot {
                     supports_open_request: false,
                     relay_state: None,
                     id: session.id.clone(),
-                    publication_state: session.publication_state(),
+                    publication_state: session.publication_state_in(&checkout),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
                     workspace_id: session.workspace_id.clone(),
                     title: session.listed_title().to_owned(),
                     given_title: session.given_name().map(str::to_owned),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
                     subagent_task_name: subagent.map(|child| child.task_name.clone()),
+                    subagent_orchestrator: subagent.is_some_and(|child| child.orchestrator),
                     subagent_session_ids,
                     reviewer_session_ids,
                     harness_kind: session.harness_kind.id().into(),
@@ -375,12 +377,11 @@ impl ViewerSnapshot {
                     active: session.state.is_active(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
-                    has_error: session.last_error.is_some()
-                        || session.configuration_issue(config).is_some(),
+                    has_error: session.last_error.is_some() || configuration_issue.is_some(),
                     has_checkpoint: session.checkpoint.is_some(),
                     failed_launch_retry,
                     retained_target: session.target.is_some(),
-                    configuration_issue: session.configuration_issue(config),
+                    configuration_issue,
                     // A session that failed to launch (or a close that left it
                     // dead) carries its reason here so a client need not open
                     // the local diagnostic to learn why. A failed resume rolls
@@ -741,6 +742,10 @@ pub struct ViewerSession {
     /// The stable task label chosen by the parent when it spawned this child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_task_name: Option<String>,
+    /// Whether this child is a depth-1 orchestrator that may delegate to its
+    /// own workers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subagent_orchestrator: bool,
     /// Direct children of this parent, workers and reviewers alike. Children
     /// are deliberately never nested.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

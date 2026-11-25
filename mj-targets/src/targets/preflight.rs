@@ -1141,6 +1141,23 @@ impl CgroupLimit {
             Self::Memory => "--memory=",
         }
     }
+
+    /// Whether `run_args` ask for this limit.
+    pub fn is_requested_by(self, run_args: &[String]) -> bool {
+        run_args
+            .iter()
+            .any(|arg| arg.starts_with(self.run_flag_prefix()))
+    }
+
+    /// Whether `target` is a container target whose run arguments ask for
+    /// any limit.
+    pub fn any_requested_by(target: &TargetTemplate) -> bool {
+        target.image_host().is_some_and(|(_, container)| {
+            Self::ALL
+                .into_iter()
+                .any(|limit| limit.is_requested_by(&container.extra_run_args))
+        })
+    }
 }
 
 /// openSUSE and SLE ship `Delegate=` for `user@.service`, so their rootless
@@ -1153,6 +1170,9 @@ const CGROUP_DELEGATION_REMEDIATION: &str = "Have systemd delegate the controlle
 pub struct CgroupCapabilities {
     pub unenforceable_limits: Vec<CgroupLimit>,
     needs_cgroup_v2: bool,
+    /// Why the engine's report could not be read. The limits are then unknown,
+    /// not enforceable.
+    unreadable: Option<String>,
 }
 
 impl CgroupCapabilities {
@@ -1204,19 +1224,25 @@ pub fn unenforceable_container_limits(
     if !CgroupLimit::ALL.into_iter().any(&requested) {
         return Vec::new();
     }
-    let mut cgroups = match preflight
-        .map_or_else(|| probe_container_unenforceable_limits(host, executor), Ok)
-    {
-        Ok(cgroups) => cgroups,
-        Err(error) => {
-            tracing::warn!(host = %host.label(), error = format!("{error:#}"), "could not read cgroup capabilities; keeping container limits");
-            executor.notify_notice(&format!(
-                "Could not read cgroup capabilities for {}, so the session keeps its CPU and memory limits: {error:#}",
-                host.label()
-            ));
-            return Vec::new();
-        }
+    let report = |error: &str| {
+        tracing::warn!(host = %host.label(), error, "could not read cgroup capabilities; keeping container limits");
+        executor.notify_notice(&format!(
+            "Could not read cgroup capabilities for {}, so the session keeps its CPU and memory limits: {error}",
+            host.label()
+        ));
     };
+    let mut cgroups =
+        match preflight.map_or_else(|| probe_container_unenforceable_limits(host, executor), Ok) {
+            Ok(cgroups) => cgroups,
+            Err(error) => {
+                report(&format!("{error:#}"));
+                return Vec::new();
+            }
+        };
+    if let Some(error) = &cgroups.unreadable {
+        report(error);
+        return Vec::new();
+    }
     cgroups
         .unenforceable_limits
         .retain(|limit| requested(*limit));
@@ -1540,21 +1566,24 @@ pub struct ProbeFrames {
     pub status: &'static str,
 }
 
-const PODMAN_PROBE_FRAMES: ProbeFrames = ProbeFrames {
+/// The frames [`PROBE_HELPER_SH`] prints and [`parse_framed_probes`] reads.
+pub const DEFAULT_PROBE_FRAMES: ProbeFrames = ProbeFrames {
     begin: PROBE_BLOCK_BEGIN,
     end: PROBE_BLOCK_END,
     status: PROBE_STATUS_PREFIX,
 };
 
-/// Run every remote Podman probe in one SSH round trip.
-///
-/// Each probe's stdout is captured in a shell variable and reprinted between
-/// framing markers, while its stderr is written straight to the saved stdout
-/// inside its own frame, so multi-line and arbitrary output survives intact.
-/// The version probe short-circuits the rest: without Podman the later probes
-/// can only repeat its failure.
-pub const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
-exec 3>&1
+/// The shell function every batched remote probe script shares. A script
+/// that starts with it runs `probe <name> <command...>` for each question and
+/// parses the output with [`parse_framed_probes`] and [`DEFAULT_PROBE_FRAMES`].
+/// Each probe's stdout is captured in `$out`, reprinted between framing
+/// markers, and its stderr is written straight to the saved stdout inside its
+/// own frame, so multi-line and arbitrary output survives intact. The function
+/// returns the probe's status, so a script can stop where later probes could
+/// only repeat an earlier failure.
+macro_rules! probe_helper_sh {
+    () => {
+        r#"exec 3>&1
 probe() {
     name=$1
     shift
@@ -1566,13 +1595,106 @@ probe() {
     printf '__mj_probe_status__ %s %s\n' "$name" "$status"
     return "$status"
 }
-probe platform uname -s || exit 0
+"#
+    };
+}
+
+/// See [`probe_helper_sh`]; the one text every batched probe script starts with.
+pub const PROBE_HELPER_SH: &str = probe_helper_sh!();
+
+/// Run every remote Podman probe in one SSH round trip.
+///
+/// The version probe short-circuits the rest: without Podman the later probes
+/// can only repeat its failure. See [`PROBE_HELPER_SH`] for the framing.
+pub const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = concat!(
+    "\n",
+    probe_helper_sh!(),
+    r#"probe platform uname -s || exit 0
 [ "$out" = Linux ] || exit 0
 probe version podman --version || exit 0
 probe info podman info --format json
 probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
 exit 0
-"#;
+"#
+);
+
+/// What a launch on an SSH Podman host asks the host before it creates
+/// anything, besides whether it is reachable: the engine's cgroup report.
+/// Each answer is framed, so a failing `podman info` cannot be mistaken for a
+/// failing connection. The engine's report is fetched on every launch; the
+/// host's delegation can change between launches.
+const SSH_PODMAN_LAUNCH_PROBE_SCRIPT: &str = concat!(
+    "\n",
+    probe_helper_sh!(),
+    r#"probe cgroups podman info --format json
+exit 0
+"#
+);
+
+/// Check that an SSH Podman host is reachable and read which limits its engine
+/// can enforce, in one SSH command.
+///
+/// The command runs as a probe session (see [`ssh_probe_command`]), so a host
+/// that is down, has an unknown host key, or asks for a password fails with
+/// [`ensure_ssh_connectivity`]'s message, as the connectivity check alone does.
+/// An engine that cannot report its cgroups is not a launch failure: the
+/// result says so, and the launch keeps the limits it was asked for.
+pub fn verify_ssh_podman_launch(
+    ssh: &SshTarget,
+    executor: &impl CommandExecutor,
+) -> Result<CgroupCapabilities> {
+    let command = ssh_probe_command(
+        ssh,
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            SSH_PODMAN_LAUNCH_PROBE_SCRIPT.to_owned(),
+        ],
+        "verify SSH connectivity and read Podman cgroup controllers",
+    );
+    let output = executor.execute(&command)?;
+    ensure_ssh_connectivity(ssh, &output)?;
+    let probes = parse_podman_probe_output(&output.stdout);
+    let Some(info) = probes.get("cgroups") else {
+        return Ok(CgroupCapabilities {
+            unreadable: Some(format!(
+                "the launch probe returned unparsable output (status {}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            ..Default::default()
+        });
+    };
+    Ok(cgroups_from_podman_info(info))
+}
+
+/// The limits Podman can enforce, from the result of `podman info --format
+/// json`.
+fn cgroups_from_podman_info(info: &CommandOutput) -> CgroupCapabilities {
+    let unreadable = |reason: String| CgroupCapabilities {
+        unreadable: Some(reason),
+        ..Default::default()
+    };
+    if info.status != 0 {
+        return unreadable(format!(
+            "`podman info` failed with status {}: {}",
+            info.status,
+            String::from_utf8_lossy(&info.stderr).trim()
+        ));
+    }
+    match serde_json::from_slice::<serde_json::Value>(&info.stdout) {
+        Ok(value) => CgroupCapabilities {
+            unenforceable_limits: value
+                .get("host")
+                .map(unenforceable_limits)
+                .unwrap_or_default(),
+            ..Default::default()
+        },
+        Err(error) => unreadable(format!(
+            "`podman info --format json` returned unparsable output: {error}"
+        )),
+    }
+}
 
 pub(super) fn run_ssh_podman_probes(
     host: PodmanHost<'_>,
@@ -1638,7 +1760,7 @@ pub fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Vec<u8> {
 /// A probe appears only once its status line has been read, so output truncated
 /// mid-probe is reported as a missing probe rather than a partial result.
 pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, CommandOutput> {
-    parse_framed_probes(stdout, PODMAN_PROBE_FRAMES)
+    parse_framed_probes(stdout, DEFAULT_PROBE_FRAMES)
 }
 
 /// Split framed output into one result per probe, as

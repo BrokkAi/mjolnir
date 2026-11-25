@@ -1686,7 +1686,7 @@ func TestTerminalSpawnFailureReleasesItsCutRegistration(t *testing.T) {
 	root := t.TempDir()
 	owner := acpTestsRelayCell(t, root, "terminal-adoption")
 	guard := owner.Lock()
-	guard.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, guard.DurableRelay, core.HarnessKindClaude)
 	guard.Unlock()
 	weakOwner := weak.Make(owner)
 	runner := startScriptedRuntimeWithOwner(t, &weakOwner)

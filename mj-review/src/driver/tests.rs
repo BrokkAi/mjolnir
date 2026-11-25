@@ -75,11 +75,9 @@ fn running() -> (TurnReviewDriver, String) {
     let requests = driver.delta_captured(changed_delta());
     let command_id = prompted(&requests, "reviewer-1");
     let prompt = prompt_text(&requests, "reviewer-1");
-    assert!(
-        prompt.contains(
-            "git -C /w/app diff --no-ext-diff --ignore-submodules=none base-tree new-tree"
-        )
-    );
+    assert!(prompt.contains("Baseline tree: base-tree"));
+    assert!(prompt.contains("Captured tree: new-tree"));
+    assert!(!prompt.contains("Run this exact command"));
     assert!(
         !prompt.contains("+retry"),
         "the prompt does not embed the diff"
@@ -361,7 +359,10 @@ fn a_brief_writer_runs_alone_and_its_brief_reaches_every_reviewer_prompt() {
         panic!("only the writer starts first: {requests:?}");
     };
     assert_eq!(command_id, &brief_writer_command_id("brief-written"));
-    assert!(prompt.contains("base-tree new-tree"), "{prompt}");
+    assert!(prompt.contains("Baseline tree: base-tree"));
+    assert!(prompt.contains("Captured tree: new-tree"));
+    assert!(prompt.contains("Per-file diffstat"));
+    assert!(!prompt.contains("Run this exact command"));
     assert!(prompt.contains("add a retry"));
     assert_eq!(driver.phase(), &TurnReviewPhase::WritingBrief);
     assert_eq!(

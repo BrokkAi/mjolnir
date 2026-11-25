@@ -819,7 +819,7 @@ fn spawn_with_gate(
                                             let env = environment.clone(); let session = id.clone(); let view = p.view.clone();
                                             let Phase::Resolving(work) = p.phase else { unreachable!() };
                                             // Child staging and admitted Moves own their own lifecycle admission.
-                                            let work = (!matches!(*recovery, quota::Plan::ChildSwitch { .. })).then_some(work);
+                                            let work = Some(work);
                                             let gate = gate.clone();
                                             let abort = jobs.spawn(async move {
                                                 let result = quota::schedule(&env, &session, view, *recovery, &gate, work).await;

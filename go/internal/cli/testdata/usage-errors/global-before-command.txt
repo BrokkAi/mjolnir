@@ -1,0 +1,7 @@
+error: the following required arguments were not provided:
+  --session <SESSION>
+  --parent <PARENT>
+
+Usage: mj usage --session <SESSION> --parent <PARENT>
+
+For more information, try '--help'.

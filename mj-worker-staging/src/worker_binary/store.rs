@@ -4,6 +4,26 @@ use super::*;
 use mj_core::targets::SshTrafficClass;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
+/// Warm the host store used by subsequent container launches.
+pub fn prestage_host_container_worker(
+    executor: &impl CommandExecutor,
+    ssh: &targets::SshTarget,
+    platform: targets::TargetPlatform,
+) -> Result<()> {
+    let source = super::binary_select::materialize_worker_source(worker_binary_for_arch(
+        platform.architecture,
+        WorkerBinaryRequirement::for_os(platform.os),
+    )?)?;
+    let digest = mj_core::worker_launch::worker_executable_digest(&source)?;
+    let host = targets::TargetLocator::SshBare {
+        ssh: ssh.clone(),
+        worker_id: None,
+        workspace: ".local/share/hel/workspaces/prestage".into(),
+    };
+    let store = mj_core::target_path::text(&store_root(&host, "prestage")?);
+    ensure_published(executor, &host, "prestage", &source, &store, &digest)
+}
+
 /// Beside the session roots, in their target filesystem (inside containers).
 pub fn store_root(locator: &targets::TargetLocator, session_id: &str) -> Result<PathBuf> {
     store_directory(Path::new(&targets::worker_root(locator, session_id)?))
@@ -196,11 +216,43 @@ fn script(
     targets::locator_command(class, locator, script_argv(body, args)).purpose(purpose)
 }
 
+fn shell_words(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| targets::posix_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn inline_collection() -> String {
+    format!(
+        r#"collect_worker_store() (
+store=$1; keep=${{2-}}
+set -- "$store"/*/hel
+if {{ [ -n "$keep" ] && [ "$#" -le 1 ]; }} || {{ [ -z "$keep" ] && [ ! -e "$1" ]; }}; then
+    found=0
+    for p in "$store"/.upload-* "$store"/.transport-* "$store"/.gc-*; do
+        [ -e "$p" ] && found=1 && break
+    done
+    [ "$found" = 1 ] || exit 0
+fi
+if [ -e "$store/.collected" ] && [ -z "$(find "$store/.collected" -mmin +60 -print)" ]; then exit 0; fi
+set -- "$store" "$keep"
+{COLLECT}
+touch -- "$store/.collected"
+)
+"#
+    )
+}
+
 fn script_argv(body: &str, args: &[&str]) -> Vec<String> {
     let mut argv = vec![
         "sh".into(),
         "-c".into(),
-        format!("{}\n{body}", super::upgrade::PROMOTE_WORKER_BINARY),
+        format!(
+            "{}\n{}\n{body}",
+            super::upgrade::PROMOTE_WORKER_BINARY,
+            inline_collection()
+        ),
         "mj-worker-store".into(),
     ];
     argv.extend(args.iter().map(|arg| (*arg).to_owned()));
@@ -266,72 +318,6 @@ fn collect(
     Ok(())
 }
 
-/// Collection only retires entries older than a day, so one run per store and
-/// interval is enough; running it for every install queued hours of commands.
-const COLLECT_INTERVAL: Duration = Duration::from_secs(60 * 60);
-
-/// Claim this daemon's collection for `store`; at most one caller per interval
-/// wins and runs it inline, so the run has exactly one owner.
-///
-/// Why this cannot starve this daemon's own installs: one run retires an
-/// entry at most once, and a republished entry has a fresh modification time
-/// (the publish script touches each upload), so no later run within the day
-/// retires it again.
-/// A run therefore forces at most one retry of an install, and the install
-/// loop allows three. Entries pinned by a link are restored, never removed.
-fn claim_collection(locator: &targets::TargetLocator, store: &str) -> bool {
-    let mut last = collections().lock().unwrap_or_else(|e| e.into_inner());
-    match last.entry(store_key(locator, store)) {
-        std::collections::hash_map::Entry::Occupied(mut entry) => {
-            if entry.get().elapsed() < COLLECT_INTERVAL {
-                return false;
-            }
-            entry.insert(Instant::now());
-        }
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(Instant::now());
-        }
-    }
-    true
-}
-
-fn collections() -> &'static Mutex<HashMap<String, Instant>> {
-    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
-    LAST.get_or_init(Default::default)
-}
-
-#[cfg(all(test, unix))]
-pub fn forget_collections() {
-    collections()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-}
-
-/// Collect after a cached install, if this interval's run is still unclaimed.
-/// A cached install never waits for the store: while a publication owns it,
-/// the publication collects itself, so this skips without claiming. A failed
-/// run is reported and not retried before the next interval; an upload that
-/// needs space collects regardless, and the next daemon starts unclaimed.
-fn collect_if_due(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    store: &str,
-    keep: Option<&str>,
-) {
-    if executor.cancellation_requested() {
-        return;
-    }
-    let gate = store_gate(locator, store);
-    let Some(_guard) = gate.try_lock(session_id, "collect unused worker binaries") else {
-        return;
-    };
-    if claim_collection(locator, store) {
-        collect_reporting(executor, locator, store, keep);
-    }
-}
-
 fn collect_reporting(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -370,6 +356,7 @@ pub fn install_worker_binary(
 const LINK_MISSING: i32 = 75;
 const LINK_NO_HARD_LINKS: i32 = 76;
 const LINK_DIGEST_MISMATCH: i32 = 77;
+const LINK_NO_ROOM: i32 = 78;
 
 pub fn install_worker_binary_at(
     executor: &impl CommandExecutor,
@@ -439,14 +426,42 @@ fn install_binary_at(
         |root| format!("{root}/{name}"),
     );
     let Some(source) = source else {
-        super::upgrade::binary_upload_plan(locator, session_id, None, destination, None)?
-            .execute(executor)?;
+        let collect_gate = store_gate(locator, &store);
+        let _collect_guard = collect_gate.try_lock(session_id, "collect unused worker binaries");
+        let allow_collect = if _collect_guard.is_some() { "1" } else { "0" };
+        execute_checked(
+            executor,
+            script(
+                SshTrafficClass::Control,
+                locator,
+                "set -eu; mkdir -p -- \"${2%/*}\"; ln -sfn -- \"$1\" \"$2.next\"; mv -f -- \"$2.next\" \"$2\"; case \"$2\" in */hel) rm -f -- \"${2%/*}\"/hel-control*;; esac; if [ \"$4\" = 1 ]; then collect_worker_store \"$3\" || echo 'worker binary store collection failed' >&2; fi",
+                &[IMAGE_WORKER, destination, &store, allow_collect],
+                "link image worker and collect store",
+            ),
+        )?;
         // Switching to an image link can release the last session reference
         // to a host-copied build. Image installs must collect that store too.
-        collect_if_due(executor, locator, session_id, &store, None);
+
         return Ok(());
     };
     let digest = mj_core::worker_launch::worker_executable_digest(source)?;
+    if matches!(
+        locator,
+        targets::TargetLocator::SshPodman { .. }
+            | targets::TargetLocator::SshDocker { .. }
+            | targets::TargetLocator::SshAppleContainer { .. }
+    ) {
+        return install_ssh_container(
+            executor,
+            locator,
+            session_id,
+            source,
+            destination,
+            &temporary,
+            &store,
+            &digest,
+        );
+    }
     let directory = format!("{store}/{digest}");
     let cached = format!("{directory}/hel");
     // A published build needs no store lock: the link script verifies the
@@ -459,11 +474,19 @@ fn install_binary_at(
         if publish {
             ensure_published(executor, locator, session_id, source, &store, &digest)?;
         }
+        let collect_gate = store_gate(locator, &store);
+        let _collect_guard = collect_gate.try_lock(session_id, "collect unused worker binaries");
+        let allow_collect = if _collect_guard.is_some() { "1" } else { "0" };
         let command = |mode| {
             script(
-                targets::SshTrafficClass::Bulk,
+                if mode == "link" {
+                    targets::SshTrafficClass::Control
+                } else {
+                    targets::SshTrafficClass::Bulk
+                },
                 locator,
                 r#"set -eu
+allow_collect=$1; shift
 source=$1; temporary=$2; destination=$3
 trap 'rm -f -- "$temporary"' EXIT
 if [ "$5" = link ]; then
@@ -492,8 +515,16 @@ promote_worker_binary "$temporary" "$destination"
 # This build serves every control subcommand, so a staged control worker has
 # nothing left to do; its link would only pin a store entry.
 case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
+if [ "$allow_collect" = 1 ]; then collect_worker_store "${source%/*/*}" "$4" || echo 'worker binary store collection failed' >&2; fi
 "#,
-                &[&cached, &temporary, destination, &digest, mode],
+                &[
+                    allow_collect,
+                    &cached,
+                    &temporary,
+                    destination,
+                    &digest,
+                    mode,
+                ],
                 "link shared Mjolnir worker into session",
             )
         };
@@ -510,7 +541,7 @@ case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
         match linked.status {
             0 => {
                 // After the pin exists, so this install's own entry is linked.
-                collect_if_due(executor, locator, session_id, &store, Some(&digest));
+
                 return Ok(());
             }
             LINK_MISSING | LINK_DIGEST_MISMATCH => publish = true,
@@ -521,6 +552,194 @@ case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
         }
     }
     bail!("shared Mjolnir worker repeatedly retired during installation")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_ssh_container(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    source: &Path,
+    destination: &str,
+    temporary: &str,
+    store: &str,
+    digest: &str,
+) -> Result<()> {
+    let endpoint = locator.container_endpoint().context("container endpoint")?;
+    let host = targets::TargetLocator::SshBare {
+        ssh: endpoint.ssh.context("SSH container host")?.clone(),
+        worker_id: None,
+        workspace: format!(".local/share/hel/workspaces/{session_id}"),
+    };
+    let host_store = mj_core::target_path::text(&store_root(&host, session_id)?);
+    let transport = format!(
+        "{host_store}/.transport-{}",
+        mj_core::relay::new_command_id("container-upload")?
+    );
+    let upload = format!(
+        "{store}/.upload-{}",
+        mj_core::relay::new_command_id("container-upload")?
+    );
+    let gate = store_gate(locator, store);
+    let _guard = lock_gate(executor, &gate, session_id, "install container worker")?;
+    let room = crate::target_storage::ensure_room_for(
+        locator,
+        [upload.as_str()],
+        || super::upgrade::file_size(source),
+        "stage container worker",
+    );
+    let can_upload = if room.is_ok() { "1" } else { "0" };
+    let inner = r#"set -eu
+store=$1; digest=$2; temporary=$3; destination=$4; upload=$5; mode=$6
+trap 'rm -f -- "$temporary"; rm -rf -- "$upload"' EXIT
+cached="$store/$digest/hel"
+if [ "$mode" = hit ]; then
+    [ -f "$cached" ] || exit 75
+    if ! ln -- "$cached" "$temporary" 2>/dev/null; then
+        if ! cp -- "$cached" "$temporary"; then
+            [ -f "$cached" ] || exit 75
+            exit 1
+        fi
+    fi
+else
+    temporary_upload="$upload/hel"
+    ln -- "$temporary_upload" "$temporary" 2>/dev/null || cp -- "$temporary_upload" "$temporary"
+fi
+case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$temporary");; *) actual=$(sha256sum -- "$temporary");; esac
+[ "${actual%% *}" = "$digest" ] || { echo 'container worker digest mismatch' >&2; exit 77; }
+if [ "$mode" != hit ]; then
+    mkdir -p -- "$store/$digest"
+    touch -- "$temporary"
+    if ! ln -- "$temporary" "$cached" 2>/dev/null; then
+        if [ ! -e "$cached" ]; then mv -n -- "$upload/hel" "$cached"; fi
+        if [ -e "$upload/hel" ]; then
+        case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$cached");; *) actual=$(sha256sum -- "$cached");; esac
+        [ "${actual%% *}" = "$digest" ] || mv -f -- "$upload/hel" "$cached"
+        fi
+    fi
+fi
+chmod 700 -- "$temporary"
+promote_worker_binary "$temporary" "$destination"
+case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
+collect_worker_store "$store" "$digest" || echo 'worker binary store collection failed' >&2
+"#;
+    let inner = format!(
+        "{}\n{}\n{inner}",
+        super::upgrade::PROMOTE_WORKER_BINARY,
+        inline_collection()
+    );
+    let exec = shell_words(&targets::with_engine_argv(vec![
+        endpoint.engine.to_owned(),
+        "exec".into(),
+        endpoint.container_id.to_owned(),
+        "sh".into(),
+        "-c".into(),
+        inner,
+        "mj-container-store".into(),
+        store.into(),
+        digest.into(),
+        temporary.into(),
+        destination.into(),
+        upload.clone(),
+    ]));
+    let engine_command = |args: Vec<String>| {
+        shell_words(&targets::with_engine_argv(
+            std::iter::once(endpoint.engine.to_owned())
+                .chain(args)
+                .collect(),
+        ))
+    };
+    let mkdir = engine_command(vec![
+        "exec".into(),
+        endpoint.container_id.into(),
+        "mkdir".into(),
+        "-p".into(),
+        "--".into(),
+        upload.clone(),
+    ]);
+    let cleanup = engine_command(vec![
+        "exec".into(),
+        endpoint.container_id.into(),
+        "rm".into(),
+        "-rf".into(),
+        "--".into(),
+        upload.clone(),
+    ]);
+    let copy = format!(
+        "{} \"$transport_path/hel\" {}",
+        engine_command(vec!["cp".into()]),
+        targets::posix_quote(&format!("{}:{upload}/hel", endpoint.container_id))
+    );
+    let destination_dir = Path::new(destination)
+        .parent()
+        .context("worker destination directory")?;
+    let ownership = engine_command(super::install::container_upload_ownership_args(
+        endpoint.engine,
+        endpoint.container_id,
+        &mj_core::target_path::text(destination_dir),
+        &[&format!("{upload}/hel")],
+    ));
+    let body = format!(
+        r#"set -eu
+rc=0
+{exec} hit || rc=$?
+[ "$rc" -ne 0 ] || exit 0
+case $rc in 75|77) ;; *) exit "$rc";; esac
+[ "$4" = 1 ] || exit 78
+[ -f "$1/$2/hel" ] || exit 75
+transport=$3
+need_upload_cleanup=0
+cleanup_upload() {{
+    rc=$?
+    trap - EXIT
+    rm -rf -- "$transport" || echo 'host worker transport cleanup failed' >&2
+    if [ "$need_upload_cleanup" -eq 1 ]; then {cleanup} || echo 'container upload cleanup failed' >&2; fi
+    exit "$rc"
+}}
+trap cleanup_upload EXIT
+trap 'exit 1' HUP INT TERM
+case "$transport" in /*) transport_path=$transport;; *) transport_path=$HOME/$transport;; esac
+mkdir -p -- "$transport"
+if ! ln -- "$1/$2/hel" "$transport/hel" 2>/dev/null; then
+    if ! cp -- "$1/$2/hel" "$transport/hel"; then
+        [ -f "$1/$2/hel" ] || exit 75
+        exit 1
+    fi
+fi
+need_upload_cleanup=1
+{mkdir}
+{copy}
+{ownership}
+{exec} publish
+need_upload_cleanup=0
+if [ "$5" = 1 ]; then collect_worker_store "$1" "$2" || echo 'worker binary store collection failed' >&2; fi
+"#
+    );
+    for _ in 0..3 {
+        let collect_gate = store_gate(&host, &host_store);
+        let collect_guard = collect_gate.try_lock(session_id, "collect unused worker binaries");
+        let allow_collect = if collect_guard.is_some() { "1" } else { "0" };
+        let command = script(
+            SshTrafficClass::Control,
+            &host,
+            &body,
+            &[&host_store, digest, &transport, can_upload, allow_collect],
+            "install shared container worker",
+        );
+        let output = executor.execute(&command)?;
+        drop(collect_guard);
+        if output.status == LINK_NO_ROOM {
+            room?;
+            bail!("container worker upload refused despite available space");
+        }
+        if matches!(output.status, LINK_MISSING | LINK_DIGEST_MISMATCH) {
+            ensure_published(executor, &host, session_id, source, &host_store, digest)?;
+        } else {
+            targets::checked_command_output(&command, output)?;
+            return Ok(());
+        }
+    }
+    bail!("shared container worker repeatedly retired during installation")
 }
 
 /// Make `{store}/{digest}/hel` exist with the right bytes. The lock is per
@@ -561,7 +780,6 @@ fn ensure_published(
     )?;
     // Reclaim old builds before the capacity check below can refuse the
     // upload, even when this interval's collection already ran.
-    claim_collection(locator, store);
     collect_reporting(executor, locator, store, Some(digest));
     let upload = format!(
         "{store}/.upload-{}",
@@ -607,8 +825,10 @@ mkdir -p -- "$2"
 touch -- "$1"
 # Atomic creation converges independent uploaders on the winning inode.
 if [ ! -e "$2/hel" ]; then
-    if ! ln -- "$1" "$2/hel" 2>/dev/null; then
-        [ -f "$2/hel" ] || mv -n -- "$1" "$2/hel"
+    if ln -- "$1" "$2/hel" 2>/dev/null; then exit 0; fi
+    if [ ! -e "$2/hel" ]; then
+        mv -n -- "$1" "$2/hel"
+        [ -e "$1" ] || exit 0
     fi
 fi
 case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$2/hel");; *) actual=$(sha256sum -- "$2/hel");; esac
@@ -626,9 +846,12 @@ fi
             )
             .best_effort_cleanup(),
         ];
-        let command =
-            targets::locator_command(SshTrafficClass::Bulk, locator, targets::step_script(steps))
-                .purpose("publish shared Mjolnir worker");
+        let command = targets::locator_command(
+            SshTrafficClass::Control,
+            locator,
+            targets::step_script(steps),
+        )
+        .purpose("publish shared Mjolnir worker");
         // A failed or disconnected batch may not have reached its EXIT trap.
         // Retry its idempotent discard through the executor's cleanup path.
         let output = executor.execute(&command)?;
@@ -670,18 +893,23 @@ fn transfer_binary(
     {
         // This path already belongs to the private store upload. Stream the
         // worker without the deadline reserved for the surrounding commands.
-        super::install::upload_worker_file(
-            &targets::WithoutDeadline::new(executor),
+        let command = targets::ssh_command(
+            SshTrafficClass::Bulk,
             ssh,
-            source,
-            destination,
-            "stage replacement Mjolnir worker",
-        )?;
-        execute_checked(
-            executor,
-            targets::ssh_command(SshTrafficClass::Control, ssh, ["chmod", "700", destination])
-                .purpose("make replaced Mjolnir worker executable"),
-        )?;
+            [
+                "sh",
+                "-c",
+                "umask 077; cat > \"$1\" && chmod 700 -- \"$1\"",
+                "mj-upload",
+                destination,
+            ],
+        )
+        .gzip_ssh_stdin()
+        .purpose("stage replacement Mjolnir worker");
+        let mut input = std::fs::File::open(source)?;
+        let output =
+            targets::WithoutDeadline::new(executor).execute_with_stdin(&command, &mut input)?;
+        targets::checked_command_output(&command, output)?;
         return Ok(());
     }
     let remote = match locator {

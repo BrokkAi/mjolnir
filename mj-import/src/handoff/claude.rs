@@ -1,58 +1,39 @@
-//! Claude's native compaction records from a verified checkpoint.
-
-use std::io::{BufRead, BufReader, Cursor};
-use std::path::Path;
+//! Claude native compaction aligned to canonical history by tool identity.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
-use chrono::DateTime;
+use anyhow::{Context, Result};
 use mj_checkpoint::archive::{
-    ArchiveManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody, PayloadRole,
-    read_verified_checkpoint_payload,
+    ArchiveManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody, CheckpointPayloadReader,
+    PayloadRole,
 };
-use mj_core::config::HarnessKind;
-use mj_core::transcript::materialized_content_text;
-use mj_transcript::handoff::reusable_handoff;
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Value, value::RawValue};
 use tokio_util::sync::CancellationToken;
 
+use super::{LineScanner, check_cancel, collect_retained_positions, lineage_start};
 use crate::compaction::PriorCompaction;
 
-const MAX_NATIVE_TRANSCRIPT_BYTES: u64 = 256 * 1024 * 1024;
-
-#[derive(Debug)]
 struct NativeCompaction {
-    pub summary: String,
-    pub boundary_at_ms: i64,
-    pub summary_at_ms: i64,
-    before_record: usize,
+    summary: String,
+    before_event: usize,
 }
 
-#[derive(Debug)]
-struct NativeTranscript {
-    records: Vec<NativeRecord>,
-    compactions: Vec<NativeCompaction>,
+struct ToolEvent {
+    id: String,
+    is_result: bool,
 }
 
-#[derive(Debug)]
-enum NativeRecord {
-    User { text: String },
-    ToolUse { id: String },
-    ToolResult { id: String },
-}
-
-/// Read only the primary session JSONL. Subagent files and project memory are
-/// separate native artifacts and cannot establish the parent's compaction.
-fn read_native_compactions(
+pub(super) fn prior_compaction_from_archive(
     archive_path: &Path,
     manifest: &ArchiveManifest,
+    snapshot: &CanonicalSessionSnapshot,
     cancel: &CancellationToken,
-) -> Result<Option<NativeTranscript>> {
+) -> Result<Option<PriorCompaction>> {
     check_cancel(cancel)?;
-    if manifest.session.harness_kind != HarnessKind::Claude {
-        return Ok(None);
-    }
     let name = format!("{}.jsonl", manifest.session.native_session_id);
     let descriptor = manifest.payloads.iter().find(|descriptor| {
         matches!(&descriptor.role, PayloadRole::NativeArtifact { relative_path }
@@ -62,353 +43,277 @@ fn read_native_compactions(
     let Some(descriptor) = descriptor else {
         return Ok(None);
     };
-    check_cancel(cancel)?;
-    let bytes =
-        read_verified_checkpoint_payload(archive_path, descriptor, MAX_NATIVE_TRANSCRIPT_BYTES)?;
-    check_cancel(cancel)?;
-    parse_native_compactions(&bytes, cancel).map(Some)
+    let transcript = scan_transcript(cancel, |writer| {
+        CheckpointPayloadReader::open(archive_path)?.copy_payload(descriptor, writer)
+    })?;
+    prior_compaction_from_transcript(transcript, snapshot, cancel)
 }
 
-/// The native summary is usable only when its surrounding native conversation
-/// can be aligned to this checkpoint's canonical conversation by identity.
-pub(super) fn prior_compaction(
-    archive_path: &Path,
-    manifest: &ArchiveManifest,
+pub(super) fn prior_compaction_from_home(
+    harness_home: &Path,
+    native_session_id: &str,
     snapshot: &CanonicalSessionSnapshot,
     cancel: &CancellationToken,
 ) -> Result<Option<PriorCompaction>> {
     check_cancel(cancel)?;
-    let Some(transcript) = read_native_compactions(archive_path, manifest, cancel)? else {
+    let name = format!("{native_session_id}.jsonl");
+    if Path::new(&name)
+        .file_name()
+        .is_none_or(|part| part != name.as_str())
+    {
         return Ok(None);
-    };
-    for native in transcript.compactions.iter().rev() {
+    }
+    let projects = harness_home.join("projects");
+    match fs::symlink_metadata(&projects) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    for entry in fs::read_dir(projects)? {
         check_cancel(cancel)?;
-        if let Some(prior) = map_compaction(
-            native,
-            &transcript.records[..native.before_record],
-            &transcript.records[native.before_record..],
-            snapshot,
-        ) {
-            check_cancel(cancel)?;
-            return Ok(Some(prior));
+        let entry = entry?;
+        if entry.file_name() == "subagents" || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join(&name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                return prior_compaction_from_reader(File::open(path)?, snapshot, cancel);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
     check_cancel(cancel)?;
     Ok(None)
 }
 
-fn check_cancel(cancel: &CancellationToken) -> Result<()> {
-    ensure!(
-        !cancel.is_cancelled(),
-        "Claude native compaction preparation cancelled"
-    );
-    Ok(())
+pub(super) fn prior_compaction_from_reader(
+    mut reader: impl Read,
+    snapshot: &CanonicalSessionSnapshot,
+    cancel: &CancellationToken,
+) -> Result<Option<PriorCompaction>> {
+    check_cancel(cancel)?;
+    let transcript = scan_transcript(
+        cancel,
+        |writer| Ok(io::copy(&mut reader, writer).map(drop)?),
+    )?;
+    prior_compaction_from_transcript(transcript, snapshot, cancel)
+}
+
+fn scan_transcript(
+    cancel: &CancellationToken,
+    feed: impl FnOnce(&mut dyn Write) -> Result<()>,
+) -> Result<ClaudeTranscript> {
+    let mut transcript = ClaudeTranscript::default();
+    let mut scanner = LineScanner::new(cancel, |line, line_number| {
+        transcript
+            .parse_record(line)
+            .with_context(|| format!("parse Claude native transcript line {line_number}"))
+            .map_err(io::Error::other)
+    });
+    feed(&mut scanner)?;
+    scanner.finish()?;
+    Ok(transcript)
+}
+
+fn prior_compaction_from_transcript(
+    transcript: ClaudeTranscript,
+    snapshot: &CanonicalSessionSnapshot,
+    cancel: &CancellationToken,
+) -> Result<Option<PriorCompaction>> {
+    let lineage_start = lineage_start(snapshot);
+    let mut prior = None;
+    for native in transcript.compactions.into_iter().rev() {
+        check_cancel(cancel)?;
+        let (preceding, following) = transcript.events.split_at(native.before_event);
+        prior = map_compaction(native, preceding, following, snapshot, lineage_start);
+        if prior.is_some() {
+            break;
+        }
+    }
+    check_cancel(cancel)?;
+    Ok(prior)
 }
 
 fn map_compaction(
-    native: &NativeCompaction,
-    preceding: &[NativeRecord],
-    following: &[NativeRecord],
+    native: NativeCompaction,
+    preceding: &[ToolEvent],
+    following: &[ToolEvent],
     snapshot: &CanonicalSessionSnapshot,
+    lineage_start: u64,
 ) -> Option<PriorCompaction> {
-    if native.summary_at_ms < native.boundary_at_ms {
-        return None;
-    }
-    let context_start = snapshot.current_context_start();
-    let generic = reusable_handoff(snapshot);
-    let lineage_start = generic.map_or(context_start, |state| {
-        context_start.max(state.through_position)
-    });
-    let canonical_users = snapshot
-        .transcript
-        .iter()
-        .filter_map(|item| {
-            if item.position <= lineage_start {
-                return None;
-            }
-            match &item.body {
-                CanonicalTranscriptBody::User { content } => {
-                    let text = materialized_content_text(content);
-                    Some((
-                        item.position,
-                        mj_core::relay::strip_hidden_prompt_context(&text)
-                            .trim()
-                            .to_owned(),
-                    ))
-                }
-                _ => None,
-            }
-        })
-        .collect::<Vec<_>>();
-    let native_users = preceding
-        .iter()
-        .filter_map(|record| match record {
-            NativeRecord::User { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let anchor_text = *native_users.last()?;
-    let matching_anchors = canonical_users
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, text))| text == anchor_text)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let [anchor_index] = matching_anchors.as_slice() else {
-        return None;
-    };
-    let expected = &canonical_users[..=*anchor_index];
-    if native_users.len() < expected.len()
-        || !native_users[native_users.len() - expected.len()..]
-            .iter()
-            .zip(expected)
-            .all(|(native, (_, canonical))| *native == canonical)
-    {
-        return None;
-    }
-
     let mut uses = HashMap::<&str, (usize, usize)>::new();
     let mut results = HashMap::<&str, (usize, usize)>::new();
-    for (index, record) in preceding.iter().enumerate() {
-        match record {
-            NativeRecord::ToolUse { id, .. } => {
-                let entry = uses.entry(id).or_default();
-                entry.0 += 1;
-                entry.1 = index;
-            }
-            NativeRecord::ToolResult { id, .. } => {
-                let entry = results.entry(id).or_default();
-                entry.0 += 1;
-                entry.1 = index;
-            }
-            NativeRecord::User { .. } => {}
-        }
+    for (index, event) in preceding.iter().enumerate() {
+        let counts = if event.is_result {
+            &mut results
+        } else {
+            &mut uses
+        };
+        let (count, last_index) = counts.entry(&event.id).or_default();
+        *count += 1;
+        *last_index = index;
     }
     let completed = uses
-        .iter()
-        .filter_map(|(id, (count, use_index))| {
-            let (result_count, result_index) = results.get(id)?;
-            (*count == 1 && *result_count == 1 && use_index < result_index).then_some(*id)
+        .into_iter()
+        .filter_map(|(id, (use_count, use_index))| {
+            let &(result_count, result_index) = results.get(id)?;
+            (use_count == 1 && result_count == 1 && use_index < result_index).then_some(id)
         })
         .collect::<HashSet<_>>();
     let post_ids = following
         .iter()
-        .filter_map(|record| match record {
-            NativeRecord::ToolUse { id, .. } | NativeRecord::ToolResult { id, .. } => {
-                Some(id.as_str())
+        .map(|event| event.id.as_str())
+        .collect::<HashSet<_>>();
+    let covered_tool = |call: &Value| {
+        call.get("toolCallId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| completed.contains(id) && !post_ids.contains(id))
+    };
+    let tool_position = snapshot
+        .transcript
+        .iter()
+        .filter_map(|item| match &item.body {
+            CanonicalTranscriptBody::Tool { call, .. }
+                if item.position > lineage_start && covered_tool(call) =>
+            {
+                Some(item.position)
             }
             _ => None,
         })
-        .collect::<HashSet<_>>();
-    let (tool_position, _) = snapshot
-        .transcript
-        .iter()
-        .filter_map(|item| {
-            if item.position <= canonical_users[*anchor_index].0 {
-                return None;
-            }
-            let CanonicalTranscriptBody::Tool { call, .. } = &item.body else {
-                return None;
-            };
-            let id = call.get("toolCallId")?.as_str()?;
-            completed.contains(id).then_some((item.position, id))
-        })
-        .filter(|(_, id)| !post_ids.contains(id))
-        .max_by_key(|(position, _)| *position)?;
+        .max()?;
 
     let cutoff = tool_position.checked_sub(1)?;
     if cutoff <= lineage_start {
         return None;
     }
-    let mut represented_users = expected
-        .iter()
-        .map(|(position, _)| *position)
-        .collect::<HashSet<_>>();
-    let outputs = mj_core::transcript::TerminalOutputs::of_canonical(snapshot.transcript.iter());
-    let mut retained_positions = Vec::new();
-    for item in snapshot
-        .transcript
-        .iter()
-        .filter(|item| item.position > lineage_start && item.position < tool_position)
-    {
-        let barrier = match &item.body {
-            CanonicalTranscriptBody::User { .. } => !represented_users.remove(&item.position),
-            CanonicalTranscriptBody::Tool {
-                call,
-                terminal_refs,
-                ..
-            } => {
-                let id = call.get("toolCallId").and_then(Value::as_str);
-                !id.is_some_and(|id| completed.contains(id) && !post_ids.contains(id))
-                    || !terminal_refs.is_empty()
-                    || !outputs.for_tool(&item.stable_id).is_empty()
-            }
-            CanonicalTranscriptBody::Message { .. } | CanonicalTranscriptBody::Plan { .. } => true,
-            CanonicalTranscriptBody::Agent { .. } => item
-                .latest_content_event_ordinal
-                .is_none_or(|ordinal| ordinal >= tool_position),
-            CanonicalTranscriptBody::Thought { .. } | CanonicalTranscriptBody::System { .. } => {
-                false
-            }
-            _ => false,
-        };
-        if barrier {
-            retained_positions.push(item.position);
-        }
-    }
+    let retained_positions =
+        collect_retained_positions(snapshot, lineage_start, tool_position, covered_tool);
     Some(PriorCompaction {
         through_position: cutoff,
-        summary: native.summary.clone(),
+        summary: native.summary,
         retained_positions,
     })
 }
 
-fn parse_native_compactions(bytes: &[u8], cancel: &CancellationToken) -> Result<NativeTranscript> {
-    parse_native_compactions_from(BufReader::new(Cursor::new(bytes)), cancel)
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawRecord<'a> {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    subtype: Option<String>,
+    is_meta: Option<bool>,
+    is_sidechain: Option<bool>,
+    is_compact_summary: Option<bool>,
+    // Unrelated record types may use a different message shape.
+    #[serde(borrow)]
+    message: Option<&'a RawValue>,
 }
 
-fn parse_native_compactions_from(
-    reader: impl BufRead,
-    cancel: &CancellationToken,
-) -> Result<NativeTranscript> {
-    let mut records = Vec::new();
-    let mut compactions = Vec::new();
-    let mut pending_boundary = None;
-    let mut lines = reader.split(b'\n');
-    let mut line_number = 0;
-    loop {
-        check_cancel(cancel)?;
-        let Some(line) = lines.next() else {
-            break;
-        };
-        line_number += 1;
-        let line = line?;
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMessage<'a> {
+    is_compact_summary: Option<bool>,
+    // Decode only the summary text or tool IDs needed for the barrier.
+    #[serde(borrow)]
+    content: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct RawToolBlock {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    id: Option<String>,
+    tool_use_id: Option<String>,
+}
+
+fn summary_text(content: &RawValue) -> serde_json::Result<String> {
+    #[derive(Deserialize)]
+    struct TextBlock {
+        #[serde(rename = "type")]
+        kind: Option<String>,
+        text: Option<String>,
+    }
+
+    match content.get().as_bytes().first() {
+        Some(b'"') => serde_json::from_str(content.get()),
+        Some(b'[') => Ok(serde_json::from_str::<Vec<TextBlock>>(content.get())?
+            .into_iter()
+            .filter(|block| block.kind.as_deref() == Some("text"))
+            .filter_map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join("\n")),
+        _ => Ok(String::new()),
+    }
+}
+
+#[derive(Default)]
+struct ClaudeTranscript {
+    pending_boundary: bool,
+    events: Vec<ToolEvent>,
+    compactions: Vec<NativeCompaction>,
+}
+
+impl ClaudeTranscript {
+    fn parse_record(&mut self, line: &[u8]) -> serde_json::Result<()> {
+        let record: RawRecord<'_> = serde_json::from_slice(line)?;
+        if record.is_meta == Some(true) || record.is_sidechain == Some(true) {
+            return Ok(());
         }
-        let record: Value = serde_json::from_slice(&line)
-            .with_context(|| format!("parse Claude native transcript line {line_number}"))?;
-        check_cancel(cancel)?;
-        if record.get("isMeta").and_then(Value::as_bool) == Some(true)
-            || record.get("isSidechain").and_then(Value::as_bool) == Some(true)
-        {
-            continue;
-        }
-        let kind = record.get("type").and_then(Value::as_str);
-        let boundary = kind == Some("system")
-            && matches!(
-                record.get("subtype").and_then(Value::as_str),
-                Some("compact_boundary" | "compaction")
-            );
-        let summary = kind == Some("user")
-            && record
-                .get("isCompactSummary")
-                .or_else(|| record.pointer("/message/isCompactSummary"))
-                .and_then(Value::as_bool)
-                == Some(true);
-        if boundary {
-            pending_boundary = timestamp_ms(&record);
-            continue;
-        }
-        if summary {
-            if let (Some(boundary_at_ms), Some(summary_at_ms), Some(text)) = (
-                pending_boundary.take(),
-                timestamp_ms(&record),
-                content_text(record.pointer("/message/content")),
-            ) && summary_at_ms >= boundary_at_ms
-                && !text.trim().is_empty()
+        let is_result = match record.kind.as_deref() {
+            Some("system")
+                if matches!(
+                    record.subtype.as_deref(),
+                    Some("compact_boundary" | "compaction")
+                ) =>
             {
-                compactions.push(NativeCompaction {
-                    summary: text,
-                    boundary_at_ms,
-                    summary_at_ms,
-                    before_record: records.len(),
-                });
+                self.pending_boundary = true;
+                return Ok(());
             }
-            continue;
+            Some("user") => true,
+            Some("assistant") => false,
+            _ => return Ok(()),
+        };
+        let pending_boundary = std::mem::take(&mut self.pending_boundary);
+        let Some(message) = record.message else {
+            return Ok(());
+        };
+        if !message.get().starts_with('{') {
+            return Ok(());
         }
-        // A boundary without its immediately following summary is not a valid
-        // pair. Other record types may occur between the two in newer Claude
-        // streams, but a real conversational record cannot.
-        if matches!(kind, Some("user" | "assistant")) {
-            pending_boundary = None;
-        }
-        match kind {
-            Some("user") => {
-                let content = record.pointer("/message/content");
-                let has_tool_result = content.and_then(Value::as_array).is_some_and(|blocks| {
-                    blocks.iter().any(|block| {
-                        block.get("type").and_then(Value::as_str) == Some("tool_result")
-                    })
-                });
-                if !has_tool_result && let Some(text) = content_text(content) {
-                    let text = mj_core::relay::strip_hidden_prompt_context(&text).trim();
-                    if !text.is_empty() {
-                        records.push(NativeRecord::User {
-                            text: text.to_owned(),
-                        });
-                    }
-                }
-                for block in record
-                    .pointer("/message/content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_result")
-                        && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
-                    {
-                        records.push(NativeRecord::ToolResult { id: id.to_owned() });
-                    }
+        let message: RawMessage<'_> = serde_json::from_str(message.get())?;
+        let Some(content) = message.content else {
+            return Ok(());
+        };
+        if is_result
+            && (record.is_compact_summary == Some(true) || message.is_compact_summary == Some(true))
+        {
+            if pending_boundary {
+                let summary = summary_text(content)?;
+                if !summary.trim().is_empty() {
+                    self.compactions.push(NativeCompaction {
+                        summary,
+                        before_event: self.events.len(),
+                    });
                 }
             }
-            Some("assistant") => {
-                for block in record
-                    .pointer("/message/content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                        && let Some(id) = block.get("id").and_then(Value::as_str)
-                    {
-                        records.push(NativeRecord::ToolUse { id: id.to_owned() });
-                    }
+        } else if content.get().starts_with('[') {
+            for block in serde_json::from_str::<Vec<RawToolBlock>>(content.get())? {
+                let id = match (is_result, block.kind.as_deref()) {
+                    (true, Some("tool_result")) => block.tool_use_id,
+                    (false, Some("tool_use")) => block.id,
+                    _ => None,
+                };
+                if let Some(id) = id {
+                    self.events.push(ToolEvent { id, is_result });
                 }
             }
-            _ => {}
         }
+        Ok(())
     }
-    Ok(NativeTranscript {
-        records,
-        compactions,
-    })
-}
-
-fn timestamp_ms(record: &Value) -> Option<i64> {
-    record
-        .get("timestamp")?
-        .as_str()
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.timestamp_millis())
-}
-
-fn content_text(content: Option<&Value>) -> Option<String> {
-    let content = content?;
-    if let Some(text) = content.as_str() {
-        return Some(text.to_owned());
-    }
-    let blocks = content.as_array()?;
-    let text = blocks
-        .iter()
-        .filter_map(|block| {
-            (block.get("type").and_then(Value::as_str) == Some("text"))
-                .then(|| block.get("text").and_then(Value::as_str))
-                .flatten()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then_some(text)
 }
 
 #[cfg(test)]
@@ -417,15 +322,13 @@ mod tests {
     use mj_checkpoint::archive::{
         CanonicalExecutionState, CanonicalSessionState, CanonicalTranscriptItem,
     };
+    use mj_core::config::HarnessKind;
     use mj_transcript::handoff::{HANDOFF_STATE_KEY, HandoffState};
     use serde_json::json;
     use std::future::Future;
-    use std::io::{self, Read};
+    use std::io::Cursor;
     use std::pin::Pin;
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Mutex;
 
     struct RecordingBackend(Mutex<Vec<String>>);
 
@@ -436,32 +339,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
             self.0.lock().unwrap().push(prompt);
             Box::pin(async { Ok("<state_snapshot>merged</state_snapshot>".into()) })
-        }
-    }
-
-    struct CancelAfterLine<'a> {
-        inner: Cursor<&'a [u8]>,
-        cancel: CancellationToken,
-        reads: &'a AtomicUsize,
-    }
-
-    impl Read for CancelAfterLine<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.inner.read(buf)
-        }
-    }
-
-    impl BufRead for CancelAfterLine<'_> {
-        fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            self.reads.fetch_add(1, Ordering::Relaxed);
-            self.inner.fill_buf()
-        }
-
-        fn consume(&mut self, amount: usize) {
-            self.inner.consume(amount);
-            if amount > 0 {
-                self.cancel.cancel();
-            }
         }
     }
 
@@ -482,13 +359,21 @@ mod tests {
             transcript: bodies
                 .into_iter()
                 .enumerate()
-                .map(|(index, body)| CanonicalTranscriptItem {
-                    stable_id: format!("entry-{index}"),
-                    position: index as u64 + 1,
-                    latest_content_event_ordinal: None,
-                    created_at_ms: 900_000,
-                    last_changed_at_ms: 900_000,
-                    body,
+                .map(|(index, body)| {
+                    let stable_id = match &body {
+                        CanonicalTranscriptBody::Message { event } => {
+                            mj_core::transcript::message_item_id(&event.key)
+                        }
+                        _ => format!("entry-{index}"),
+                    };
+                    CanonicalTranscriptItem {
+                        stable_id,
+                        position: index as u64 + 1,
+                        latest_content_event_ordinal: None,
+                        created_at_ms: 900_000,
+                        last_changed_at_ms: 900_000,
+                        body,
+                    }
                 })
                 .collect(),
             queued_prompts: Vec::new(),
@@ -515,14 +400,47 @@ mod tests {
         }
     }
 
-    fn native(records: Vec<NativeRecord>) -> (NativeCompaction, Vec<NativeRecord>) {
-        let pair = NativeCompaction {
+    fn mailbox_message() -> CanonicalTranscriptBody {
+        use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+        CanonicalTranscriptBody::Message {
+            event: Box::new(MailboxEvent {
+                key: "mailbox-1".into(),
+                source: "parent_message".into(),
+                wake: true,
+                created_at_ms: 900_000,
+                body: MailboxEventBody::ParentMessage {
+                    text: "mailbox message".into(),
+                },
+            }),
+        }
+    }
+
+    fn tool_exchange(id: &str) -> [ToolEvent; 2] {
+        [
+            ToolEvent {
+                id: id.into(),
+                is_result: false,
+            },
+            ToolEvent {
+                id: id.into(),
+                is_result: true,
+            },
+        ]
+    }
+
+    fn native_prior_for_events(
+        canonical: &CanonicalSessionSnapshot,
+        preceding: impl IntoIterator<Item = ToolEvent>,
+        following: impl IntoIterator<Item = ToolEvent>,
+    ) -> Option<PriorCompaction> {
+        let mut transcript = ClaudeTranscript::default();
+        transcript.events.extend(preceding);
+        transcript.compactions.push(NativeCompaction {
             summary: "prior state".into(),
-            boundary_at_ms: 100,
-            summary_at_ms: 101,
-            before_record: records.len(),
-        };
-        (pair, records)
+            before_event: transcript.events.len(),
+        });
+        transcript.events.extend(following);
+        prior_compaction_from_transcript(transcript, canonical, &CancellationToken::new()).unwrap()
     }
 
     #[test]
@@ -543,39 +461,54 @@ mod tests {
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        let parsed = parse_native_compactions(body.as_bytes(), &CancellationToken::new()).unwrap();
+        let cancel = CancellationToken::new();
+        let parsed =
+            scan_transcript(&cancel, |writer| Ok(writer.write_all(body.as_bytes())?)).unwrap();
         assert_eq!(parsed.compactions.len(), 2);
         assert_eq!(parsed.compactions[1].summary, "new state");
-        assert_eq!(parsed.compactions[1].before_record, 3);
+        assert_eq!(parsed.compactions[1].before_event, 2);
     }
 
     #[test]
-    fn native_parser_observes_cancellation_before_and_between_large_lines() {
-        let first = json!({"type":"user","message":{"content":"x".repeat(70 * 1024)}}).to_string();
-        let body = format!(
-            "{first}\n{}\n",
-            json!({"type":"user","message":{"content":"later"}})
-        );
-        let reads = AtomicUsize::new(0);
-        let canceled = CancellationToken::new();
-        canceled.cancel();
-        let reader = CancelAfterLine {
-            inner: Cursor::new(body.as_bytes()),
-            cancel: canceled.clone(),
-            reads: &reads,
-        };
-        assert!(parse_native_compactions_from(reader, &canceled).is_err());
-        assert_eq!(reads.load(Ordering::Relaxed), 0);
+    fn native_parser_observes_cancellation_before_and_during_a_large_line() {
+        struct CancelMidRead<'a> {
+            inner: Cursor<&'a [u8]>,
+            cancel: &'a CancellationToken,
+        }
 
-        let cancel = CancellationToken::new();
-        let reader = CancelAfterLine {
-            inner: Cursor::new(body.as_bytes()),
-            cancel: cancel.clone(),
-            reads: &reads,
-        };
-        let error = parse_native_compactions_from(reader, &cancel).unwrap_err();
-        assert!(error.to_string().contains("cancelled"));
-        assert!(reads.load(Ordering::Relaxed) > 0);
+        impl Read for CancelMidRead<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let count = buf.len().min(4096);
+                let read = self.inner.read(&mut buf[..count])?;
+                if self.inner.position() >= 8 * 1024 {
+                    self.cancel.cancel();
+                }
+                Ok(read)
+            }
+        }
+
+        let first = json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"tool-a","content":"x".repeat(70 * 1024)}
+        ]}})
+        .to_string();
+        let body = format!("{first}\n");
+        let canonical = snapshot(Vec::new());
+        for pre_cancelled in [true, false] {
+            let cancel = CancellationToken::new();
+            if pre_cancelled {
+                cancel.cancel();
+            }
+            let mut reader = CancelMidRead {
+                inner: Cursor::new(body.as_bytes()),
+                cancel: &cancel,
+            };
+            let error = prior_compaction_from_reader(&mut reader, &canonical, &cancel).unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+            assert_eq!(
+                reader.inner.position(),
+                if pre_cancelled { 0 } else { 8 * 1024 }
+            );
+        }
     }
 
     // The native and relay clocks need not agree; tool identity establishes the cut.
@@ -594,28 +527,21 @@ mod tests {
             },
         ]);
         canonical.transcript[1].latest_content_event_ordinal = Some(2);
-        let (pair, records) = native(vec![
-            NativeRecord::User {
-                text: "implement it".into(),
-            },
-            NativeRecord::ToolUse {
-                id: "tool-a".into(),
-            },
-            NativeRecord::ToolResult {
-                id: "tool-a".into(),
-            },
-        ]);
-        let prior = map_compaction(&pair, &records, &[], &canonical).unwrap();
+        let prior = native_prior_for_events(&canonical, tool_exchange("tool-a"), []).unwrap();
         assert_eq!(prior.through_position, 2);
         assert!(prior.retained_positions.is_empty());
     }
 
-    // Late terminal output can mutate a prior tool without updating its row timestamp.
     #[test]
-    fn terminal_and_controller_plan_are_retained_without_replaying_the_whole_turn() {
+    fn native_barrier_retains_unfinished_tools_late_agents_and_only_the_latest_plan() {
         let mut canonical = snapshot(vec![
             user("work"),
             tool("tool-a", true),
+            mailbox_message(),
+            CanonicalTranscriptBody::Plan {
+                plan: json!({"entries":[]}),
+            },
+            tool("unfinished", false),
             CanonicalTranscriptBody::Plan {
                 plan: json!({"entries":[]}),
             },
@@ -625,70 +551,28 @@ mod tests {
             },
             tool("tool-b", false),
         ]);
-        canonical.transcript[3].latest_content_event_ordinal = Some(10);
-        let (pair, records) = native(vec![
-            NativeRecord::User {
-                text: "work".into(),
-            },
-            NativeRecord::ToolUse {
-                id: "tool-a".into(),
-            },
-            NativeRecord::ToolResult {
-                id: "tool-a".into(),
-            },
-            NativeRecord::ToolUse {
-                id: "tool-b".into(),
-            },
-            NativeRecord::ToolResult {
-                id: "tool-b".into(),
-            },
-        ]);
-        let prior = map_compaction(&pair, &records, &[], &canonical).unwrap();
-        assert_eq!(prior.through_position, 4);
-        assert_eq!(prior.retained_positions, vec![2, 3, 4]);
-        canonical.transcript[1].body = tool("tool-a", false);
-        let prior = map_compaction(&pair, &records, &[], &canonical).unwrap();
-        assert_eq!(prior.through_position, 4);
-        assert_eq!(prior.retained_positions, vec![3, 4]);
+        canonical.transcript[6].latest_content_event_ordinal = Some(10);
+        let records = tool_exchange("tool-a")
+            .into_iter()
+            .chain([ToolEvent {
+                id: "unfinished".into(),
+                is_result: false,
+            }])
+            .chain(tool_exchange("tool-b"))
+            .collect::<Vec<_>>();
+        let prior = native_prior_for_events(&canonical, records, []).unwrap();
+        assert_eq!(prior.through_position, 7);
+        assert_eq!(prior.retained_positions, vec![5, 6, 7]);
     }
 
     #[test]
     fn repeated_tool_id_after_boundary_is_not_a_safe_anchor() {
         let canonical = snapshot(vec![user("work"), tool("tool-a", false)]);
-        let (pair, records) = native(vec![
-            NativeRecord::User {
-                text: "work".into(),
-            },
-            NativeRecord::ToolUse {
-                id: "tool-a".into(),
-            },
-            NativeRecord::ToolResult {
-                id: "tool-a".into(),
-            },
-        ]);
-        let following = [NativeRecord::ToolUse {
+        let following = [ToolEvent {
             id: "tool-a".into(),
+            is_result: false,
         }];
-        assert!(map_compaction(&pair, &records, &following, &canonical).is_none());
-    }
-
-    #[test]
-    fn unrepresented_user_is_replayed_before_the_tool_barrier() {
-        let canonical = snapshot(vec![user("first"), user("second"), tool("tool-a", false)]);
-        let (pair, records) = native(vec![
-            NativeRecord::User {
-                text: "first".into(),
-            },
-            NativeRecord::ToolUse {
-                id: "tool-a".into(),
-            },
-            NativeRecord::ToolResult {
-                id: "tool-a".into(),
-            },
-        ]);
-        let prior = map_compaction(&pair, &records, &[], &canonical).unwrap();
-        assert_eq!(prior.through_position, 2);
-        assert_eq!(prior.retained_positions, vec![2]);
+        assert!(native_prior_for_events(&canonical, tool_exchange("tool-a"), following).is_none());
     }
 
     #[test]
@@ -702,19 +586,8 @@ mod tests {
             tool("tool-a", false),
         ]);
         canonical.transcript[1].stable_id = "context-cleared:2".into();
-        let (pair, records) = native(vec![
-            NativeRecord::User {
-                text: "duplicate".into(),
-            },
-            NativeRecord::ToolUse {
-                id: "tool-a".into(),
-            },
-            NativeRecord::ToolResult {
-                id: "tool-a".into(),
-            },
-        ]);
         assert_eq!(
-            map_compaction(&pair, &records, &[], &canonical)
+            native_prior_for_events(&canonical, tool_exchange("tool-a"), [])
                 .unwrap()
                 .through_position,
             3
@@ -722,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn validated_hidden_handoff_bounds_native_user_lineage() {
+    fn validated_hidden_handoff_bounds_native_lineage() {
         let mut before_handoff = snapshot(vec![user("old harness request")]);
         before_handoff.event_frontier = 1;
         let state = HandoffState::capture(&before_handoff, "generic earlier state".into()).unwrap();
@@ -735,19 +608,48 @@ mod tests {
             HANDOFF_STATE_KEY.into(),
             serde_json::to_value(state).unwrap(),
         );
-        let (pair, records) = native(vec![
-            NativeRecord::User {
-                text: "new request".into(),
-            },
-            NativeRecord::ToolUse {
-                id: "tool-a".into(),
-            },
-            NativeRecord::ToolResult {
-                id: "tool-a".into(),
-            },
-        ]);
-        let prior = map_compaction(&pair, &records, &[], &canonical).unwrap();
+        let prior = native_prior_for_events(&canonical, tool_exchange("tool-a"), []).unwrap();
         assert_eq!(prior.through_position, 2);
+    }
+
+    #[test]
+    fn claude_home_search_uses_only_regular_primary_project_transcripts() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join("projects");
+        let slug = projects.join("-work");
+        let subagents = projects.join("subagents");
+        fs::create_dir_all(&slug).unwrap();
+        fs::create_dir_all(&subagents).unwrap();
+        let transcript = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-a"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-a"}]}}"#,
+            "\n",
+            r#"{"type":"system","subtype":"compaction"}"#,
+            "\n",
+            r#"{"type":"user","message":{"isCompactSummary":true,"content":"prior state"}}"#,
+        );
+        fs::write(subagents.join("native-1.jsonl"), transcript).unwrap();
+        let canonical = snapshot(vec![user("work"), tool("tool-a", false)]);
+        let cancel = CancellationToken::new();
+        let read_prior =
+            || prior_compaction_from_home(home.path(), "native-1", &canonical, &cancel);
+
+        assert!(read_prior().unwrap().is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let link = slug.join("native-1.jsonl");
+            symlink(subagents.join("native-1.jsonl"), &link).unwrap();
+            symlink(&subagents, projects.join("-linked")).unwrap();
+            assert!(read_prior().unwrap().is_none());
+            fs::remove_file(link).unwrap();
+        }
+        fs::write(slug.join("native-1.jsonl"), transcript).unwrap();
+        let prior = read_prior().unwrap().unwrap();
+        assert_eq!(prior.through_position, 1);
+        assert_eq!(prior.summary, "prior state");
     }
 
     #[tokio::test]
@@ -758,6 +660,7 @@ mod tests {
         };
         let mut canonical = snapshot(vec![
             user("work"),
+            mailbox_message(),
             CanonicalTranscriptBody::System {
                 text: "startup notice".into(),
             },
@@ -779,16 +682,23 @@ mod tests {
                 streaming: false,
             },
         ]);
-        canonical.transcript[3].latest_content_event_ordinal = Some(4);
-        canonical.transcript[7].latest_content_event_ordinal = Some(8);
+        canonical.transcript[4].latest_content_event_ordinal = Some(5);
+        canonical.transcript[8].latest_content_event_ordinal = Some(9);
         let native = [
             json!({"type":"user","message":{"content":"work"}}),
-            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-a"}]}}),
+            json!({"type":"assistant","message":{"content":[
+                {"type":"thinking","thinking":"x".repeat(70 * 1024)},
+                {"type":"tool_use","id":"tool-a","input":{"command":"printf test"}}
+            ]}}),
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-a"}]}}),
             json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-b"}]}}),
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-b"}]}}),
-            json!({"type":"system","subtype":"compact_boundary","timestamp":"2026-01-01T00:00:00Z"}),
-            json!({"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:01Z","message":{"content":"native prior state"}}),
+            json!({"type":"user","message":{"content":"<task-notification>background task done</task-notification>"}}),
+            json!({"type":"user","message":{"content":"mailbox message"}}),
+            json!({"type":"system","subtype":"compact_boundary","timestamp":"2026-01-01T00:00:00.095Z"}),
+            json!({"type":"attachment","attachment":{"type":"queued_command"}}),
+            json!({"type":"user","isMeta":true,"message":{"content":"injected context"}}),
+            json!({"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:00Z","message":{"content":"native prior state"}}),
         ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
         let input = ArchiveInput {
             session: SessionManifest {
@@ -824,7 +734,7 @@ mod tests {
         let path = dir.path().join("checkpoint.zip");
         write_archive_atomic(&path, &input).unwrap();
         let verified = verify_archive_streaming(&path).unwrap();
-        let prior = prior_compaction(
+        let prior = prior_compaction_from_archive(
             &path,
             &verified.manifest,
             &verified.canonical_session,
@@ -832,8 +742,8 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(prior.through_position, 6);
-        assert_eq!(prior.retained_positions, vec![6]);
+        assert_eq!(prior.through_position, 7);
+        assert_eq!(prior.retained_positions, vec![7]);
         let backend = RecordingBackend(Mutex::new(Vec::new()));
         crate::compaction::compact_snapshot_since(
             &verified.canonical_session,

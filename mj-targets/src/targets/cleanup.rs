@@ -74,11 +74,7 @@ fn close_plan_scoped(
         locator,
         TargetLocator::LocalPodman { .. } | TargetLocator::SshPodman { .. }
     ) {
-        let mut plan = podman_cleanup_plan(locator, session_id)?;
-        if !remove_shared_cache {
-            plan.commands
-                .retain(|command| command.stage != Some(ProvisionStage::CleaningCache));
-        }
+        let plan = podman_cleanup_plan(locator, session_id, remove_shared_cache)?;
         return WorkerControlPlan::new(
             plan.description,
             plan.commands.into_iter().map(Into::into).collect(),
@@ -456,9 +452,15 @@ fi
     }))
 }
 
+/// Remove a stopped Podman session's container and storage, in that order.
+/// Over SSH the steps run as one script, so a host far from the daemon costs
+/// one round trip instead of four; a step that fails stops the script before
+/// the next one, and the error names the step. A local engine runs each step as
+/// its own command.
 pub(super) fn podman_cleanup_plan(
     locator: &TargetLocator,
     session_id: &str,
+    remove_shared_cache: bool,
 ) -> Result<CommandPlan> {
     let (ssh, container_id, workspace_storage) = match locator {
         TargetLocator::LocalPodman {
@@ -477,26 +479,18 @@ pub(super) fn podman_cleanup_plan(
     let remove_container_script = format!(
         "{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\n[ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\n# `container exists` exits 1 only for a definite absence; 125 is an error.\nstatus=0\npodman container exists \"$container\" || status=$?\ncase $status in\n    1) ;;\n    0) echo 'Podman session container is still present' >&2; exit 1 ;;\n    *) echo 'could not determine whether the Podman session container was removed' >&2; exit 1 ;;\nesac\n"
     );
-    let at_host = |args: Vec<String>| match ssh {
-        Some(ssh) => ssh_command_owned(SshTrafficClass::Control, ssh, args),
-        None => {
-            let mut args = args;
-            CommandSpec::new(args.remove(0), args)
-        }
-    };
-    let mut commands = vec![
-        at_host(vec![
+    let mut steps = vec![PodmanCleanupStep {
+        purpose: "remove exact stopped Podman session container",
+        stage: ProvisionStage::RemovingContainer,
+        argv: vec![
             "sh".to_owned(),
             "-c".to_owned(),
             remove_container_script,
             "mj-remove-container".to_owned(),
             container_id.clone(),
             session_id.to_owned(),
-        ])
-        .purpose("remove exact stopped Podman session container")
-        .stage(ProvisionStage::RemovingContainer)
-        .warn_on_stderr(),
-    ];
+        ],
+    }];
     match workspace_storage {
         PodmanWorkspaceLocator::ContainerLayer => {}
         PodmanWorkspaceLocator::Volume { name } => {
@@ -514,18 +508,18 @@ elif ! podman info >/dev/null 2>&1; then
     exit 1
 fi
 "#;
-            commands.push(
-                at_host(vec![
+            steps.push(PodmanCleanupStep {
+                purpose: "remove exact Podman session workspace volume",
+                stage: ProvisionStage::RemovingStorage,
+                argv: vec![
                     "sh".to_owned(),
                     "-c".to_owned(),
                     script.to_owned(),
                     "mj-remove-volume".to_owned(),
                     name.clone(),
                     session_id.to_owned(),
-                ])
-                .purpose("remove exact Podman session workspace volume")
-                .stage(ProvisionStage::RemovingStorage),
-            );
+                ],
+            });
         }
         PodmanWorkspaceLocator::HostPath {
             helper, resource, ..
@@ -546,49 +540,90 @@ esac
 }}
 "#
             );
-            commands.push(
-                at_host(vec![
+            steps.push(PodmanCleanupStep {
+                purpose: "remove exact helper-managed Podman session workspace",
+                stage: ProvisionStage::RemovingStorage,
+                argv: vec![
                     "sh".to_owned(),
                     "-c".to_owned(),
                     script,
                     "mj-remove-host-workspace".to_owned(),
                     resource.clone(),
-                ])
-                .purpose("remove exact helper-managed Podman session workspace")
-                .stage(ProvisionStage::RemovingStorage),
-            );
+                ],
+            });
         }
     }
     let temporary_volume = container_temporary_volume_name(container_id);
     let temporary_cleanup = format!(
         "set -eu\nengine=podman\ntemporary_volume=$1\nsession=$2\n{TEMPORARY_VOLUME_FUNCTIONS}\nremove_temporary_volume\n"
     );
-    commands.push(
-        at_host(vec![
+    steps.push(PodmanCleanupStep {
+        purpose: "remove exact Podman session temporary volume",
+        stage: ProvisionStage::RemovingStorage,
+        argv: vec![
             "sh".to_owned(),
             "-c".to_owned(),
             temporary_cleanup,
             "mj-remove-temporary-volume".to_owned(),
             temporary_volume,
             session_id.to_owned(),
-        ])
-        .purpose("remove exact Podman session temporary volume")
-        .stage(ProvisionStage::RemovingStorage),
-    );
-    commands.push(
-        at_host(vec![
-            "rm".to_owned(),
-            "-rf".to_owned(),
-            "--".to_owned(),
-            format!(".cache/mjolnir/git/sessions/{session_id}"),
-        ])
-        .purpose("remove Podman session Git cache snapshot")
-        .stage(ProvisionStage::CleaningCache),
-    );
+        ],
+    });
+    if remove_shared_cache {
+        steps.push(PodmanCleanupStep {
+            purpose: "remove Podman session Git cache snapshot",
+            stage: ProvisionStage::CleaningCache,
+            argv: vec![
+                "rm".to_owned(),
+                "-rf".to_owned(),
+                "--".to_owned(),
+                format!(".cache/mjolnir/git/sessions/{session_id}"),
+            ],
+        });
+    }
+    let commands = match ssh {
+        Some(ssh) => vec![
+            ssh_command_owned(
+                SshTrafficClass::Control,
+                ssh,
+                step_script(
+                    steps
+                        .into_iter()
+                        .map(|step| CommandStep::new(step.purpose, step.argv)),
+                ),
+            )
+            .purpose("clean up stopped Podman session container and storage")
+            .stage(ProvisionStage::RemovingContainer)
+            .warn_on_stderr(),
+        ],
+        None => steps
+            .into_iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let mut argv = step.argv;
+                let command = CommandSpec::new(argv.remove(0), argv)
+                    .purpose(step.purpose)
+                    .stage(step.stage);
+                // Only the container's removal reports warnings on success.
+                if index == 0 {
+                    command.warn_on_stderr()
+                } else {
+                    command
+                }
+            })
+            .collect(),
+    };
     Ok(CommandPlan {
         description: format!("clean up stopped Mjolnir session {session_id}"),
         commands,
     })
+}
+
+/// One removal in [`podman_cleanup_plan`], in the order it must run.
+struct PodmanCleanupStep {
+    purpose: &'static str,
+    stage: ProvisionStage,
+    argv: Vec<String>,
 }
 
 /// Confirm that a container is absent after its exact delete command failed.

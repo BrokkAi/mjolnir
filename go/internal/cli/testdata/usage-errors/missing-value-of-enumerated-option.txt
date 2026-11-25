@@ -1,0 +1,4 @@
+error: a value is required for '--oracle <ORACLE>' but none was supplied
+  [possible values: enabled, disabled]
+
+For more information, try '--help'.

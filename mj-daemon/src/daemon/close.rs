@@ -8,6 +8,102 @@ enum SuspendInvocation {
     Recovery,
 }
 
+async fn release_idle_workspace_leases(
+    leases: Vec<mj_controller::controller::IdleWorkspaceLease>,
+) -> Result<()> {
+    futures::future::join_all(leases.into_iter().map(|lease| lease.release()))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+        .map(drop)
+}
+
+/// Lease a running worker, or accept a parked session whose foreground
+/// admission already prevents unparking. `parent` keeps the original refusal
+/// text for the session being repaired.
+async fn acquire_suspend_blocker_lease(
+    runtime: &RuntimeState,
+    session_id: &str,
+    record: Option<&SessionRecord>,
+    admission: mj_controller::recovery_gate::ForegroundAdmission,
+    parent: bool,
+) -> Result<Option<mj_controller::controller::IdleWorkspaceLease>> {
+    match record {
+        Some(record) if record.target.is_some() && record.state == SessionState::Running => {
+            let handle = runtime
+                .session_manager
+                .wait_for_session(session_id, Duration::from_secs(5))
+                .await
+                .map_err(|error| {
+                    if parent {
+                        mj_core::refusal::Refusal::precondition(format!("{error:#}"))
+                    } else {
+                        mj_core::refusal::Refusal::precondition(format!(
+                            "Cannot fix suspend blockers while sub-agent {} ({session_id}) is running: {error:#}",
+                            record.title
+                        ))
+                    }
+                })?;
+            let session_admission =
+                mj_controller::recovery_gate::SessionAdmission::Foreground(admission);
+            let lease = mj_controller::controller::IdleWorkspaceLease::acquire(
+                &session_admission,
+                &handle,
+                record.harness_kind,
+            )
+            .await
+            .map_err(|error| {
+                if parent {
+                    mj_core::refusal::Refusal::precondition(format!("{error:#}"))
+                } else {
+                    mj_core::refusal::Refusal::precondition(format!(
+                        "Cannot fix suspend blockers while sub-agent {} ({session_id}) is running: {error:#}",
+                        record.title
+                    ))
+                }
+            })?;
+            Ok(Some(lease))
+        }
+        Some(record) if record.state == SessionState::Parked => {
+            drop(admission);
+            Ok(None)
+        }
+        Some(record)
+            if !parent
+                && (!record.state.is_active()
+                    || (matches!(record.state, SessionState::Error | SessionState::Lost)
+                        && record.target.is_none())) =>
+        {
+            drop(admission);
+            Ok(None)
+        }
+        None if !parent => {
+            drop(admission);
+            Ok(None)
+        }
+        Some(record) if parent => {
+            drop(admission);
+            Err(mj_core::refusal::Refusal::precondition(format!(
+            "Session must be running (idle) or parked to fix suspend blockers (current state: {:?}).",
+            record.state
+        ))
+        .into())
+        }
+        Some(record) => {
+            drop(admission);
+            Err(mj_core::refusal::Refusal::precondition(format!(
+                "Cannot fix suspend blockers while sub-agent {} ({session_id}) is {:?}.",
+                record.title, record.state
+            ))
+            .into())
+        }
+        None => {
+            drop(admission);
+            Err(mj_core::refusal::Refusal::precondition("unknown session").into())
+        }
+    }
+}
+
 impl RuntimeState {
     pub fn request_close(&self, session_id: &str) {
         self.owner().close_requested.insert(session_id.to_owned());
@@ -47,18 +143,181 @@ impl RuntimeState {
                 &ProcessExecutor,
             )
             .await?;
-        self.persist_suspension_intent(session_id, None).await
+        self.persist_suspension_intent(session_id, None)
+            .await
+            .map(drop)
     }
 
+    pub async fn resolve_suspend_blockers(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse> {
+        let runtime = Arc::clone(self);
+        // Own daemon admission, session gate, and worker idle barrier inside a
+        // spawned task so client disconnect cannot drop guards while Git
+        // mutations are still running.
+        mj_core::runtime::spawn(async move {
+            let _work = mj_controller::upgrade::activity_unless_draining(
+                "resolve suspend blockers",
+            )?;
+            let admission = runtime
+                .session_gate
+                .try_enter_foreground(
+                    &session_id,
+                    "resolve suspend blockers",
+                    mj_controller::recovery_gate::LifecycleOrigin::Person,
+                )
+                .map_err(|error| {
+                    mj_core::refusal::Refusal::precondition(format!(
+                        "Session is busy: {}",
+                        error.holders.join(", ")
+                    ))
+                })?;
+            // Serialize against concurrent borrower sub-agent/reviewer
+            // registration on this workspace owner so no new borrower can
+            // start while we scan borrowers and mutate the checkout.
+            let borrower_gate = runtime
+                .borrower_registration_gate(&session_id)
+                .ok_or_else(|| mj_core::refusal::Refusal::precondition("unknown session"))?;
+            let _borrower_write_guard = borrower_gate.try_write().map_err(|_| {
+                mj_core::refusal::Refusal::precondition(
+                    "Cannot fix suspend blockers while a sub-agent is starting on this workspace.",
+                )
+            })?;
+            // Sync durable registrations committed just before we took the
+            // write guard (including reviewer children registered directly in
+            // the controller store) before enumerating active borrowers.
+            runtime.reload_controller().await?;
+            // Foreground admissions stay alive across remediation so a borrower
+            // cannot unpark or start a turn underneath the checkout edit.
+            let mut admissions = vec![admission];
+            let mut leases = Vec::new();
+            let parent_record = runtime.session_record(&session_id);
+            let borrower_ids = {
+                let owner = runtime.owner();
+                let mut ids = owner.controller().state.active_borrowers(&session_id);
+                drop(owner);
+                ids.sort();
+                ids.retain(|id| id != &session_id);
+                ids
+            };
+            let mut batch = vec![(session_id.clone(), parent_record, admissions[0].clone(), true)];
+            for borrower_id in borrower_ids {
+                let borrower_admission = match runtime.session_gate.try_enter_foreground(
+                    &borrower_id,
+                    "resolve suspend blockers",
+                    mj_controller::recovery_gate::LifecycleOrigin::Person,
+                ) {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        let record = runtime.session_record(&borrower_id);
+                        let label = record
+                            .as_ref()
+                            .map(|record| record.title.as_str())
+                            .unwrap_or(borrower_id.as_str());
+                        return Err(mj_core::refusal::Refusal::precondition(format!(
+                            "Cannot fix suspend blockers while sub-agent {label} ({borrower_id}) is busy: {}",
+                            error.holders.join(", ")
+                        ))
+                        .into());
+                    }
+                };
+                // Read borrower state only after holding its foreground admission
+                // so concurrent lifecycle transitions cannot race with the check.
+                let record = runtime.session_record(&borrower_id);
+                admissions.push(borrower_admission.clone());
+                batch.push((borrower_id, record, borrower_admission, false));
+            }
+            // Acquire the parent and all active borrower idle barriers
+            // concurrently so slow control connections do not multiply wait time.
+            let results = futures::future::join_all(batch.into_iter().map(
+                |(target_id, record, target_admission, is_parent)| {
+                    let runtime = Arc::clone(&runtime);
+                    async move {
+                        acquire_suspend_blocker_lease(
+                            &runtime,
+                            &target_id,
+                            record.as_ref(),
+                            target_admission,
+                            is_parent,
+                        )
+                        .await
+                    }
+                },
+            ))
+            .await;
+            let mut first_error = None;
+            for result in results {
+                match result {
+                    Ok(Some(lease)) => leases.push(lease),
+                    Ok(None) => {}
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+            if let Some(error) = first_error {
+                release_idle_workspace_leases(leases).await.context(
+                    "could not release worker idle barriers after refusing suspend-blocker remediation",
+                )?;
+                return Err(error);
+            }
+            let probe_session_id = session_id.clone();
+            // Bound the remediation probe to 60s (matching ForceDestroy's
+            // daemon-handoff admission bound in AGENTS.md) so a stalled target
+            // cannot hold daemon replacement or the worker barrier open.
+            let response = super::terminal_operations::process_probe(
+                Some(Duration::from_secs(60)),
+                move |executor| {
+                    Controller::load()?.resolve_suspend_blockers(&probe_session_id, executor)
+                },
+            )
+            .await;
+            release_idle_workspace_leases(leases).await.context(
+                "blocker remediation finished, but the worker idle barrier could not be released",
+            )?;
+            drop(admissions);
+            let mut response = response?;
+            let current = runtime.runtime_publication()?;
+            response.preflight.interrupting = current
+                .verdicts
+                .get(&response.preflight.session_id)
+                .is_some_and(|verdict| verdict.active_work);
+            response.preflight.children_not_handed_back =
+                super::verdicts::unfinished_suspend_children(
+                    &current,
+                    &response.preflight.session_id,
+                );
+            Ok(response)
+        })
+        .await
+        .context("resolve suspend blockers task panicked")?
+    }
     pub async fn suspend_preflight(
         self: &Arc<Self>,
         session_id: String,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        blocking(move || {
-            let controller = Controller::load()?;
-            controller.suspend_preflight(&session_id, dry_run, without_checkpoint, &ProcessExecutor)
+        let runtime = Arc::clone(self);
+        super::terminal_operations::process_probe(None, move |executor| {
+            let mut preflight = Controller::load()?.suspend_preflight(
+                &session_id,
+                dry_run,
+                without_checkpoint,
+                history_only,
+                executor,
+            )?;
+            // Git inventory can take time. Read current work from the same
+            // verdicts the dashboard uses when the preflight is ready.
+            let current = runtime.runtime_publication()?;
+            preflight.interrupting = current
+                .verdicts
+                .get(&session_id)
+                .is_some_and(|verdict| verdict.active_work);
+            preflight.children_not_handed_back =
+                super::verdicts::unfinished_suspend_children(&current, &session_id);
+            Ok(preflight)
         })
         .await
     }
@@ -67,9 +326,9 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: &str,
         consent: Option<&mj_core::suspend_consent::SuspendConsent>,
-    ) -> Result<()> {
+    ) -> Result<SessionRecord> {
         let consent = consent.cloned();
-        blocking({
+        let previous = blocking({
             let session_id = session_id.to_owned();
             move || {
                 ensure!(
@@ -84,6 +343,7 @@ impl RuntimeState {
                     .sessions
                     .get_mut(&session_id)
                     .with_context(|| format!("unknown session {session_id}"))?;
+                let previous = record.clone();
                 let ready_move = mj_controller::controller::move_session::move_destination_before_close(record)?;
                 if matches!(
                     record.state,
@@ -104,13 +364,13 @@ impl RuntimeState {
                     ready_move.as_ref(),
                     consent.as_ref(),
                 )?;
-                Ok(())
+                Ok(previous)
             }
         })
         .await?;
         self.reload_controller().await?;
         self.publish_revision();
-        Ok(())
+        Ok(previous)
     }
 
     pub async fn suspend_session(self: &Arc<Self>, session_id: String) -> Result<()> {
@@ -146,6 +406,7 @@ impl RuntimeState {
         consent: mj_core::suspend_consent::SuspendConsent,
         control: LifecycleControl,
     ) -> Result<StartedLifecycle> {
+        consent.validate()?;
         self.start_suspend_session_origin(
             session_id,
             consent,
@@ -249,6 +510,7 @@ impl RuntimeState {
                         }
                         if origin == super::lifecycle::LifecycleOrigin::Person
                             && !consent.without_checkpoint
+                            && !consent.history_only
                         {
                             if owns_environment
                                 && record.target.is_some()
@@ -261,26 +523,40 @@ impl RuntimeState {
                                 )
                             {
                                 let executor = DaemonStageReportingExecutor::new(
-                                    CancellableProcessExecutor::new(control.cancelled.clone()),
+                                    control.executor(),
                                     state.clone(),
                                     session_id.clone(),
                                 );
+                                // Both the inventory and the acceptance record
+                                // read and write the target, so both run with
+                                // admission yielded: a handoff must not wait on a
+                                // stalled target. The record is written whole or
+                                // not at all, so a person's cancel must not cut it
+                                // short (shutdown-only view); shutdown still does,
+                                // and the next daemon recovers a leftover record.
                                 executor.begin_resumable_work()?;
-                                let inventory = controller.preflight_origin_delta_suspension(
-                                    &session_id,
-                                    &consent,
-                                    &executor,
-                                );
+                                let accepted = controller
+                                    .preflight_origin_delta_suspension(
+                                        &session_id,
+                                        &consent,
+                                        &executor,
+                                    )
+                                    .and_then(|inventory| {
+                                        mj_core::runtime::off_async_worker(|| {
+                                            controller.record_origin_delta_suspend_acceptance(
+                                                &session_id,
+                                                &executor.shutdown_only(),
+                                            )
+                                        })
+                                        .map(|()| inventory)
+                                    });
                                 executor.end_resumable_work("accept managed clone suspend")?;
-                                inventory?;
-                                mj_core::runtime::off_async_worker(|| {
-                                    controller.record_origin_delta_suspend_acceptance(&session_id)
-                                })?;
+                                accepted?;
                             }
                         } else if consent.without_checkpoint && !consent.confirm_no_checkpoint {
                             let sid = session_id.clone();
                             let executor = DaemonStageReportingExecutor::new(
-                                CancellableProcessExecutor::new(control.cancelled.clone()),
+                                control.executor(),
                                 state.clone(),
                                 session_id.clone(),
                             );
@@ -300,21 +576,24 @@ impl RuntimeState {
                             })
                             .await?;
                         }
-                        if let Err(error) = state
+                        let accepted_record = match state
                             .persist_suspension_intent(&session_id, Some(&consent))
                             .await
                         {
-                            if invocation == SuspendInvocation::Parent {
-                                let id = session_id.clone();
-                                let _ = blocking(move || {
-                                    mj_controller::database::set_subagent_resume_with_parent(
-                                        &id, false,
-                                    )
-                                })
-                                .await;
+                            Ok(previous) => previous,
+                            Err(error) => {
+                                if invocation == SuspendInvocation::Parent {
+                                    let id = session_id.clone();
+                                    let _ = blocking(move || {
+                                        mj_controller::database::set_subagent_resume_with_parent(
+                                            &id, false,
+                                        )
+                                    })
+                                    .await;
+                                }
+                                return Err(error);
                             }
-                            return Err(error);
-                        }
+                        };
                         accepted.send_replace(Some(Ok(())));
                         let children = if matches!(
                             invocation,
@@ -330,7 +609,7 @@ impl RuntimeState {
                         };
                         if !children.is_empty() {
                             let executor = DaemonStageReportingExecutor::new(
-                                CancellableProcessExecutor::new(control.cancelled.clone()),
+                                control.executor(),
                                 state.clone(),
                                 session_id.clone(),
                             );
@@ -379,6 +658,7 @@ impl RuntimeState {
                                 session_id.clone(),
                                 control,
                                 consent,
+                                Some(accepted_record),
                             )
                             .await;
                         if invocation == SuspendInvocation::Parent {
@@ -848,6 +1128,7 @@ impl RuntimeState {
                             session_id,
                             control,
                             mj_core::suspend_consent::SuspendConsent::default(),
+                            None,
                         )
                         .await
                 },
@@ -868,25 +1149,48 @@ impl RuntimeState {
         session_id: String,
         control: LifecycleControl,
         consent: mj_core::suspend_consent::SuspendConsent,
+        accepted_record: Option<SessionRecord>,
     ) -> Result<DaemonLifecycleResult> {
-        let cancelled = control.cancelled.clone();
         let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon close task")??;
-        let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled),
-            self.clone(),
-            session_id.clone(),
-        );
-        self.suspend_with_loaded_controller(
-            session_admission,
-            &session_id,
-            &mut controller,
-            &executor,
-            &consent,
-            Some(&control),
-        )
-        .await
+        let executor =
+            DaemonStageReportingExecutor::new(control.executor(), self.clone(), session_id.clone());
+        let result = self
+            .suspend_with_loaded_controller(
+                session_admission,
+                &session_id,
+                &mut controller,
+                &executor,
+                &consent,
+                Some(&control),
+            )
+            .await;
+        if result.is_err()
+            && let Some(accepted) = accepted_record
+        {
+            let id = session_id.clone();
+            let restored = blocking(move || {
+                let Some(mut durable) = mj_controller::database::read_durable_session_record(&id)?
+                else {
+                    return Ok(());
+                };
+                if durable.state == SessionState::Closing
+                    && durable.target == accepted.target
+                    && durable.checkpoint == accepted.checkpoint
+                {
+                    durable.state = accepted.state;
+                    durable.updated_at = chrono::Utc::now().to_rfc3339();
+                    mj_controller::database::save_session(&durable)?;
+                }
+                Ok(())
+            })
+            .await;
+            if let Err(error) = restored {
+                tracing::warn!(%session_id, %error, "could not roll back accepted suspension state");
+            }
+        }
+        result
     }
 
     /// `commit` is the control a daemon close commits through at its point of
@@ -1019,10 +1323,10 @@ impl RuntimeState {
             .start_automatic_lifecycle(
                 session_id.clone(),
                 LifecycleKind::Cleanup,
-                |state, session_id, cancelled, _session_admission| async move {
+                |state, session_id, control, _session_admission| async move {
                     let mut controller = Controller::load()?;
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
+                        control.executor(),
                         state,
                         session_id.clone(),
                     );

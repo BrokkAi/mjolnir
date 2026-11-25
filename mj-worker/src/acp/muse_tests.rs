@@ -31,6 +31,7 @@ pub(crate) async fn native_muse_turn(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -196,6 +197,7 @@ for line in sys.stdin:
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
         instruction_role: None,
+        claude_mcp_socket: None,
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: root.path().join("subagents.sock"),
             role: mj_core::subagent::SubagentMcpRole::MessageOnly,
@@ -297,7 +299,7 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
             && opened.received[0].contains(&"mj-agents".into())
     );
     assert!(
-        opened.standing.contains("search_sessions") && opened.standing.contains("send_message"),
+        opened.standing.contains("search_history") && opened.standing.contains("send_message"),
         "{}",
         opened.standing
     );
@@ -312,7 +314,7 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
             && opened.received[0].contains(&"mj-agents".into())
     );
     assert!(
-        !opened.standing.contains("search_sessions") && !opened.standing.contains("send_message"),
+        !opened.standing.contains("search_history") && !opened.standing.contains("send_message"),
         "{}",
         opened.standing
     );
@@ -345,7 +347,7 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
 }
 
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.25.0"]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.26.0"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));
@@ -388,6 +390,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

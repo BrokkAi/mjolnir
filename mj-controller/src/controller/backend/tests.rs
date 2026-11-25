@@ -299,11 +299,12 @@ fn github_token_is_inherited_only_by_managed_containers() {
     );
 }
 
-/// `sudo` logs every command line it runs to the host's journal, and a
-/// sandbox's engine runs under `sudo`. A value that came from a reference must
-/// reach the engine through the ssh command's environment, never its argv.
+/// A value that came from a reference must not reach the engine at all: the
+/// engine records `--env` in the container's configuration, and `sudo` (a
+/// sandbox's engine runs under it) logs every command line. Referenced values
+/// reach the worker through `launch.json` instead.
 #[test]
-fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
+fn a_container_launch_gives_the_engine_only_literal_environment_entries() {
     use mj_core::config::{Environment, EnvironmentValue, SecretResolver, with_secret_resolver};
     let resolver = SecretResolver::fixed(
         BTreeMap::new(),
@@ -365,7 +366,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
     else {
         panic!("the Nitro target and accepted bundle should enable the remote");
     };
-    let mut plan = targets::provision_plan_named(
+    let plan = targets::provision_plan_named(
         &target,
         session_id,
         &bundle,
@@ -378,9 +379,10 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
         },
     )
     .unwrap();
-    let secrets = container_environment(&container, ContainerOverrides::default(), true).secrets;
-    plan.provide_target_environment_secrets(&target, &secrets)
-        .unwrap();
+    assert_eq!(
+        container_environment(&container, ContainerOverrides::default()),
+        ["--env", "MODE=fast"]
+    );
     let run = plan
         .commands
         .iter()
@@ -388,8 +390,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
         .unwrap();
     let line = run.args.last().unwrap();
     assert!(!line.contains("sk-secret-value"), "{line}");
-    assert!(line.contains("--preserve-env=API_KEY"), "{line}");
-    assert!(line.contains("'--env' 'API_KEY'"), "{line}");
+    assert!(!line.contains("API_KEY"), "{line}");
     assert!(line.contains("'--env' 'MODE=fast'"), "{line}");
     assert!(
         line.contains("'--mbx-remote' 's3://test-build-cache/mbx'"),
@@ -404,7 +405,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
     assert_eq!(line.matches("'--mbx-namespace=").count(), 2, "{line}");
     assert!(!line.contains("MBX_REMOTE_"), "{line}");
     assert!(!run.env.keys().any(|name| name.starts_with("MBX_REMOTE_")));
-    assert_eq!(run.sensitive_stdin(), Some(&b"sk-secret-value\n"[..]));
+    assert_eq!(run.sensitive_stdin(), None);
 }
 
 fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) -> ConfigContainer {
@@ -937,6 +938,9 @@ fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("Retry launch"));
+    #[cfg(target_os = "macos")]
+    assert!(error.contains(mj_targets::targets::PODMAN_UNSUPPORTED_ON_MACOS));
+    #[cfg(not(target_os = "macos"))]
     assert!(error.contains("Podman 4.0.0"));
 }
 
@@ -1153,4 +1157,147 @@ fn the_wizard_says_docker_is_not_installed_in_the_launch_options_words() {
         launch,
         "Docker is not installed on this host. Install Docker or choose another target, then Retry launch."
     );
+}
+
+#[test]
+fn deployment_capacity_targets_ignore_bare_session_churn() {
+    use mj_core::state::{SessionState, TargetLocator};
+    for local in [false, true] {
+        for prefix in [".local/share/hel/workspaces", "/"] {
+            let template = if local {
+                TargetTemplate::LocalBare
+            } else {
+                TargetTemplate::SshBare {
+                    ssh: SshConnection {
+                        host: "builder".into(),
+                        user: None,
+                        identity_file: None,
+                        extra_args: Vec::new(),
+                    },
+                    permissions: mj_core::config::PermissionMode::Yolo,
+                    workspace_prefix: prefix.into(),
+                }
+            };
+            let mut controller = Controller {
+                config: Config {
+                    targets: BTreeMap::from([("bare".into(), template)]),
+                    ..Config::default()
+                },
+                state: State::default(),
+            };
+            let session = |id: &str, workspace: &str| {
+                let mut record = crate::database::test_session(id, "raw");
+                record.target_template_id = "bare".into();
+                record.state = SessionState::Running;
+                record.project_directory = Some(workspace.into());
+                record.target = Some(Box::new(if local {
+                    TargetLocator::LocalBare {
+                        worker_root: data_dir().join("workers").join(id),
+                    }
+                } else {
+                    TargetLocator::SshBare {
+                        host: "builder".into(),
+                        workspace: workspace.into(),
+                        worker_id: Some(id.into()),
+                    }
+                }));
+                record
+            };
+            for id in ["s1", "s2", "external"] {
+                controller
+                    .state
+                    .environment_owners
+                    .insert(id.into(), id.into());
+            }
+            let baseline = controller.deployment_capacity_targets();
+            let paths = [
+                format!("{prefix}/nested/mount"),
+                "/mnt/data/repo/.mj/clones/s1/".into(),
+                "/mnt/data/repo/.mj/worktrees/s2".into(),
+                " /mnt/other/project with whitespace ".into(),
+            ];
+            for (index, path) in paths.iter().enumerate() {
+                let id = format!("session-{index}");
+                controller
+                    .state
+                    .environment_owners
+                    .insert(id.clone(), id.clone());
+                controller
+                    .state
+                    .sessions
+                    .insert(id.clone(), session(&id, path));
+            }
+            let active = controller.deployment_capacity_targets();
+            assert_ne!(baseline, active);
+            assert!(baseline[0].same_schedule_identity(&active[0]));
+            for record in controller.state.sessions.values() {
+                let storage = mj_core::targets::storage::session_storage_paths(
+                    record.target.as_ref().unwrap(),
+                    &record.id,
+                    record.project_directory.as_deref(),
+                );
+                for path in storage.all() {
+                    if local {
+                        assert!(
+                            active[0]
+                                .local_storage_paths
+                                .iter()
+                                .any(|known| known == path),
+                            "{path:?}"
+                        );
+                    } else {
+                        assert!(
+                            active[0].probes[0]
+                                .args
+                                .iter()
+                                .any(|arg| arg.contains(path)),
+                            "{path:?}"
+                        );
+                    }
+                }
+            }
+            let records: Vec<_> = controller.state.sessions.values().cloned().collect();
+            controller.state.sessions.clear();
+            for record in records.into_iter().rev() {
+                controller.state.sessions.insert(record.id.clone(), record);
+            }
+            assert_eq!(active, controller.deployment_capacity_targets());
+            for id in controller
+                .state
+                .sessions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                controller.state.sessions.get_mut(&id).unwrap().state = SessionState::Stopped;
+            }
+            assert_eq!(baseline, controller.deployment_capacity_targets());
+            let mut changed = active[0].clone();
+            let identity = changed.stable_identity.as_mut().unwrap();
+            if local {
+                identity.local_template_paths.push("/new/template".into());
+            } else {
+                identity.connections[0].2.push("/new/template".into());
+            }
+            assert!(!active[0].same_schedule_identity(&changed));
+            if !local {
+                let mut changed = active[0].clone();
+                changed.stable_identity.as_mut().unwrap().connections[0].1 ^= true;
+                assert!(!active[0].same_schedule_identity(&changed));
+                let mut changed = active[0].clone();
+                changed.stable_identity.as_mut().unwrap().connections[0]
+                    .0
+                    .destination = "other".into();
+                assert!(!active[0].same_schedule_identity(&changed));
+            }
+            let mut fleet = active[0].clone();
+            fleet.stable_identity = None;
+            fleet.kind = targets::DeploymentCapacityKind::AwsFleet;
+            let mut changed = fleet.clone();
+            changed
+                .probes
+                .push(CommandSpec::new("new-instance", Vec::<String>::new()));
+            assert!(!fleet.same_schedule_identity(&changed));
+        }
+    }
 }

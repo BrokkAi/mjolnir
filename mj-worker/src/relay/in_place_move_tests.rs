@@ -168,6 +168,7 @@ fn in_place_move_hold_is_atomic_idempotent_and_enforces_store_id_on_all_commands
         (
             "r-bad-release",
             RelayRequest::ReleaseInPlaceMoveDispatch {
+                expected_harness_restarted: None,
                 operation_id: "move-op-1".into(),
                 expected_store_id: wrong_store,
             },
@@ -340,6 +341,7 @@ fn in_place_move_hold_persists_across_reopen_and_releases_submit_front_first() {
     let released = reopened.handle(req(
         "r-release",
         RelayRequest::ReleaseInPlaceMoveDispatch {
+            expected_harness_restarted: None,
             operation_id: "move-op-reopen".into(),
             expected_store_id: store_id.clone(),
         },
@@ -354,6 +356,7 @@ fn in_place_move_hold_persists_across_reopen_and_releases_submit_front_first() {
     let released_again = reopened.handle(req(
         "r-release-2",
         RelayRequest::ReleaseInPlaceMoveDispatch {
+            expected_harness_restarted: None,
             operation_id: "move-op-reopen".into(),
             expected_store_id: store_id,
         },
@@ -474,11 +477,25 @@ fn in_place_harness_restart_in_flight_blocks_release_and_mutations_until_complet
         .unwrap_err();
     assert_eq!(err.code, RelayErrorCode::InvalidState);
 
+    assert!(
+        matches!(err.detail, Some(RelayErrorDetail::ReloadInProgress { operation_id }) if operation_id == "move-op-1")
+    );
+    relay
+        .mark_in_place_harness_committed("move-op-1", &store_id)
+        .unwrap();
+    let err = relay
+        .admit_in_place_harness_restart("move-op-1", &store_id)
+        .unwrap_err();
+    assert!(
+        matches!(err.detail, Some(RelayErrorDetail::ReloadInProgress { operation_id }) if operation_id == "move-op-1")
+    );
+
     // Release, Discard, and SubmitFront are all refused while restart is in flight.
     for (req_id, request) in [
         (
             "r-rel-busy",
             RelayRequest::ReleaseInPlaceMoveDispatch {
+                expected_harness_restarted: None,
                 operation_id: "move-op-1".into(),
                 expected_store_id: store_id.clone(),
             },
@@ -525,6 +542,7 @@ fn in_place_harness_restart_in_flight_blocks_release_and_mutations_until_complet
     let released = relay.handle(req(
         "r-rel-ok",
         RelayRequest::ReleaseInPlaceMoveDispatch {
+            expected_harness_restarted: None,
             operation_id: "move-op-1".into(),
             expected_store_id: store_id,
         },
@@ -699,4 +717,97 @@ fn in_place_move_hold_allows_active_turn_cancel_while_blocking_queued_prompts() 
         .record_command_completed("cancel-active", RelayCommandOutcome::Cancelled)
         .unwrap();
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+}
+
+#[test]
+fn checked_release_refuses_reload_that_advanced_since_cancellation_observed_precommit() {
+    use mj_core::relay::InPlaceReloadPhase;
+    for phase in [
+        None,
+        Some(InPlaceReloadPhase::Committed),
+        Some(InPlaceReloadPhase::Started),
+        Some(InPlaceReloadPhase::FailedAfterCommit {
+            message: "startup failed".into(),
+        }),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = configured(&temp);
+        let store = relay.snapshot.store_id.clone().unwrap();
+        let held = relay.handle(req(
+            "hold",
+            RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store.clone(),
+            },
+        ));
+        assert!(matches!(held.body, RelayResponseBody::Ok { .. }));
+        let queued = relay.handle(req(
+            "queued",
+            RelayRequest::SubmitFront {
+                operation_id: "move".into(),
+                expected_store_id: store.clone(),
+                command_id: "cmd-queued".into(),
+                command: prompt_command("existing user work"),
+            },
+        ));
+        assert!(
+            matches!(queued.body, RelayResponseBody::Ok { .. }),
+            "{queued:?}"
+        );
+        // The controller observed pre-commit; the earlier request advances
+        // before cancellation or failed-retry cleanup can release its hold.
+        let started = matches!(phase, Some(InPlaceReloadPhase::Started));
+        let hold = relay.snapshot.in_place_move_hold.as_mut().unwrap();
+        hold.reload_phase = phase.clone();
+        hold.harness_restarted = started;
+        relay.persist_snapshot().unwrap();
+        let released = relay.handle(req(
+            "release",
+            RelayRequest::ReleaseInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store.clone(),
+                expected_harness_restarted: Some(false),
+            },
+        ));
+        if phase.is_none() {
+            assert!(matches!(released.body, RelayResponseBody::Ok { .. }));
+            assert!(relay.snapshot.in_place_move_hold.is_none());
+            assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        } else {
+            let RelayResponseBody::Error { error } = released.body else {
+                panic!("release must be refused");
+            };
+            match phase {
+                Some(InPlaceReloadPhase::Committed) => assert!(matches!(
+                    error.detail,
+                    Some(RelayErrorDetail::ReloadInProgress { .. })
+                )),
+                Some(InPlaceReloadPhase::FailedAfterCommit { .. }) => {
+                    assert_eq!(error.code, RelayErrorCode::Internal);
+                    assert!(matches!(
+                        error.detail,
+                        Some(RelayErrorDetail::ReloadFailedAfterCommit { .. })
+                    ));
+                }
+                _ => {
+                    assert_eq!(error.code, RelayErrorCode::InvalidState);
+                    assert!(error.detail.is_none());
+                }
+            }
+            assert!(relay.snapshot.in_place_move_hold.is_some());
+            assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+            if started {
+                let released = relay.handle(req(
+                    "release-settled",
+                    RelayRequest::ReleaseInPlaceMoveDispatch {
+                        operation_id: "move".into(),
+                        expected_store_id: store,
+                        expected_harness_restarted: Some(true),
+                    },
+                ));
+                assert!(matches!(released.body, RelayResponseBody::Ok { .. }));
+                assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+            }
+        }
+    }
 }

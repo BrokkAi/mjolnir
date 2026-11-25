@@ -1,6 +1,7 @@
 //! Resuming a stopped session onto a profile and target.
 
 use mj_core::targets::SshTrafficClass;
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,7 +11,8 @@ use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use tokio_util::sync::CancellationToken;
 
-use crate::checkpoint_transfer::restore_command;
+use crate::checkpoint_transfer::restore_stdin_command;
+use crate::handoff::NativePriorSource;
 use crate::session_manager::new_command_id;
 use mj_checkpoint::archive::{
     CanonicalQueuedCommandKind, CanonicalSessionSnapshot, CheckpointRepositoryBundle, SystemGit,
@@ -930,7 +932,6 @@ impl Controller {
                 _ => PathBuf::from(path),
             };
             let remote_archive = format!("{worker_root}/restore.hel.zip");
-            let remote_spec = format!("{worker_root}/restore-spec.json");
             let move_destination =
                 crate::database::load_move_operation(session_id)?.filter(|operation| {
                     matches!(
@@ -1078,13 +1079,9 @@ impl Controller {
                 upload_checkpoint_spec(syncing, &backend, session_id, &local_seed, &remote_seed)?;
                 staged.aws_profile
             } else {
-                let staging = tempfile::tempdir().context("create restore staging")?;
-                let local_spec = staging.path().join("restore-spec.json");
-                std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
                 let controller = &*self;
                 let backend_ref = &backend;
                 let worker_root_ref = worker_root.as_str();
-                let local_spec_ref = local_spec.as_path();
                 let staged_aws_profile = if let Some(transfer) = move_transfer.as_mut() {
                     // Direct cross-target Move: install destination worker
                     // binary first so `receive-move-stream` is available, then
@@ -1149,14 +1146,6 @@ impl Controller {
                     transfer.operation.phase = mj_core::state::MovePhase::Restoring;
                     transfer.operation.updated_at = now();
                     crate::database::save_move_operation(transfer.operation)?;
-                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    upload_checkpoint_spec(
-                        restoring,
-                        backend_ref,
-                        session_id,
-                        local_spec_ref,
-                        &remote_spec,
-                    )?;
                     staged
                 } else {
                     // Two independent lanes into the target. The checkpoint transfer
@@ -1223,23 +1212,25 @@ impl Controller {
                                     )?;
                                 }
                             }
-                            upload_checkpoint_spec(
-                                restoring,
-                                backend_ref,
-                                session_id,
-                                local_spec_ref,
-                                &remote_spec,
-                            )
+                            Ok(())
                         },
                     )?;
                     staged
                 };
                 {
                     let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    let output = execute_checked(
+                    // The spec streams over stdin, so no upload of it
+                    // precedes the restore. Both branches above install this
+                    // build's worker first; an older one would read `-` as a
+                    // file name.
+                    let command = restore_stdin_command(&backend, session_id)?;
+                    let output = super::checkpoint::send_spec_streamed(
                         restoring,
-                        restore_command(&backend, session_id, &remote_spec)?,
+                        &command,
+                        &restore,
+                        "restore target checkpoint",
                     )?;
+                    let output = targets::checked_command_output(&command, output)?;
                     if move_transfer.is_some() {
                         // Remove the transferred Move archive from the
                         // destination worker root once restore has unpacked it.
@@ -1571,6 +1562,16 @@ pub(super) fn verify_resume_checkpoint(
     session_id: &str,
     checkpoint: &mj_core::state::CheckpointMetadata,
 ) -> Result<VerifiedResumeArchive> {
+    verify_resume_checkpoint_unless(session_id, checkpoint, None)
+}
+
+/// [`verify_resume_checkpoint`] that stops reading the archive once `cancel`
+/// returns true, for work that runs for a client that can leave.
+pub(super) fn verify_resume_checkpoint_unless(
+    session_id: &str,
+    checkpoint: &mj_core::state::CheckpointMetadata,
+    cancel: Option<&mj_checkpoint::archive::ArchivePurgeCancel>,
+) -> Result<VerifiedResumeArchive> {
     let archive_path = {
         let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive");
         checkpoint.archive_path.canonicalize().with_context(|| {
@@ -1591,7 +1592,12 @@ pub(super) fn verify_resume_checkpoint(
         archive_sha256,
     } = {
         let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive contents");
-        verify_archive_streaming(&archive_path)?
+        match cancel {
+            Some(cancel) => {
+                mj_checkpoint::archive::verify_archive_streaming_unless(&archive_path, cancel)?
+            }
+            None => verify_archive_streaming(&archive_path)?,
+        }
     };
     if archive_sha256 != checkpoint.sha256 || manifest.session.id != session_id {
         bail!("persisted checkpoint verification failed");
@@ -2169,6 +2175,13 @@ impl Controller {
         let is_history_cutoff_origin_delta =
             super::network_git::manifest_has_history_cutoff_origin_delta(archive_manifest)
                 && super::backend::session_history_cutoff(&previous)?.is_some();
+        let history_only_archive = archive_manifest
+            .repositories
+            .iter()
+            .any(|repository| repository.metadata.review_refs_metadata_only)
+            && archive_manifest.repositories.iter().all(|repository| {
+                repository.metadata.review_refs_metadata_only || repository.metadata.plain_directory
+            });
         let origin_delta = manifest_uses_origin_delta(archive_manifest);
         if origin_delta && plan != ResumePlan::InPlace {
             let originless = archive_manifest.repositories.iter().any(|repository| {
@@ -2200,6 +2213,7 @@ impl Controller {
             }
         }
         if !origin_delta
+            && !history_only_archive
             && !transferring_workspace
             && plan == ResumePlan::RawToWorkspace
             && let Some(worktree) = previous_managed_worktree.as_ref()
@@ -2233,10 +2247,7 @@ impl Controller {
             let refreshed_checkout = self.state.checkout_for_record(session_id, &previous)?;
             previous_managed_worktree = refreshed_checkout.effective().managed_worktree().cloned();
         }
-        let mut upgraded_legacy_worktree: Option<(
-            mj_core::state::ManagedWorktree,
-            Option<PathBuf>,
-        )> = None;
+        let mut upgraded_legacy_worktree: Option<mj_core::state::ManagedWorktree> = None;
         if !origin_delta
             && !transferring_workspace
             && plan == ResumePlan::InPlace
@@ -2249,13 +2260,9 @@ impl Controller {
             )
             && !managed_worktree_checkout_exists(executor, worktree)?
         {
-            let (upgraded_clone, upgraded_project_directory) = upgrade_legacy_worktree_to_clone(
-                worktree,
-                session_id,
-                previous.project_directory.as_deref(),
-            );
+            let upgraded_clone = upgrade_legacy_worktree_to_clone(worktree, session_id);
             ensure_managed_worktree_available(executor, &upgraded_clone)?;
-            upgraded_legacy_worktree = Some((upgraded_clone, upgraded_project_directory));
+            upgraded_legacy_worktree = Some(upgraded_clone);
         }
         // A converting resume writes its own archive below, from the accepted
         // repository's selected network source, and provisioning reads that
@@ -2274,7 +2281,7 @@ impl Controller {
             && matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. })
             && let Some(project_directory) = checkout.project_directory()
         {
-            self.validate_project_directory(target_id, project_directory, executor)
+            self.validate_project_directory(target_id, &project_directory, executor)
                 .context("raw project is unavailable for resume")?;
         }
         let conversion = match plan {
@@ -2319,6 +2326,9 @@ impl Controller {
         let history_host = mount_history_host(&target_template);
         let history_mounts = additional_mounts.clone();
         let mut resume_notices = Vec::new();
+        if history_only_archive && !is_attached_checkout {
+            resume_notices.push("Resumed from a history-only checkpoint into a fresh workspace checkout; prior workspace Git changes were not saved.".to_owned());
+        }
         // The raw-to-workspace notice is written where the conversion snapshot
         // is taken, because it reports the branch the container arrives on.
         if let Some(conversion) = conversion
@@ -2395,8 +2405,20 @@ impl Controller {
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
         let utility_config = (!native_continuity).then(|| self.config.clone());
-        let native_prior = if utility_config.is_some() && direct_move_source.is_none() {
-            native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+        let native_prior = if utility_config.is_some() {
+            if let Some((source_backend, _, _)) = &direct_move_source {
+                native_prior_from_target_while_cancellable(
+                    session_id,
+                    source_backend,
+                    archive_manifest.session.harness_kind,
+                    Some(archive_manifest.session.native_session_id.as_str()),
+                    &verified_archive.canonical_session,
+                    executor,
+                )
+                .await?
+            } else {
+                native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+            }
         } else {
             None
         };
@@ -2458,13 +2480,9 @@ impl Controller {
                 worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
                     && matches!(worktree.target, mj_core::state::ManagedWorktreeTarget::Local)
             }) {
-                let (upgraded, upgraded_project_directory) = upgrade_legacy_worktree_to_clone(
-                    worktree,
-                    session_id,
-                    previous.project_directory.as_deref(),
-                );
+                let upgraded = upgrade_legacy_worktree_to_clone(worktree, session_id);
                 ensure_managed_worktree_available(executor, &upgraded)?;
-                Some((upgraded, upgraded_project_directory))
+                Some(upgraded)
             } else {
                 None
             }
@@ -2502,12 +2520,13 @@ impl Controller {
                 apply_workspace_to_raw(record, conversion);
             }
             None => {
-                if let Some((upgraded, upgraded_project_directory)) = upgraded_origin_delta_clone
+                if let Some(upgraded) = upgraded_origin_delta_clone
                     .as_ref()
                     .or(upgraded_legacy_worktree.as_ref())
                 {
+                    // The clone's path derives from its descriptor.
                     record.managed_worktree = Some(Box::new(upgraded.clone()));
-                    record.project_directory = upgraded_project_directory.clone();
+                    record.project_directory = None;
                 } else if let (Some(worktree), Some(refreshed)) = (
                     record.managed_worktree.as_mut(),
                     previous_managed_worktree.as_ref(),
@@ -2551,7 +2570,7 @@ impl Controller {
                     // then applies the origin-delta snapshot into the workspace.
                 } else if plan == ResumePlan::WorkspaceToRaw {
                     // Handled in the WorkspaceToRaw conversion block below.
-                } else if let Some((upgraded, _)) = upgraded_origin_delta_clone.as_ref() {
+                } else if let Some(upgraded) = upgraded_origin_delta_clone.as_ref() {
                     match super::worktree::restore_managed_clone_origin_delta(
                         executor, upgraded, &archive_path, archive_manifest,
                     )? {
@@ -2580,13 +2599,23 @@ impl Controller {
                     // ManagedWorkspace resuming in place: provisioning clones from origin;
                     // restore_into_target applies the origin-delta snapshot.
                 }
-            } else if let Some((upgraded_clone, _)) = upgraded_legacy_worktree.as_ref() {
-                resume_notices.extend(restore_legacy_worktree_as_managed_clone(
-                    executor,
-                    upgraded_clone,
-                    &archive_path,
-                    archive_manifest,
-                )?);
+            } else if let Some(upgraded_clone) = upgraded_legacy_worktree.as_ref() {
+                if history_only_archive {
+                    if let Some(fresh_head) =
+                        super::worktree::restore_managed_clone_fresh_head(executor, upgraded_clone)?
+                    {
+                        self.record_fresh_managed_clone_head(session_id, fresh_head)?;
+                        recreated_managed_worktree = true;
+                    }
+                } else {
+                    resume_notices.extend(restore_legacy_worktree_as_managed_clone(
+                        executor,
+                        upgraded_clone,
+                        &archive_path,
+                        archive_manifest,
+                        None,
+                    )?);
+                }
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 if !transferring_workspace
                     && plan == ResumePlan::RawToWorkspace
@@ -2598,7 +2627,20 @@ impl Controller {
                     // restore_into_target applies the original legacy archive
                     // directly (preserving archived untracked files & stashes).
                 } else {
-                    recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
+                    recreated_managed_worktree = if history_only_archive
+                        && worktree.kind == mj_core::state::ManagedCheckoutKind::Clone
+                    {
+                        if let Some(fresh_head) =
+                            super::worktree::restore_managed_clone_fresh_head(executor, worktree)?
+                        {
+                            self.record_fresh_managed_clone_head(session_id, fresh_head)?;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        restore_managed_worktree(executor, worktree)?
+                    };
                     if !transferring_workspace
                         && recreated_managed_worktree
                         && plan == ResumePlan::RawToWorkspace
@@ -2970,6 +3012,30 @@ impl Controller {
         Ok(record.state == SessionState::Running
             || crate::database::load_worker_restart(session_id)?
                 .is_some_and(|intent| record.target.as_deref() == Some(&intent.target)))
+    }
+
+    pub(in crate::controller) fn record_fresh_managed_clone_head(
+        &mut self,
+        session_id: &str,
+        fresh_head: String,
+    ) -> Result<()> {
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let worktree = record
+            .managed_worktree
+            .as_mut()
+            .context("fresh managed clone has no worktree record")?;
+        ensure!(
+            worktree.kind == mj_core::state::ManagedCheckoutKind::Clone,
+            "fresh managed clone head belongs to a non-clone checkout"
+        );
+        worktree.base_commit = Some(fresh_head);
+        // accept_resumed_session persisted the old checkout before the clone
+        // was recreated; publish the new baseline in the same durable record.
+        crate::database::save_resumed_session(record, None)
     }
 
     fn keep_started_resume_after_failure(
@@ -3489,6 +3555,17 @@ struct CrossHarnessProvisionExecutor<'a, E: CommandExecutor + ?Sized> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecutor<'_, E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner.execute_to_file(command, output)
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         self.inner.pause_deadline()
     }
@@ -3506,6 +3583,10 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecu
 
     fn cancellation_requested(&self) -> bool {
         self.cancellation.is_cancelled() || self.inner.cancellation_requested()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.inner.shutdown_interrupted()
     }
 
     fn stage_started(&self, stage: ProvisionStage) {
@@ -3703,11 +3784,134 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
     })
 }
 
-/// Cooperatively stop native parsing on cancellation and join its blocking
-/// task before releasing the source archive and lifecycle ownership.
 async fn native_prior_while_cancellable(
     session_id: &str,
     archive: &VerifiedResumeArchive,
+    executor: &impl CommandExecutor,
+) -> Result<Option<crate::compaction::PriorCompaction>> {
+    native_prior_source_while_cancellable(
+        session_id,
+        NativePriorSource::Archive {
+            archive_path: archive.archive_path.clone(),
+            manifest: archive.manifest.clone(),
+        },
+        &archive.canonical_session,
+        executor,
+    )
+    .await
+}
+
+/// POSIX scripts that print a source session's native transcript, taking the
+/// harness home as `$1` and the native session ID as `$2`. They follow no
+/// symlink and print nothing when the transcript is absent.
+const CLAUDE_TRANSCRIPT_READ_SCRIPT: &str = r#"if [ -d "$1/projects" ] && [ ! -L "$1/projects" ]; then for d in "$1"/projects/*; do [ -d "$d" ] && [ ! -L "$d" ] && [ "${d##*/}" != subagents ] && f="$d/$2.jsonl" && [ -f "$f" ] && [ ! -L "$f" ] && exec cat -- "$f"; done; fi; exit 0"#;
+const ANTIGRAVITY_TRANSCRIPT_READ_SCRIPT: &str = r#"d="$1"; for part in antigravity-cli brain "$2" .system_generated logs; do d="$d/$part"; [ -d "$d" ] && [ ! -L "$d" ] || exit 0; done; f="$d/transcript_full.jsonl"; [ -f "$f" ] && [ ! -L "$f" ] && exec cat -- "$f"; exit 0"#;
+
+pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
+    session_id: &str,
+    source_backend: &targets::TargetLocator,
+    source_harness_kind: HarnessKind,
+    native_session_id: Option<&str>,
+    snapshot: &Arc<CanonicalSessionSnapshot>,
+    executor: &impl CommandExecutor,
+) -> Result<Option<crate::compaction::PriorCompaction>> {
+    let script = match source_harness_kind {
+        HarnessKind::Claude => CLAUDE_TRANSCRIPT_READ_SCRIPT,
+        HarnessKind::Antigravity => ANTIGRAVITY_TRANSCRIPT_READ_SCRIPT,
+        _ => return Ok(None),
+    };
+    let Some(id) = native_session_id.filter(|id| {
+        !id.is_empty()
+            && !id.contains('/')
+            && !id.contains('\\')
+            && !id.contains("..")
+            && !id.chars().any(char::is_control)
+    }) else {
+        return Ok(None);
+    };
+    let harness_home =
+        targets::target_profile_home_for_kind(source_backend, session_id, source_harness_kind);
+    if matches!(source_backend, targets::TargetLocator::LocalBare { .. }) {
+        return native_prior_source_while_cancellable(
+            session_id,
+            NativePriorSource::Home {
+                harness_kind: source_harness_kind,
+                harness_home: PathBuf::from(harness_home),
+                native_session_id: id.to_owned(),
+            },
+            snapshot,
+            executor,
+        )
+        .await;
+    }
+
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while reading native compaction"
+    );
+    let mut spool = mj_checkpoint::archive::create_fetch_spool()?;
+    let command = targets::locator_command(
+        SshTrafficClass::Bulk,
+        source_backend,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            script.into(),
+            "mj-read-native-transcript".into(),
+            harness_home,
+            id.to_owned(),
+        ],
+    )
+    .purpose("read source native transcript for compaction");
+    let output = match executor.execute_to_file(&command, &spool) {
+        Ok(output) => output,
+        Err(error) if executor.cancellation_requested() => {
+            return Err(error.context("operation cancelled while reading native compaction"));
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not read source native transcript; using canonical history"
+            );
+            return Ok(None);
+        }
+    };
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while reading native compaction"
+    );
+    if output.status != 0 {
+        tracing::warn!(
+            session_id,
+            status = output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "could not read source native transcript; using canonical history"
+        );
+        return Ok(None);
+    }
+    spool.rewind()?;
+    if spool.metadata()?.len() == 0 {
+        return Ok(None);
+    }
+    native_prior_source_while_cancellable(
+        session_id,
+        NativePriorSource::File {
+            harness_kind: source_harness_kind,
+            file: spool,
+        },
+        snapshot,
+        executor,
+    )
+    .await
+}
+
+/// Cooperatively stop native parsing on cancellation and join its blocking
+/// task before releasing the source and lifecycle ownership.
+async fn native_prior_source_while_cancellable(
+    session_id: &str,
+    source: NativePriorSource,
+    snapshot: &Arc<CanonicalSessionSnapshot>,
     executor: &impl CommandExecutor,
 ) -> Result<Option<crate::compaction::PriorCompaction>> {
     ensure!(
@@ -3716,13 +3920,7 @@ async fn native_prior_while_cancellable(
     );
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    let operation = crate::handoff::native_prior_from_archive(
-        session_id,
-        &archive.archive_path,
-        &archive.manifest,
-        &archive.canonical_session,
-        cancel.clone(),
-    );
+    let operation = crate::handoff::native_prior(session_id, source, snapshot, cancel.clone());
     tokio::pin!(operation);
     loop {
         tokio::select! {

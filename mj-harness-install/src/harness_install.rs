@@ -13,9 +13,9 @@ use mj_core::config::{ExecutionPolicy, HarnessKind};
 use mj_core::file_lock::FileLock;
 use mj_core::harness_runtime::{
     GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
-    NODE_VERSION, harness_uses_node_runtime, managed_harness_cache_root,
-    managed_harness_install_dir, managed_harness_manifest_matches, managed_node_cache_root,
-    npm_bridge, pin,
+    NODE_MINIMUM_VERSION, NODE_VERSION, harness_node_minimum_version, harness_uses_node_runtime,
+    managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches,
+    managed_node_cache_root, node_version_is_at_least, npm_bridge, pin,
 };
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
@@ -25,7 +25,7 @@ const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 // container start must not fail preparation, and the user can cancel it.
 const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const DEFAULT_NODE_DIST_URL: &str = "https://nodejs.org/dist";
+use crate::runtime_manifests::NODE_DIST_URL as DEFAULT_NODE_DIST_URL;
 const ARTIFACT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARTIFACT_REDIRECTS: usize = 10;
@@ -46,9 +46,9 @@ pub struct ManagedHarness {
     pub entrypoint: PathBuf,
     /// The harness command-line program installed beside an ACP adapter.
     pub cli_entrypoint: PathBuf,
-    pub lease_path: PathBuf,
-    pub cache_root: PathBuf,
-    _lease: FileLock,
+    pub lease_path: Option<PathBuf>,
+    pub cache_root: Option<PathBuf>,
+    _lease: Option<FileLock>,
     _managed_node: Option<ManagedNodeRuntime>,
 }
 
@@ -58,8 +58,8 @@ pub struct ManagedHarness {
 #[derive(Debug)]
 pub struct ManagedNodeRuntime {
     path: PathBuf,
-    lease_path: PathBuf,
-    _lease: FileLock,
+    lease_path: Option<PathBuf>,
+    _lease: Option<FileLock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,8 +83,8 @@ impl ManagedNodeRuntime {
         &self.path
     }
 
-    pub fn lease_path(&self) -> &Path {
-        &self.lease_path
+    pub fn lease_path(&self) -> Option<&Path> {
+        self.lease_path.as_deref()
     }
 }
 
@@ -199,6 +199,11 @@ pub async fn locate(
         // DSH has no managed installation: its launch script resolves a
         // compatible target `dsh-acp` or fetches the pinned package through
         // npx.
+        _ if harness == HarnessKind::Dsh && built_in => {
+            let (command, args) =
+                mj_core::harness_runtime::fallback_launch(harness, execution_policy);
+            Ok(Located::unchosen(Path::new(&command), &args))
+        }
         _ if harness == HarnessKind::Dsh => Ok(Located::unchosen(command, args)),
         HarnessRuntimePolicy::Managed => {
             resolve_with_environment(harness, execution_policy, environment)
@@ -634,11 +639,24 @@ async fn resolve_with_environment(
             harness.display_name()
         );
     }
-    let root = managed_harness_cache_root(
+    match managed_harness_cache_root(
         environment.get("XDG_CACHE_HOME").map(OsStr::new),
         environment.get("HOME").map(OsStr::new),
-    )?;
-    resolve_at_async(&root, harness, execution_policy, environment).await
+    ) {
+        Ok(root) => resolve_at_async(&root, harness, execution_policy, environment).await,
+        Err(cache_error) => {
+            let mut environment = environment.clone();
+            let mut managed_node = if harness_uses_node_runtime(harness) {
+                ensure_node_runtime(&mut environment).await?
+            } else {
+                None
+            };
+            match try_baked_harness(harness, execution_policy, &environment, &mut managed_node)? {
+                Some(baked) => Ok(baked),
+                None => Err(cache_error),
+            }
+        }
+    }
 }
 
 async fn resolve_at_async(
@@ -648,12 +666,19 @@ async fn resolve_at_async(
     environment: &BTreeMap<String, String>,
 ) -> Result<ManagedHarness> {
     let mut environment = environment.clone();
-    let managed_node = if harness_uses_node_runtime(harness) {
+    let mut managed_node = if harness_uses_node_runtime(harness) {
         ensure_node_runtime(&mut environment).await?
     } else {
         None
     };
     let selected = pin(harness);
+    let install = managed_harness_install_dir(root, harness);
+    if !complete_install(&install, harness, selected)?
+        && let Some(baked) =
+            try_baked_harness(harness, execution_policy, &environment, &mut managed_node)?
+    {
+        return Ok(baked);
+    }
     let harness_root = root.join(harness.id());
     std::fs::create_dir_all(&harness_root)
         .with_context(|| format!("create managed {} cache", harness.display_name()))?;
@@ -663,6 +688,12 @@ async fn resolve_at_async(
 
     let install = managed_harness_install_dir(root, harness);
     if !complete_install(&install, harness, selected)? {
+        if let Some(baked) =
+            try_baked_harness(harness, execution_policy, &environment, &mut managed_node)?
+        {
+            drop(install_lock);
+            return Ok(baked);
+        }
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
             let _lease = match lease.try_lock() {
@@ -686,6 +717,56 @@ async fn resolve_at_async(
     let lease = lock_file(lease, true, "managed harness lease").await?;
     drop(install_lock);
 
+    build_managed_harness(
+        &install,
+        harness,
+        execution_policy,
+        &environment,
+        managed_node,
+        Some(lease_path),
+        Some(root.to_path_buf()),
+        Some(lease),
+    )
+}
+
+fn try_baked_harness(
+    harness: HarnessKind,
+    execution_policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+    managed_node: &mut Option<ManagedNodeRuntime>,
+) -> Result<Option<ManagedHarness>> {
+    let Some(root) = baked_harness_store_root(environment) else {
+        return Ok(None);
+    };
+    let baked = mj_core::harness_runtime::baked_harness_install_dir(&root, harness);
+    if !complete_install(&baked, harness, pin(harness))? {
+        return Ok(None);
+    }
+    build_managed_harness(
+        &baked,
+        harness,
+        execution_policy,
+        environment,
+        managed_node.take(),
+        None,
+        None,
+        None,
+    )
+    .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_managed_harness(
+    install: &Path,
+    harness: HarnessKind,
+    execution_policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+    managed_node: Option<ManagedNodeRuntime>,
+    lease_path: Option<PathBuf>,
+    cache_root: Option<PathBuf>,
+    lease: Option<FileLock>,
+) -> Result<ManagedHarness> {
+    let selected = pin(harness);
     let mut launch_environment = BTreeMap::new();
     if managed_node.is_some() {
         launch_environment.insert(
@@ -730,7 +811,11 @@ async fn resolve_at_async(
     }
     // Muse launches its adapter the way the other npm bridges do: the target's
     // own `muse-acp` when present, otherwise npx fetches the pinned package.
-    let (command, args) = if harness == HarnessKind::Muse {
+    let (command, args) = if harness == HarnessKind::Muse
+        && entrypoint_is_executable(&install.join("node_modules/.bin/muse-acp"))
+    {
+        (install.join("node_modules/.bin/muse-acp"), Vec::new())
+    } else if harness == HarnessKind::Muse {
         let bridge = npm_bridge(harness).expect("Muse installs its adapter from npm");
         (
             PathBuf::from("sh"),
@@ -757,7 +842,7 @@ async fn resolve_at_async(
     } else {
         (
             install.join(selected.entrypoint),
-            native_acp_args(harness, execution_policy, &environment)?,
+            native_acp_args(harness, execution_policy, environment)?,
         )
     };
     Ok(ManagedHarness {
@@ -767,7 +852,7 @@ async fn resolve_at_async(
         entrypoint: install.join(selected.entrypoint),
         cli_entrypoint,
         lease_path,
-        cache_root: root.to_path_buf(),
+        cache_root,
         _lease: lease,
         _managed_node: managed_node,
     })
@@ -985,19 +1070,29 @@ async fn install_npm(
         .context("write managed harness package.json")?;
     std::fs::write(staging.join("package-lock.json"), package_lock)
         .context("write managed harness package-lock.json")?;
+    let npm_cache = tempfile::Builder::new()
+        .prefix(".install-npm-cache-")
+        .tempdir_in(staging.parent().unwrap_or(staging))?;
     let mut command = tokio::process::Command::new("npm");
     command
-        .args(["ci", "--omit=dev", "--no-audit", "--no-fund"])
+        .args(["ci", "--omit=dev", "--no-audit", "--no-fund", "--cache"])
+        .arg(npm_cache.path())
         .current_dir(staging)
         .env_clear()
-        .envs(environment);
+        .envs(environment)
+        .env("npm_config_cache", npm_cache.path());
     run_bounded_checked(
         &mut command,
         "install exact managed npm harness",
         MANAGED_INSTALL_TIMEOUT,
     )
     .await?;
-    verify_install_scripts_ran(staging, harness, environment).await
+    let mut npm_environment = environment.clone();
+    npm_environment.insert(
+        "npm_config_cache".into(),
+        npm_cache.path().to_string_lossy().into_owned(),
+    );
+    verify_install_scripts_ran(staging, harness, &npm_environment).await
 }
 
 /// npm 12 and later refuse dependency install scripts unless the package is
@@ -1075,7 +1170,7 @@ fn pending_install_scripts(stdout: &str) -> Result<Vec<String>> {
 /// interpreter. They run on glibc and musl targets regardless of the worker's
 /// own compilation target. Metadata acquisition also verified Google's SHA-512.
 async fn install_antigravity(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    let metadata = serde_json::from_str(include_str!("../assets/antigravity/runtime.json"))?;
+    let metadata = crate::runtime_manifests::manifest("antigravity")?;
     install_antigravity_from_metadata(staging, environment, &metadata).await
 }
 
@@ -1089,16 +1184,15 @@ async fn install_antigravity_from_metadata(
         "Antigravity download metadata does not match the managed runtime pin"
     );
     let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("Antigravity has no managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing Antigravity artifact field {name}"))
-    };
+    let artifact = crate::runtime_manifests::artifact_from_metadata("antigravity", metadata, &key)?;
     let archive = staging.join("agy.tar.gz");
-    download_verified_async(field("url")?, &archive, field("sha256")?, environment).await?;
+    download_verified_async(
+        artifact.url.as_str(),
+        &archive,
+        artifact.sha256.as_str(),
+        environment,
+    )
+    .await?;
     let bin = staging.join("bin");
     std::fs::create_dir_all(&bin)?;
     let executable = bin.join("agy");
@@ -1128,29 +1222,18 @@ async fn install_antigravity_from_metadata(
 /// verified download.
 async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
     use mj_core::harness_runtime::MUSE_VERSION;
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/muse/runtime.json"))?;
+    let metadata: serde_json::Value = crate::runtime_manifests::manifest("muse")?;
     anyhow::ensure!(
         metadata["muse_version"] == MUSE_VERSION,
         "Muse download metadata does not match the managed runtime pin"
     );
     let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("Muse Code does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing Muse artifact field {name}"))
-    };
+    let artifact = crate::runtime_manifests::artifact_from_metadata("muse", &metadata, &key)?;
     let bin = staging.join("bin");
     std::fs::create_dir_all(&bin)?;
-    let muse_target = field("muse_target")?;
-    let url = format!(
-        "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version={MUSE_VERSION}&file=muse-{muse_target}"
-    );
+    let url = artifact.url;
     let muse = bin.join("muse");
-    download_verified_async(&url, &muse, field("muse_sha256")?, environment).await?;
+    download_verified_async(&url, &muse, &artifact.sha256, environment).await?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&muse, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
@@ -1162,26 +1245,17 @@ async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, Stri
 /// `package/bin/opencode`.
 async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
     use mj_core::harness_runtime::OPENCODE_VERSION;
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/opencode/runtime.json"))?;
+    let metadata: serde_json::Value = crate::runtime_manifests::manifest("opencode")?;
     anyhow::ensure!(
         metadata["version"] == OPENCODE_VERSION,
         "OpenCode download metadata does not match the managed runtime pin"
     );
     let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("OpenCode does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing OpenCode artifact field {name}"))
-    };
-    let target = field("target")?;
-    let file = format!("cli-{target}-{OPENCODE_VERSION}.tgz");
-    let url = format!("https://registry.npmjs.org/@opencode/cli-{target}/-/{file}");
-    let archive = staging.join(&file);
-    download_verified_async(&url, &archive, field("sha256")?, environment).await?;
+    let artifact = crate::runtime_manifests::artifact_from_metadata("opencode", &metadata, &key)?;
+    let file = "opencode.tgz";
+    let url = artifact.url;
+    let archive = staging.join(file);
+    download_verified_async(&url, &archive, &artifact.sha256, environment).await?;
     let entrypoint = staging.join("opencode");
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
@@ -1444,16 +1518,114 @@ pub async fn ensure_mise_runtime(environment: &BTreeMap<String, String>) -> Resu
 pub async fn ensure_node_runtime(
     environment: &mut BTreeMap<String, String>,
 ) -> Result<Option<ManagedNodeRuntime>> {
-    if system_node_is_compatible(environment).await {
+    ensure_node_runtime_with_minimum(environment, NODE_MINIMUM_VERSION).await
+}
+
+pub async fn ensure_node_runtime_for(
+    harness: HarnessKind,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<Option<ManagedNodeRuntime>> {
+    ensure_node_runtime_with_minimum(environment, harness_node_minimum_version(harness)).await
+}
+
+fn baked_harness_store_root(environment: &BTreeMap<String, String>) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        environment
+            .get("MJ_TEST_BAKED_HARNESS_ROOT")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = environment;
+        Some(PathBuf::from(mj_core::harness_runtime::BAKED_HARNESS_ROOT))
+    }
+}
+
+fn baked_node_dir(
+    environment: &BTreeMap<String, String>,
+    metadata: &serde_json::Value,
+) -> Result<Option<PathBuf>> {
+    let Some(root) = baked_harness_store_root(environment) else {
+        return Ok(None);
+    };
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let Some(target) = metadata["platforms"][key]["target"].as_str() else {
+        return Ok(None);
+    };
+    Ok(Some(mj_core::harness_runtime::baked_node_install_dir(
+        &root,
+        &format!("node-v{NODE_VERSION}-{target}"),
+    )))
+}
+
+fn baked_node_is_usable(path: &Path, minimum: &str, metadata: &serde_json::Value) -> Result<bool> {
+    if !mj_core::harness_runtime::baked_node_manifest_matches(path, NODE_VERSION)?
+        || !node_version_is_at_least(NODE_VERSION, minimum)
+        || !["node", "npm", "npx"]
+            .iter()
+            .all(|name| entrypoint_is_executable(&path.join("bin").join(name)))
+    {
+        return Ok(false);
+    }
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    Ok(ensure_node_artifact_platform(&metadata["platforms"][key]).is_ok())
+}
+
+async fn ensure_node_runtime_with_minimum(
+    environment: &mut BTreeMap<String, String>,
+    minimum_version: &str,
+) -> Result<Option<ManagedNodeRuntime>> {
+    let metadata: serde_json::Value = crate::runtime_manifests::manifest("node")?;
+    let baked = baked_node_dir(environment, &metadata)?;
+    if let Some(baked) = &baked {
+        let first = environment
+            .get("PATH")
+            .and_then(|path| std::env::split_paths(path).next());
+        if first == Some(baked.join("bin"))
+            && baked_node_is_usable(baked, minimum_version, &metadata)?
+        {
+            return Ok(None);
+        }
+    }
+    if system_node_is_compatible(environment, minimum_version).await {
         return Ok(None);
     }
-    let root = managed_node_cache_root(
+    let root = match managed_node_cache_root(
         environment.get("XDG_CACHE_HOME").map(OsStr::new),
         environment.get("HOME").map(OsStr::new),
-    )?;
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/node/runtime.json"))?;
-    install_managed_node(&root, environment, &metadata)
+    ) {
+        Ok(root) => root,
+        Err(cache_error) => {
+            if let Some(baked) = baked
+                && baked_node_is_usable(&baked, minimum_version, &metadata)?
+            {
+                prepend_path(environment, &baked.join("bin"))?;
+                return Ok(Some(ManagedNodeRuntime {
+                    path: baked,
+                    lease_path: None,
+                    _lease: None,
+                }));
+            }
+            return Err(cache_error);
+        }
+    };
+
+    if let Some(baked) = baked {
+        let cached = root.join(baked.file_name().context("baked Node folder")?);
+        if managed_node_health(&cached, environment).await? != ManagedNodeHealth::Usable
+            && baked_node_is_usable(&baked, minimum_version, &metadata)?
+        {
+            prepend_path(environment, &baked.join("bin"))?;
+            return Ok(Some(ManagedNodeRuntime {
+                path: baked,
+                lease_path: None,
+                _lease: None,
+            }));
+        }
+    }
+    install_managed_node(&root, environment, &metadata, minimum_version)
         .await
         .map(Some)
 }
@@ -1464,10 +1636,10 @@ async fn ensure_node_runtime_from_metadata(
     environment: &mut BTreeMap<String, String>,
     metadata: &serde_json::Value,
 ) -> Result<Option<ManagedNodeRuntime>> {
-    if system_node_is_compatible(environment).await {
+    if system_node_is_compatible(environment, NODE_MINIMUM_VERSION).await {
         return Ok(None);
     }
-    install_managed_node(root, environment, metadata)
+    install_managed_node(root, environment, metadata, NODE_MINIMUM_VERSION)
         .await
         .map(Some)
 }
@@ -1476,6 +1648,7 @@ async fn install_managed_node(
     root: &Path,
     environment: &mut BTreeMap<String, String>,
     metadata: &serde_json::Value,
+    minimum_version: &str,
 ) -> Result<ManagedNodeRuntime> {
     anyhow::ensure!(
         metadata["version"] == NODE_VERSION,
@@ -1485,12 +1658,8 @@ async fn install_managed_node(
     let platform = metadata["platforms"]
         .get(&key)
         .with_context(|| format!("Node.js does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing Node.js artifact field {name}"))
-    };
-    let target = field("target")?;
+    let artifact = crate::runtime_manifests::artifact_from_metadata("node", metadata, &key)?;
+    let target = &artifact.target;
     let folder = format!("node-v{NODE_VERSION}-{target}");
     let install = root.join(&folder);
     ensure_node_artifact_platform(platform)?;
@@ -1503,6 +1672,17 @@ async fn install_managed_node(
 
     let cached = managed_node_health(&install, environment).await?;
     if cached != ManagedNodeHealth::Usable {
+        if let Some(baked) = baked_node_dir(environment, metadata)?
+            && baked_node_is_usable(&baked, minimum_version, metadata)?
+        {
+            drop(install_lock);
+            prepend_path(environment, &baked.join("bin"))?;
+            return Ok(ManagedNodeRuntime {
+                path: baked,
+                lease_path: None,
+                _lease: None,
+            });
+        }
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
             let _lease = match lease.try_lock() {
@@ -1525,10 +1705,10 @@ async fn install_managed_node(
             .prefix(".install-")
             .tempdir_in(root)
             .with_context(|| format!("create Node.js staging directory in {}", root.display()))?;
-        let file = format!("{folder}.tar.gz");
-        let archive = staging.path().join(&file);
-        let url = node_distribution_url(environment, &file)?;
-        download_verified_async(&url, &archive, field("sha256")?, environment).await?;
+        let file = &artifact.filename;
+        let archive = staging.path().join(file);
+        let url = node_distribution_url(environment, file)?;
+        download_verified_async(&url, &archive, &artifact.sha256, environment).await?;
         let staging_root = staging.path().to_path_buf();
         let folder_for_extract = folder.clone();
         let cancellation = mj_core::subprocess::preparation_cancellation();
@@ -1577,8 +1757,8 @@ async fn install_managed_node(
     prepend_path(environment, &bin)?;
     Ok(ManagedNodeRuntime {
         path: install,
-        lease_path,
-        _lease: lease,
+        lease_path: Some(lease_path),
+        _lease: Some(lease),
     })
 }
 
@@ -1659,12 +1839,15 @@ fn ensure_node_artifact_platform(platform: &serde_json::Value) -> Result<()> {
     };
     anyhow::ensure!(
         Path::new(interpreter).is_file(),
-        "Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter {interpreter} is missing. Install Node.js 22 or newer with npm and npx on the target PATH"
+        "Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter {interpreter} is missing. Install a supported Node.js with npm and npx on the target PATH"
     );
     Ok(())
 }
 
-async fn system_node_is_compatible(environment: &BTreeMap<String, String>) -> bool {
+async fn system_node_is_compatible(
+    environment: &BTreeMap<String, String>,
+    minimum_version: &str,
+) -> bool {
     if crate::program_path::find_program_on_path("node", environment.get("PATH").map(OsStr::new))
         .is_none()
     {
@@ -1686,7 +1869,10 @@ async fn system_node_is_compatible(environment: &BTreeMap<String, String>) -> bo
         }
     };
     if !output.status.success()
-        || !node_version_is_supported(String::from_utf8_lossy(&output.stdout).trim())
+        || !node_version_is_at_least(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            minimum_version,
+        )
     {
         if !output.status.success() {
             tracing::warn!(
@@ -1781,7 +1967,7 @@ async fn managed_node_health(
             output.status
         )));
     }
-    if !node_version_is_supported(version) {
+    if !node_version_is_at_least(version, NODE_MINIMUM_VERSION) {
         return Ok(ManagedNodeHealth::Unusable(format!(
             "node reports unsupported version {version:?}"
         )));
@@ -1818,14 +2004,6 @@ async fn bounded_env_output(
     mj_core::subprocess::run_bounded(command, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
         .context("probe Node.js runtime")
-}
-
-fn node_version_is_supported(version: &str) -> bool {
-    version
-        .strip_prefix('v')
-        .and_then(|version| version.split('.').next())
-        .and_then(|major| major.parse::<u64>().ok())
-        .is_some_and(|major| major >= 22)
 }
 
 fn prepend_path(environment: &mut BTreeMap<String, String>, bin: &Path) -> Result<()> {
@@ -1935,8 +2113,7 @@ fn extract_node_archive(
 }
 
 async fn install_kimi(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/kimi/runtime.json"))?;
+    let metadata: serde_json::Value = crate::runtime_manifests::manifest("kimi")?;
     install_kimi_from_metadata(staging, environment, &metadata).await
 }
 
@@ -1950,26 +2127,19 @@ async fn install_kimi_from_metadata(
         "Kimi Code download metadata does not match the managed runtime pin"
     );
     let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("Kimi Code does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing Kimi Code artifact field {name}"))
-    };
-    let filename = field("filename")?;
+    let artifact = crate::runtime_manifests::artifact_from_metadata("kimi", metadata, &key)?;
+    let filename = &artifact.filename;
     let destinations = [
         format!(
             "{}/{KIMI_VERSION}/{filename}",
             kimi_artifact_base(environment).trim_end_matches('/')
         ),
-        format!("https://code.kimi.ai/kimi-code/binaries/{KIMI_VERSION}/{filename}"),
+        crate::runtime_manifests::kimi_fallback_url(filename),
     ];
     let bin = staging.join("bin");
     std::fs::create_dir_all(&bin)?;
     let entrypoint = bin.join("kimi");
-    download_verified_first_async(&destinations, &entrypoint, field("sha256")?, environment)
+    download_verified_first_async(&destinations, &entrypoint, &artifact.sha256, environment)
         .await?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
@@ -1977,8 +2147,7 @@ async fn install_kimi_from_metadata(
 }
 
 async fn install_grok(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/grok/runtime.json"))?;
+    let metadata: serde_json::Value = crate::runtime_manifests::manifest("grok")?;
     install_grok_from_metadata(staging, environment, &metadata).await
 }
 
@@ -1992,25 +2161,17 @@ async fn install_grok_from_metadata(
         "Grok download metadata does not match the managed runtime pin"
     );
     let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("Grok does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing Grok artifact field {name}"))
-    };
-    let target = field("target")?;
-    let filename = format!("grok-{GROK_VERSION}-{target}.zst");
+    let artifact = crate::runtime_manifests::artifact_from_metadata("grok", metadata, &key)?;
+    let filename = &artifact.filename;
     let destinations = [
         format!(
             "{}/{filename}",
             grok_artifact_base(environment).trim_end_matches('/')
         ),
-        format!("https://storage.googleapis.com/grok-build-public-artifacts/cli/{filename}"),
+        artifact.url.clone(),
     ];
-    let archive = staging.join(&filename);
-    download_verified_first_async(&destinations, &archive, field("sha256")?, environment).await?;
+    let archive = staging.join(filename);
+    download_verified_first_async(&destinations, &archive, &artifact.sha256, environment).await?;
     let bin = staging.join("bin");
     std::fs::create_dir_all(&bin)?;
     let entrypoint = bin.join("grok");
@@ -2068,7 +2229,7 @@ fn kimi_artifact_base(environment: &BTreeMap<String, String>) -> String {
     }
     #[cfg(not(test))]
     let _ = environment;
-    "https://code.kimi.com/kimi-code/binaries".to_owned()
+    crate::runtime_manifests::KIMI_PRIMARY_BASE.to_owned()
 }
 
 fn grok_artifact_base(environment: &BTreeMap<String, String>) -> String {
@@ -2078,7 +2239,7 @@ fn grok_artifact_base(environment: &BTreeMap<String, String>) -> String {
     }
     #[cfg(not(test))]
     let _ = environment;
-    "https://x.ai/cli".to_owned()
+    crate::runtime_manifests::GROK_PRIMARY_BASE.to_owned()
 }
 
 async fn download_verified_first_async(
@@ -2284,6 +2445,499 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_dsh_launch_upgrades_under_ambient_and_managed_policies() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let policy = ExecutionPolicy::ConfiguredApprovals;
+        let legacy = vec![
+            "-c".into(),
+            mj_core::harness_runtime::legacy_dsh_acp_launch_script(),
+        ];
+        let current = mj_core::harness_runtime::fallback_launch(HarnessKind::Dsh, policy);
+        for runtime_policy in [HarnessRuntimePolicy::Ambient, HarnessRuntimePolicy::Managed] {
+            for args in [&legacy, &current.1] {
+                let located = runtime
+                    .block_on(locate(
+                        runtime_policy,
+                        HarnessKind::Dsh,
+                        policy,
+                        Path::new("sh"),
+                        args,
+                        &BTreeMap::new(),
+                    ))
+                    .unwrap();
+                assert_eq!(located.command, Path::new(&current.0));
+                assert_eq!(located.args, current.1);
+                assert!(located.managed.is_none());
+            }
+            let custom = vec!["-c".into(), "exec custom-dsh".into()];
+            let located = runtime
+                .block_on(locate(
+                    runtime_policy,
+                    HarnessKind::Dsh,
+                    policy,
+                    Path::new("sh"),
+                    &custom,
+                    &BTreeMap::new(),
+                ))
+                .unwrap();
+            assert_eq!(located.args, custom);
+        }
+    }
+
+    #[tokio::test]
+    async fn collected_writable_harness_uses_baked_after_waiting_for_installer_lock() {
+        use std::future::Future as _;
+        use std::task::Poll;
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let baked = root.path().join("baked");
+        let kind = HarnessKind::OpenCode;
+        let selected = pin(kind);
+        for parent in [&cache, &baked.join("harnesses")] {
+            complete_fake(
+                &parent.join(kind.id()),
+                kind,
+                selected.install_id,
+                selected.entrypoint,
+            );
+        }
+        let install = managed_harness_install_dir(&cache, kind);
+        let lock = open_lock(&cache.join(kind.id()).join(INSTALL_LOCK_FILE)).unwrap();
+        lock.lock().unwrap();
+        let lock = FileLock::new(lock);
+        let environment = BTreeMap::from([(
+            "MJ_TEST_BAKED_HARNESS_ROOT".into(),
+            baked.display().to_string(),
+        )]);
+        let mut resolving = Box::pin(resolve_at_async(
+            &cache,
+            kind,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        ));
+        // With no Node preparation on this path, the first pending poll is the
+        // held installer lock, after the complete writable cache was checked.
+        std::future::poll_fn(|cx| {
+            assert!(resolving.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        std::fs::remove_dir_all(&install).unwrap();
+        drop(lock);
+        let managed = resolving.await.unwrap();
+        assert_eq!(
+            managed.entrypoint,
+            mj_core::harness_runtime::baked_harness_install_dir(&baked, kind)
+                .join(selected.entrypoint)
+        );
+        assert!(managed.lease_path.is_none());
+        assert!(managed.cache_root.is_none());
+        assert!(!install.exists());
+    }
+
+    #[test]
+    fn baked_harnesses_preserve_writable_cache_and_launch_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let baked = root.path().join("baked");
+        let mut environment = fake_node_tools(root.path(), &root.path().join("installs"));
+        environment.insert(
+            "HOME".into(),
+            root.path().join("home").display().to_string(),
+        );
+        environment.insert(
+            "MJ_TEST_BAKED_HARNESS_ROOT".into(),
+            baked.display().to_string(),
+        );
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            root.path().join("xdg").display().to_string(),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        environment.insert(
+            HarnessKind::Antigravity.home_env().into(),
+            root.path().join("agy-home").display().to_string(),
+        );
+        for (kind, variable) in [
+            (HarnessKind::Codex, "CODEX_PATH"),
+            (HarnessKind::Claude, "CLAUDE_CODE_EXECUTABLE"),
+            (HarnessKind::Muse, "MUSE_CLI"),
+            (HarnessKind::OpenCode, "OPENCODE_DISABLE_AUTOUPDATE"),
+            (HarnessKind::Antigravity, "AGY_CLI_DISABLE_AUTO_UPDATE"),
+        ] {
+            let selected = pin(kind);
+            complete_fake(
+                &baked.join("harnesses").join(kind.id()),
+                kind,
+                selected.install_id,
+                selected.entrypoint,
+            );
+            let dir = mj_core::harness_runtime::baked_harness_install_dir(&baked, kind);
+            std::fs::remove_file(dir.join(LEASE_FILE)).unwrap();
+            if kind == HarnessKind::Muse {
+                executable(
+                    &dir.join("node_modules/.bin/muse-acp"),
+                    "#!/bin/sh\nexit 0\n",
+                );
+            }
+            let (command, args) = mj_core::harness_runtime::fallback_launch(
+                kind,
+                ExecutionPolicy::ConfiguredApprovals,
+            );
+            for policy in [HarnessRuntimePolicy::Managed, HarnessRuntimePolicy::Ambient] {
+                let located = runtime
+                    .block_on(locate(
+                        policy,
+                        kind,
+                        ExecutionPolicy::ConfiguredApprovals,
+                        Path::new(&command),
+                        &args,
+                        &environment,
+                    ))
+                    .unwrap();
+                assert_eq!(located.entrypoint, Some(dir.join(selected.entrypoint)));
+                assert!(located.managed.unwrap().lease_path.is_none());
+            }
+            let managed = runtime
+                .block_on(resolve_at_async(
+                    &cache,
+                    kind,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &environment,
+                ))
+                .unwrap();
+            assert_eq!(managed.entrypoint, dir.join(selected.entrypoint));
+            assert!(managed.environment.contains_key(variable));
+            assert!(managed.lease_path.is_none());
+            assert!(managed.cache_root.is_none());
+            assert!(!cache.exists());
+            assert!(!root.path().join("xdg").exists());
+            assert!(!dir.join(LEASE_FILE).exists());
+            if kind == HarnessKind::Muse {
+                assert_eq!(managed.command, dir.join("node_modules/.bin/muse-acp"));
+            }
+            for relative in [false, true] {
+                let mut no_cache = environment.clone();
+                no_cache.remove("HOME");
+                no_cache.remove("XDG_CACHE_HOME");
+                if relative {
+                    no_cache.insert("XDG_CACHE_HOME".into(), "relative-cache".into());
+                }
+                let resolved = runtime
+                    .block_on(resolve_with_environment(
+                        kind,
+                        ExecutionPolicy::ConfiguredApprovals,
+                        &no_cache,
+                    ))
+                    .unwrap();
+                assert_eq!(resolved.entrypoint, dir.join(selected.entrypoint));
+                assert!(resolved.lease_path.is_none());
+                assert!(resolved.cache_root.is_none());
+                no_cache.remove("MJ_TEST_BAKED_HARNESS_ROOT");
+                let error = runtime
+                    .block_on(resolve_with_environment(
+                        kind,
+                        ExecutionPolicy::ConfiguredApprovals,
+                        &no_cache,
+                    ))
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains(if relative {
+                        "must be absolute"
+                    } else {
+                        "HOME or XDG_CACHE_HOME"
+                    }),
+                    "{error:#}"
+                );
+            }
+            complete_fake(
+                &cache.join(kind.id()),
+                kind,
+                selected.install_id,
+                selected.entrypoint,
+            );
+            let writable = runtime
+                .block_on(resolve_at_async(
+                    &cache,
+                    kind,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &environment,
+                ))
+                .unwrap();
+            assert_eq!(
+                writable.entrypoint,
+                managed_harness_install_dir(&cache, kind).join(selected.entrypoint)
+            );
+            assert!(writable.lease_path.is_some());
+            drop(writable);
+            let cached = managed_harness_install_dir(&cache, kind);
+            std::fs::remove_file(cached.join(MANIFEST_FILE)).unwrap();
+            let fallback = runtime
+                .block_on(resolve_at_async(
+                    &cache,
+                    kind,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &environment,
+                ))
+                .unwrap();
+            assert_eq!(fallback.entrypoint, dir.join(selected.entrypoint));
+            assert!(fallback.lease_path.is_none());
+            assert!(fallback.cache_root.is_none());
+            assert!(!cached.join(MANIFEST_FILE).exists());
+            std::fs::remove_dir_all(&cache).unwrap();
+            if kind == HarnessKind::Codex {
+                std::fs::write(
+                    dir.join(MANIFEST_FILE),
+                    serde_json::to_vec(&ManagedHarnessManifest::for_install(kind, "stale"))
+                        .unwrap(),
+                )
+                .unwrap();
+                let fallback = runtime
+                    .block_on(resolve_at_async(
+                        &cache,
+                        kind,
+                        ExecutionPolicy::ConfiguredApprovals,
+                        &environment,
+                    ))
+                    .unwrap();
+                assert!(fallback.lease_path.is_some());
+                assert_eq!(
+                    fallback.entrypoint,
+                    managed_harness_install_dir(&cache, kind).join(selected.entrypoint)
+                );
+                drop(fallback);
+                std::fs::remove_dir_all(&cache).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn npm_cache_is_temporary_on_success_and_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let bin = root.path().join("bin");
+        executable(
+            &bin.join("npm"),
+            r#"#!/bin/sh
+case "$npm_config_cache" in */.install-npm-cache-*) ;; *) exit 72 ;; esac
+mkdir -p "$npm_config_cache/_cacache"
+if [ "$1" = install-scripts ]; then
+    echo "$npm_config_cache" >> "$MJ_CACHE_RECEIPT"
+    echo '{"allowScripts":[]}'
+    exit 0
+fi
+[ "$1" = ci ] && [ "$5" = --cache ] && [ "$6" = "$npm_config_cache" ] || exit 71
+echo "$npm_config_cache" > "$MJ_CACHE_RECEIPT"
+exit "$MJ_NPM_STATUS"
+"#,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for status in ["0", "1"] {
+            let environment = BTreeMap::from([
+                ("PATH".into(), format!("{}:/usr/bin:/bin", bin.display())),
+                (
+                    "MJ_CACHE_RECEIPT".into(),
+                    root.path().join("receipt").display().to_string(),
+                ),
+                ("MJ_NPM_STATUS".into(), status.into()),
+                (
+                    "npm_config_cache".into(),
+                    root.path().join("wrong-cache").display().to_string(),
+                ),
+            ]);
+            let result = runtime.block_on(install_npm(
+                &staging,
+                b"{}",
+                b"{}",
+                HarnessKind::Codex,
+                &environment,
+            ));
+            assert_eq!(result.is_ok(), status == "0");
+            let used = std::fs::read_to_string(root.path().join("receipt")).unwrap();
+            assert!(used.contains(".install-npm-cache-"));
+            let paths: Vec<_> = used.lines().collect();
+            assert_eq!(paths.len(), if status == "0" { 2 } else { 1 });
+            assert!(paths.iter().all(|path| *path == paths[0]));
+            assert!(!Path::new(paths[0]).exists());
+            assert!(!root.path().join("wrong-cache").exists());
+        }
+    }
+
+    #[test]
+    fn baked_node_receipt_and_path_skip_subprocesses_and_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata = crate::runtime_manifests::manifest("node").unwrap();
+        let mut environment = BTreeMap::from([
+            (
+                "MJ_TEST_BAKED_HARNESS_ROOT".into(),
+                root.path().display().to_string(),
+            ),
+            (
+                "HOME".into(),
+                root.path().join("unused-home").display().to_string(),
+            ),
+        ]);
+        let Some(baked) = baked_node_dir(&environment, &metadata).unwrap() else {
+            return;
+        };
+        std::fs::create_dir_all(baked.join("bin")).unwrap();
+        for name in ["node", "npm", "npx"] {
+            let path = baked.join("bin").join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 99\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        std::fs::write(
+            baked.join(mj_core::harness_runtime::BAKED_NODE_MANIFEST_FILE),
+            serde_json::to_vec(&mj_core::harness_runtime::BakedNodeManifest::current()).unwrap(),
+        )
+        .unwrap();
+        environment.insert(
+            "PATH".into(),
+            root.path().join("missing").display().to_string(),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let selected = runtime
+            .block_on(ensure_node_runtime_with_minimum(
+                &mut environment,
+                NODE_MINIMUM_VERSION,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.path(), baked);
+        assert!(selected.lease_path().is_none());
+        let old_bin = root.path().join("old-node");
+        executable(&old_bin.join("node"), "#!/bin/sh\necho v18.0.0\n");
+        environment.insert("PATH".into(), old_bin.display().to_string());
+        let replacement = runtime
+            .block_on(ensure_node_runtime_with_minimum(
+                &mut environment,
+                NODE_MINIMUM_VERSION,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(replacement.path(), baked);
+
+        assert!(
+            runtime
+                .block_on(ensure_node_runtime_with_minimum(
+                    &mut environment,
+                    NODE_MINIMUM_VERSION
+                ))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.path().join("unused-home").exists());
+        assert!(!baked.join(LEASE_FILE).exists());
+        for relative in [false, true] {
+            let mut no_cache = environment.clone();
+            no_cache.remove("HOME");
+            no_cache.remove("XDG_CACHE_HOME");
+            no_cache.insert(
+                "PATH".into(),
+                root.path().join("missing").display().to_string(),
+            );
+            if relative {
+                no_cache.insert("XDG_CACHE_HOME".into(), "relative-cache".into());
+            }
+            let selected = runtime
+                .block_on(ensure_node_runtime_with_minimum(
+                    &mut no_cache,
+                    NODE_MINIMUM_VERSION,
+                ))
+                .unwrap()
+                .unwrap();
+            assert_eq!(selected.path(), baked);
+            assert!(selected.lease_path().is_none());
+            no_cache.remove("MJ_TEST_BAKED_HARNESS_ROOT");
+            no_cache.insert(
+                "PATH".into(),
+                root.path().join("missing").display().to_string(),
+            );
+            let error = runtime
+                .block_on(ensure_node_runtime_with_minimum(
+                    &mut no_cache,
+                    NODE_MINIMUM_VERSION,
+                ))
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(if relative {
+                    "must be absolute"
+                } else {
+                    "HOME or XDG_CACHE_HOME"
+                }),
+                "{error:#}"
+            );
+        }
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            root.path().join("writable").display().to_string(),
+        );
+        let cached_root = managed_node_cache_root(
+            environment.get("XDG_CACHE_HOME").map(OsStr::new),
+            environment.get("HOME").map(OsStr::new),
+        )
+        .unwrap();
+        let cached = cached_root.join(baked.file_name().unwrap());
+        std::fs::create_dir_all(&cached).unwrap();
+        environment.insert(
+            "PATH".into(),
+            root.path().join("missing").display().to_string(),
+        );
+        let fallback = runtime
+            .block_on(ensure_node_runtime_with_minimum(
+                &mut environment,
+                NODE_MINIMUM_VERSION,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fallback.path(), baked);
+        assert!(fallback.lease_path().is_none());
+        assert!(!cached.join("bin").exists());
+        assert!(!cached.join(LEASE_FILE).exists());
+        runtime.block_on(async {
+            use std::future::Future as _;
+            use std::task::Poll;
+            let lock = open_lock(&cached_root.join(INSTALL_LOCK_FILE)).unwrap();
+            lock.lock().unwrap();
+            let lock = FileLock::new(lock);
+            let mut installing = Box::pin(install_managed_node(
+                &cached_root,
+                &mut environment,
+                &metadata,
+                NODE_MINIMUM_VERSION,
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(installing.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            std::fs::remove_dir_all(&cached).unwrap();
+            drop(lock);
+            let node = installing.await.unwrap();
+            assert_eq!(node.path(), baked);
+            assert!(node.lease_path().is_none());
+            assert!(!cached.exists());
+        });
+        assert!(!baked_node_is_usable(&baked, "99.0.0", &metadata).unwrap());
+        let mut missing_interpreter = metadata.clone();
+        missing_interpreter["platforms"][current_node_platform()]["interpreter"] = root
+            .path()
+            .join("missing-interpreter")
+            .display()
+            .to_string()
+            .into();
+        assert!(!baked_node_is_usable(&baked, NODE_MINIMUM_VERSION, &missing_interpreter).unwrap());
+        std::fs::write(
+            baked.join(mj_core::harness_runtime::BAKED_NODE_MANIFEST_FILE),
+            "{}",
+        )
+        .unwrap();
+        assert!(!baked_node_is_usable(&baked, NODE_MINIMUM_VERSION, &metadata).unwrap());
+    }
+
+    #[test]
     #[ignore = "downloads the pinned Grok artifact into a disposable cache"]
     fn grok_real_install_launches_from_final_directory() {
         let parent =
@@ -2456,7 +3110,7 @@ mod tests {
         assert_eq!(output.stdout, b"agy-fixture\n");
         let failed = temp.path().join("failed");
         std::fs::create_dir(&failed).unwrap();
-        metadata["platforms"][current_node_platform()]["sha256"] = "wrong".into();
+        metadata["platforms"][current_node_platform()]["sha256"] = "0".repeat(64).into();
         let error = run_async(install_antigravity_from_metadata(
             &failed,
             &BTreeMap::new(),
@@ -2615,7 +3269,7 @@ mod tests {
             mj_core::harness_runtime::ANTIGRAVITY_VERSION
         );
         let managed = first.managed.as_ref().unwrap();
-        let root = managed.cache_root.join("antigravity");
+        let root = managed.cache_root.as_ref().unwrap().join("antigravity");
         gc_harness_root(&root, "a-newer-pin").unwrap();
         assert!(first.command.exists());
         let third = resolve().await.unwrap();
@@ -2840,7 +3494,7 @@ mod tests {
         );
         let error = ensure_node_artifact_platform(&platform).unwrap_err();
         assert!(error.to_string().contains("required program interpreter"));
-        assert!(error.to_string().contains("Install Node.js 22 or newer"));
+        assert!(error.to_string().contains("Install a supported Node.js"));
     }
 
     #[test]
@@ -3459,6 +4113,26 @@ ln -s '{dispatcher}' "$cli"
     }
 
     #[test]
+    fn dsh_does_not_reuse_node_22_for_its_pinned_npm_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
+        let tools = temp.path().join("bin");
+        executable(
+            &tools.join("node"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v22.22.0; fi\n",
+        );
+
+        assert!(run_async(system_node_is_compatible(
+            &environment,
+            NODE_MINIMUM_VERSION
+        )));
+        assert!(!run_async(system_node_is_compatible(
+            &environment,
+            harness_node_minimum_version(HarnessKind::Dsh)
+        )));
+    }
+
+    #[test]
     fn missing_node_is_downloaded_verified_and_prepended_once() {
         let temp = tempfile::tempdir().unwrap();
         let (archive, metadata) = fake_node_archive(temp.path());
@@ -3491,7 +4165,13 @@ ln -s '{dispatcher}' "$cli"
         drop(runtime);
 
         let first_path = environment["PATH"].clone();
-        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        let runtime = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap();
         assert_eq!(runtime.path(), install);
         assert_eq!(environment["PATH"], first_path);
         assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
@@ -3555,7 +4235,12 @@ ln -s '{dispatcher}' "$cli"
             let token = tokio_util::sync::CancellationToken::new();
             let install = mj_core::subprocess::with_preparation_cancellation(
                 token.clone(),
-                install_managed_node(&root, &mut cancelled_environment, &metadata),
+                install_managed_node(
+                    &root,
+                    &mut cancelled_environment,
+                    &metadata,
+                    NODE_MINIMUM_VERSION,
+                ),
             );
             tokio::pin!(install);
             loop {
@@ -3581,7 +4266,13 @@ ln -s '{dispatcher}' "$cli"
         assert!(staged(&root).is_empty(), "staging outlived the install");
         assert!(!root.join(&folder).exists(), "cancelled install published");
 
-        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        let runtime = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap();
         assert!(runtime.path().join("bin/node").is_file());
     }
 
@@ -3608,7 +4299,7 @@ ln -s '{dispatcher}' "$cli"
             let token = tokio_util::sync::CancellationToken::new();
             let call = mj_core::subprocess::with_preparation_cancellation(
                 token.clone(),
-                install_managed_node(&root, &mut environment, &metadata),
+                install_managed_node(&root, &mut environment, &metadata, NODE_MINIMUM_VERSION),
             );
             tokio::pin!(call);
             let mut waited = 0;
@@ -3688,7 +4379,13 @@ ln -s '{dispatcher}' "$cli"
         }
         open_lock(&install.join(LEASE_FILE)).unwrap();
 
-        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        let runtime = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap();
 
         assert_eq!(runtime.path(), install);
         let output =
@@ -3707,8 +4404,13 @@ ln -s '{dispatcher}' "$cli"
             serde_json::Value::String("0".repeat(64));
         let root = temp.path().join("node");
 
-        let error =
-            run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap_err();
+        let error = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap_err();
 
         assert!(error.to_string().contains("checksum mismatch"), "{error:#}");
         assert!(
@@ -3739,7 +4441,13 @@ ln -s '{dispatcher}' "$cli"
                 std::thread::spawn(move || {
                     let mut environment = environment;
                     barrier.wait();
-                    run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap()
+                    run_async(install_managed_node(
+                        &root,
+                        &mut environment,
+                        &metadata,
+                        NODE_MINIMUM_VERSION,
+                    ))
+                    .unwrap()
                 })
             })
             .collect::<Vec<_>>();
@@ -4138,7 +4846,13 @@ ln -s '{dispatcher}' "$cli"
             &BTreeMap::new(),
         )
         .unwrap();
-        let install = managed.lease_path.parent().unwrap().to_path_buf();
+        let install = managed
+            .lease_path
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let (mut parent, forked) = UnixStream::pair().unwrap();
         parent
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -4201,8 +4915,8 @@ ln -s '{dispatcher}' "$cli"
             &environment,
         )
         .unwrap();
-        let supervisor = acquire_supervisor_lease(&managed.lease_path).unwrap();
-        let lease_path = managed.lease_path.clone();
+        let supervisor = acquire_supervisor_lease(managed.lease_path.as_ref().unwrap()).unwrap();
+        let lease_path = managed.lease_path.clone().unwrap();
         drop(managed);
 
         let exclusive = open_lock(&lease_path).unwrap();

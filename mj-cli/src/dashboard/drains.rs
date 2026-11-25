@@ -497,7 +497,7 @@ impl DashboardContext {
             update.sessions,
             update.subagents,
             update.environment_owners,
-            update.last_subagent_policies,
+            update.launch_preferences,
         );
         self.dashboard
             .set_native_agent_snapshot(update.native_agents);
@@ -643,10 +643,7 @@ impl DashboardContext {
         >,
         subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentMetadata>,
         environment_owners: mj_core::snapshot_map::SnapshotMap<String, String>,
-        last_subagent_policies: std::collections::BTreeMap<
-            String,
-            mj_core::subagent::SubagentPolicy,
-        >,
+        launch_preferences: mj_core::state::LaunchPreferences,
     ) {
         let mut sessions = records;
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
@@ -683,10 +680,14 @@ impl DashboardContext {
             // Order matters: an expected feed clears the retiring flag.
             chat.set_session_feed_expected(feed_expected);
         }
-        if self.controller.state.sessions == sessions
+        let preferences_changed = self
+            .controller
+            .state
+            .apply_launch_preferences(launch_preferences);
+        if !preferences_changed
+            && self.controller.state.sessions == sessions
             && self.controller.state.subagents == subagents
             && self.controller.state.environment_owners == environment_owners
-            && self.controller.state.last_subagent_policies == last_subagent_policies
         {
             return;
         }
@@ -709,7 +710,6 @@ impl DashboardContext {
         self.controller.state.sessions = sessions;
         self.controller.state.subagents = subagents;
         self.controller.state.environment_owners = environment_owners;
-        self.controller.state.last_subagent_policies = last_subagent_policies;
         self.dashboard.set_state(self.controller.state.clone());
         for id in retired_ids {
             self.worker_diagnoses.observe(&id, true, None);

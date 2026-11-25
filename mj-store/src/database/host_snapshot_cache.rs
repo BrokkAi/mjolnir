@@ -88,6 +88,23 @@ pub fn list_host_snapshot_cache_entries_for_session(
         .context("collect host_snapshot_cache session rows")
 }
 
+/// List every cached snapshot entry, whatever its age or host.
+pub fn list_all_host_snapshot_cache_entries() -> Result<Vec<HostSnapshotCacheEntry>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, session_id, host, sha256, path, written_at
+             FROM host_snapshot_cache
+             ORDER BY written_at ASC, id ASC",
+        )
+        .context("prepare host_snapshot_cache full list")?;
+    let rows = statement
+        .query_map([], entry_from_row)
+        .context("query all host_snapshot_cache entries")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect all host_snapshot_cache rows")
+}
+
 /// List all cached snapshot entries whose `written_at <= cutoff_rfc3339`.
 pub fn list_overdue_host_snapshot_cache_entries(
     cutoff_rfc3339: &str,

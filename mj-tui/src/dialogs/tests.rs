@@ -747,6 +747,7 @@ fn failed_suspension_offers_retry_and_suspend_without_checkpoint() {
             consent: mj_core::suspend_consent::SuspendConsent {
                 without_checkpoint: true,
                 confirm_no_checkpoint: true,
+                history_only: false,
                 ..Default::default()
             },
         }
@@ -916,18 +917,77 @@ fn golden_dashboard_dialogs() {
                 ..Default::default()
             },
         ),
+        (
+            "suspend dialog with blockers",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                    kind: "hidden_tracked_edits".into(),
+                    paths: (1..=7).map(|i| format!("linked/file-{i}.txt")).collect(),
+                    remedy: "Clear index flags in the linked checkout before suspending.".into(),
+                }],
+                ..Default::default()
+            },
+        ),
+        // Hard-won: #1679: backend-only warnings showed Continue anyway without a reason.
+        (
+            "suspend dialog with backend-only warnings",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                children_not_handed_back: vec!["native-child".into()],
+                interrupting: true,
+                ..Default::default()
+            },
+        ),
     ] {
         let mut dashboard = dashboard_with_session(running_session());
+        let request_id = 1;
         dashboard.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
             session_id: "session-1".into(),
-            children_not_handed_back: Vec::new(),
-            interrupting: false,
-            preflight: Some(preflight),
-            checking: false,
+            request_id,
+            child_warning_titles: Vec::new(),
+            preflight: None,
             viewing_all_untracked: false,
+            resolving_blockers: false,
+            confirming_history_only: false,
+            can_prompt: true,
         }));
+        assert_eq!(
+            dashboard.apply_suspend_preflight(request_id, preflight),
+            DashboardAction::None
+        );
         let lines = drawn(&mut dashboard, 100, 28);
         append_dialog_render(&mut output, label, 100, 28, &lines);
+        if label == "suspend dialog with blockers" {
+            dashboard.handle_key(key(KeyCode::Char('v')));
+            let lines = drawn(&mut dashboard, 100, 28);
+            append_dialog_render(&mut output, "suspend blockers expanded", 100, 28, &lines);
+            let Mode::Confirm(dialog) = &dashboard.mode else {
+                panic!("confirmation")
+            };
+            let confirmation = dialog.confirmation.clone();
+            let history = confirmation_buttons(&confirmation)
+                .iter()
+                .position(|label| label == "Suspend (history only)…")
+                .unwrap();
+            dashboard.activate_confirmation_button(confirmation, history);
+            append_dialog_render(
+                &mut output,
+                "history-only external worktree warning",
+                100,
+                28,
+                &drawn(&mut dashboard, 100, 28),
+            );
+            let Mode::Confirm(dialog) = &dashboard.mode else {
+                panic!("confirmation")
+            };
+            let confirmation = dialog.confirmation.clone();
+            dashboard.activate_confirmation_button(confirmation, 0);
+            let prompt = dashboard.handle_key(key(KeyCode::Char('a')));
+            assert!(
+                matches!(prompt, DashboardAction::PromptSession { ref text, .. } if text.contains("linked/file-7.txt") && text.contains("Clear index flags"))
+            );
+        }
     }
 
     let mut targets = dashboard_with_session(running_session());
@@ -1129,8 +1189,9 @@ fn golden_dashboard_dialogs() {
 
     // Extend the full dialog golden through the Profiles menu and real controls.
     use mj_core::usage::{
-        AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, SessionUsageEstimate,
-        SessionUsageReport, UnknownCost, UsageAgentRole,
+        AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileQuotaUsage,
+        ProfileUsageEstimate, SessionUsageEstimate, SessionUsageReport, UnknownCost,
+        UsageAgentRole,
     };
     let mut usage = dashboard_with_session(running_session());
     usage.begin_support_pane_menu(crate::SupportPane::Quota);
@@ -1141,6 +1202,21 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
+    let claude_profile = usage.config.profiles["claude-1"].clone();
+    let codex_profile = usage.config.profiles["codex-1"].clone();
+    usage
+        .config
+        .profiles
+        .insert("claude".into(), claude_profile.clone());
+    usage.config.profiles.insert("codex".into(), codex_profile);
+    usage
+        .config
+        .profiles
+        .insert("claude-idle".into(), claude_profile);
+    for (id, profile) in &mut usage.config.profiles {
+        profile.enabled = matches!(id.as_str(), "claude" | "claude-idle" | "codex");
+    }
+    usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
     usage.handle_key(key(KeyCode::Char('3')));
     append_dialog_render(
         &mut output,
@@ -1253,6 +1329,38 @@ fn golden_dashboard_dialogs() {
             codex_models[4].clone(),
         ),
     ];
+    report.profile_usage = vec![
+        ProfileUsageEstimate {
+            profile: Some("claude".into()),
+            cost_usd_ticks: Ok(82_000_000_000),
+            coverage: report.sessions[0].coverage.clone(),
+        },
+        ProfileUsageEstimate {
+            profile: Some("codex".into()),
+            cost_usd_ticks: Err(UnknownCost),
+            ..Default::default()
+        },
+    ];
+    report.quota_usage = vec![
+        ProfileQuotaUsage {
+            profile: "claude".into(),
+            consumed_basis_points: Some(1000),
+            partial: false,
+            monthly_price_usd: Some(200),
+        },
+        ProfileQuotaUsage {
+            profile: "claude-idle".into(),
+            consumed_basis_points: Some(0),
+            partial: false,
+            monthly_price_usd: Some(100),
+        },
+        ProfileQuotaUsage {
+            profile: "codex".into(),
+            consumed_basis_points: Some(2000),
+            partial: false,
+            monthly_price_usd: Some(200),
+        },
+    ];
     // Dollars per hour; the 20th bar also ran a model with no known rate, and
     // the 14th ran only such models.
     let hour_dollars = [
@@ -1267,6 +1375,86 @@ fn golden_dashboard_dialogs() {
             has_unknown_cost: n == 19 || n == 13,
         })
         .collect();
+    let mut known = report.clone();
+    known.profile_usage[1].cost_usd_ticks = Ok(30_000_000_000);
+    known.cost_usd_ticks = Ok(112_000_000_000);
+    // The idle member still makes the provider's quota coverage incomplete.
+    known.quota_usage[1].partial = true;
+    usage.apply_session_usage_result(first, Ok(known));
+    append_dialog_render(
+        &mut output,
+        "Usage known provider totals with partial coverage",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    let mut unweighted = report.clone();
+    unweighted.quota_usage[1].monthly_price_usd = None;
+    usage.apply_session_usage_result(first, Ok(unweighted));
+    append_dialog_render(
+        &mut output,
+        "Usage unknown plan weight",
+        70,
+        22,
+        &drawn(&mut usage, 70, 22),
+    );
+    let mut missing = report.clone();
+    missing.quota_usage[1].consumed_basis_points = None;
+    missing.quota_usage[1].partial = true;
+    usage.apply_session_usage_result(first, Ok(missing));
+    append_dialog_render(
+        &mut output,
+        "Usage missing idle account reading",
+        70,
+        17,
+        &drawn(&mut usage, 70, 17),
+    );
+    let mut many_providers = report.clone();
+    many_providers
+        .profile_usage
+        .extend((0..12).map(|n| ProfileUsageEstimate {
+            profile: Some(format!("retired-account-with-long-profile-name-{n:02}")),
+            cost_usd_ticks: Ok(5_000_000_000),
+            ..Default::default()
+        }));
+    usage.apply_session_usage_result(first, Ok(many_providers));
+    append_dialog_render(
+        &mut output,
+        "Usage many providers preserves details and chart footer",
+        70,
+        30,
+        &drawn(&mut usage, 70, 30),
+    );
+    let mut retained = report.clone();
+    retained.profile_usage.extend([
+        ProfileUsageEstimate {
+            profile: Some("retired-account".into()),
+            cost_usd_ticks: Ok(5_000_000_000),
+            ..Default::default()
+        },
+        ProfileUsageEstimate {
+            profile: None,
+            cost_usd_ticks: Err(UnknownCost),
+            ..Default::default()
+        },
+    ]);
+    usage.quota_providers = Default::default();
+    usage.apply_session_usage_result(first, Ok(retained));
+    append_dialog_render(
+        &mut output,
+        "Usage unresolved and retained provider labels",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    append_dialog_render(
+        &mut output,
+        "Usage unresolved and retained providers",
+        70,
+        17,
+        &drawn(&mut usage, 70, 17),
+    );
+    usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,
@@ -1332,6 +1520,12 @@ fn golden_dashboard_dialogs() {
     usage.apply_session_usage_result(first, Ok(report.clone()));
     assert!(matches!(&usage.mode,Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
     let mut codex_report = report.clone();
+    codex_report
+        .profile_usage
+        .retain(|usage| usage.profile.as_deref() == Some("codex"));
+    codex_report
+        .quota_usage
+        .retain(|quota| quota.profile == "codex");
     codex_report.sessions = vec![report.sessions[1].clone()];
     codex_report.sessions[0]
         .models
@@ -1377,7 +1571,12 @@ fn golden_dashboard_dialogs() {
     click(&mut usage);
     let (hour_request, query) = usage.session_usage_request().unwrap();
     assert_eq!(query.hour_start_ms, Some((490_000 + 2) * HOUR_MS));
-    usage.apply_session_usage_result(hour_request, Ok(codex_report.clone()));
+    let mut hour_report = codex_report.clone();
+    hour_report.quota_usage.iter_mut().for_each(|q| {
+        q.consumed_basis_points = Some(125);
+        q.partial = true;
+    });
+    usage.apply_session_usage_result(hour_request, Ok(hour_report));
     append_dialog_render(
         &mut output,
         "Usage one hour selected",
@@ -2084,4 +2283,124 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), retry);
     assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
+}
+
+#[test]
+fn suspend_safe_fix_enters_pending_state_and_refresh_requires_confirmation() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = 77;
+    dashboard.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+        session_id: "session-1".into(),
+        request_id,
+        child_warning_titles: Vec::new(),
+        preflight: None,
+        viewing_all_untracked: false,
+        can_prompt: true,
+        resolving_blockers: false,
+        confirming_history_only: false,
+    }));
+    let preflight = mj_core::suspend_consent::SuspendPreflight {
+        session_id: "session-1".into(),
+        blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+            kind: "hidden_tracked_edits".into(),
+            paths: vec!["file".into()],
+            remedy: "Clear flags.".into(),
+        }],
+        ..Default::default()
+    };
+    dashboard.apply_suspend_preflight(request_id, preflight);
+    let _ = drawn(&mut dashboard, 100, 28);
+    let action = dashboard.handle_key(key(KeyCode::Char('f')));
+    assert_eq!(
+        action,
+        DashboardAction::ResolveSuspendBlockers {
+            session_id: "session-1".into(),
+            request_id
+        }
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: true,
+                        confirming_history_only: false, preflight: None, .. }))
+    );
+    let action = dashboard.apply_suspend_preflight(
+        request_id,
+        mj_core::suspend_consent::SuspendPreflight {
+            session_id: "session-1".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(action, DashboardAction::None);
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: false,
+                        confirming_history_only: false, preflight: Some(_), .. }))
+    );
+}
+
+#[test]
+fn suspend_history_only_requires_second_confirmation_and_back_returns_to_blockers() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let confirmation = Confirmation::SuspendSession {
+        session_id: "session-1".into(),
+        request_id: 77,
+        child_warning_titles: vec!["child".into()],
+        preflight: Some(mj_core::suspend_consent::SuspendPreflight {
+            blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                kind: "hidden_tracked_edits".into(),
+                paths: vec!["file".into()],
+                remedy: "Clear flags".into(),
+            }],
+            interrupting: true,
+            ..Default::default()
+        }),
+        viewing_all_untracked: false,
+        can_prompt: true,
+        resolving_blockers: false,
+        confirming_history_only: false,
+    };
+    dashboard.activate_confirmation_button(confirmation.clone(), 0);
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    let index = confirmation_buttons(&confirmation)
+        .iter()
+        .position(|label| label == "Suspend (history only)…")
+        .unwrap();
+    assert_eq!(
+        dashboard.activate_confirmation_button(confirmation, index),
+        DashboardAction::None
+    );
+    let rendered = drawn(&mut dashboard, 100, 28).join(" ");
+    assert!(rendered.contains("Discard workspace Git changes"));
+    assert!(!rendered.contains("Save a recovery copy"));
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("confirmation")
+    };
+    assert_eq!(
+        confirmation_buttons(&dialog.confirmation),
+        vec!["Back", "Suspend with history only"]
+    );
+    let confirmation = dialog.confirmation.clone();
+    dashboard.activate_confirmation_button(confirmation, 0);
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("blockers")
+    };
+    assert!(
+        confirmation_buttons(&dialog.confirmation)
+            .iter()
+            .any(|label| label == "Suspend (history only)…")
+    );
+    let confirmation = dialog.confirmation.clone();
+    dashboard.activate_confirmation_button(confirmation, index);
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("confirmation")
+    };
+    let confirmation = dialog.confirmation.clone();
+    assert_eq!(
+        dashboard.activate_confirmation_button(confirmation, 1),
+        DashboardAction::Suspend {
+            session_id: "session-1".into(),
+            consent: mj_core::suspend_consent::SuspendConsent {
+                history_only: true,
+                ..Default::default()
+            },
+        }
+    );
 }

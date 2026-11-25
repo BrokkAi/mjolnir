@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 155;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 159;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3652,6 +3652,128 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 156 is breaking: older daemons ignore `region` and `aws_profile`
+    // on ec2_move_grants and would query or reconcile non-default-region grants
+    // against the wrong AWS region/profile.
+    if version < 156 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        for column in ["region", "aws_profile"] {
+            if !legacy_schema::table_has_column(&transaction, "ec2_move_grants", column)? {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE ec2_move_grants ADD COLUMN {column} TEXT;"
+                ))?;
+            }
+        }
+        transaction.execute_batch(
+            "UPDATE schema_compatibility
+                 SET minimum_compatible_version = 156 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (156, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=156;",
+        )?;
+        transaction.commit()?;
+    }
+    // Revision 157 is breaking, for two reasons that ship together.
+    // Recorded target runtimes keep secret-sourced environment entries as
+    // `environment_references`: an older daemon rewrites `target_runtime_json`
+    // without the field, silently dropping those variables at the next launch.
+    // And a managed checkout's path derives from its descriptor, so its
+    // `project_directory` is NULL: an older daemon rejects such a record, and
+    // reads NULL as a bundle workspace.
+    // `target_secret_scrub_pending` marks a store upgraded from an earlier
+    // revision, whose recorded runtimes may hold resolved secrets the daemon
+    // rewrites once at its next start; a new store never gets the row.
+    // Work is O(rows of `subagent_sessions`), two triggers, and four existence
+    // probes; no large blob table is scanned. Existing `sessions.project_directory` values stay: a
+    // legacy sub-agent whose parent is gone has no other record of its path.
+    if version < 157 {
+        // The rewrite below frees pages that held resolved secrets: zero them,
+        // and drop the log frames that still hold the earlier page images.
+        // Both cost in proportion to the rows rewritten, unlike a `VACUUM` of
+        // a store that is gigabytes of transcripts. A reader holding the log
+        // leaves the truncation to the repair that follows this upgrade.
+        let _secure_delete = super::target_secrets::SecureDelete::enable(connection)?;
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        // Reviewer launches recorded the profile's resolved environment, which
+        // the launch now takes from the live profile.
+        let scrubbed = transaction.execute(
+            "UPDATE subagent_sessions
+                SET record_json = json_remove(record_json, '$.reviewer_launch.environment')
+              WHERE json_type(record_json, '$.reviewer_launch.environment') IS NOT NULL",
+            [],
+        )?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS target_secret_scrub_pending (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1)
+             ) STRICT;
+             INSERT OR IGNORE INTO target_secret_scrub_pending(singleton)
+                 SELECT 1 WHERE EXISTS(SELECT 1 FROM sessions)
+                     OR EXISTS(SELECT 1 FROM session_moves)
+                     OR EXISTS(SELECT 1 FROM retained_move_sources)
+                     OR EXISTS(SELECT 1 FROM environments)
+                     OR EXISTS(SELECT 1 FROM environment_workers);
+             DROP TRIGGER IF EXISTS project_discovery_insert;
+             DROP TRIGGER IF EXISTS project_discovery_update;
+             CREATE TRIGGER project_discovery_insert AFTER INSERT ON sessions
+                WHEN NEW.project_directory IS NOT NULL OR NEW.managed_worktree IS NOT NULL BEGIN
+                    INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                    VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                END;
+             CREATE TRIGGER project_discovery_update AFTER UPDATE OF project_directory,managed_worktree,target_template_id ON sessions
+                WHEN (NEW.project_directory IS NOT NULL OR NEW.managed_worktree IS NOT NULL) AND
+                    (NEW.project_directory IS NOT OLD.project_directory
+                    OR NEW.managed_worktree IS NOT OLD.managed_worktree
+                    OR NEW.target_template_id IS NOT OLD.target_template_id) BEGIN
+                    INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                    VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                END;
+             UPDATE schema_compatibility
+                 SET minimum_compatible_version = 157 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (157, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=157;",
+        )?;
+        transaction.commit()?;
+        if scrubbed > 0 {
+            super::target_secrets::truncate_wal(connection, "migration 157")?;
+        }
+    }
+    // Revision 158 is compatible: additive Move credential authority, ignored
+    // by older readers/writers; existing rows and formats remain unchanged.
+    if version < 158 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_retired_logins (
+                 session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 operation_id TEXT NOT NULL CHECK(length(trim(operation_id)) > 0),
+                 source_profile_id TEXT NOT NULL CHECK(length(trim(source_profile_id)) > 0),
+                 harness_kind TEXT NOT NULL CHECK(length(trim(harness_kind)) > 0),
+                 store_id TEXT NOT NULL CHECK(length(trim(store_id)) > 0),
+                 PRIMARY KEY (session_id, operation_id)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (158, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=158;",
+        )?;
+        transaction.commit()?;
+    }
+    // Revision 159 is breaking: sessions.closing_consent JSON may include
+    // history_only, which older daemons reject via deny_unknown_fields during crash recovery.
+    // O(1): only compatibility metadata changes; no session rows are scanned.
+    if version < 159 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 159 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (159, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=159;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3685,28 +3807,10 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
 /// deleted last because the follower tests read them.
 fn gone_session_rows_sql(gone: &str) -> String {
     let id = format!("{gone}.session_id");
-    let other_live_follower = format!(
-        "EXISTS (SELECT 1 FROM github_watch_classifications c
-                     JOIN sessions s ON s.session_id = c.session_id
-                     WHERE c.owner = github_watch_items.owner
-                       AND c.repo = github_watch_items.repo
-                       AND c.number = github_watch_items.number
-                       AND c.interested = 1 AND c.created = 0
-                       AND c.session_id <> {id}
-                       AND s.state <> 'destroyed-with-data-loss')"
-    );
+    let watches = github_watch::detach_github_watches_sql(&id).join("\n");
     format!(
         "DELETE FROM mailbox_outbox WHERE target_session_id = {id};
-             DELETE FROM github_watch_items
-                 WHERE (creator_session_id = {id}
-                        OR (creator_session_id IS NULL
-                            AND EXISTS (SELECT 1 FROM github_watch_classifications f
-                                        WHERE f.owner = github_watch_items.owner
-                                          AND f.repo = github_watch_items.repo
-                                          AND f.number = github_watch_items.number
-                                          AND f.session_id = {id})))
-                   AND NOT {other_live_follower};
-             UPDATE github_watch_items SET creator_session_id = NULL WHERE creator_session_id = {id};
+             {watches}
              DELETE FROM github_watch_classifications WHERE session_id = {id};
              DELETE FROM github_watch_classification_failures WHERE session_id = {id};"
     )
@@ -6064,6 +6168,315 @@ mod reader_tests {
     }
 
     #[test]
+    fn revision_159_history_only_consent_round_trips_and_refuses_revision_158() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        save_session_to(&path, &super::super::tests::session("history", "project")).unwrap();
+        stamp_schema_version(&path, 158);
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 159);
+        assert_eq!(state.minimum_compatible, Some(159));
+        assert!(state.ensure_supported_by(158).is_err());
+        let consent = mj_core::suspend_consent::SuspendConsent {
+            history_only: true,
+            ..Default::default()
+        };
+        connection
+            .execute(
+                "UPDATE sessions SET closing_consent = ?1 WHERE session_id = 'history'",
+                [serde_json::to_string(&consent).unwrap()],
+            )
+            .unwrap();
+        let json: String = connection
+            .query_row(
+                "SELECT closing_consent FROM sessions WHERE session_id = 'history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<mj_core::suspend_consent::SuspendConsent>(&json).unwrap(),
+            consent
+        );
+    }
+
+    #[test]
+    fn revision_158_retired_login_authority_is_compatible_and_cascades() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        save_session_to(&path, &super::super::tests::session("source", "project")).unwrap();
+        stamp_schema_version(&path, 157);
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(state.ensure_supported_by(158).is_err());
+        upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source','move','profile','codex','store')", []).unwrap();
+        // New harness identifiers never require rebuilding this table.
+        upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source','future','profile','future-harness','store')", []).unwrap();
+        assert!(upgraded.execute("INSERT INTO pending_retired_logins VALUES ('missing','move','profile','codex','store')", []).is_err());
+        assert!(upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source',' ','profile','codex','store')", []).is_err());
+        upgraded
+            .execute("DELETE FROM sessions WHERE session_id='source'", [])
+            .unwrap();
+        assert_eq!(
+            upgraded
+                .query_row("SELECT count(*) FROM pending_retired_logins", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn revision_156_adds_ec2_move_grants_region_and_profile_and_refuses_revision_155() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        save_session_to(&path, &super::super::tests::session("grants", "project")).unwrap();
+        stamp_schema_version(&path, 155);
+        let previous = Connection::open(&path).unwrap();
+        for column in ["region", "aws_profile"] {
+            assert!(
+                !legacy_schema::table_has_column(&previous, "ec2_move_grants", column).unwrap()
+            );
+        }
+        previous
+            .execute(
+                "INSERT INTO ec2_move_grants(
+                     security_group_id, cidr_ip, port, state, users_json, absent_checks,
+                     attempt_id, updated_at
+                 ) VALUES ('sg-old', '203.0.113.7/32', 22, 'active', '[\"move\"]', 0, 1,
+                           '2026-11-24T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        read_schema_state(&previous)
+            .unwrap()
+            .ensure_supported_by(155)
+            .unwrap();
+        drop(previous);
+
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert!(matches!(
+            state
+                .ensure_supported_by(155)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        ));
+        for column in ["region", "aws_profile"] {
+            assert!(legacy_schema::table_has_column(&upgraded, "ec2_move_grants", column).unwrap());
+        }
+        let preserved: (String, Option<String>, Option<String>) = upgraded
+            .query_row(
+                "SELECT security_group_id, region, aws_profile FROM ec2_move_grants",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("sg-old".into(), None, None));
+    }
+
+    #[test]
+    fn revision_157_scrubs_reviewer_environment_catalogs_pathless_checkouts_and_refuses_revision_156()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let (_, child) = super::super::tests::subagent_pair(&path);
+        let discoveries = |connection: &Connection| -> i64 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM project_discovery_changes",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        // A reviewer launch as revision 156 recorded it: with the profile's
+        // resolved environment, which may hold a secret.
+        let connection = Connection::open(&path).unwrap();
+        let json: String = connection
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&child.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut record: mj_core::subagent::SubagentRecord = serde_json::from_str(&json).unwrap();
+        record.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+            role: mj_core::worker_launch::ReviewChildRole::Reviewer,
+            profile_id: "reviewer".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            bridge_command: "review-bridge".into(),
+            bridge_args: vec![],
+            environment: Default::default(),
+            excluded_environment: vec![],
+            execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            model: None,
+            effort: None,
+            fast_mode: None,
+            generation: 0,
+            mcp_servers: vec![],
+        });
+        connection
+            .execute(
+                "UPDATE subagent_sessions
+                    SET record_json=json_insert(?2,'$.reviewer_launch.environment',
+                                                json('{\"API_KEY\":\"sk-secret-value\"}'))
+                  WHERE child_session_id=?1",
+                params![child.id, serde_json::to_string(&record).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+        stamp_schema_version(&path, 156);
+        let previous = Connection::open(&path).unwrap();
+        previous
+            .execute_batch(
+                "DROP TRIGGER project_discovery_insert;
+                 DROP TRIGGER project_discovery_update;
+                 CREATE TRIGGER project_discovery_insert AFTER INSERT ON sessions
+                    WHEN NEW.project_directory IS NOT NULL BEGIN
+                        INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                        VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                    END;
+                 CREATE TRIGGER project_discovery_update AFTER UPDATE OF project_directory,managed_worktree,target_template_id ON sessions
+                    WHEN NEW.project_directory IS NOT NULL AND
+                        (NEW.project_directory IS NOT OLD.project_directory
+                        OR NEW.managed_worktree IS NOT OLD.managed_worktree
+                        OR NEW.target_template_id IS NOT OLD.target_template_id) BEGIN
+                        INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                        VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                    END;",
+            )
+            .unwrap();
+        read_schema_state(&previous)
+            .unwrap()
+            .ensure_supported_by(156)
+            .unwrap();
+        // Revision 156 ignores a managed checkout that records no path.
+        let before = discoveries(&previous);
+        previous
+            .execute(
+                "UPDATE sessions SET managed_worktree='{}' WHERE session_id=?1",
+                [&child.id],
+            )
+            .unwrap();
+        assert_eq!(discoveries(&previous), before);
+        previous
+            .execute(
+                "UPDATE sessions SET managed_worktree=NULL WHERE session_id=?1",
+                [&child.id],
+            )
+            .unwrap();
+        drop(previous);
+
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert!(matches!(
+            state
+                .ensure_supported_by(156)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        ));
+        let (environment, profile): (Option<String>, String) = upgraded
+            .query_row(
+                "SELECT json_type(record_json,'$.reviewer_launch.environment'),
+                        json_extract(record_json,'$.reviewer_launch.profile_id')
+                   FROM subagent_sessions WHERE child_session_id=?1",
+                [&child.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((environment, profile.as_str()), (None, "reviewer"));
+        // The secret is gone from the files too, not only from the row: the
+        // page that held it is zeroed and the log frames with its earlier
+        // image are truncated.
+        for suffix in ["", "-wal"] {
+            let bytes = std::fs::read(format!("{}{suffix}", path.display())).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(b"sk-secret-value".len())
+                    .any(|window| window == b"sk-secret-value"),
+                "the reviewer secret survives in the {suffix:?} file"
+            );
+        }
+        // The store held sessions, so the daemon repairs its recorded runtimes
+        // once; a store created at this revision has nothing to repair.
+        let pending = |connection: &Connection| -> i64 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM target_secret_scrub_pending",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(pending(&upgraded), 1);
+        let fresh = open_writer(&directory.path().join("fresh.sqlite3")).unwrap();
+        assert_eq!(pending(&fresh), 0);
+        assert!(
+            load_state_from(&path)
+                .unwrap()
+                .subagents
+                .contains_key(&child.id)
+        );
+
+        // A managed checkout stores no project directory: its path derives
+        // from the descriptor, and the new triggers still queue it.
+        let mut managed = super::super::tests::session("managed", "project");
+        let source = PathBuf::from("/srv/project");
+        managed.project_directory = None;
+        managed.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+            kind: mj_core::state::ManagedCheckoutKind::Clone,
+            source_project_directory: source.join("app"),
+            source_repository: source.clone(),
+            worktree_root: source.join(".mj/clones/managed"),
+            branch: "main".into(),
+            target: mj_core::state::ManagedWorktreeTarget::Local,
+            base_commit: None,
+        }));
+        let queued = discoveries(&upgraded);
+        save_session_to(&path, &managed).unwrap();
+        assert_eq!(discoveries(&upgraded), queued + 1);
+        let directory: Option<Vec<u8>> = upgraded
+            .query_row(
+                "SELECT directory FROM project_discovery_changes ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(directory, None);
+        let loaded = state_io::load_session_with(&upgraded, "managed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.project_directory, None);
+        assert_eq!(
+            loaded.checkout().project_directory().as_deref(),
+            Some(source.join(".mj/clones/managed/app").as_path())
+        );
+        upgraded
+            .execute(
+                "UPDATE sessions SET managed_worktree='{}' WHERE session_id=?1",
+                [&child.id],
+            )
+            .unwrap();
+        assert_eq!(discoveries(&upgraded), queued + 2);
+    }
+
+    #[test]
     fn revision_155_persists_staged_aws_profile_and_refuses_revision_154() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -6072,8 +6485,10 @@ mod reader_tests {
         stamp_schema_version(&path, 154);
         let previous = Connection::open(&path).unwrap();
         previous
-            .execute_batch("ALTER TABLE sessions DROP COLUMN staged_aws_profile;
-                            ALTER TABLE worker_restart_intents DROP COLUMN staged_aws_profile;")
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN staged_aws_profile;
+                            ALTER TABLE worker_restart_intents DROP COLUMN staged_aws_profile;",
+            )
             .unwrap();
         read_schema_state(&previous)
             .unwrap()
@@ -6082,12 +6497,14 @@ mod reader_tests {
         assert!(
             !legacy_schema::table_has_column(&previous, "sessions", "staged_aws_profile").unwrap()
         );
-        assert!(!legacy_schema::table_has_column(
-            &previous,
-            "worker_restart_intents",
-            "staged_aws_profile"
-        )
-        .unwrap());
+        assert!(
+            !legacy_schema::table_has_column(
+                &previous,
+                "worker_restart_intents",
+                "staged_aws_profile"
+            )
+            .unwrap()
+        );
         drop(previous);
 
         let upgraded = open_writer(&path).unwrap();
@@ -6265,7 +6682,9 @@ mod reader_tests {
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
-        state.ensure_supported_by(MINIMUM_COMPATIBLE_VERSION).unwrap();
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .unwrap();
         let mut statement = upgraded
             .prepare("SELECT draft_id FROM detached_drafts ORDER BY draft_id")
             .unwrap();
@@ -6299,6 +6718,28 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 158 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS pending_retired_logins;")
+                .unwrap();
+        }
+        if version < 157 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS target_secret_scrub_pending;")
+                .unwrap();
+        }
+        if version < 156 {
+            for column in ["region", "aws_profile"] {
+                if legacy_schema::table_has_column(&connection, "ec2_move_grants", column).unwrap()
+                {
+                    connection
+                        .execute_batch(&format!(
+                            "ALTER TABLE ec2_move_grants DROP COLUMN {column};"
+                        ))
+                        .unwrap();
+                }
+            }
+        }
         if version < 153 {
             restore_pre153_transcript_layout(&connection);
         }

@@ -5,6 +5,7 @@ use tracing::instrument::WithSubscriber;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SessionConfiguration {
     Opening,
+    OpeningReload,
     Ready,
     Reopening,
 }
@@ -60,12 +61,38 @@ impl HarnessStartup {
 }
 
 #[derive(Default)]
-struct TaskMonitors {
+pub(super) struct TaskMonitors {
+    pub(super) claude_mcp: Option<super::super::claude_mcp::ClaudeMcpController>,
     kimi: Option<KimiTaskMonitor>,
     antigravity: Option<AntigravityTaskMonitor>,
 }
 
 impl TaskMonitors {
+    pub(super) fn new(
+        harness: HarnessKind,
+        credentials: &std::result::Result<CredentialEndpoint, String>,
+    ) -> Self {
+        let home = || {
+            credentials
+                .as_ref()
+                .map(|endpoint| endpoint.home.clone())
+                .map_err(Clone::clone)
+        };
+        match harness {
+            HarnessKind::Kimi => Self {
+                kimi: Some(KimiTaskMonitor::new(home())),
+                antigravity: None,
+                claude_mcp: None,
+            },
+            HarnessKind::Antigravity => Self {
+                kimi: None,
+                antigravity: Some(AntigravityTaskMonitor::new(home())),
+                claude_mcp: None,
+            },
+            _ => Self::default(),
+        }
+    }
+
     async fn prepare_event(
         &mut self,
         relay: &Arc<RelayCell>,
@@ -83,10 +110,10 @@ pub(super) async fn run_relay_coordinator_with_shells(
     dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     user_shells: crate::user_shell::UserShellRegistry,
-    kimi_tasks: Option<KimiTaskMonitor>,
-    antigravity_tasks: Option<AntigravityTaskMonitor>,
+    task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
+    antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<Option<u64>>>>,
 ) -> Result<()> {
     let verdict = crate::acp::verdict_client::VerdictClient::resolve(None).await;
     run_relay_coordinator(
@@ -95,13 +122,11 @@ pub(super) async fn run_relay_coordinator_with_shells(
         dispatch_wakes,
         commands,
         user_shells,
-        TaskMonitors {
-            kimi: kimi_tasks,
-            antigravity: antigravity_tasks,
-        },
+        task_monitors,
         verdict,
         capture,
         Some(startup),
+        antigravity_refresh,
     )
     .await
 }
@@ -133,6 +158,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
         verdict,
         capture,
         None,
+        None,
     )
     .await
 }
@@ -148,6 +174,7 @@ fn run_relay_coordinator(
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
     capture: Option<crate::work_facts::WorkObserver>,
     mut startup: Option<HarnessStartup>,
+    mut antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<Option<u64>>>>,
 ) -> impl std::future::Future<Output = Result<()>> + Send {
     // Capturing a turn's work facts makes this future large. Keep its state
     // on the heap rather than embedding it in every startup/capture wrapper;
@@ -236,6 +263,9 @@ fn run_relay_coordinator(
                 let cut_held = relay.worker_writes_held();
                 (cut_held || relay.close_pending(), cut_held)
             };
+            if held && let Some(monitor) = task_monitors.antigravity.as_mut() {
+                monitor.fail_idle_waiters();
+            }
             if !cut_held
                 && relay
                     .lock()
@@ -427,6 +457,7 @@ fn run_relay_coordinator(
                     // The worker ends here: the runtime owner stops ACP and the
                     // exit record carries the typed failure, so the daemon stops
                     // restarting this harness and reports why.
+                    reload_failure_resolution(&relay, cause.clone())?;
                     verdict_tasks.shutdown().await;
                     return Err(anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
                         kind: None,
@@ -574,12 +605,20 @@ fn run_relay_coordinator(
                         .refresh(&relay, false)
                         .await?;
                 }
+                reply = async { antigravity_refresh.as_mut().expect("guarded refresh receiver").recv().await }, if antigravity_refresh.is_some() => {
+                    if let Some(reply) = reply {
+                        if held { let _ = reply.send(None); }
+                        else if let Some(monitor) = task_monitors.antigravity.as_mut() {
+                            monitor.request_idle_reservation_refresh(&relay, reply)?;
+                        } else {
+                            let epoch = relay.lock().expect("relay state lock poisoned").antigravity_hook_epoch();
+                            let _ = reply.send(Some(epoch));
+                        }
+                    } else { antigravity_refresh = None; }
+                }
+                result = async { task_monitors.antigravity.as_mut().expect("guarded scan").finish_in_flight_scan(&relay).await }, if task_monitors.antigravity.as_ref().is_some_and(AntigravityTaskMonitor::has_in_flight_scan) && !held => { result?; }
                 _ = antigravity_poll.tick(), if task_monitors.antigravity.is_some() && !held => {
-                    task_monitors.antigravity
-                        .as_mut()
-                        .expect("Antigravity poll branch is guarded")
-                        .refresh(&relay, false)
-                        .await?;
+                    task_monitors.antigravity.as_mut().expect("guarded poll").start_periodic_poll(&relay)?;
                 }
                 _ = verdict_poll.tick(), if verdict.is_some() => {}
                 result = login_reads.join_next(), if !login_reads.is_empty() => {
@@ -919,7 +958,7 @@ async fn observe_and_record(
     user_shells: &mut crate::user_shell::UserShellRegistry,
     task_monitors: &mut TaskMonitors,
     capture: Option<&mut Capture<'_>>,
-    startup: Option<&mut HarnessStartup>,
+    mut startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
     // One rule for "a managed child's turn ended": a prompt of ours finishing,
     // or the harness ending a turn it started on its own.
@@ -942,15 +981,233 @@ async fn observe_and_record(
             None
         }
     };
+    let reload = match &mut event {
+        RuntimeEvent::HarnessRestarting { reload, .. } => {
+            reload.take().and_then(HarnessReload::take)
+        }
+        _ => None,
+    };
     track_user_shell_completion(user_shells, &event);
-    record_runtime_event_with_startup(
+    let stopped = record_runtime_event_with_startup(
         relay,
         in_flight,
         event,
         session_configuration,
         work_facts,
-        startup,
-    )
+        startup.as_deref_mut(),
+    );
+    if let Some((transition, applied)) = reload {
+        let result = match stopped {
+            Ok(stopped) => apply_harness_reload_transition(relay, task_monitors, transition)
+                .await
+                .map(|runtime| (stopped, runtime)),
+            Err(error) => Err(error),
+        };
+        return match result {
+            Ok((stopped, runtime)) => {
+                if runtime.is_some() {
+                    *session_configuration = SessionConfiguration::OpeningReload;
+                    // Overlay and configurators belong to preparation; only the
+                    // replacement bridge's startup consumes this deadline.
+                    if let Some(startup) = startup {
+                        *startup = HarnessStartup::new();
+                    }
+                }
+                let _ = applied.send(Ok(runtime));
+                Ok(stopped)
+            }
+            Err(error) => {
+                let resolution = reload_failure_resolution(relay, format!("{error:#}"))?;
+                let committed = matches!(
+                    resolution,
+                    crate::acp::ReloadResolution::FailedAfterCommit(_)
+                );
+                let _ = applied.send(Err(resolution));
+                if committed {
+                    Err(startup_failure(format!("{error:#}")))
+                } else {
+                    Err(error)
+                }
+            }
+        };
+    }
+    stopped
+}
+
+fn startup_failure(message: String) -> anyhow::Error {
+    anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+        kind: None,
+        message,
+    })
+}
+
+pub(super) fn reload_failure_resolution(
+    relay: &Arc<RelayCell>,
+    message: String,
+) -> Result<crate::acp::ReloadResolution> {
+    let mut state = relay.lock().expect("relay state lock poisoned");
+    let pending_exists = state
+        .root()
+        .join(mj_core::worker_launch::PENDING_RELOAD_FILE)
+        .exists();
+    let committed = state.committed_reload_operation();
+    if pending_exists || committed.is_some() {
+        let identity = committed.or_else(|| {
+            let operational = state.operational_state();
+            Some((
+                operational.in_place_move_hold?.operation_id,
+                operational.store_id?,
+            ))
+        });
+        if let Some((operation, store)) = identity
+            && let Err(error) =
+                state.mark_in_place_harness_failed_after_commit(&operation, &store, message.clone())
+        {
+            tracing::warn!(%error, "could not persist post-commit reload failure");
+        }
+        Ok(crate::acp::ReloadResolution::FailedAfterCommit(message))
+    } else {
+        Ok(crate::acp::ReloadResolution::RefusedBeforeCommit(message))
+    }
+}
+
+pub(super) async fn apply_harness_reload_transition(
+    relay: &Arc<RelayCell>,
+    task_monitors: &mut TaskMonitors,
+    mut transition: HarnessReloadTransition,
+) -> Result<Option<AppliedReloadRuntime>> {
+    let runtime = if let Some(action) = transition.commit.take() {
+        let CommittedReloadAction {
+            root,
+            capabilities,
+            mut pending,
+            git_setup,
+            mut launch_config,
+            disk_launch,
+            mut environment,
+            mut supervisor_spec,
+        } = action;
+        let staged = !pending.candidate_id.is_empty();
+        if staged {
+            let path = git_setup.keep();
+            pending.git_setup_name = Some(
+                path.file_name()
+                    .context("private Git setup name")?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            let commit_root = root.clone();
+            let commit_pending = pending.clone();
+            mj_core::runtime::spawn_blocking(move || {
+                super::super::reload_commit::commit_pending_reload(&commit_root, &commit_pending)
+            })
+            .await??;
+            relay
+                .lock()
+                .expect("relay lock")
+                .mark_in_place_harness_committed(
+                    &pending.operation_id,
+                    &pending.expected_store_id,
+                )?;
+            let apply_root = root.clone();
+            mj_core::runtime::spawn_blocking(move || {
+                super::super::reload_commit::sync_pending_reload_dir(&apply_root)?;
+                super::super::reload_commit::apply_committed_reload(&apply_root, &pending)
+            })
+            .await??;
+        } else {
+            publish_git_setup(&root, git_setup)?;
+        }
+        let before = launch_config.environment.clone();
+        let (registered, boundary, mailbox) = apply_profile_configuration(
+            &root,
+            &mut launch_config,
+            capabilities,
+            &environment,
+            None,
+            &CancellationToken::new(),
+        )
+        .await?;
+        apply_profile_environment_delta(
+            &launch_config,
+            &before,
+            &mut environment,
+            &mut supervisor_spec,
+        );
+        if !staged {
+            if launch_config.no_github_credentials {
+                mj_core::credentials::remove_github_token(&root.join("github-token"))?;
+            }
+            disk_launch.write(&root.join("launch.json"))?;
+        }
+        let supervisor_path = root.join("acp-supervisor.json");
+        mj_core::runtime::spawn_blocking(move || {
+            let bytes = serde_json::to_vec(&supervisor_spec)?;
+            super::super::reload_commit::atomic_private_write(&supervisor_path, &bytes)
+        })
+        .await??;
+        transition.boundary_mailbox_hook_available = boundary;
+        transition.mailbox_delivery_mode = mailbox;
+        let socket = crate::acp::launch_subagent_mcp_socket(
+            &root,
+            &launch_config,
+            capabilities.subagent_role,
+            registered,
+        );
+        let claude_mcp_active = task_monitors
+            .claude_mcp
+            .as_ref()
+            .map(|controller| controller.reconcile(launch_config.harness, environment.clone()))
+            .transpose()?
+            .unwrap_or(false);
+        Some(AppliedReloadRuntime {
+            committed: staged,
+            environment,
+            subagent_mcp_socket: socket,
+            claude_mcp_socket: if claude_mcp_active {
+                crate::acp::launch_claude_mcp_socket(&root, launch_config.harness, registered)
+            } else {
+                None
+            },
+            managed_subagent: capabilities.managed_subagent,
+        })
+    } else {
+        None
+    };
+    let HarnessReloadTransition {
+        commit: _,
+        harness,
+        claude_login_path,
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode,
+        credentials,
+        shared_credentials,
+    } = transition;
+    // Stop holds the endpoint read guard until it applies its SQLite sample.
+    // Drain those hooks before retiring state they may have just written.
+    shared_credentials.set(credentials.clone()).await;
+    {
+        let mut state = relay.lock().expect("relay state lock poisoned");
+        state.set_turn_verdict_harness(harness);
+        state.authentication_login_path = claude_login_path;
+        state.set_steering_delivery_mode(harness, boundary_mailbox_hook_available);
+        state.update_mailbox_delivery_mode(mailbox_delivery_mode);
+        state.set_harness_turn_policy(harness_turn_policy_for(harness));
+        state.set_background_work_policy(background_work_policy_for(harness));
+        state.retire_harness_process_state()?;
+    }
+    let login_identity = relay.lock().expect("relay lock").login_identity.clone();
+    if let Ok(endpoint) = &credentials {
+        if let Err(error) = requests::observe_initial_login(endpoint, &login_identity).await {
+            tracing::warn!(%error, "could not read committed login before harness restart");
+        }
+    } else {
+        login_identity.observe_file(None);
+    }
+    let claude_mcp = task_monitors.claude_mcp.take();
+    *task_monitors = TaskMonitors::new(harness, &credentials);
+    task_monitors.claude_mcp = claude_mcp;
+    Ok(runtime)
 }
 
 fn record_runtime_event_with_startup(
@@ -977,9 +1234,33 @@ fn record_runtime_event_with_startup(
         _ => None,
     };
     let configured = matches!(event, RuntimeEvent::SessionConfigured { .. });
+    if *session_configuration == SessionConfiguration::OpeningReload
+        || (!session_configuration.is_ready()
+            && relay
+                .lock()
+                .expect("relay lock")
+                .committed_reload_operation()
+                .is_some())
+    {
+        let failure = match &event {
+            RuntimeEvent::SessionFault { message } => Some(message.clone()),
+            RuntimeEvent::Stopped => {
+                Some("ACP runtime stopped before replacement harness opened".to_owned())
+            }
+            _ => None,
+        };
+        if let Some(message) = failure {
+            reload_failure_resolution(relay, message.clone())?;
+            return Err(startup_failure(message));
+        }
+    }
     let failure = match &event {
         RuntimeEvent::SessionFault { message }
-            if startup.is_some() && *session_configuration == SessionConfiguration::Opening =>
+            if startup.is_some()
+                && matches!(
+                    *session_configuration,
+                    SessionConfiguration::Opening | SessionConfiguration::OpeningReload
+                ) =>
         {
             let (cause, diagnostics) = message.split_once('\n').unwrap_or((message, ""));
             let failure = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
@@ -1007,6 +1288,10 @@ fn record_runtime_event_with_startup(
         return Err(failure);
     }
     if configured {
+        relay
+            .lock()
+            .expect("relay lock")
+            .finish_committed_reload()?;
         *session_configuration = SessionConfiguration::Ready;
     } else if restarting && session_configuration.is_ready() {
         // Allow dispatch again only after the fresh bridge configures itself.
@@ -1223,12 +1508,14 @@ pub(crate) fn record_runtime_event_with_facts(
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-session-open");
+            relay.begin_pending_parked_move()?;
             relay.record_observation(RelayObservation::SessionOpened {
                 native_session_id,
                 resumed,
                 native_continuity_lost,
                 replaced_unused_native_session_id,
             })?;
+            relay.complete_pending_parked_move()?;
         }
         RuntimeEvent::SessionConfigured { config_options } => {
             relay.record_observation(RelayObservation::SessionConfigured { config_options })?;
@@ -1421,7 +1708,7 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::Warning { message } => {
             relay.record_observation(RelayObservation::Warning { message })?;
         }
-        RuntimeEvent::HarnessRestarting { message } => {
+        RuntimeEvent::HarnessRestarting { message, .. } => {
             // Close admission before interrupting anything: interruption may
             // otherwise promote a replacement ahead of SessionRestarted.
             relay.clear_acp_readiness();
@@ -1844,14 +2131,39 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
 /// the journal recorded last, if there is one: the launch configuration can
 /// still name a thread this session already replaced. ACP decides how to open
 /// that identity using `DurableRelay::native_session_history` as evidence.
+pub(crate) fn accepted_config_for_boot(
+    config: &WorkerLaunchConfig,
+    relay: &DurableRelay,
+    resume_session: Option<&str>,
+) -> acp::AcceptedSessionConfig {
+    if config
+        .parked_move
+        .as_ref()
+        .and_then(|parked| parked.discard_native_session_id.as_deref())
+        .is_some()
+        && resume_session.is_none()
+    {
+        return Default::default();
+    }
+    let state = relay.operational_state();
+    acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
+}
+
 pub(crate) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,
 ) -> Option<String> {
-    relay
-        .operational_state()
-        .native_session_id
-        .or_else(|| config.native_session_id.clone())
+    let native_session_id = relay.operational_state().native_session_id;
+    if native_session_id.is_some()
+        && native_session_id.as_deref()
+            == config
+                .parked_move
+                .as_ref()
+                .and_then(|parked| parked.discard_native_session_id.as_deref())
+    {
+        return None;
+    }
+    native_session_id.or_else(|| config.native_session_id.clone())
 }
 
 /// A native identity that arrived with the launch configuration was created
@@ -2159,6 +2471,7 @@ mod startup_tests {
             if arrival == Arrival::BatchedRestart {
                 events
                     .send(RuntimeEvent::HarnessRestarting {
+                        reload: None,
                         message: "restart".into(),
                     })
                     .await
@@ -2183,6 +2496,7 @@ mod startup_tests {
                 None,
                 None,
                 Some(startup),
+                None,
             ));
             match arrival {
                 Arrival::AdvancesThenStalls => {
@@ -2312,6 +2626,7 @@ mod startup_tests {
                             }
                         } else {
                             RuntimeEvent::HarnessRestarting {
+                                reload: None,
                                 message: "restart".into(),
                             }
                         })
@@ -2375,3 +2690,434 @@ mod startup_tests {
 
 #[cfg(test)]
 mod antigravity_tests;
+
+#[cfg(test)]
+mod staged_reload_tests {
+    use super::*;
+    use mj_core::relay::{
+        InPlaceReloadPhase, RelayErrorDetail, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
+    };
+    use mj_core::worker_launch::ReloadCandidateManifest;
+
+    fn request(request: RelayRequest) -> RelayRequestEnvelope {
+        RelayRequestEnvelope {
+            request_id: "reload-test".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request,
+        }
+    }
+
+    fn setup(root: &Path) -> (Arc<RelayCell>, WorkerLaunchConfig, String) {
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root, "session-1", "1.0.0").unwrap(),
+        ));
+        let mut state = relay.lock().unwrap();
+        state
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "native".into(),
+                native_continuity_lost: false,
+                resumed: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        state
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        state.set_acp_ready(true);
+        let store = state.operational_state().store_id.clone().unwrap();
+        drop(state);
+        let home = root.join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "source profile").unwrap();
+        for name in [
+            "launch.json",
+            "ownership.json",
+            "acp-supervisor.json",
+            "current-git-setup",
+        ] {
+            std::fs::write(root.join(name), format!("source {name}")).unwrap();
+        }
+        let mut launch = crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap());
+        launch.cwd = root.to_owned();
+        launch.session_id = "session-1".into();
+        launch.accepted_reload_operation_id = Some("move".into());
+        launch.write(&root.join("launch.json")).unwrap();
+        std::fs::write(root.join("ownership.json"), serde_json::to_vec(&serde_json::json!({
+            "version":3, "session_id":"session-1", "profile_id":"source", "bundle_id":"bundle", "target_template_id":"target",
+        })).unwrap()).unwrap();
+        (relay, launch, store)
+    }
+
+    fn stage(root: &Path, launch: &WorkerLaunchConfig, store: &str) {
+        let candidate = root.join("reload-candidates/candidate");
+        std::fs::create_dir_all(candidate.join("profile")).unwrap();
+        std::fs::write(
+            candidate.join("profile/config.toml"),
+            "model = \"destination\"\n",
+        )
+        .unwrap();
+        launch.write(&candidate.join("launch.json")).unwrap();
+        std::fs::write(candidate.join("ownership.json"), serde_json::to_vec(&serde_json::json!({
+            "version":3, "session_id":"session-1", "profile_id":"destination", "bundle_id":"bundle", "target_template_id":"target",
+        })).unwrap()).unwrap();
+        let manifest = ReloadCandidateManifest {
+            operation_id: "move".into(),
+            expected_store_id: store.into(),
+            candidate_id: "candidate".into(),
+            harness: launch.harness,
+            target_profile_home: launch.harness_home.to_string_lossy().into_owned(),
+            clear_paths: vec!["config.toml".into()],
+            protected_paths: Vec::new(),
+            shared_login: None,
+            clear_github_token: false,
+        };
+        std::fs::write(
+            candidate.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn hold(relay: &Arc<RelayCell>, store: &str) {
+        let response =
+            relay
+                .lock()
+                .unwrap()
+                .handle(request(RelayRequest::HoldInPlaceMoveDispatch {
+                    operation_id: "move".into(),
+                    expected_store_id: store.into(),
+                }));
+        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+    }
+
+    fn live_bytes(root: &Path) -> Vec<Vec<u8>> {
+        [
+            "launch.json",
+            "ownership.json",
+            "acp-supervisor.json",
+            "current-git-setup",
+            "home/config.toml",
+        ]
+        .map(|name| std::fs::read(root.join(name)).unwrap())
+        .into()
+    }
+
+    #[test]
+    fn reload_commit_wal_rename_is_postcommit_even_when_relay_persistence_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (relay, launch, store) = setup(root);
+        stage(root, &launch, &store);
+        hold(&relay, &store);
+        let pending = mj_core::worker_launch::PendingInPlaceReload {
+            operation_id: "move".into(),
+            expected_store_id: store,
+            candidate_id: "candidate".into(),
+            git_setup_name: None,
+        };
+        super::super::super::reload_commit::commit_pending_reload(root, &pending).unwrap();
+        assert!(relay.lock().unwrap().committed_reload_operation().is_none());
+        // Simulate failure persisting Committed, before the WAL directory sync.
+        let state_path = root.join(RELAY_STATE_FILE);
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let resolution =
+            reload_failure_resolution(&relay, "post-rename sync failure".into()).unwrap();
+        assert!(matches!(
+            resolution,
+            crate::acp::ReloadResolution::FailedAfterCommit(_)
+        ));
+        assert!(
+            root.join(mj_core::worker_launch::PENDING_RELOAD_FILE)
+                .exists()
+        );
+        assert!(root.join("reload-candidates/candidate").is_dir());
+        assert!(
+            startup_failure("post-commit failure".into())
+                .is::<mj_core::relay::WorkerHarnessStartupFailure>()
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_commit_refused_busy_wrong_store_and_private_preparation_leave_live_files_intact()
+     {
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
+        for reason in ["busy", "store", "preparation"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (relay, mut launch, store) = setup(dir.path());
+            if reason == "busy" {
+                let submitted = relay.lock().unwrap().handle(request(RelayRequest::Submit {
+                    command_id: "cmd-active".into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                            "active turn",
+                        )],
+                    },
+                }));
+                assert!(
+                    matches!(submitted.body, RelayResponseBody::Ok { .. }),
+                    "{submitted:?}"
+                );
+                assert_eq!(
+                    relay
+                        .lock()
+                        .unwrap()
+                        .claim_pending_commands(true)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            hold(&relay, &store);
+            if reason == "preparation" {
+                launch.bridge_command = dir.path().join("missing-bridge");
+            }
+            let expected = if reason == "store" {
+                "wrong-store"
+            } else {
+                &store
+            };
+            stage(dir.path(), &launch, expected);
+            let before = live_bytes(dir.path());
+            let (commands, mut received) = mpsc::channel(1);
+            let response = restart_harness_in_place_response(
+                request(RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move".into(),
+                    expected_store_id: expected.into(),
+                    candidate_id: Some("candidate".into()),
+                    launch_config: Box::new(launch.clone()),
+                }),
+                Some(&commands),
+                &relay,
+                &SharedCredentials::new(super::super::super::credential_endpoint(&launch)),
+                dir.path(),
+                &SharedSubagents::default(),
+                None,
+            )
+            .await;
+            assert!(
+                matches!(response.body, RelayResponseBody::Error { .. }),
+                "{reason}: {response:?}"
+            );
+            assert!(received.try_recv().is_err());
+            assert_eq!(live_bytes(dir.path()), before, "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_commit_retry_reports_in_progress_after_candidate_was_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (relay, launch, store) = setup(root);
+        hold(&relay, &store);
+        stage(root, &launch, &store);
+        relay
+            .lock()
+            .unwrap()
+            .admit_in_place_harness_restart("move", &store)
+            .unwrap();
+        let pending = mj_core::worker_launch::PendingInPlaceReload {
+            operation_id: "move".into(),
+            expected_store_id: store.clone(),
+            candidate_id: "candidate".into(),
+            git_setup_name: None,
+        };
+        crate::worker_runtime::reload_commit::commit_pending_reload(root, &pending).unwrap();
+        relay
+            .lock()
+            .unwrap()
+            .mark_in_place_harness_committed("move", &store)
+            .unwrap();
+        crate::worker_runtime::reload_commit::apply_committed_reload(root, &pending).unwrap();
+        let _writer =
+            PreparationWriter::try_acquire(&relay.preparation_writer, "accepted reload".into())
+                .unwrap();
+        let before = live_bytes(root);
+        let (commands, mut received) = mpsc::channel(1);
+        for active_commands in [Some(&commands), None] {
+            let response = restart_harness_in_place_response(
+                request(RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move".into(),
+                    expected_store_id: store.clone(),
+                    candidate_id: Some("candidate".into()),
+                    launch_config: Box::new(launch.clone()),
+                }),
+                active_commands,
+                &relay,
+                &SharedCredentials::new(super::super::super::credential_endpoint(&launch)),
+                root,
+                &SharedSubagents::default(),
+                None,
+            )
+            .await;
+            let RelayResponseBody::Error { error } = response.body else {
+                panic!("expected in-progress reload")
+            };
+            assert_eq!(error.code, RelayErrorCode::InvalidState);
+            assert!(
+                matches!(error.detail, Some(RelayErrorDetail::ReloadInProgress { operation_id }) if operation_id == "move")
+            );
+        }
+        assert_eq!(live_bytes(root), before);
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn reload_commit_session_fault_returns_typed_failure_and_worker_startup_exit() {
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_owned();
+        let (relay, launch, store) = setup(&root);
+        hold(&relay, &store);
+        stage(&root, &launch, &store);
+        let (commands, mut received) = mpsc::channel(1);
+        let actor_relay = relay.clone();
+        let actor_root = root.clone();
+        let actor = mj_core::runtime::spawn(async move {
+            let CommandRequest::ReloadLaunchConfig {
+                on_restart,
+                resolved,
+                ..
+            } = received.recv().await.unwrap()
+            else {
+                panic!("reload expected")
+            };
+            let (reload, applied) = HarnessReload::new(*on_restart.unwrap());
+            let (events, mut event_rx) = mpsc::channel(1);
+            let mut shells = crate::user_shell::UserShellRegistry::new(
+                actor_root.clone(),
+                BTreeMap::new(),
+                events,
+            );
+            let mut configuration = SessionConfiguration::Ready;
+            let mut startup = HarnessStartup::new();
+            observe_and_record(
+                &actor_relay,
+                &mut BTreeMap::new(),
+                RuntimeEvent::HarnessRestarting {
+                    message: "reload".into(),
+                    reload: Some(reload),
+                },
+                &mut event_rx,
+                &mut Default::default(),
+                &mut configuration,
+                &mut shells,
+                &mut TaskMonitors::default(),
+                None,
+                Some(&mut startup),
+            )
+            .await
+            .unwrap();
+            assert!(applied.await.unwrap().unwrap().is_some());
+            assert!(configuration == SessionConfiguration::OpeningReload);
+            let failure = record_runtime_event_with_startup(
+                &actor_relay,
+                &mut BTreeMap::new(),
+                RuntimeEvent::SessionFault {
+                    message: "replacement failed to open".into(),
+                },
+                &mut configuration,
+                None,
+                Some(&mut startup),
+            )
+            .unwrap_err();
+            assert!(
+                failure
+                    .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+                    .is_some()
+            );
+            resolved
+                .send(reload_failure_resolution(&actor_relay, failure.to_string()).unwrap())
+                .unwrap();
+            assert_eq!(
+                std::fs::read(actor_root.join("home/config.toml")).unwrap(),
+                b"model = \"destination\"\n"
+            );
+        });
+        let response = restart_harness_in_place_response(
+            request(RelayRequest::RestartHarnessInPlace {
+                operation_id: "move".into(),
+                expected_store_id: store,
+                candidate_id: Some("candidate".into()),
+                launch_config: Box::new(launch.clone()),
+            }),
+            Some(&commands),
+            &relay,
+            &SharedCredentials::new(super::super::super::credential_endpoint(&launch)),
+            &root,
+            &SharedSubagents::default(),
+            None,
+        )
+        .await;
+        actor.await.unwrap();
+        let RelayResponseBody::Error { error } = response.body else {
+            panic!("expected post-commit failure")
+        };
+        assert_eq!(error.code, RelayErrorCode::Internal);
+        assert!(
+            matches!(error.detail, Some(RelayErrorDetail::ReloadFailedAfterCommit { operation_id }) if operation_id == "move")
+        );
+        assert!(matches!(
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .in_place_move_hold
+                .unwrap()
+                .reload_phase,
+            Some(InPlaceReloadPhase::FailedAfterCommit { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod reload_boot_tests {
+    use super::*;
+
+    #[test]
+    fn reload_commit_ready_after_boot_settles_the_durable_hold() {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap();
+        let store = relay.operational_state().store_id.clone().unwrap();
+        relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store.clone(),
+            },
+        });
+        relay
+            .mark_in_place_harness_committed("move", &store)
+            .unwrap();
+        drop(relay);
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let mut configuration = SessionConfiguration::Opening;
+        record_runtime_event_with_startup(
+            &relay,
+            &mut BTreeMap::new(),
+            RuntimeEvent::SessionConfigured {
+                config_options: Vec::new(),
+            },
+            &mut configuration,
+            None,
+            Some(&mut HarnessStartup::new()),
+        )
+        .unwrap();
+        let hold = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .in_place_move_hold
+            .unwrap();
+        assert!(hold.harness_restarted);
+        assert!(matches!(
+            hold.reload_phase,
+            Some(mj_core::relay::InPlaceReloadPhase::Started)
+        ));
+    }
+}

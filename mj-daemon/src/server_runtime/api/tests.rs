@@ -236,12 +236,6 @@ impl ExportRuntime for RecordingExports {
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
         (session_id == self.parent.id).then(|| self.parent.clone())
     }
-    fn checkpoint_now(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
-    }
     fn spawn_subagent(
         self: Arc<Self>,
         request: mj_controller::controller::RegisterSubagentRequest,
@@ -644,6 +638,103 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(exports.registered().profile_id, "parent");
 }
 
+/// Reviewer model selection reports why a profile could not be checked
+/// instead of folding discovery failures into "no profile offers the model".
+#[tokio::test]
+async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
+    if !isolated_spawn_test("reviewer_model_selection_reports_profiles_that_fail_discovery") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+
+    // Every enabled profile fails discovery.
+    let (backend, _) = selection_backend(&[], None).await;
+    let error = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+    assert!(!error.contains("no further enabled"), "{error}");
+    let error = backend
+        .reviewer_autoconfigure_candidates()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("deepseek (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+
+    // Two profiles answer without the model; one fails discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &["flash"]), ("deepseek", &["flash"])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let candidates = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap();
+    assert!(candidates.offered.is_empty());
+    assert_eq!(candidates.unavailable.len(), 1);
+    assert_eq!(candidates.unavailable[0].0, "codex-high");
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let error = crate::server::api::resolve_reviewer_model_profile_selection(
+        &backend,
+        "luna",
+        None,
+        mj_core::config::ExecutionPolicy::Unconstrained,
+        "reviewer",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.message.contains("Could not check: codex-high (")
+            && error.message.contains("cannot be discovered"),
+        "{}",
+        error.message
+    );
+}
+
+/// Automatic reviewer selection that ends with no reviewers names the profiles
+/// that could not be checked, not only the ones that answered.
+#[tokio::test]
+async fn autoconfigure_without_reviewers_names_profiles_that_failed_discovery() {
+    if !isolated_spawn_test("autoconfigure_without_reviewers_names_profiles_that_failed_discovery")
+    {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    // `parent` answers but offers no model to configure a reviewer from; the
+    // others fail discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &[])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let settings = mj_core::config::ReviewConfig {
+        legacy: Some(Default::default()),
+        ..Default::default()
+    };
+
+    let error =
+        crate::review_host::selection::configured_choices(settings, &selection_config(), &backend)
+            .await
+            .map_err(|error| error.to_string())
+            .expect_err("autoconfigure should find no reviewers");
+
+    assert!(error.contains("No reviewers are configured"), "{error}");
+    assert!(
+        error.contains("Could not check:")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+}
+
 /// A close is accepted long before the child is gone: it cancels whatever owned
 /// the session, checkpoints, seals the relay and tears the process tree down,
 /// and the record only says `Closing` once that is under way. A child that had
@@ -921,12 +1012,6 @@ impl ExportRuntime for NoExports {
     fn session_record(&self, _session_id: &str) -> Option<mj_core::state::SessionRecord> {
         None
     }
-    fn checkpoint_now(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
-    }
 }
 
 /// A connected view whose harness is ready and offers one model.
@@ -1065,12 +1150,6 @@ impl ExportRuntime for ParentExports {
 
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
         (session_id == self.0.id).then(|| self.0.clone())
-    }
-    fn checkpoint_now(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
     }
 }
 
@@ -1532,64 +1611,248 @@ async fn prompt_reports_a_session_the_manager_does_not_hold() {
     );
 }
 
-/// A checkpoint that finishes only after its requester has given up, so a
-/// dropped request can be told apart from a cancelled checkpoint.
-struct SlowCheckpoint {
-    started: Arc<std::sync::atomic::AtomicBool>,
-    finished: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl ExportRuntime for SlowCheckpoint {
-    fn session_record(&self, _session_id: &str) -> Option<SessionRecord> {
-        None
-    }
-    fn checkpoint_now(
-        &self,
-        _session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        use std::sync::atomic::Ordering;
-        Box::pin(async move {
-            self.started.store(true, Ordering::Release);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            self.finished.store(true, Ordering::Release);
-            bail!("the archive is not built in this test")
-        })
-    }
-}
-
-/// A client that times out drops the request future. The checkpoint behind a
-/// bundle export must run to its end anyway: it has already marked the session
-/// `Checkpointing` and holds a barrier on the worker, so abandoning it midway
-/// left the session busy with nothing to finish or fail it, and every retry
-/// refused for minutes (#1010).
-// Hard-won: 4a7c9a62: dropping a timed-out export handler abandoned its active checkpoint.
+/// A worker whose own `hel` predates a subcommand answers clap's usage
+/// failure until the session is next resumed. The live export then runs the
+/// current build's control worker staged beside it, once, and leaves `hel`
+/// alone.
+#[cfg(unix)]
 #[tokio::test]
-async fn a_dropped_bundle_export_request_does_not_abandon_its_checkpoint() {
-    use std::sync::atomic::Ordering;
+async fn a_worker_command_an_older_hel_cannot_serve_runs_on_the_staged_control_worker() {
+    use std::os::unix::fs::PermissionsExt;
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    struct Stager {
+        script: &'static str,
+        staged: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl mj_controller::targets::ControlWorkerStager for Stager {
+        fn stage_control_worker(
+            &self,
+            _caller: &impl mj_controller::targets::CommandExecutor,
+            _locator: &mj_core::targets::TargetLocator,
+            _session_id: &str,
+            root: &str,
+        ) -> Result<()> {
+            self.staged
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let path = std::path::Path::new(root).join("hel-control");
+            std::fs::write(&path, self.script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            Ok(())
+        }
+    }
+    let run = |control_script: &'static str| {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_root = directory.path().join(SESSION);
+        std::fs::create_dir_all(&worker_root).unwrap();
+        let old_hel = "#!/bin/sh\necho 'error: unrecognized subcommand' >&2\nexit 2\n";
+        let hel = worker_root.join("hel");
+        std::fs::write(&hel, old_hel).unwrap();
+        std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let layout = SessionExportLayout {
+            backend: mj_core::targets::TargetLocator::LocalBare {
+                worker_root: worker_root.to_str().unwrap().to_owned(),
+            },
+            workspace_root: String::new(),
+            primary_repository: "project".into(),
+            repositories: Vec::new(),
+            report_root: String::new(),
+            managed_worktree: None,
+        };
+        let staged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stager = Stager {
+            script: control_script,
+            staged: staged.clone(),
+        };
+        async move {
+            let result = worker_command_staging(
+                layout,
+                SESSION.into(),
+                vec!["bundle".into()],
+                "session bundle",
+                None,
+                stager,
+            )
+            .await;
+            let untouched = std::fs::read_to_string(&hel).unwrap() == old_hel;
+            let staged = staged.load(std::sync::atomic::Ordering::Acquire);
+            drop(directory);
+            (result, staged, untouched)
+        }
+    };
 
-    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let exports = Arc::new(SlowCheckpoint {
-        started: started.clone(),
-        finished: finished.clone(),
-    });
-
-    let request = supervised_checkpoint(exports, "session-1".into());
-    // Let the checkpoint start, then abandon the request the way a timed-out
-    // client does.
-    let abandoned = tokio::time::timeout(Duration::from_millis(5), request).await;
-    assert!(abandoned.is_err(), "the checkpoint should still be running");
-    assert!(started.load(Ordering::Acquire), "the checkpoint started");
+    let (result, staged, untouched) = run("#!/bin/sh\nprintf 'bundle via %s' \"$0\"\n").await;
+    let bytes = result.unwrap();
     assert!(
-        !finished.load(Ordering::Acquire),
-        "the checkpoint was still running when the request was dropped"
+        String::from_utf8(bytes).unwrap().ends_with("/hel-control"),
+        "the staged control worker ran the command"
     );
+    assert_eq!((staged, untouched), (1, true));
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        finished.load(Ordering::Acquire),
-        "the supervised checkpoint ran to its end without its requester"
+    // A staged worker that does not know the subcommand either is not asked
+    // again: the caller is told to resume, and nothing loops.
+    let (result, staged, untouched) = run("#!/bin/sh\nexit 2\n").await;
+    match result {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("resume the session to upgrade"), "{reason}")
+        }
+        other => panic!("expected an upgrade refusal, got {other:?}"),
+    }
+    assert_eq!((staged, untouched), (1, true));
+}
+
+/// A stopped session whose cleanup is deferred keeps its locator. Its work is
+/// in the checkpoint, so a patch export reads that instead of addressing a
+/// target that no longer runs it, and a stopped session with nothing saved is
+/// told so rather than told to export a bundle.
+#[tokio::test]
+async fn a_stopped_sessions_patch_export_reads_its_checkpoint_even_with_a_locator() {
+    struct StoppedWithLocator(SessionRecord);
+    impl ExportRuntime for StoppedWithLocator {
+        fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+            (session_id == self.0.id).then(|| self.0.clone())
+        }
+    }
+
+    let mut record = mj_controller::controller::test_support::checkpoint_test_session("stopped-1");
+    record.state = SessionState::Stopped;
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/nonexistent/worker-root".into(),
+    }));
+    let (submitted_tx, _submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "stopped-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: None,
+        })),
+        running_states(),
+        Arc::new(StoppedWithLocator(record)),
     );
+    match backend.export_patch("stopped-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("no checkpoint"), "{reason}");
+            assert!(!reason.contains("bundle"), "{reason}");
+        }
+        other => panic!("expected a refusal naming the missing checkpoint, got {other:?}"),
+    }
+    match backend.export_patch("unknown".into()).await {
+        Err(ExportError::Refused(reason)) => assert!(reason.contains("unknown session")),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// A live export runs a worker command on the target. When its request is
+/// dropped (the client left, or the daemon is stopping) that command must stop
+/// at once rather than run on to its five-minute timeout.
+// Hard-won: review of b5c722d: dropped live export requests left their target Git/SSH subprocess running.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_live_export_request_stops_its_worker_command() {
+    use std::os::unix::fs::PermissionsExt;
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    let directory = tempfile::tempdir().unwrap();
+    // The worker root is named for its session.
+    let worker_root = directory.path().join(SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let script = worker_root.join("hel");
+    let pid_file = worker_root.join("pid");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let layout = SessionExportLayout {
+        backend: mj_core::targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_str().unwrap().to_owned(),
+        },
+        workspace_root: String::new(),
+        primary_repository: "project".into(),
+        repositories: Vec::new(),
+        report_root: String::new(),
+        managed_worktree: None,
+    };
+    let request = mj_core::runtime::spawn(worker_command(
+        layout,
+        SESSION.into(),
+        vec!["diff".into()],
+        "session diff",
+    ));
+    let started = std::time::Instant::now();
+    let pid = loop {
+        assert!(
+            !request.is_finished(),
+            "the command ended before it was dropped: {:?}",
+            request.await
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no command started"
+        );
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    assert!(alive(pid));
+    request.abort();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker command outlived its request"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A bundle of a session with no checkout comes from its stored checkpoint,
+/// rebuilt in a scratch checkout, even when the session keeps a locator while
+/// its cleanup is deferred (#1674). A live session's bundle is written by Git
+/// on its target and never reads a checkpoint.
+#[tokio::test]
+async fn a_stopped_sessions_bundle_export_reads_its_stored_checkpoint() {
+    struct Stopped(SessionRecord);
+    impl ExportRuntime for Stopped {
+        fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+            (session_id == self.0.id).then(|| self.0.clone())
+        }
+    }
+    let mut record = mj_controller::controller::test_support::checkpoint_test_session("stopped-1");
+    record.state = SessionState::Stopped;
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/nonexistent/worker-root".into(),
+    }));
+    record.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        archive_path: "/nonexistent/checkpoint.hel.zip".into(),
+        sha256: "0".repeat(64),
+        created_at: "2026-08-14T12:00:00Z".into(),
+        event_frontier: 0,
+    }));
+    let (submitted_tx, _submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "stopped-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: None,
+        })),
+        running_states(),
+        Arc::new(Stopped(record)),
+    );
+    match backend.bundle("stopped-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("checkpoint archive"), "{reason}")
+        }
+        other => panic!("expected the stored checkpoint to be read, got {other:?}"),
+    }
 }
 
 /// A relative export path resolves against the directory the agent runs in,
@@ -3282,12 +3545,6 @@ impl ExportRuntime for ParkingExports {
 
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
         self.records.lock().unwrap().get(session_id).cloned()
-    }
-    fn checkpoint_now(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
     }
     fn unpark_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
@@ -8585,12 +8842,6 @@ impl ExportRuntime for OracleExports {
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
-    fn checkpoint_now(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
-    }
     fn spawn_subagent(
         self: Arc<Self>,
         request: mj_controller::controller::RegisterSubagentRequest,
@@ -9164,13 +9415,6 @@ impl ExportRuntime for ListingExports {
     fn runtime_projection(&self) -> Result<Option<RuntimeProjection>> {
         Ok(Some(self.0.clone()))
     }
-
-    fn checkpoint_now(
-        &self,
-        id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        NoExports.checkpoint_now(id)
-    }
 }
 
 async fn run_listing(
@@ -9256,6 +9500,7 @@ async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_bud
     projection.records.insert(parked.id.clone(), parked);
     projection.metadata.host_capacities = vec![RuntimeHostCapacity {
         reading: HostCapacityRow {
+            storage_warning: None,
             id: "host".into(),
             host: "builder".into(),
             target_ids: vec!["nitro".into()],

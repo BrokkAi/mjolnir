@@ -168,59 +168,74 @@ impl<R: BufRead> BufRead for ShutdownReader<R> {
     }
 }
 
+/// Advertise `search_history` and `read_session`. `get_session_brief`,
+/// `search_sessions`, and `search_session` still dispatch through
+/// [`Client::call`] for resumed transcripts and older workers; retire their
+/// variants and handlers once
+/// `RELAY_MIN_PROTOCOL_VERSION >= RELAY_READ_SESSION_V2_PROTOCOL`.
 pub(super) fn tool_definitions() -> Vec<Value> {
     let page = json!({"type":"integer","minimum":1,"maximum":100,"default":20});
     let chars = json!({"type":"integer","minimum":1,"maximum":64000,"default":16000});
-    let id = json!({"type":"string","description":"Session ID returned by a history tool."});
-    let text = json!({"type":"string"});
+    let id = json!({"type":"string","description":"A session ID, a unique prefix of one, a native session UUID, or \"self\" for the calling session."});
     let index = json!({"type":"integer","minimum":0,"default":0});
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| {
         json!({"name":name,"description":description,
         "annotations":{"readOnlyHint":true,"destructiveHint":false},
         "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})
     };
+    let search_history = tool(
+        "search_history",
+        "Full-text search of earlier coding sessions, across all of them or within chosen ones. \
+Matching is SQLite FTS5 with the `porter unicode61` tokenizer, case-insensitive, never regular expressions. \
+Supported: Porter word stemming (`inventory` finds `inventories`, `retry` finds `retries`); whitespace-separated terms, all of which must match (AND); \
+\"quoted phrases\" matching adjacent tokens in order (still Porter-stemmed, not literal byte-exact: \"retry inventory\" can match \"retries inventories\"); `OR` or `|` between alternatives, which bind tighter than AND (`1591 OR 1589 mbx` means `(1591 OR 1589) AND mbx`); \
+and an explicit trailing `*` for prefixes (`a25b06ab*`, `5992*`, `diff-scop*`), which is how to find a short SHA, a session ID prefix, or a partial word. \
+Not supported: regular expressions, and leading or mid-word wildcards (`*foo`, `foo*bar`). \
+Scope: omit session_ids to search all indexed top-level sessions newest first, excluding the calling session (reported as self_hits_omitted). \
+A global search returns one hit per session first, up to limit, then up to 3 per session, and pages on session boundaries with next_cursor. \
+Pass session_ids (1 to 50 session IDs, unique prefixes, native UUIDs, or \"self\") for an uncapped search inside those sessions only. \
+Sub-agent transcripts are not indexed; they appear in unresolved_sessions with parent_session_id and report_dir. \
+Every hit carries i (message index), excerpt_offset, next_offset (when the excerpt was cut), text_chars, and hits_in_session. \
+To expand a hit, call read_session(session_id, start=max(0, i-2), limit=6), or read_session(session_id, start=i, offset=next_offset) to continue a cut message, \
+or repeat search_history with session_ids=[session_id] for every match in that session. \
+With zero hits, term_counts lists the matches per term, and prefix_hits shows how many a trailing `*` would add. \
+Indexed snapshots can lag live sessions and may omit timestamps or older tool output.",
+        json!({
+            "query":{"type":"string","description":"Terms, \"phrases\", `a OR b` alternatives, and `prefix*` terms. Not a regular expression."},
+            "session_ids":{"type":"array","items":{"type":"string"},"maxItems":50,"description":"Search only these sessions: session IDs, unique prefixes, native UUIDs, or \"self\" for the calling session. Omit to search all sessions."},
+            "role":{"type":"string","enum":["user","assistant","tool","dialogue"],"description":"Match only messages from this role. \"dialogue\" matches user and assistant messages, not tool summaries."},
+            "order":{"type":"string","enum":["newest","oldest"],"default":"newest","description":"Order sessions and within-session messages newest or oldest first."},
+            "limit":{"type":"integer","minimum":1,"maximum":50,"default":20,"description":"Hits per page. Context messages do not count."},
+            "context_messages":{"type":"integer","minimum":0,"maximum":5,"default":0,"description":"Adjacent messages to return before and after each hit."},
+            "max_chars":{"type":"integer","minimum":1,"maximum":64000,"default":16000,"description":"Character budget for the page. A page returns fewer hits plus next_cursor rather than exceed it."},
+            "cursor":{"type":"string","description":"next_cursor from the previous page of the same query, role, and scope."}
+        }),
+        vec!["query"],
+    );
     vec![
-        tool(
-            "search_sessions",
-            "Find earlier coding sessions across the controller's index. Search specific terms, then read the relevant evidence. Returns IDs and snippets.",
-            json!({"query":text,"limit":page}),
-            vec!["query"],
-        ),
-        tool(
-            "get_session_brief",
-            "Read a bounded overview of an indexed session before choosing passages to inspect.",
-            json!({"session_id":id,"max_chars":chars}),
-            vec!["session_id"],
-        ),
-        tool(
-            "search_session",
-            "Find case-insensitive literal text in one session, with message indices for read_session. Use next_start to continue.",
-            json!({"session_id":id,"query":text,"start":index,"context":{"type":"integer","minimum":0,"maximum":5,"default":0},"limit":page,"max_chars":chars}),
-            vec!["session_id", "query"],
-        ),
+        search_history,
         tool(
             "read_session",
-            "Read a bounded transcript page. Follow next.start/offset to continue inside long messages. role=user produces an outline. Cite session ID and message indices.",
-            json!({"session_id":id,"start":index,"offset":index,"role":{"type":"string","enum":["user","assistant","tool"]},"limit":page,"max_chars":chars}),
+            "Read a bounded page of an indexed session transcript. The reply names the session (title, tool, project, started, ended, total_messages) and each message carries i, role, text, offset, text_chars, and next_offset when cut. \
+session_id accepts a session ID, a unique prefix, a native session UUID, or \"self\" for the calling session (a sub-agent gets its parent session ID and report_dir instead). \
+Forward: start=max(0, i-2), limit=6 expands a search_history hit; follow next (start, offset) to continue inside a long message. \
+Backward: tail=true reads the last page in chronological order; before=i reads the page ending before message i, and earlier.before gives the next such cursor. \
+Drop tail and before (and pass limit=1) when following next after a cut backward message. tail and before cannot be combined with start or offset. \
+role=\"user\" gives an outline of prompts (sub-agent reports can arrive as user messages); \"assistant\"; \"dialogue\" gives user and assistant turns without tool summaries; \"tool\" gives compact tool summaries, including peer send_message calls. \
+max_message_chars=N skims: it shows at most N characters of each message, pages on whole messages, and 0 means no cap. \
+Indexed snapshots can lag live sessions and may omit timestamps or older tool output. Cite session ID and message indices.",
+            json!({
+                "session_id":id,
+                "start":index,
+                "offset":index,
+                "tail":{"type":"boolean","default":false,"description":"Read the final page, chronologically. Not with start or offset."},
+                "before":{"type":"integer","minimum":0,"description":"Read the page that ends before this message index (exclusive). Not with start or offset."},
+                "role":{"type":"string","enum":["user","assistant","tool","dialogue"],"description":"Only messages from this role; \"dialogue\" is user plus assistant."},
+                "limit":page,
+                "max_chars":chars,
+                "max_message_chars":{"type":"integer","minimum":0,"maximum":64000,"description":"Show at most this many characters of each message; 0 means no cap."}
+            }),
             vec!["session_id"],
-        ),
-        tool(
-            "trace_file",
-            "Find sessions that edited a recorded path or repository-relative suffix. Returns matched paths; equal suffixes do not establish repository identity.",
-            json!({"path":text,"limit":page}),
-            vec!["path"],
-        ),
-        tool(
-            "session_files",
-            "List recorded files changed by one session, to judge whether its conversation is relevant. Empty evidence does not prove no files changed.",
-            json!({"session_id":id,"start":index,"limit":page}),
-            vec!["session_id"],
-        ),
-        tool(
-            "blame_file",
-            "Attribute an inclusive range of up to 1000 lines using Git on this target and indexed session evidence. Paths are relative to the session working directory. Confidence is heuristic; inspect candidates' conversations.",
-            json!({"path":text,"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
-            vec!["path", "start_line", "end_line"],
         ),
     ]
 }

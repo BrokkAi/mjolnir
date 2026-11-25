@@ -1,0 +1,9 @@
+mj sessions --session s1
+s1  running (login required)  t
+profile claude: login refused; automatic renewal failed; run `mj login --profile claude`
+
+mj doctor
+fixable Harness profile claude login: login refused; automatic renewal failed; run `mj login --profile claude`
+  remediation: Run `mj login --profile claude`. Interrupted authentication-failed work continues when the new login reaches its worker.
+
+Session JSON login status: "login refused; automatic renewal failed; run `mj login --profile claude`"
