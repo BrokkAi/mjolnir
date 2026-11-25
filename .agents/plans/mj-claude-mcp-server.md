@@ -18,7 +18,7 @@ A user can verify the behavior end to end by starting a non-Claude session (or r
 - [x] (2026-11-25 15:48Z) Milestone 2: Add `mj-worker-mcp::claude_mcp` stdio MCP server (plus optional `instructions` in `mcp_stdio.rs`) and `hel worker claude-mcp` CLI subcommand in `mj-worker-bin`.
 - [x] (2026-11-25 15:58Z) Milestone 3: Implement worker-side `ClaudeMcpService` (`web_fetch`, `monitor`, `cron`, `schedule_wakeup`) and `DurableRelay::deliver_agent_wake` in `mj-worker`, with clean process-group teardown and durable cron persistence.
 - [x] (2026-11-25 16:09Z) Milestone 4: Wire `mj-claude` launch, selective registration, deferred loading, and eager-whitelisting across Codex, Antigravity, DSH, Kimi, OpenCode, Grok, Muse (and explicit exclusion for Claude and isolated reviewers), plus integrated-review fixes (`anyOf` schema removal, `monitor` `env_clear()`, durable one-shot cron reload, `web_fetch` self-closing script & `data-href` guards).
-- [ ] Milestone 5: Run before-push review via `request_review`, address or override findings, finalize commit, and push to `origin/master`.
+- [x] (2026-11-25 16:28Z) Milestone 5: Completed review rounds 1–3 fixes (reconciling `ClaudeMcpController` on reload, `ProcessGroupGuard` teardown and mailbox backpressure in `monitor`, serialized `cron_io` and overdue-recurring/DST handling in `cron`, linear zero-alloc hidden-tag scanning in `web_fetch`, serialized `schedule_wakeup` cancel-vs-delivery) and recorded deliberate overrides for monitor eager-whitelisting and `web_fetch` body buffering. Submitting final review round before push.
 
 ## Surprises & Discoveries
 
@@ -69,7 +69,9 @@ A user can verify the behavior end to end by starting a non-Claude session (or r
 
 ## Outcomes & Retrospective
 
-To be completed after Milestone 5 validation and review.
+Implemented the worker-local `mj-claude` MCP server end to end across `mj-core`, `mj-worker-mcp`, `mj-worker`, and `mj-worker-bin` with zero new workspace crate dependencies and zero daemon, store, or wire-protocol changes. Every harness receives only the capabilities it lacks natively (Claude omits `mj-claude`; Codex receives all four; Antigravity receives `web_fetch` and `monitor`; OpenCode, DSH, and Grok receive `monitor`, `cron`, and `schedule_wakeup`; Kimi receives `monitor` and `schedule_wakeup`; Muse receives `schedule_wakeup`), while isolated reviewers never receive `mj-claude`. On Codex `mj-claude` stays deferred (no `omit_tools_from = ["deferred"]`), and on Codex, Antigravity, and DSH it is eager-whitelisted alongside `mj-agents`, `mj-memory`, and `mj-review`.
+
+Pre-push reviews caught real edge cases that were fixed cleanly before pushing: reload reconfiguration via `ClaudeMcpController`, `ProcessGroupGuard` descendant cleanup and mailbox backpressure in `monitor`, serialized `cron_io` across service generations and DST fall-back handling in `cron`, linear zero-allocation `<script>` skipping and bounded entity lookahead in `web_fetch`, and generation-serialized cancellation in `schedule_wakeup`. Two deliberate overrides remain recorded: eager-whitelisting `monitor` (explicit user requirement) and buffering fetched HTTP bodies without a speculative 5 MiB truncation cap (follow-up if giant-page streaming is ever needed).
 
 ## Context and Orientation
 

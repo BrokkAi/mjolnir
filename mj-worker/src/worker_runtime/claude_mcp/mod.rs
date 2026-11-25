@@ -49,12 +49,12 @@ struct Service {
     monitors: Mutex<BTreeMap<String, monitor::Monitor>>,
     jobs: tokio::sync::Mutex<BTreeMap<String, cron::Job>>,
     cron_io: Arc<tokio::sync::Mutex<()>>,
-    wakeup: Mutex<Option<JoinHandle<()>>>,
+    wakeup: Mutex<Option<(u64, JoinHandle<()>)>>,
     cron_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 impl Service {
-    fn deliver_wake(&self, key: &str, text: String) {
-        self.deliver_wake_with_key(&format!("{key}-{}", id()), text);
+    fn deliver_wake(&self, key: &str, text: String) -> bool {
+        self.deliver_wake_with_key(&format!("{key}-{}", id()), text)
     }
     fn deliver_wake_with_key(&self, key: &str, text: String) -> bool {
         if let Err(error) = self
@@ -98,7 +98,7 @@ impl Service {
         let mut slot = self.wakeup.lock().unwrap();
         let cancelled = slot
             .take()
-            .map(|h| {
+            .map(|(_, h)| {
                 let active = !h.is_finished();
                 h.abort();
                 usize::from(active)
@@ -114,9 +114,22 @@ impl Service {
             Duration::from_secs(clamped)
         };
         let service = self.clone();
-        *slot = Some(mj_core::runtime::spawn(async move {
-            tokio::select! { _=service.cancel.cancelled()=>{}, _=tokio::time::sleep(duration)=>service.deliver_wake("wakeup",format!("[mj-claude wakeup ({reason})]\n{prompt}")) }
-        }));
+        let generation = IDS.fetch_add(1, Ordering::Relaxed);
+        *slot = Some((
+            generation,
+            mj_core::runtime::spawn(async move {
+                tokio::select! {
+                    _ = service.cancel.cancelled() => {},
+                    _ = tokio::time::sleep(duration) => {
+                        let mut slot = service.wakeup.lock().unwrap();
+                        if slot.as_ref().is_some_and(|(current, _)| *current == generation) {
+                            slot.take();
+                            service.deliver_wake("wakeup", format!("[mj-claude wakeup ({reason})]\n{prompt}"));
+                        }
+                    }
+                }
+            }),
+        ));
         Ok(
             json!({"scheduled_for":(chrono::Utc::now()+chrono::Duration::from_std(duration)?).to_rfc3339(),"clamped_delay_seconds":clamped,"was_clamped":delay!=clamped as i64,"noop":a["noop"].as_bool().unwrap_or(false)}),
         )
@@ -197,7 +210,7 @@ impl ClaudeMcpShutdownGuard {
     }
     pub fn shutdown(&self) {
         self.service.cancel.cancel();
-        if let Some(task) = self.service.wakeup.lock().unwrap().take() {
+        if let Some((_, task)) = self.service.wakeup.lock().unwrap().take() {
             task.abort();
         }
         for task in self.service.cron_tasks.lock().unwrap().drain(..) {

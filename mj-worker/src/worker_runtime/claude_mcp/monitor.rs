@@ -7,14 +7,6 @@ pub(super) struct Monitor {
     pub events: Arc<AtomicU64>,
     pub done: tokio::sync::watch::Receiver<bool>,
 }
-pub(super) fn kill(pgid: i32, signal: i32) {
-    if unsafe { libc::killpg(pgid, signal) } != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!(%error,pgid,"signal monitor group failed");
-        }
-    }
-}
 fn take_utf8_chunk(batch: &mut Vec<u8>, flush_all: bool) -> Option<String> {
     if batch.is_empty() {
         return None;
@@ -63,8 +55,8 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
     let task_id = id();
     let mut registry = s.monitors.lock().unwrap();
     anyhow::ensure!(!s.cancel.is_cancelled(), "service is shutting down");
-    let mut child = tokio::process::Command::new("sh")
-        .arg("-c")
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c")
         .arg(&command)
         .current_dir(&s.cwd)
         .env_clear()
@@ -72,9 +64,9 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let pgid = child.id().context("monitor PID missing")? as i32;
+        .stderr(Stdio::piped());
+    let mut child = mj_core::subprocess::spawn_async_child(&mut cmd)?;
+    let group = mj_core::subprocess::ProcessGroupGuard::new(child.id());
     let cancel = s.cancel.child_token();
     let events = Arc::new(AtomicU64::new(0));
     let (done_tx, done) = tokio::sync::watch::channel(false);
@@ -95,6 +87,8 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
         let mut stderr = child.stderr.take().unwrap();
         let out_s = s.clone();
         let out_id = task_id.clone();
+        let pipe_drain = CancellationToken::new();
+        let out_drain = pipe_drain.clone();
         let out_cancel = cancel.clone();
         let mut output = mj_core::runtime::spawn(async move {
             let mut buf = [0; 4096];
@@ -102,17 +96,20 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
             let mut tick = tokio::time::interval(Duration::from_millis(200));
             loop {
                 let mut flush = false;
-                let end = tokio::select! {biased; _=out_cancel.cancelled()=>break,r=stdout.read(&mut buf)=>match r {Ok(0)=>true,Ok(n)=>{batch.extend_from_slice(&buf[..n]);false},Err(error)=>{tracing::warn!(%error,"monitor stdout failed");true}},_=tick.tick()=>{flush=true;false}};
+                let end = tokio::select! {biased; _=out_cancel.cancelled()=>break,_=out_drain.cancelled()=>true,r=stdout.read(&mut buf)=>match r {Ok(0)=>true,Ok(n)=>{batch.extend_from_slice(&buf[..n]);false},Err(error)=>{tracing::warn!(%error,"monitor stdout failed");true}},_=tick.tick()=>{flush=true;false}};
                 if out_cancel.is_cancelled() {
                     break;
                 }
                 if (end || batch.len() >= 16384 || flush)
                     && let Some(chunk) = take_utf8_chunk(&mut batch, end)
                 {
-                    out_s.deliver_wake(
-                        &out_id,
-                        format!("[mj-claude monitor {out_id}: {description}]\n{chunk}"),
-                    );
+                    let text = format!("[mj-claude monitor {out_id}: {description}]\n{chunk}");
+                    while !out_s.deliver_wake(&out_id, text.clone()) {
+                        tokio::select! {
+                            _ = out_cancel.cancelled() => return,
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        }
+                    }
                     events.fetch_add(1, Ordering::Relaxed);
                 }
                 if end {
@@ -120,12 +117,13 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
                 }
             }
         });
+        let err_drain = pipe_drain.clone();
         let err_cancel = cancel.clone();
         let mut errors = mj_core::runtime::spawn(async move {
             let mut tail = Vec::new();
             let mut buf = [0; 4096];
             loop {
-                match tokio::select! { biased; _ = err_cancel.cancelled() => break, result = stderr.read(&mut buf) => result }
+                match tokio::select! { biased; _ = err_cancel.cancelled() => break, _ = err_drain.cancelled() => break, result = stderr.read(&mut buf) => result }
                 {
                     Ok(0) => break,
                     Ok(n) => {
@@ -149,29 +147,38 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
                 tokio::time::sleep(Duration::from_millis(timeout)).await
             }
         };
-        // Only this supervisor signals the group, and only before reaping.
+        // Shared group ownership also cleans up descendants when the shell exits.
         let (status, stopped, timed_out) = tokio::select! {
             _ = cancel.cancelled() => {
-                s.monitors.lock().unwrap().remove(&task_id);
-                kill(pgid, libc::SIGTERM); kill(pgid, libc::SIGKILL);
+                group.kill();
                 (child.wait().await, true, false)
             },
             _ = deadline => {
-                s.monitors.lock().unwrap().remove(&task_id);
-                kill(pgid, libc::SIGTERM); kill(pgid, libc::SIGKILL);
+                group.kill();
                 (child.wait().await, false, true)
             },
             result = child.wait() => {
-                s.monitors.lock().unwrap().remove(&task_id);
                 (result, false, false)
             }
         };
+        drop(group);
         // Escaped descendants can retain pipes after the owned group exits.
         // Bound only this final drain; cancellation always remains responsive.
         let drained = tokio::select! {
             biased;
             _ = cancel.cancelled() => None,
-            result = tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(&mut output, &mut errors) }) => result.ok(),
+            result = async {
+                let joined = async { tokio::join!(&mut output, &mut errors) };
+                tokio::pin!(joined);
+                tokio::select! {
+                    result = &mut joined => result,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        // Stop pipe reads, but let unsent output keep applying mailbox backpressure.
+                        pipe_drain.cancel();
+                        joined.await
+                    }
+                }
+            } => Some(result),
         };
         let tail = if let Some((out, err)) = drained {
             if let Err(error) = out {
@@ -189,6 +196,7 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
             errors.abort();
             Vec::new()
         };
+        s.monitors.lock().unwrap().remove(&task_id);
         if !stopped && !cancel.is_cancelled() {
             s.deliver_wake(
                 &task_id,
@@ -289,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn claude_mcp_monitor_stop_and_drop_kill_descendants() {
-        for explicit in [true, false] {
+        for mode in 0..3 {
             let root = tempfile::tempdir().unwrap();
             let relay = Arc::new(RelayCell::new(
                 crate::relay::DurableRelay::open(root.path(), "test-session", "test").unwrap(),
@@ -305,7 +313,16 @@ mod tests {
                 &tokio::runtime::Handle::current(),
             )
             .unwrap();
-            let result=start(&guard.service,json!({"description":"descendant","command":"sleep 30 & echo $! > descendant.pid; wait","persistent":true})).unwrap();
+            let command = if mode == 2 {
+                "sleep 30 & echo $! > descendant.pid"
+            } else {
+                "sleep 30 & echo $! > descendant.pid; wait"
+            };
+            let result = start(
+                &guard.service,
+                json!({"description":"descendant", "command":command, "persistent":true}),
+            )
+            .unwrap();
             let file = root.path().join("descendant.pid");
             let pid = tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
@@ -319,10 +336,25 @@ mod tests {
             })
             .await
             .unwrap();
-            if explicit {
+            if mode == 0 {
                 stop(&guard.service, result["task_id"].as_str().unwrap())
                     .await
                     .unwrap();
+            }
+            if mode == 2 {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while guard
+                        .service
+                        .monitors
+                        .lock()
+                        .unwrap()
+                        .contains_key(result["task_id"].as_str().unwrap())
+                    {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
             }
             drop(guard);
             tokio::time::timeout(Duration::from_secs(3), async {

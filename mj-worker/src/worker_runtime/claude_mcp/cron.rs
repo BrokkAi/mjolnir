@@ -67,9 +67,14 @@ impl Schedule {
                             continue;
                         }
                         let local = date.and_hms_opt(hour, minute, 0)?;
-                        if let Some(time) = Local.from_local_datetime(&local).earliest()
-                            && time > after
-                        {
+                        let candidate = match Local.from_local_datetime(&local) {
+                            chrono::LocalResult::Single(t) => (t > after).then_some(t),
+                            chrono::LocalResult::Ambiguous(a, b) => {
+                                [a, b].into_iter().find(|t| *t > after)
+                            }
+                            chrono::LocalResult::None => None,
+                        };
+                        if let Some(time) = candidate {
                             return Some(time);
                         }
                     }
