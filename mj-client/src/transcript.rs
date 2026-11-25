@@ -1490,8 +1490,9 @@ mod tests {
             4,
             ChatRole::System,
             format!(
-                "Before-push review override requested by the agent. The agent declined to fix these findings:\n- Finding: [P2] Keep long review context\n  Reason: This finding is outside scope.\nOverridden synthesis (review long-review):\n{}END_OF_LONG_REVIEW\nRepositories:\n/workspace/mjolnir: abc123..def456",
+                "Before-push review override requested by the agent. The agent declined to fix these findings:\n- Finding: [P2] Keep long review context\n  Reason: This finding is outside scope.\nOverridden synthesis (review long-review):\n{}\n{}END_OF_LONG_REVIEW\nRepositories:\n/workspace/mjolnir: abc123..def456",
                 "Review detail. ".repeat(400),
+                "Additional review detail.\n".repeat(30),
             ),
         );
         let browser = browser_transcript(&[entry, notice, long_notice], 4, 0, None);

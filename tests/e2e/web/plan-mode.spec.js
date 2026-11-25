@@ -556,6 +556,8 @@ test('golden_viewer_conversation', async ({ context, browser }) => {
   await captureMailbox('keyboard restores only the declined finding list');
   const longOverride = mailboxPage.locator('#conversation-feed [data-entry-id="4"] .transcript-disclosure');
   await longOverride.locator('summary').tap();
+  await expect(longOverride.locator('.entry-body details')).toHaveCount(0);
+  await expect(longOverride.locator('.entry-body pre')).toBeVisible();
   await expect(longOverride.locator('.entry-body')).toContainText('END_OF_LONG_REVIEW');
   expect(await longOverride.locator('.entry-body').textContent()).toBe(
     mailboxState.conversation.entries[2].disclosures[0].body.join('\n'),

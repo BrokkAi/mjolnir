@@ -9550,7 +9550,7 @@ function paintEntry(node, entry, unansweredPrompt) {
       const time = entryTimestamp(entry);
       if (time) summary.append(time);
       const body = el('div', 'entry-body');
-      body.append(renderToolOutput(disclosure.body.join('\n')));
+      body.append(el('pre', 'entry-text', disclosure.body.join('\n')));
       fold.append(summary, body);
       return fold;
     }));
