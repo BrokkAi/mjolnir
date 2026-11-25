@@ -1329,7 +1329,14 @@ impl RelayClient {
         &mut self,
         barrier_command_id: String,
         cut: mj_core::relay::RelayCursor,
-    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
+    ) -> Result<(
+        Option<mj_core::relay::NativeSessionUseEvidence>,
+        Option<String>,
+    )> {
+        anyhow::ensure!(
+            self.protocol_version >= mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL,
+            "worker cannot report pending prompt context at a checkpoint cut"
+        );
         match self
             .call(RelayRequest::ReadCheckpointNativeUse {
                 barrier_command_id,
@@ -1339,7 +1346,8 @@ impl RelayClient {
         {
             RelayResponsePayload::CheckpointNativeUse {
                 native_use_evidence,
-            } => Ok(native_use_evidence),
+                pending_prompt_context,
+            } => Ok((native_use_evidence, pending_prompt_context)),
             _ => bail!("relay returned an unexpected checkpoint native-use response"),
         }
     }

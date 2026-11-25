@@ -968,7 +968,10 @@ impl StandaloneSession {
         &mut self,
         barrier_command_id: String,
         cut: RelayCursor,
-    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
+    ) -> Result<(
+        Option<mj_core::relay::NativeSessionUseEvidence>,
+        Option<String>,
+    )> {
         self.client
             .read_checkpoint_native_use(barrier_command_id, cut)
             .await

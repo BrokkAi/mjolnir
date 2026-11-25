@@ -79,6 +79,7 @@ fn claude_prior_snapshot() -> Arc<CanonicalSessionSnapshot> {
     })
     .collect();
     Arc::new(CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -2569,6 +2570,8 @@ enum FreshNativeOpening {
     /// The archive holds the native session's files, and the worker opens a
     /// new session with no reason given for the change.
     Unexplained,
+    /// A second harness switch must carry the prior hidden handoff too.
+    CrossHarness,
 }
 
 /// Whether the suspend before a [`fresh_native_resume`] stopped a sub-agent.
@@ -2663,9 +2666,17 @@ fn fresh_native_resume(
         2,
         harness,
         profile_id,
-        opening != FreshNativeOpening::NothingToLoad,
+        !matches!(
+            opening,
+            FreshNativeOpening::NothingToLoad | FreshNativeOpening::CrossHarness
+        ),
     );
-    let verified = verify_resume_checkpoint(session_id, &checkpoint).unwrap();
+    let mut verified = verify_resume_checkpoint(session_id, &checkpoint).unwrap();
+    let saved_context = "previous hidden context ".repeat(4_000);
+    if opening == FreshNativeOpening::CrossHarness {
+        Arc::make_mut(&mut verified.canonical_session).pending_prompt_context =
+            Some(saved_context.clone());
+    }
     assert_eq!(
         verified.manifest.session.native_session_id,
         "native-session"
@@ -2678,7 +2689,9 @@ fn fresh_native_resume(
         FreshNativeOpening::ReplacesUnused => format!(
             "{LATCH_RELAY_REPLACED_UNUSED}=native-session\n    export {LATCH_RELAY_REPLACED_UNUSED}\n    "
         ),
-        FreshNativeOpening::NothingToLoad | FreshNativeOpening::Unexplained => String::new(),
+        FreshNativeOpening::NothingToLoad
+        | FreshNativeOpening::Unexplained
+        | FreshNativeOpening::CrossHarness => String::new(),
     };
     let script = format!(
         r#"case "${{2:-}}" in
@@ -2792,12 +2805,13 @@ exit 0
                 resumed_project_directory: Some(checkout.clone()),
                 resumed_container_workspace: None,
                 restore_repositories: false,
-                native_continuity: true,
-                discard_queued_prompts: false,
-                replay_queue: true,
+                native_continuity: opening != FreshNativeOpening::CrossHarness,
+                discard_queued_prompts: opening == FreshNativeOpening::CrossHarness,
+                replay_queue: opening != FreshNativeOpening::CrossHarness,
                 queue_policy_override: QueuePolicy::Import,
                 move_transfer: None,
-                utility_handoff: None,
+                utility_handoff: (opening == FreshNativeOpening::CrossHarness)
+                    .then(|| "new generated handoff".to_owned()),
                 projection_build: None,
                 resume_notices: Vec::new(),
                 include_in_place_subagents: false,
@@ -2826,7 +2840,11 @@ exit 0
     // worker try to load it; Codex cannot load a thread it never wrote.
     assert_eq!(
         launch.native_session_id.as_deref(),
-        (opening != FreshNativeOpening::NothingToLoad).then_some("native-session")
+        (!matches!(
+            opening,
+            FreshNativeOpening::NothingToLoad | FreshNativeOpening::CrossHarness
+        ))
+        .then_some("native-session")
     );
     assert_eq!(
         restored_spec
@@ -2844,7 +2862,9 @@ exit 0
     };
 
     match opening {
-        FreshNativeOpening::NothingToLoad | FreshNativeOpening::ReplacesUnused => {
+        FreshNativeOpening::NothingToLoad
+        | FreshNativeOpening::ReplacesUnused
+        | FreshNativeOpening::CrossHarness => {
             restored.unwrap_or_else(|error| panic!("{harness:?} resume failed: {error:#}"));
             // The new identity is the session's now, in memory and on disk, so
             // the next suspend archives it and the next resume expects it.
@@ -2881,6 +2901,17 @@ exit 0
                         .unwrap()
                         .is_empty()
                 );
+            }
+            if opening == FreshNativeOpening::CrossHarness {
+                let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+                    &std::fs::read(worker_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+                )
+                .unwrap();
+                let context = snapshot.pending_prompt_context.unwrap().text;
+                assert!(context.contains(&saved_context));
+                assert_eq!(context.matches(&saved_context).count(), 1);
+                assert!(context.contains("new generated handoff"));
+                assert!(context.contains("<mj-stopped-subagents>"));
             }
 
             // The resumed session takes a prompt and answers it.
@@ -2972,6 +3003,17 @@ exit 0
             );
         }
     }
+}
+
+// Hard-won: a second harness switch after suspend lost the pending handoff.
+#[cfg(unix)]
+#[test]
+fn a_cross_harness_resume_preserves_saved_context_and_stopped_subagent_notes() {
+    fresh_native_resume_for_each_harness(
+        "a_cross_harness_resume_preserves_saved_context_and_stopped_subagent_notes",
+        FreshNativeOpening::CrossHarness,
+        StoppedSubagents::One,
+    );
 }
 
 /// R7-5: a session suspended before its native session was ever prompted.
@@ -3525,6 +3567,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
             },
         ));
         let canonical = mj_core::archive::CanonicalSessionSnapshot {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
@@ -3842,6 +3885,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
     }));
     let archive_path = temp.path().join("cutoff.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -4040,6 +4084,7 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
     let session_id = "legacy-clone-on-disk".to_owned();
     let archive_path = temp.path().join("legacy-clone.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,

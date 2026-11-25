@@ -2383,6 +2383,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
     let snapshot = |transcript: Vec<CanonicalTranscriptItem>,
                     queued: Vec<CanonicalQueuedPrompt>| {
         CanonicalSessionSnapshot {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,

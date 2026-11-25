@@ -2028,15 +2028,20 @@ const QUEUED_WAKE_TEST_CHILD: &str = "MJ_TEST_QUEUED_WAKE_CHILD";
 /// restart continuation, and saving the failed session checkpoints that queue
 /// without a harness. The daemon's projection keeps no payload for a wake, so
 /// the latch archives the prompt the worker's queue holds at the cut. A
-/// checkpoint-only worker too old to report it saves the rest and says so: it
-/// never starts the wake, so waiting for it would never end.
+/// checkpoint-only worker too old to report pending context cannot safely save
+/// a checkpoint, even if it can report the wake.
 // Hard-won: #1594: a queued mailbox wake failed every checkpoint export with "has no content".
+// Hard-won: pending handoff text was absent from suspend checkpoints.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     let reads_queue = mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL;
     let Some(protocol) = std::env::var_os(QUEUED_WAKE_TEST_CHILD) else {
-        for protocol in [mj_core::relay::RELAY_PROTOCOL_VERSION, reads_queue - 1] {
+        for protocol in [
+            mj_core::relay::RELAY_PROTOCOL_VERSION,
+            mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL - 1,
+            reads_queue - 1,
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let test_name = format!(
                 "{}::a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue",
@@ -2054,6 +2059,7 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         return;
     };
     let protocol: u32 = protocol.to_str().unwrap().parse().unwrap();
+    let pending_context = "hidden checkpoint context ".repeat(4_000);
     let _writer = crate::database::install_isolated_test_writer();
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(120));
@@ -2139,6 +2145,17 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                 config_options: Vec::new(),
             })
             .unwrap();
+        let installed = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "install-context".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::InstallPromptContext {
+                text: pending_context.clone(),
+            },
+        });
+        assert!(
+            matches!(installed.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+            "install pending prompt context: {installed:?}"
+        );
         let delivered = relay.handle(mj_core::relay::RelayRequestEnvelope {
             request_id: "deliver-parent-task".into(),
             protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
@@ -2242,6 +2259,15 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     let Err(error) = result else {
         panic!("a checkpoint exported to a target that refuses every command");
     };
+    if protocol < mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL {
+        assert!(
+            format!("{error:#}").contains("checkpoint-only worker is too old"),
+            "{error:#}"
+        );
+        assert!(executor.exported.lock().unwrap().is_none());
+        channels.shutdown.shutdown().await.unwrap();
+        return;
+    }
     assert!(
         format!("{error:#}").contains("no target is provisioned for this test"),
         "{error:#}"
@@ -2253,6 +2279,10 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         .take()
         .expect("the checkpoint never reached its export");
     spec.canonical_session.validate().unwrap();
+    assert_eq!(
+        spec.canonical_session.pending_prompt_context.as_deref(),
+        Some(pending_context.as_str())
+    );
     let notices = executor.notices.lock().unwrap().clone();
     if protocol < reads_queue {
         assert!(
@@ -3087,6 +3117,7 @@ fn an_installed_archive_is_reused_when_only_relay_bookkeeping_moved() {
     // The reused archive is still the gate close destroys through.
     verify_installed_checkpoint_gate(session_id, &artifact.metadata).unwrap();
 }
+// Hard-won: pending handoff installation does not advance the archive frontier.
 #[test]
 fn archive_reuse_falls_back_to_a_full_export_for_anything_but_bookkeeping() {
     let directory = tempfile::tempdir().unwrap();
@@ -3117,6 +3148,17 @@ fn archive_reuse_falls_back_to_a_full_export_for_anything_but_bookkeeping() {
         },
     });
     assert!(reuse(Some(&checkpoint), latched.event_frontier, &with_new_content).is_none());
+
+    let mut with_pending_context = latched.clone();
+    with_pending_context.pending_prompt_context = Some("hidden context".repeat(8_000));
+    assert!(
+        reuse(
+            Some(&checkpoint),
+            latched.event_frontier,
+            &with_pending_context
+        )
+        .is_none()
+    );
 
     // An archive the latch has not reached yet cannot describe the session.
     assert!(reuse(Some(&checkpoint), checkpoint.event_frontier - 1, &latched).is_none());

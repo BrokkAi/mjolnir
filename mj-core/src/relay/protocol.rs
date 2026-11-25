@@ -1134,6 +1134,9 @@ pub enum RelayResponsePayload {
     },
     CheckpointNativeUse {
         native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
+        /// Present at protocol 95 when context is pending at the checkpoint cut.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_prompt_context: Option<String>,
     },
     PendingElicitation {
         request: Option<crate::elicitation::ElicitationRequest>,

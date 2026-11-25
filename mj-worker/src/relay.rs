@@ -878,6 +878,15 @@ impl DurableRelay {
                 // The accepted model and effort the worker pins on its first
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
+                // The cut has settled or recovered the old dispatch. Its
+                // command attachment is local to that dispatch, not the seed.
+                snapshot.pending_prompt_context =
+                    restored
+                        .pending_prompt_context
+                        .map(|text| PendingPromptContext {
+                            text,
+                            attached_command_id: None,
+                        });
                 snapshot.restored_native_session_unused = restored.native_session_unused;
                 if let Some(evidence) = restored.native_use_evidence {
                     snapshot.native_session_used = evidence.usage == NativeSessionUse::Used;

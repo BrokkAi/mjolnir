@@ -133,16 +133,28 @@ impl DurableRelay {
         Ok(Ok(mailbox))
     }
 
-    /// The worker-owned native-session-use evidence at a ready barrier's cut.
+    /// The worker-owned native-use evidence and pending context at the same cut.
     pub(super) fn checkpoint_native_use(
         &self,
         barrier_command_id: &str,
         cut: &RelayCursor,
-    ) -> std::result::Result<Option<mj_core::relay::NativeSessionUseEvidence>, &'static str> {
+    ) -> std::result::Result<
+        (
+            Option<mj_core::relay::NativeSessionUseEvidence>,
+            Option<String>,
+        ),
+        &'static str,
+    > {
         if !self.at_checkpoint_cut(barrier_command_id, cut) {
             return Err("the relay is no longer at this checkpoint cut");
         }
-        Ok(self.snapshot.native_use_evidence.clone())
+        Ok((
+            self.snapshot.native_use_evidence.clone(),
+            self.snapshot
+                .pending_prompt_context
+                .as_ref()
+                .map(|context| context.text.clone()),
+        ))
     }
 
     /// Spoil the ready barrier's cut: end its hold and remember that work

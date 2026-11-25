@@ -196,6 +196,7 @@ pub fn checkpoint_archive_input(
             primary_repository: "project".into(),
         },
         canonical_session: mj_checkpoint::archive::CanonicalSessionSnapshot {
+            pending_prompt_context: None,
             command_ledger: None,
             notification_stack: None,
             native_use_evidence: None,

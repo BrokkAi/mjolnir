@@ -6514,6 +6514,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
     std::fs::write(
         mj_core::relay::restored_relay_seed_path(&root),
         serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
@@ -6551,6 +6552,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
     std::fs::write(
         mj_core::relay::restored_relay_seed_path(&root),
         serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
@@ -6593,6 +6595,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
         std::fs::write(
             mj_core::relay::restored_relay_seed_path(&root),
             serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+                pending_prompt_context: None,
                 command_ledger: None,
                 assessment_state: None,
                 notification_stack: None,
@@ -10778,6 +10781,58 @@ fn antigravity_connected_with_hook_publishes_steering_and_enables_automatic_stee
             ..
         } if t.contains("steer me")
     ));
+}
+
+#[tokio::test]
+async fn checkpoint_native_use_protocol_transfers_large_pending_context_at_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "checkpoint-context").unwrap();
+    let context = "escaped \"hidden\" context\n".repeat(4096);
+    assert!(context.len() > 64 * 1024);
+    durable.install_prompt_context(context.clone()).unwrap();
+    let cut = crate::relay::test_support::ready_checkpoint(&mut durable, "context-barrier");
+    let relay = Arc::new(RelayCell::new(durable));
+    let (wake_tx, _wake_rx) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let serving = mj_core::runtime::spawn(unix::serve_client(
+        server,
+        relay,
+        wake_tx,
+        test_credentials(),
+        None,
+        fatal_reports().0,
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    for barrier in ["context-barrier", "wrong-barrier"] {
+        let request = RelayRequestEnvelope {
+            request_id: barrier.into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::ReadCheckpointNativeUse {
+                barrier_command_id: barrier.into(),
+                cut: cut.clone(),
+            },
+        };
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.unwrap();
+        let line = tokio::time::timeout(crate::test_support::IO_TIMEOUT, lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+        if barrier == "context-barrier" {
+            assert!(matches!(response.body, RelayResponseBody::Ok {
+                payload: RelayResponsePayload::CheckpointNativeUse { pending_prompt_context: Some(text), .. }
+            } if text == context));
+        } else {
+            assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+        }
+    }
+    drop(writer);
+    drop(lines);
+    serving.await.unwrap().unwrap();
 }
 
 #[tokio::test]

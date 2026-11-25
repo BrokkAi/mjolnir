@@ -1807,6 +1807,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 assessment_state: None,
                 notification_stack: None,
                 native_use_evidence: None,
+                pending_prompt_context: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),
                 session: CanonicalSessionState {
@@ -2530,6 +2531,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     fs::create_dir_all(&memory_root).unwrap();
     fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
+        parked_move: None,
         accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
@@ -4096,12 +4098,15 @@ fn checkpoint_export_rejects_an_unsupported_protocol_before_interpreting_paths()
     );
 }
 
+// Hard-won: suspending before the first prompt lost the pending harness handoff.
 #[test]
 fn checkpoint_round_trips_the_latched_materialized_session() {
     let temp = tempfile::tempdir().unwrap();
     let (mut spec, _) = fixture(temp.path());
     spec.canonical_session.event_frontier = 9;
     spec.canonical_session.transcript[0].position = 7;
+    let pending = "hidden note: 支持\n".repeat(5_000);
+    spec.canonical_session.pending_prompt_context = Some(pending.clone());
 
     let target = export_checkpoint(&spec).unwrap();
     assert_eq!(target.event_frontier, 9);
@@ -4109,6 +4114,49 @@ fn checkpoint_round_trips_the_latched_materialized_session() {
         read_checkpoint_session(&spec.output_path).unwrap(),
         spec.canonical_session
     );
+    assert_eq!(
+        read_archive_verified(&spec.output_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+    );
+    for (native, policy) in [
+        (true, QueueRestorePolicy::Restore),
+        (true, QueueRestorePolicy::Discard),
+        (true, QueueRestorePolicy::Defer),
+        (false, QueueRestorePolicy::Restore),
+    ] {
+        let relay_root = temp
+            .path()
+            .join(format!("context-relay-{native}-{policy:?}"));
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                report_root: None,
+                archive_path: spec.output_path.clone(),
+                workspace_root: spec.workspace_root.clone(),
+                relay_root: relay_root.clone(),
+                harness_home: temp
+                    .path()
+                    .join(format!("context-harness-{native}-{policy:?}")),
+                restore_repositories: false,
+                restore_native: native,
+                queue_policy: policy,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        let seed = restored_seed(&relay_root);
+        assert_eq!(
+            seed.pending_prompt_context.as_deref(),
+            native.then_some(pending.as_str())
+        );
+        assert_eq!(
+            seed.queued_prompts.is_empty(),
+            policy != QueueRestorePolicy::Restore
+        );
+    }
 }
 
 fn restore_into(temp: &Path, spec: &CheckpointExportSpec, discard_queued_prompts: bool) -> PathBuf {
@@ -5857,6 +5905,7 @@ fn native_use_evidence_overrides_empty_transcript_and_content_matches_detects_ch
         queued_prompts: Vec::new(),
         mailbox: None,
         native_use_evidence: None,
+        pending_prompt_context: None,
     };
 
     // Legacy archive (no evidence): empty transcript falls back to current_native_session_received_prompt == false.

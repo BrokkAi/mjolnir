@@ -57,6 +57,8 @@ pub const ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA: u32 = 14;
 /// readers reject the canonical field, so an archive that carries it declares
 /// this schema whatever else it carries (including origin-delta and mailbox).
 pub const ARCHIVE_SCHEMA_VERSION_NATIVE_USE: u32 = 15;
+/// Pending hidden prompt context must survive restore; older readers reject it.
+pub const ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT: u32 = 16;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
@@ -471,6 +473,9 @@ pub struct CanonicalSessionSnapshot {
     /// relay protocol 80.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_use_evidence: Option<crate::relay::NativeSessionUseEvidence>,
+    /// Worker-owned context awaiting the next prompt, without dispatch bookkeeping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_prompt_context: Option<String>,
 }
 
 /// Mail a worker accepted, as its relay held it at a checkpoint cut. The
@@ -567,6 +572,7 @@ impl CanonicalSessionSnapshot {
             && self.queued_prompts == other.queued_prompts
             && self.mailbox == other.mailbox
             && self.native_use_evidence == other.native_use_evidence
+            && self.pending_prompt_context == other.pending_prompt_context
             && self.session.without_activity_watermark()
                 == other.session.without_activity_watermark()
     }

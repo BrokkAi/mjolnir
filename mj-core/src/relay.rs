@@ -228,7 +228,9 @@ pub const RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL: u32 = 93;
 /// 94 adds `read_session` backward paging (`tail`/`before`), `max_message_chars`,
 /// `"self"`, and `role="dialogue"`.
 pub const RELAY_READ_SESSION_V2_PROTOCOL: u32 = 94;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_READ_SESSION_V2_PROTOCOL;
+/// The cut-checked checkpoint native-use reply also carries pending prompt context.
+pub const RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL: u32 = 95;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -481,6 +483,9 @@ pub struct RestoredRelaySeed {
     /// Seeds from older releases omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_use_evidence: Option<NativeSessionUseEvidence>,
+    /// Context awaiting the first prompt in the continued native session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_prompt_context: Option<String>,
 }
 
 impl RestoredRelaySeed {

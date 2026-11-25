@@ -255,9 +255,33 @@ impl DurableRelay {
                 barrier_command_id,
                 cut,
             } => match self.checkpoint_native_use(barrier_command_id, cut) {
-                Ok(native_use_evidence) => RelayResponsePayload::CheckpointNativeUse {
-                    native_use_evidence,
-                },
+                Ok((native_use_evidence, pending_prompt_context)) => {
+                    let payload = RelayResponsePayload::CheckpointNativeUse {
+                        native_use_evidence,
+                        pending_prompt_context: (envelope.protocol_version
+                            >= RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL)
+                            .then_some(pending_prompt_context)
+                            .flatten(),
+                    };
+                    // The response, including JSON escaping, the request ID and
+                    // newline, must fit the transport's actual frame limit.
+                    let response = RelayResponseEnvelope {
+                        request_id: envelope.request_id.clone(),
+                        protocol_version: envelope.protocol_version,
+                        body: RelayResponseBody::Ok {
+                            payload: payload.clone(),
+                        },
+                    };
+                    if serde_json::to_vec(&response)?.len().saturating_add(1) > MAX_FRAME_BYTES {
+                        return Ok(relay_error(
+                            RelayErrorCode::InvalidState,
+                            "checkpoint pending prompt context exceeds the relay response frame limit",
+                            false,
+                            None,
+                        ));
+                    }
+                    payload
+                }
                 Err(message) => {
                     return Ok(relay_error(
                         RelayErrorCode::InvalidState,
