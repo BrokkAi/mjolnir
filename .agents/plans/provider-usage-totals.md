@@ -19,9 +19,9 @@ The terminal's Usage by session dialog currently shows one estimated API-dollar 
 - [x] (2026-11-25 04:50Z) Measure observed weekly quota consumption over that interval and display the pooled provider percentage.
 - [x] (2026-11-25 04:51Z) Review the integrated diff, commit on the current branch, and request pre-push review.
 - [x] Address the three accepted review findings: partial quota coverage, weekly boundary readings, and tall-dialog provider height; targeted tests and affected clippy pass.
-- [ ] Complete pre-push review of the fixes.
+- [x] Complete three pre-push review rounds; record the remaining P2 limitations as explicit follow-ups and authorize the reviewed tree by override.
 - [x] Address second-review quota details: weekly history bounds, stale reset readings, and the inclusive last second; affected backend tests and clippy pass.
-- [ ] Push the reviewed implementation to origin/master.
+- [x] Push the reviewed implementation through `85e9ea6a7` to origin/master.
 
 ## Surprises & Discoveries
 
@@ -51,7 +51,15 @@ Decision: Restrict weekly boundary searches and interpolation to one actual week
 
 ## Outcomes & Retrospective
 
-Implementation and validation, including first-review fixes, are complete. The initial implementation was committed as `c6d8678d0`. The dialog shows provider dollars followed by estimated weekly quota consumed during its selected interval, including an individual clicked hour. The label states that quota includes all account use. Unknown pricing stays unknown, partial dollar totals keep `+`, and missing quota history displays `n/a`. Incomplete quota history is explicitly marked `(partial)`, including when an idle account's reading makes the pooled percentage partial. Idle subscription profiles contribute their capacity to the weighted provider measurement. Boundary lookup shares the consumer's definition of a readable weekly probe. Provider height derives from the actual header, chart, hints and footer geometry, retaining at least one detail row even when summaries overflow. Account aliases are counted the same way as the existing quota pools; this feature does not introduce account deduplication. Sampling, reset losses, and interpolation make quota percentages estimates rather than dollar attribution. Final review and delivery remain.
+Implementation and validation are complete, and commits through `85e9ea6a7` are pushed to origin/master. The dialog shows provider dollars followed by estimated weekly quota consumed during its selected interval, including an individual clicked hour. The label states that quota includes all account use. Unknown pricing stays unknown, partial dollar totals keep `+`, and missing quota history displays `n/a`. Incomplete quota history is explicitly marked `(partial)`, including when an idle account's reading makes the pooled percentage partial. Idle subscription profiles contribute their capacity to the weighted provider measurement. Boundary lookup shares the consumer's definition of a readable weekly probe and searches at most one weekly period per edge. Provider height derives from the actual header, chart, hints and footer geometry, retaining at least one detail row even when summaries overflow. Account aliases are counted the same way as the existing quota pools; this feature does not introduce account deduplication. Sampling, reset losses, and interpolation make quota percentages estimates rather than dollar attribution. Three P2-only review rounds ended with explicit overrides for the follow-ups below; the reviewed implementation is the baseline for subsequent work.
+
+## Accepted Follow-ups
+
+Provider grouping uses the retained profile name and its current configured provider. Reconfiguring that profile to another provider inside the displayed interval can reattribute earlier costs. Recording historical provider identity per turn is separate accounting-format work.
+
+The percentage measures unscoped weekly capacity. Antigravity and other profiles with only model-scoped allowances show `quota n/a`; support must retain and name each independent allowance pool rather than invent a single combined provider capacity.
+
+Large lists of distinct provider or unconfigured-profile labels can overflow the fixed-height modal. Hidden totals currently have an overflow count, but the modal's height cap means resizing cannot always reveal them. Add accessible provider scrolling or reuse the selectable detail list in a follow-up. Also prioritize at least one provider amount over the legend when only two summary rows fit; current overflow handling can show only notice and legend at that height. These are accepted view limitations after the third review round, not accounting data loss.
 
 ## Context and Orientation
 
@@ -122,3 +130,5 @@ Revised 2026-11-25 after review-fix validation: 3 quota-history tests, 1 weekly-
 Revised 2026-11-25 after the second review: record the declined historical-attribution expansion and the accepted bounded weekly-history and timestamp corrections. Provider grouping remains a view over retained profile names and current provider configuration.
 
 Revised 2026-11-25 after second-review validation: store quota-history tests pass (3), accounts weekly-consumption timing test passes (1), and client/store/accounts/daemon all-target clippy passes with warnings denied. The unchanged terminal interface required no golden rerun. The decisive receipt is `.mj/agents/8568433d9a722742998daf248f1b69d8/round2-validation-receipt.md`. Boundary SQL now limits searches to one documented weekly period per side, stale expired weekly readings are excluded by the shared predicate, and inclusive millisecond report ends are converted to exclusive seconds so the final second is measured.
+
+Final update 2026-11-25: third-review P2 findings were explicitly overridden as the scoped-pool and overflow-display follow-ups above. Review baseline was set to `85e9ea6a7`; `git push origin HEAD:master` succeeded from `5e0ad5cf2` through `85e9ea6a7`. This final plan-only update needs no code validation or additional code review.
