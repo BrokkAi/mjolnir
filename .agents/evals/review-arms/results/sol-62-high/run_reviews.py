@@ -165,7 +165,7 @@ def run(job):
     return 'done'
 
 
-def main():
+def run_manifest():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs',type=pathlib.Path,required=True)
     parser.add_argument('--concurrency',type=int,default=16)
@@ -188,10 +188,19 @@ def main():
             if (directory/'prompt-intent.json').exists():
                 intent = json.loads((directory/'prompt-intent.json').read_text())
                 sid, command = intent['session_id'], intent['command_id']
+                last_attention = None
                 while True:
                     try:
                         state = d.session(sid)
                         outcome = state.get('last_turn_outcome') or {}
+                        if state.get('attention') == 'needs_input':
+                            pending = d.mj('elicitations','--session',sid)
+                            signature = json.dumps(pending,sort_keys=True)
+                            if signature != last_attention:
+                                d.save(directory/'waiting-input.json',{'session_id':sid,'command_id':command,'requests':pending})
+                                print(json.dumps({'job':job,'state':'needs-input','session_id':sid,
+                                                  'action':f'Inspect mj elicitations --session {sid}; resolve the request, or cancel with mj interrupt-turn --session {sid}. The profile slot remains owned.'}),flush=True)
+                                last_attention = signature
                         if (outcome.get('command_id') == command and state.get('is_idle')) or state.get('lifecycle') in ['failed','stopped','suspended']:
                             d.save(directory/'reconciled-turn.json',{'state':state,'command_id':command})
                             break
@@ -209,6 +218,17 @@ def main():
     ok=all([f.result() for f in futures])
     for pool in pools.values():pool.shutdown()
     return 0 if ok else 1
+
+def main():
+    import fcntl
+    CAMPAIGN.mkdir(parents=True,exist_ok=True)
+    with (CAMPAIGN/'reviews.lock').open('w') as owner:
+        try:
+            fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit('Another high-review driver owns this campaign; do not overlap canary or full invocations')
+        return run_manifest()
+
 
 if __name__=='__main__':
     sys.exit(main())

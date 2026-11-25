@@ -56,11 +56,11 @@ Run from `.agents/evals/review-arms` with:
     export REVIEW_ARMS_CORPUS="$REVIEW_ARMS_DIR/corpus/corpus.jsonl"
     export REVIEW_ARMS_DIFFS="$REVIEW_ARMS_DIR/corpus/diffs.jsonl"
     C="$REVIEW_ARMS_DIR/sol-62-high"
-    S=results/sol-62-high
+    S="$(pwd)/results/sol-62-high"
     python3 -B "$S/run_reviews.py" --jobs "$C/canaries.json" --concurrency 1
     python3 -B "$S/run_reviews.py" --jobs "$C/jobs.json" --concurrency 16
 
-The concurrency argument applies separately to each profile's executor. The saved manifests alternate original O job order between codex3 and codex4. Canary rows remain in jobs.json and skip after successful completion. All long-running work uses the installed main daemon through mjx, not the retired private instance. Record command, PID, script digest and log path before leaving a detached run.
+Only one review-driver invocation may own this campaign; a process lock rejects overlapping canary/full manifests. The concurrency argument applies separately to each profile's executor. The saved manifests alternate original O job order between codex3 and codex4. Canary rows remain in jobs.json and skip after successful completion. All long-running work uses the installed main daemon through mjx, not the retired private instance. Record command, PID, script digest and log path before leaving a detached run.
 
 After the recorded reviewer driver exits, the single-owner guarded entry point is:
 
@@ -75,7 +75,7 @@ Require exactly70 U sessions on the original70 unique diffs, 35 on each requeste
 
 ## Idempotence and Recovery
 
-A launch intent without a saved session acknowledgement requires reconciliation against the daemon before any new session creation. Reuse recorded sessions. Prompt command IDs are stable, so a repeated send after a lost receipt is deduplicated. A completed result is never sampled again. Preserve any failed attempt and diagnose whether any reviewer prompt was accepted before authorizing replacement. Runtime or clock evidence cannot be manufactured by rerunning a completed review. Save result/evidence before suspension; diagnose missing cleanup separately from measurement completion. Verification must preserve private keys and batch IDs on resume.
+A launch intent without a saved session acknowledgement requires reconciliation against the daemon before any new session creation. Reuse recorded sessions. Prompt command IDs are stable, so a repeated send after a lost receipt is deduplicated. A completed result is never sampled again. Preserve any failed attempt and diagnose whether any reviewer prompt was accepted before authorizing replacement. If reconciliation detects a pending input request, it writes waiting-input.json and prints the exact session and inspect/resolve-or-cancel commands while retaining the profile slot. Runtime or clock evidence cannot be manufactured by rerunning a completed review. Save result/evidence before suspension; diagnose missing cleanup separately from measurement completion. Verification must preserve private keys and batch IDs on resume.
 
 ## Artifacts and Notes
 

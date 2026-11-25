@@ -39,7 +39,9 @@ def wait_reviews():
         try:
             stat=(proc/'stat').read_text().split(') ',1)[1].split()[0]
             command=(proc/'cmdline').read_bytes().split(b'\0')
-            active=stat!='Z' and str(S/'run_reviews.py').encode() in command
+            cwd=(proc/'cwd').resolve()
+            scripts=[pathlib.Path(os.fsdecode(arg)) for arg in command if arg and pathlib.Path(os.fsdecode(arg)).name=='run_reviews.py']
+            active=stat!='Z' and any((arg if arg.is_absolute() else cwd/arg).resolve()==(S/'run_reviews.py').resolve() for arg in scripts)
         except FileNotFoundError:active=False
         if time.monotonic()>=next_report or not active:
             jobs=audit.load(C/'jobs.json');done=[j for j in jobs if (R/'runs'/j['bug']/'U/done.json').exists()]
