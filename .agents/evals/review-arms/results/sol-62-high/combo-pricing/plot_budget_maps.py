@@ -247,7 +247,7 @@ def wrap_label(label, width=30):
     return "\n".join(lines)
 
 
-def draw(panel, domain, vmax, geometry):
+def draw(panel, domain, vmax, geometry, *, linear_x=False):
     norm = Normalize(0, vmax)
     xs, ys, z = extended(panel["ts"], panel["cs"], panel["f"], domain)
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 12,
@@ -281,15 +281,16 @@ def draw(panel, domain, vmax, geometry):
                                      linewidths=.4, zorder=1))
     ax.add_collection(LineCollection(boundaries(xs, ys, z), colors="white", linewidths=.7,
                                      alpha=.85, zorder=2))
-    ax.set_xscale("log")
+    ax.set_xscale("linear" if linear_x else "log")
     ax.set_yscale("log")
     ax.set_xlim(*domain["t"])
     ax.set_ylim(*domain["c"])
-    for axis, ticks, fmt in ((ax.xaxis, TIME_TICKS, "{:g}"), (ax.yaxis, COST_TICKS, "${:g}")):
+    for axis, ticks, fmt in ((ax.xaxis, ([0, 25, 50, 75, 100, 125, 150] if linear_x else TIME_TICKS), "{:g}"), (ax.yaxis, COST_TICKS, "${:g}")):
         axis.set_major_locator(FixedLocator([t for t in ticks]))
         axis.set_major_formatter(FuncFormatter(lambda v, _, fmt=fmt: fmt.format(v)))
         axis.set_minor_locator(NullLocator())
-    ax.set_xlabel("Latency budget: simulated median review time (seconds, log scale)",
+    ax.set_xlabel("Latency budget: simulated median review time (seconds" +
+                  (")" if linear_x else ", log scale)"),
                   fontsize=13, color=INK, labelpad=10)
     ax.set_ylabel("Cost budget: estimated API cost per diff (USD, log scale)",
                   fontsize=13, color=INK, labelpad=10)
@@ -348,7 +349,8 @@ def draw(panel, domain, vmax, geometry):
         spine.set_color("#b9b8b2")
     cax.plot([0, 1], [panel["max_f"]] * 2, color="white", linewidth=1.6)
 
-    fig.text(.045, .075, "Blank: infeasible     \u25cb best setup     \u25c7 Greptile solo reference"
+    fig.text(.045, .075, "Blank: infeasible     \u25cb best setup" +
+             ("     \u25c7 Greptile solo reference" if panel["greptile"] else "") +
              "     Bold tick: panel best", fontsize=11, color=MUTED)
 
     fig.text(.045, .045, "Hydrogen costs assume full-turn counters; Ember uses the upper context-tier estimate.", fontsize=10.5, color=MUTED)
@@ -390,15 +392,16 @@ def draw(panel, domain, vmax, geometry):
 
 
 # ---------------------------------------------------------------- HTML
-def svg_panel(panel, domain, vmax):
+def svg_panel(panel, domain, vmax, *, linear_x=False):
     """Static SVG for one panel in a 640x600 viewBox; JS adds hover only."""
     norm = Normalize(0, vmax)
     x0, y0, w, h = 66, 14, 556, 500
-    lx0, lx1 = math.log(domain["t"][0]), math.log(domain["t"][1])
+    x_transform = (lambda value: value) if linear_x else math.log
+    lx0, lx1 = map(x_transform, domain["t"])
     ly0, ly1 = math.log(domain["c"][0]), math.log(domain["c"][1])
 
     def px(t):
-        return x0 + w * (math.log(t) - lx0) / (lx1 - lx0)
+        return x0 + w * (x_transform(t) - lx0) / (lx1 - lx0)
 
     def py(c):
         return y0 + h * (1 - (math.log(c) - ly0) / (ly1 - ly0))
@@ -406,7 +409,8 @@ def svg_panel(panel, domain, vmax):
     xs, ys, z = extended(panel["ts"], panel["cs"], panel["f"], domain)
     out = [f'<svg class="map" id="map-{panel["id"]}" viewBox="0 0 640 600" role="img" '
            f'aria-label="{html.escape(panel["title"])} budget map" '
-           f'data-x0="{x0}" data-y0="{y0}" data-w="{w}" data-h="{h}">']
+           f'data-x0="{x0}" data-y0="{y0}" data-w="{w}" data-h="{h}" '
+           f'data-x-scale="{"linear" if linear_x else "log"}">']
     out.append(f'<rect x="{x0}" y="{y0}" width="{w}" height="{h}" fill="#fcfcfb"/>')
     out.append('<g class="cells" shape-rendering="crispEdges">')
     for j in range(len(ys) - 1):
@@ -430,7 +434,7 @@ def svg_panel(panel, domain, vmax):
                    for a, b in boundaries(xs, ys, z))
     out.append(f'<path d="{path}" fill="none" stroke="#fff" stroke-width=".8" '
                f'stroke-opacity=".85" pointer-events="none"/>')
-    for ticks, domain_key, pos, horizontal in ((TIME_TICKS, "t", px, True),
+    for ticks, domain_key, pos, horizontal in ((([0, 25, 50, 75, 100, 125, 150] if linear_x else TIME_TICKS), "t", px, True),
                                                (COST_TICKS, "c", py, False)):
         for tick in ticks:
             if not domain[domain_key][0] < tick < domain[domain_key][1]:
@@ -444,7 +448,8 @@ def svg_panel(panel, domain, vmax):
                            f'<text x="{x0 - 9}" y="{p + 4:.2f}" text-anchor="end" class="tl">${tick:g}</text>')
     out.append(f'<rect x="{x0}" y="{y0}" width="{w}" height="{h}" fill="none" stroke="#b9b8b2"/>')
     out.append(f'<text x="{x0 + w / 2}" y="{y0 + h + 46}" text-anchor="middle" class="al">'
-               "Latency budget: simulated median review time (s, log)</text>")
+               "Latency budget: simulated median review time (s" +
+               (")</text>" if linear_x else ", log)</text>"))
     out.append(f'<text transform="translate(16 {y0 + h / 2}) rotate(-90)" text-anchor="middle" '
                'class="al">Cost budget: estimated API USD per diff (log)</text>')
     by_name = {o["name"]: o for o in panel["options"]}
@@ -535,7 +540,8 @@ function cellRange(P, T, C) { return `latency ${span(P.ts, T, fmtT)}, cost ${spa
 // Pure hit test: SVG-space point to budget coordinates, or null outside the plot rectangle.
 function plotBudget(geo, p) {
   if (p.x < geo.x0 || p.x > geo.x0 + geo.w || p.y < geo.y0 || p.y > geo.y0 + geo.h) return null;
-  return {T: Math.exp(geo.t0 + (p.x - geo.x0) / geo.w * (geo.t1 - geo.t0)),
+  const t = geo.t0 + (p.x - geo.x0) / geo.w * (geo.t1 - geo.t0);
+  return {T: geo.linearX ? t : Math.exp(t),
           C: Math.exp(geo.c0 + (1 - (p.y - geo.y0) / geo.h) * (geo.c1 - geo.c0))};
 }
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
@@ -579,11 +585,13 @@ function setup(P) {
   const svg = document.getElementById('map-' + P.id);
   const g = k => +svg.dataset[k];
   const [x0, y0, w, h] = [g('x0'), g('y0'), g('w'), g('h')];
-  const [t0, t1] = D.domain.t.map(Math.log), [c0, c1] = D.domain.c.map(Math.log);
-  const px = t => x0 + w * (Math.log(t) - t0) / (t1 - t0), py = c => y0 + h * (1 - (Math.log(c) - c0) / (c1 - c0));
+  const linearX = svg.dataset.xScale === 'linear';
+  const tx = t => linearX ? t : Math.log(t);
+  const [t0, t1] = D.domain.t.map(tx), [c0, c1] = D.domain.c.map(Math.log);
+  const px = t => x0 + w * (tx(t) - t0) / (t1 - t0), py = c => y0 + h * (1 - (Math.log(c) - c0) / (c1 - c0));
   const cross = svg.querySelector('.cross');
   crosses.push(cross);
-  const geo = {x0, y0, w, h, t0, t1, c0, c1};
+  const geo = {x0, y0, w, h, t0, t1, c0, c1, linearX};
   function locate(ev) {
     const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
     const p = pt.matrixTransform(svg.getScreenCTM().inverse()), b = plotBudget(geo, p);

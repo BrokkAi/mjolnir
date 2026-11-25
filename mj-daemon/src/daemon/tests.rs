@@ -16220,6 +16220,7 @@ async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
 /// The whole dismiss seam: a served question target, the daemon operation the
 /// web and TUI menus call, and the next view the worker publishes once the
 /// command lands. The attention must drop so the card glyph clears.
+// Hard-won: 8dd7f63840: ignored cards prevented dismissal of visible attention.
 #[tokio::test]
 async fn dismiss_notification_clears_the_served_question_attention() {
     use mj_core::attention::{
@@ -16246,11 +16247,12 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         turn_id: "turn-1".into(),
         completed_ordinal: 9,
     };
-    let record = runtime_test_session(
+    let mut record = runtime_test_session(
         "session-1",
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
+    record.notifications_ignored = true;
     mj_controller::database::save_session(&record).unwrap();
     let mut applied = mj_core::state::MaterializedSession::empty("session-1");
     applied.applied_event_ordinal = question.completed_ordinal;
@@ -16331,6 +16333,26 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .cloned()
         .expect("a needs-input session serves its dismissal target");
     assert_eq!(target, NotificationDismissal::Stack { revision: 9 });
+    assert!(
+        !served
+            .metadata
+            .notification_cards
+            .as_ref()
+            .unwrap()
+            .contains_key("session-1")
+    );
+    let stale = state
+        .dismiss_notification(
+            "session-1".into(),
+            NotificationDismissal::Stack { revision: 8 },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        stale
+            .to_string()
+            .contains("notification is no longer current")
+    );
 
     let answerer = mj_core::runtime::spawn(async move {
         let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
