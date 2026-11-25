@@ -139,6 +139,12 @@ role reads the diff; they are independent, so a reviewer-only rerun keeps the ac
   `reviewer_diff_reading` and a digest of the instruction text, budget and flags, and
   `prompt_sha256` covers the rendered list.
 
+Each read redoes rename detection on its own paths. A diff whose rename candidates exceed
+`diff.renameLimit` could therefore pair a move in a small read that the full diff prints as a
+deletion and an addition. Before a paid run on a new corpus, check that the concatenated reads of
+every diff equal `git diff` with the same flags. That check was run by hand for the 35 Stage 2a
+diffs, on the host and with the pinned image's git 2.47.3; it is not automated.
+
 `tool_output_token_limit` in the Codex overlay would raise the policy, but it applies to every
 session of the profile and the model still chooses `max_output_tokens` (the reviewers chose 30,000,
 below the 48,800 tokens of the largest diff), so the harness splits the diff instead.
