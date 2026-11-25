@@ -702,7 +702,11 @@ impl Controller {
         Ok(())
     }
 
-    pub fn record_origin_delta_suspend_acceptance(&self, session_id: &str) -> Result<()> {
+    pub fn record_origin_delta_suspend_acceptance(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
         let parked = self
             .state
             .sessions
@@ -712,12 +716,11 @@ impl Controller {
             == SessionState::Parked;
         if parked
             || matches!(
-                self.explicit_suspend_export_policy_with_executor(session_id, &ProcessExecutor)?,
+                self.explicit_suspend_export_policy_with_executor(session_id, executor)?,
                 CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
             )
         {
-            OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?
-                .accept(&ProcessExecutor, parked)?;
+            OriginDeltaSuspend::load(self, session_id, executor)?.accept(executor, parked)?;
         }
         Ok(())
     }
@@ -811,7 +814,10 @@ impl Controller {
                     // The current suspend can settle cancellation once it can
                     // read the target's records. Keep target recovery resumable.
                     mj_core::runtime::off_async_worker(|| {
-                        targets::ensure_recovery_target_running(&ProcessExecutor, Some(&plan))
+                        targets::ensure_recovery_target_running(
+                            &executor.shutdown_only(),
+                            Some(&plan),
+                        )
                     })
                     .with_context(|| {
                         format!("recover suspend target after interrupted probe: {error:#}")
@@ -1064,13 +1070,16 @@ impl Controller {
             CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
         );
         let user_cancelled = || executor.cancellation_requested() && !executor.shutdown_interrupted();
+        // After a person cancels, the stop's records and worker still need
+        // their cleanup, but daemon shutdown must still be able to end it.
+        let cleanup = executor.shutdown_only();
         let yield_origin_delta_preflight = move_intent.is_some() && is_origin_delta;
         if yield_origin_delta_preflight {
             executor.begin_resumable_work()?;
         }
         let load_origin_delta = || {
-            if executor.cancellation_requested() && !executor.shutdown_interrupted() {
-                OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)
+            if user_cancelled() {
+                OriginDeltaSuspend::load(self, session_id, &cleanup)
             } else {
                 OriginDeltaSuspend::load(self, session_id, executor)
             }
@@ -1169,9 +1178,9 @@ impl Controller {
             if !user_cancelled() {
                 attempt.restart_reason(executor)
             } else if owning_suspend {
-                Self::record_suspend_cancellation(attempt, &ProcessExecutor).map(Some)
+                Self::record_suspend_cancellation(attempt, &cleanup).map(Some)
             } else {
-                attempt.restart_reason(&ProcessExecutor)
+                attempt.restart_reason(&cleanup)
             }
         };
         let mut restart = None;
@@ -1306,11 +1315,11 @@ impl Controller {
             // reading it; anything else reads restart and receipt together.
             let receipt = if restart.is_none() && owning_suspend && user_cancelled() {
                 restart = restart_reason(attempt)?;
-                attempt.restart_and_receipt(&ProcessExecutor, false)?.1
+                attempt.restart_and_receipt(&cleanup, false)?.1
             } else {
                 let want_restart = restart.is_none();
                 let (read, receipt) = if user_cancelled() {
-                    attempt.restart_and_receipt(&ProcessExecutor, want_restart)?
+                    attempt.restart_and_receipt(&cleanup, want_restart)?
                 } else {
                     attempt.restart_and_receipt(executor, want_restart)?
                 };
@@ -1340,7 +1349,7 @@ impl Controller {
                 && !attempt.request_recorded() && !attempt.already_quiescent()
             {
                 let mode = if user_cancelled() {
-                    attempt.live_worker_mode(&ProcessExecutor)
+                    attempt.live_worker_mode(&cleanup)
                 } else {
                     attempt.live_worker_mode(executor)
                 };
@@ -1356,12 +1365,11 @@ impl Controller {
                     WorkerRunMode::CheckpointOnly
                 };
                 let capture_manager = if attempt.already_quiescent() { None } else { manager };
+                // `start_worker` brackets its own admission yields, on either
+                // executor; bracketing it here would readmit twice.
                 let relay = if user_cancelled() {
-                    executor.begin_resumable_work()?;
-                    let result = attempt.start_worker(self, admission, session_id, &ProcessExecutor,
-                        capture_manager, run_mode, observe_original).await;
-                    executor.end_resumable_work("observe suspend seal after cancellation")?;
-                    result
+                    attempt.start_worker(self, admission, session_id, &cleanup,
+                        capture_manager, run_mode, observe_original).await
                 } else {
                     attempt.start_worker(self, admission, session_id, executor,
                         capture_manager, run_mode, observe_original).await
@@ -1855,6 +1863,58 @@ impl Controller {
         }
     }
 
+    /// Stop the quiescent worker and record the session `Parked`. Admission
+    /// is yielded around the stop, which can wait on a hung target, so a
+    /// handoff does not wait for it; the readmission is required before the
+    /// intent is retired or `Parked` is persisted, so a retired owner never
+    /// writes after the handoff closed admission.
+    fn park_quiescent_session(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        cleanup: &(impl CommandExecutor + Sync),
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        let (backend, root) = self.worker_placement(session_id)?;
+        let owner = crate::worker_lifecycle::require(session_id)?;
+        executor.begin_resumable_work()?;
+        let stopped = mj_core::runtime::off_async_worker(|| {
+            super::worker_binary::stop_worker(&owner, cleanup, &backend, &root)
+        });
+        executor.end_resumable_work("restore parked session")?;
+        stopped?;
+        retire_worker_restart_intent(session_id)?;
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .context("session disappeared during suspend")?;
+        record.state = SessionState::Parked;
+        record.last_checkpoint_error = Some(format!("{error:#}"));
+        record.updated_at = now();
+        self.persist_session_state(session_id)
+    }
+
+    /// Remove the stop's records from the target. The session's state is
+    /// already persisted, and the remote removal can stall, so admission is
+    /// yielded around it. A handoff that closed admission meanwhile leaves the
+    /// next daemon to clear them; that is not a failure of this rollback.
+    fn clear_suspend_records(
+        attempt: &OriginDeltaSuspend,
+        executor: &(impl CommandExecutor + Sync),
+        cleanup: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        executor.begin_resumable_work()?;
+        let cleared = mj_core::runtime::off_async_worker(|| attempt.clear_after_restart(cleanup));
+        if executor
+            .end_resumable_work("clear suspend records")
+            .is_err()
+        {
+            return Ok(());
+        }
+        cleared
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn restart_after_refused_origin_delta(
         &mut self,
@@ -1869,37 +1929,25 @@ impl Controller {
         if executor.shutdown_interrupted() {
             return error;
         }
+        let cleanup = executor.shutdown_only();
         if attempt.already_quiescent() {
-            let parked = (|| -> Result<()> {
-                let cleanup = super::failed_launch_cleanup_executor();
-                let (backend, root) = self.worker_placement(session_id)?;
-                super::worker_binary::stop_worker(
-                    &crate::worker_lifecycle::require(session_id)?,
-                    &cleanup,
-                    &backend,
-                    &root,
-                )?;
-                retire_worker_restart_intent(session_id)?;
-                let record = self
-                    .state
-                    .sessions
-                    .get_mut(session_id)
-                    .context("session disappeared during suspend")?;
-                record.state = SessionState::Parked;
-                record.last_checkpoint_error = Some(format!("{error:#}"));
-                record.updated_at = now();
-                self.persist_session_state(session_id)?;
-                attempt.clear_after_restart(&cleanup)
-            })();
+            // Bounded like the failed-launch cleanup it replaces, and ending
+            // for daemon shutdown.
+            let parked_cleanup =
+                cleanup.with_cleanup_timeout(super::FAILED_STARTUP_CLEANUP_TIMEOUT);
+            let parked = self
+                .park_quiescent_session(session_id, executor, &parked_cleanup, &error)
+                .and_then(|()| Self::clear_suspend_records(attempt, executor, &parked_cleanup));
             return match parked {
                 Ok(()) => error,
+                Err(_) if executor.shutdown_interrupted() => error,
                 Err(rollback) => error.context(format!("restore parked session: {rollback:#}")),
             };
         }
         let recovered = async {
             let cancelled = executor.cancellation_requested() && !executor.shutdown_interrupted();
             if cancelled {
-                attempt.record_restart(&error, &ProcessExecutor)?;
+                attempt.record_restart(&error, &cleanup)?;
             } else {
                 attempt.record_restart(&error, executor)?;
             }
@@ -1907,20 +1955,19 @@ impl Controller {
             if cancelled {
                 // Cancellation ends the suspend. The retained checkout still
                 // needs its agent back after quiescence finished.
-                executor.begin_resumable_work()?;
-                let restarted = attempt
+                // `start_worker` brackets its own admission yields.
+                attempt
                     .start_worker(
                         self,
                         admission,
                         session_id,
-                        &ProcessExecutor,
+                        &cleanup,
                         manager,
                         WorkerRunMode::Harness,
                         false,
                     )
-                    .await;
-                executor.end_resumable_work("record restart after cancelled suspend")?;
-                restarted?.release();
+                    .await?
+                    .release();
             } else {
                 attempt
                     .start_worker(
@@ -1944,19 +1991,25 @@ impl Controller {
             record.last_checkpoint_error = Some(format!("{error:#}"));
             record.updated_at = now();
             self.persist_session_state(session_id)?;
-            let cleanup = if cancelled {
-                attempt.clear_after_restart(&ProcessExecutor)
+            let cleared = if cancelled {
+                Self::clear_suspend_records(attempt, executor, &cleanup)
             } else {
-                attempt.clear_after_restart(executor)
+                Self::clear_suspend_records(attempt, executor, executor)
             };
-            if let Err(cleanup) = cleanup {
-                tracing::warn!(session_id, %cleanup, "could not clear worker suspend records");
+            if let Err(failure) = cleared {
+                // A shutdown that stopped this cleanup leaves the records for
+                // the next daemon; it is not a failure to warn about.
+                if executor.shutdown_interrupted() {
+                    return Err(failure);
+                }
+                tracing::warn!(session_id, %failure, "could not clear worker suspend records");
             }
             anyhow::Ok(())
         }
         .await;
         match recovered {
             Ok(()) => error,
+            Err(_) if executor.shutdown_interrupted() => error,
             Err(restart) => error.context(format!("restart the retained session: {restart:#}")),
         }
     }
@@ -2109,11 +2162,12 @@ impl Controller {
             self.ensure_suspend_target_running(admission, session_id, executor)?;
         }
         let cancelled = executor.cancellation_requested() && !executor.shutdown_interrupted();
+        let cleanup = executor.shutdown_only();
         let has_before_close = before_close.is_some();
         let prepare = || {
             let policy = if has_before_close {
                 Some(if cancelled {
-                    self.explicit_suspend_export_policy_with_executor(session_id, &ProcessExecutor)?
+                    self.explicit_suspend_export_policy_with_executor(session_id, &cleanup)?
                 } else {
                     self.explicit_suspend_export_policy_with_executor(session_id, executor)?
                 })
@@ -2129,7 +2183,7 @@ impl Controller {
                 && (origin_policy && verified.is_none()
                     || self.state.sessions[session_id].target.is_some() && {
                         let attempt = if cancelled {
-                            OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?
+                            OriginDeltaSuspend::load(self, session_id, &cleanup)?
                         } else {
                             OriginDeltaSuspend::load(self, session_id, executor)?
                         };
@@ -2735,7 +2789,7 @@ impl Controller {
                     self.destroy_after_verified_checkpoint(
                         session_id,
                         verified,
-                        &ProcessExecutor,
+                        &executor.shutdown_only(),
                         SuspendSettlement::Suspend,
                     )
                 } else {
@@ -3435,6 +3489,31 @@ impl Controller {
                     .get(session_id)
                     .with_context(|| format!("unknown session {session_id}"))?
                     .clone();
+                // Reachable workers may still hold the last refreshed source grant.
+                let retired = (|| -> Result<()> {
+                    let pending = crate::database::pending_retired_logins(session_id)?;
+                    if pending.is_empty() {
+                        return Ok(());
+                    }
+                    let spec = self.reconnect_command(session_id)?;
+                    mj_core::runtime::block_on(async {
+                        let mut client =
+                            crate::worker_client::RelayClient::connect(&spec, session_id).await?;
+                        let result = crate::worker_client::drain_retired_logins(
+                            &mut client,
+                            pending,
+                            |id| self.config.profiles.get(id).cloned(),
+                            |op| crate::database::clear_pending_retired_login(session_id, op),
+                            |op| Ok(!crate::database::retired_login_move_active(session_id, op)?),
+                        )
+                        .await;
+                        let detached = client.detach().await;
+                        result.1.and(detached)
+                    })?
+                })();
+                if let Err(error) = retired {
+                    tracing::warn!(session_id, %error, "could not adopt retired logins before destroy");
+                }
                 let mut outcome = DestroyOutcome::default();
                 if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
                     outcome.cleanup(

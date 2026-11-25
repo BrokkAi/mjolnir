@@ -609,6 +609,21 @@ pub fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind)
             ..State::default()
         },
     };
+    let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
+    controller
+        .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+        .unwrap()
+        .write(&worker_root.join("launch.json"))
+        .unwrap();
+    fs::write(
+        worker_root.join("ownership.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version":3, "session_id":LATCH_RELAY_SESSION, "profile_id":IN_PLACE_SOURCE_PROFILE,
+            "bundle_id":"bundle", "target_template_id":"local-bare",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     InPlaceFixture {
         _directory: directory,
         worker_root,

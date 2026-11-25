@@ -330,7 +330,7 @@ impl RuntimeState {
                     holds_through_drain: false,
                 },
                 Some(acceptance),
-                move |state, session_id, cancelled, session_admission| async move {
+                move |state, session_id, control, session_admission| async move {
                     let result = async {
                         let _capacity_lease =
                             state.reserve_container_capacity_for_move(&request).await?;
@@ -343,7 +343,7 @@ impl RuntimeState {
                             .clone()
                             .run_move_controller_work(
                                 session_id.clone(),
-                                cancelled,
+                                control,
                                 |mut controller, executor, manager| async move {
                                     controller
                                         .move_session_managed_controlled_with_admission(
@@ -480,12 +480,12 @@ impl RuntimeState {
                             deferrable_admission: None,
                             holds_through_drain: false,
                         },
-                        move |state, session_id, cancelled, _session_admission| async move {
+                        move |state, session_id, control, _session_admission| async move {
                             let notice_state = state.clone();
                             let outcome = state
                                 .run_move_controller_work(
                                     session_id.clone(),
-                                    cancelled,
+                                    control,
                                     |mut controller, executor, _manager| async move {
                                         let notice = controller
                                             .recover_legacy_move_operation(
@@ -580,11 +580,11 @@ impl RuntimeState {
                         deferrable_admission: None,
                         holds_through_drain: false,
                     },
-                    move |state, session_id, cancelled, session_admission| async move {
+                    move |state, session_id, control, session_admission| async move {
                         state
                             .run_move_controller_work(
                                 session_id,
-                                cancelled,
+                                control,
                                 |mut controller, executor, manager| async move {
                                     controller
                                         .recover_move_managed_controlled(
@@ -668,11 +668,11 @@ impl RuntimeState {
                 .start_automatic_lifecycle(
                     id.clone(),
                     LifecycleKind::Cleanup,
-                    |state, id, cancelled, _session_admission| async move {
+                    |state, id, control, _session_admission| async move {
                         state
                         .run_move_controller_work(
                             id.clone(),
-                            cancelled,
+                            control,
                             move |controller, executor, _manager| async move {
                                 let mut operation = mj_controller::database::load_move_operation(&id)?
                                     .context("Move cleanup intent missing")?;
@@ -749,7 +749,7 @@ impl RuntimeState {
     pub(super) async fn run_move_controller_work<W, Fut>(
         self: Arc<Self>,
         session_id: String,
-        cancelled: Arc<AtomicBool>,
+        control: LifecycleControl,
         work: W,
     ) -> Result<MoveOutcome>
     where
@@ -772,11 +772,7 @@ impl RuntimeState {
                 "move phase finished"
             );
             let manager = self.session_manager.clone();
-            let executor = DaemonStageReportingExecutor::new(
-                CancellableProcessExecutor::new(cancelled),
-                self,
-                session_id,
-            );
+            let executor = DaemonStageReportingExecutor::new(control.executor(), self, session_id);
             let result = mj_core::runtime::block_on(Box::pin(work(controller, executor, manager)));
             mj_controller::mailbox_outbox::notify_mailbox_outbox_changed();
             result?
@@ -914,11 +910,11 @@ mod admission_tests {
             .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled, _session_admission| async move {
+                move |state, session_id, control, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,
-                            cancelled,
+                            control,
                             |_, executor, _| async move {
                                 executor.begin_resumable_work()?;
                                 let copied = executor.execute(&copy);
@@ -1067,11 +1063,11 @@ mod admission_tests {
             .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled, _session_admission| async move {
+                move |state, session_id, control, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,
-                            cancelled,
+                            control,
                             |_, executor, _| async move {
                                 executor.execute(&swap)?;
                                 Ok(outcome("completed"))

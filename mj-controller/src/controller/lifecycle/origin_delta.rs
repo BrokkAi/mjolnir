@@ -802,15 +802,6 @@ impl OriginDeltaSuspend {
         Ok(())
     }
 
-    pub(super) async fn wait_for_stop(
-        &self,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
-        self.wait_for_stop_with_uncancelled(executor, &ProcessExecutor)
-            .await
-            .context(LifecycleFailureReason::SuspendPending)
-    }
-
     /// The accepted request and the restart record, read together.
     fn request_and_restart(
         &self,
@@ -922,17 +913,21 @@ impl OriginDeltaSuspend {
         )?))
     }
 
-    pub(super) async fn wait_for_stop_with_uncancelled(
+    /// Wait for the original worker to finish the accepted stop. After a
+    /// person cancels, the wait still has to read and write the stop's
+    /// records, so it runs on the shutdown-only view: only daemon shutdown
+    /// interrupts those commands.
+    pub(super) async fn wait_for_stop(
         &self,
         executor: &(impl CommandExecutor + Sync),
-        uncancelled: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
+        let cleanup = executor.shutdown_only();
         executor.begin_resumable_work()?;
         let outcome = async {
             let initial_cancelled =
                 executor.cancellation_requested() && !executor.shutdown_interrupted();
             let (request, restart_recorded) = if initial_cancelled {
-                self.request_and_restart(uncancelled)?
+                self.request_and_restart(&cleanup)?
             } else {
                 self.request_and_restart(executor)?
             };
@@ -947,13 +942,13 @@ impl OriginDeltaSuspend {
                     "suspend process wait was handed off"
                 );
                 if executor.cancellation_requested() && !cancellation_recorded {
-                    self.record_restart(&anyhow::anyhow!("suspend was cancelled"), uncancelled)?;
+                    self.record_restart(&anyhow::anyhow!("suspend was cancelled"), &cleanup)?;
                     cancellation_recorded = true;
                 }
-                let use_uncancelled = cancellation_recorded || executor.cancellation_requested();
+                let after_cancellation = cancellation_recorded || executor.cancellation_requested();
                 // A receipt can precede the worker's last cleanup tasks.
-                let polled = if use_uncancelled {
-                    self.poll_worker(worker, uncancelled)
+                let polled = if after_cancellation {
+                    self.poll_worker(worker, &cleanup)
                 } else {
                     self.poll_worker(worker, executor)
                 };
@@ -964,7 +959,7 @@ impl OriginDeltaSuspend {
                     // back to the top to record the restart or report the
                     // handoff; the next poll no longer uses this executor.
                     Err(_)
-                        if !use_uncancelled
+                        if !after_cancellation
                             && (executor.shutdown_interrupted()
                                 || executor.cancellation_requested()) =>
                     {
@@ -996,8 +991,10 @@ impl OriginDeltaSuspend {
             }
         }
         .await;
-        executor.end_resumable_work("record suspend quiescence outcome")?;
-        outcome
+        executor
+            .end_resumable_work("record suspend quiescence outcome")
+            .and(outcome)
+            .context(LifecycleFailureReason::SuspendPending)
     }
 
     pub(super) fn live_worker_mode(
@@ -1159,6 +1156,9 @@ mod tests {
     impl CommandExecutor for RemoteShell {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
+            if self.cancelled.load(Ordering::SeqCst) && !command.is_shutdown_only() {
+                anyhow::bail!("a cancelled operation must run on the shutdown-only view");
+            }
             let waiting = command.purpose == "wait for suspend worker exit";
             if waiting
                 && self.cancel_during_first_wait
@@ -1352,10 +1352,7 @@ if [ "$asked" -ge "$(cat "$root/dead_after")" ]; then echo dead; else echo alive
         let (_directory, root) = worker_root(4);
         record_request(&root);
         let shell = RemoteShell::default();
-        attempt(&root)
-            .wait_for_stop_with_uncancelled(&shell, &shell)
-            .await
-            .unwrap();
+        attempt(&root).wait_for_stop(&shell).await.unwrap();
         // Four checks of the worker, one command on the connection.
         assert_eq!(asked(&root), 4);
         assert_eq!(shell.count("wait for suspend worker exit"), 1);
@@ -1387,10 +1384,7 @@ if [ "$asked" -ge "$(cat "$root/dead_after")" ]; then echo dead; else echo alive
             })),
             ..Default::default()
         };
-        attempt(&root)
-            .wait_for_stop_with_uncancelled(&shell, &shell)
-            .await
-            .unwrap();
+        attempt(&root).wait_for_stop(&shell).await.unwrap();
         assert_eq!(shell.count("wait for suspend worker exit"), 2);
         assert!(asked(&root) > 20, "the first wait polled until its bound");
         assert_eq!(
@@ -1408,13 +1402,10 @@ if [ "$asked" -ge "$(cat "$root/dead_after")" ]; then echo dead; else echo alive
             cancel_during_first_wait: true,
             ..Default::default()
         };
-        let uncancelled = RemoteShell::default();
-        attempt(&root)
-            .wait_for_stop_with_uncancelled(&cancellable, &uncancelled)
-            .await
-            .unwrap();
-        assert_eq!(cancellable.count("wait for suspend worker exit"), 1);
-        assert_eq!(uncancelled.count("wait for suspend worker exit"), 1);
+        attempt(&root).wait_for_stop(&cancellable).await.unwrap();
+        // The killed wait, then the wait that continues on the shutdown-only
+        // view (the shell refuses any other command once cancelled).
+        assert_eq!(cancellable.count("wait for suspend worker exit"), 2);
         let restart: SuspendReceipt =
             serde_json::from_slice(&std::fs::read(Path::new(&root).join(wire::RESTART)).unwrap())
                 .unwrap();
@@ -1428,10 +1419,7 @@ if [ "$asked" -ge "$(cat "$root/dead_after")" ]; then echo dead; else echo alive
         record_request(&root);
         std::fs::write(Path::new(&root).join("unsupported"), "").unwrap();
         let shell = RemoteShell::default();
-        let error = attempt(&root)
-            .wait_for_stop_with_uncancelled(&shell, &shell)
-            .await
-            .unwrap_err();
+        let error = attempt(&root).wait_for_stop(&shell).await.unwrap_err();
         let error = format!("{error:#}");
         assert!(
             error.contains("check suspend worker liveness failed (status 2)")

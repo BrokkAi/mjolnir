@@ -18,7 +18,13 @@ impl<E: CommandExecutor> RemoteGitExecutor<'_, E> {
         );
         arguments.push(command.program.clone());
         arguments.extend(command.args.clone());
-        ssh_command(SshTrafficClass::Control, &self.ssh, arguments).purpose(&command.purpose)
+        let remote =
+            ssh_command(SshTrafficClass::Control, &self.ssh, arguments).purpose(&command.purpose);
+        if command.is_shutdown_only() {
+            remote.shutdown_only()
+        } else {
+            remote
+        }
     }
 }
 
@@ -59,5 +65,9 @@ impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
 
     fn cancellation_requested(&self) -> bool {
         self.executor.cancellation_requested()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.executor.shutdown_interrupted()
     }
 }

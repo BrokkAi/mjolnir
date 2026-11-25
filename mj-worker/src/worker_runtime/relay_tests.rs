@@ -9064,7 +9064,10 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
 async fn acp_supervisor_terminates_descendants_when_parent_input_ends() {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
-    for broken_output in [false, true] {
+    // Own fixture orphans instead of relying on the test host's PID 1 reaper.
+    #[cfg(target_os = "linux")]
+    mj_core::subprocess::orphans::become_subreaper().unwrap();
+    for (broken_output, leader_exits) in [(false, false), (true, false), (false, true)] {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("descendant-writes");
         let ready_path = root.path().join("ready.sock");
@@ -9091,6 +9094,7 @@ read_ready, write_ready = os.pipe()
 if os.fork() == 0:
     os.close(read_ready)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(sys.argv[1] + '.child-pid', 'w') as f: f.write(str(os.getpid()))
     with open(sys.argv[1], 'a') as f: f.write('x')
     with socket.socket(socket.AF_UNIX) as ready:
         ready.connect(sys.argv[2])
@@ -9104,12 +9108,14 @@ if os.fork() == 0:
 os.close(write_ready)
 assert os.read(read_ready, 1) == b'x'
 os.close(read_ready)
+if sys.argv[3] == 'exit': sys.exit(0)
 print('x' * 100000, flush=True)
 while True: time.sleep(1)
 "#
                 .into(),
                 marker.to_string_lossy().into_owned(),
                 ready_path.to_string_lossy().into_owned(),
+                if leader_exits { "exit" } else { "stay" }.into(),
             ],
             environment: BTreeMap::new(),
             excluded_environment: Vec::new(),
@@ -9133,7 +9139,7 @@ while True: time.sleep(1)
         })
         .await;
         let mut held = Some(held);
-        if !broken_output {
+        if !broken_output && !leader_exits {
             drop(held.take());
         }
         let result = tokio::time::timeout(crate::test_support::IO_TIMEOUT, task)
@@ -9145,7 +9151,19 @@ while True: time.sleep(1)
         } else {
             result.unwrap();
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let descendant: i32 =
+            std::fs::read_to_string(root.path().join("descendant-writes.child-pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+        // Success acknowledges group exit, not merely that KILL was sent.
+        // A planned reload's wait for this supervisor cannot finish earlier.
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+
         let size = std::fs::metadata(&marker).unwrap().len();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(

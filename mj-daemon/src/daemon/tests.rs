@@ -1312,7 +1312,8 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     let operation = state
         .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Resume, {
             let release = release.clone();
-            move |_, _, cancelled, _session_admission| async move {
+            move |_, _, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 release.notified().await;
                 ensure!(
                     !cancelled.load(Ordering::Acquire),
@@ -2654,7 +2655,8 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
         let automatic = state
             .start_automatic_lifecycle("automatic-move".into(), LifecycleKind::Move, {
                 let release = release.clone();
-                move |_, _, cancelled, _session_admission| async move {
+                move |_, _, control, _session_admission| async move {
+                    let cancelled = control.cancelled.clone();
                     tokio::select! {
                         () = release.notified() => {}
                         () = mj_controller::recovery_gate::wait_until_cancelled(&cancelled) => {}
@@ -3292,6 +3294,36 @@ fn create_cancellation_and_commit_have_one_winner() {
     }
 }
 
+/// An operation that sees `cancelled` set by shutdown must also see that
+/// shutdown stopped it, or it would take the daemon's exit for a person's
+/// cancel and record a rollback. Shutdown is published before the flag.
+#[test]
+fn a_shutdown_stop_is_visible_before_the_cancelled_flag_is() {
+    for committed in [false, true] {
+        for _ in 0..200 {
+            let control = LifecycleControl::default();
+            if committed {
+                assert!(control.grant_commit());
+            }
+            let observer = {
+                let control = control.clone();
+                std::thread::spawn(move || {
+                    while !control.cancelled.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                    assert!(control.stopped_for_shutdown());
+                })
+            };
+            if committed {
+                control.interrupt();
+            } else {
+                assert!(control.cancel_for_shutdown());
+            }
+            observer.join().unwrap();
+        }
+    }
+}
+
 #[test]
 fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
     let control = LifecycleControl::default();
@@ -3309,10 +3341,11 @@ fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
 /// A child launch that an explicit daemon stop cancelled reported only
 /// "operation cancelled", which its parent could not tell from a fault on the
 /// target. The control records which cancel won, so a person's cancel that
-/// came first is never blamed on the shutdown that followed it.
+/// came first is never blamed on the shutdown that followed it, except for
+/// the cleanup that shutdown itself interrupts (#1678).
 // Hard-won: #1321: a daemon stop cancelled a child launch and the failure did not say so.
-#[test]
-fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
+#[tokio::test]
+async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
@@ -3361,6 +3394,77 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     assert!(control.grant_commit());
     assert!(operation(LifecycleKind::Suspend, control.clone()).interrupt_for_shutdown());
     assert!(control.stopped_for_shutdown());
+
+    // A person's cancel wins first and its cleanup runs; shutdown then still
+    // stops that cleanup, and the lost commit decision stays lost.
+    let control = LifecycleControl::default();
+    let mut cancelled = operation(LifecycleKind::Suspend, control.clone());
+    assert!(cancelled.request_cancel("test-session", "person cancellation"));
+    assert!(!control.stopped_for_shutdown());
+    assert!(cancelled.interrupt_for_shutdown());
+    assert!(control.stopped_for_shutdown());
+    assert!(!control.grant_commit());
+    assert_eq!(control.cancel_cause(), Some("person cancellation"));
+    tokio::time::timeout(Duration::from_secs(5), control.shutdown_stopped())
+        .await
+        .expect("shutdown after a person's cancel must wake its waiters");
+    // The executor built from the control sees the shutdown as its own token.
+    assert!(control.executor().shutdown_interrupted());
+
+    // The dashboard moves a cancelled Restart or container upgrade to its own
+    // phase; shutdown must still stop that rollback, a Resume's too. Each
+    // lifecycle's executor comes from its control, so the shutdown-only view
+    // of it ends a stalled command at once.
+    for (kind, phase) in [
+        (LifecycleKind::Restart, LifecyclePhase::CancellingRestart),
+        (
+            LifecycleKind::UpgradeContainer,
+            LifecyclePhase::CancellingRestart,
+        ),
+        (LifecycleKind::Resume, LifecyclePhase::Cancelling),
+        (LifecycleKind::Suspend, LifecyclePhase::Executing),
+        (LifecycleKind::Move, LifecyclePhase::MovingDestination),
+    ] {
+        let restart = matches!(phase, LifecyclePhase::CancellingRestart);
+        let control = LifecycleControl::default();
+        let mut cancelled = operation(kind, control.clone());
+        if matches!(
+            phase,
+            LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+        ) {
+            // A phone action cancels the control and leaves the phase alone.
+            assert!(control.request_cancel("phone action cancel"));
+        } else {
+            assert!(cancelled.request_cancel("test-session", "person cancel from dashboard"));
+        }
+        cancelled.phase = phase;
+        assert!(!control.stopped_for_shutdown());
+        assert_eq!(cancelled.cancelled_restart_releases_intent(), restart);
+
+        let executor = control.executor();
+        let rollback = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = executor
+                .shutdown_only()
+                .execute(&CommandSpec::new("sh", ["-c", "sleep 30"]));
+            (result, started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(cancelled.interrupt_for_shutdown());
+        let (result, elapsed) = rollback.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("operation cancelled"),
+            "{kind:?}: {error:#}"
+        );
+        assert!(elapsed < Duration::from_secs(20), "{kind:?}: {elapsed:?}");
+
+        assert!(control.stopped_for_shutdown());
+        // The dying daemon leaves the durable intent to its successor.
+        assert!(!cancelled.cancelled_restart_releases_intent());
+        assert!(!control.grant_commit());
+        assert!(control.executor().shutdown_interrupted());
+    }
 }
 
 #[tokio::test]
@@ -4020,7 +4124,8 @@ async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cance
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
             let release = release.clone();
-            move |_state, _session_id, cancelled, _session_admission| async move {
+            move |_state, _session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 release.notified().await;
                 assert!(
                     !cancelled.load(Ordering::Acquire),
@@ -4061,7 +4166,8 @@ async fn force_destruction_cancels_a_teardown_that_outlives_the_wait() {
     let state = test_runtime_state();
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
-            |_state, _session_id, cancelled, _session_admission| async move {
+            |_state, _session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -4382,7 +4488,7 @@ async fn a_stalled_unpark_stream_releases_admission_and_can_retry() {
         .start_or_join_lifecycle(child.into(), LifecycleKind::Unpark, {
             |_, _, flag, _| async move {
                 admitted.send(()).unwrap();
-                mj_controller::recovery_gate::wait_until_cancelled(&flag).await;
+                mj_controller::recovery_gate::wait_until_cancelled(&flag.cancelled).await;
                 cancel_seen.send(()).unwrap();
                 cleanup.await.unwrap();
                 anyhow::bail!("stream cancelled")
@@ -4522,7 +4628,8 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             let cancel_seen = cancel_seen.clone();
-            move |_state, _session_id, cancelled, _session_admission| async move {
+            move |_state, _session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 admitted.send(()).unwrap();
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -4572,7 +4679,8 @@ async fn a_primary_or_worker_create_can_run_a_stage_past_the_stall_bound() {
         let (finish, running) = tokio::sync::oneshot::channel();
         let result = state
             .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-                move |_, _, cancelled, _| async move {
+                move |_, _, control, _| async move {
+                    let cancelled = control.cancelled.clone();
                     admitted.send(()).unwrap();
                     running.await.unwrap();
                     assert!(!cancelled.load(Ordering::Acquire));
@@ -5067,7 +5175,8 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
         .start_or_join_lifecycle(
             "session-1".into(),
             LifecycleKind::UpgradeContainer,
-            |state, id, cancelled, _session_admission| async move {
+            |state, id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 let intent = mj_controller::database::begin_container_upgrade(
                     &id,
                     "upgrade-test",
@@ -5154,7 +5263,8 @@ async fn a_pending_container_upgrade_cancels_without_recording_a_session_failure
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::UpgradeContainer, {
             let ready = ready.clone();
-            move |state, id, cancelled, _session_admission| async move {
+            move |state, id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 mj_controller::database::begin_container_upgrade(
                     &id,
                     "upgrade-test",
@@ -8234,7 +8344,8 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
             .start_automatic_lifecycle(
                 id.into(),
                 LifecycleKind::Create,
-                move |_, _, cancelled, _session_admission| async move {
+                move |_, _, control, _session_admission| async move {
+                    let cancelled = control.cancelled.clone();
                     while !cancelled.load(Ordering::Acquire) {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
@@ -8361,7 +8472,8 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             LifecycleKind::Suspend,
             super::lifecycle::LifecycleStart::request(key, None, None),
             Some(cancellable_watch),
-            move |_, _, cancelled, _session_admission| async move {
+            move |_, _, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
@@ -9130,7 +9242,8 @@ esac
                 state
                     .start_automatic_lifecycle(id.into(), LifecycleKind::Move, {
                         let cloning = cloning.clone();
-                        move |_, _, cancelled, _session_admission| async move {
+                        move |_, _, control, _session_admission| async move {
+                            let cancelled = control.cancelled.clone();
                             // Hold the destination-cloning cut before any worker is installed.
                             cloning.notify_one();
                             while !cancelled.load(Ordering::Acquire) {
@@ -16607,7 +16720,8 @@ async fn queued_lifecycle_requests_release_client_admission_for_handoff_and_stop
             Some(control.clone()),
             {
                 let release = release.clone();
-                move |state, id, cancelled, _session_admission| async move {
+                move |state, id, control, _session_admission| async move {
+ let cancelled = control.cancelled.clone();
                     let executor = DaemonStageReportingExecutor::new(ProcessExecutor, state, id);
                     executor.begin_resumable_work()?;
                     executor.stage_started(ProvisionStage::Cloning);

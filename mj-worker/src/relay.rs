@@ -1563,7 +1563,6 @@ impl DurableRelay {
         self.mailbox_delivery_mode = mode;
     }
 
-    #[cfg(unix)]
     pub(crate) fn in_place_move_hold_active(&self) -> bool {
         self.snapshot.in_place_move_hold.is_some()
     }

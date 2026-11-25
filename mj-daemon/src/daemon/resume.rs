@@ -144,7 +144,7 @@ impl RuntimeState {
                         Some(control),
                     ),
                     Some(acceptance),
-                    move |state, session_id, cancelled, _session_admission| async move {
+                    move |state, session_id, control, _session_admission| async move {
                         let _admission = _admission;
                         let session = blocking({
                             let session_id = session_id.clone();
@@ -174,7 +174,7 @@ impl RuntimeState {
                             .is_some_and(|session| session.state == SessionState::Running)
                         {
                             accepted.send_replace(Some(Ok(())));
-                            state.resume_owned_children(&session_id, &cancelled).await?;
+                            state.resume_owned_children(&session_id, &control).await?;
                             return Ok(DaemonLifecycleResult::Done);
                         }
                         // Suspend may have produced this stopped placement while
@@ -186,11 +186,11 @@ impl RuntimeState {
                             blocking({
                                 let state = state.clone();
                                 let session_id = session_id.clone();
-                                let cancelled = cancelled.clone();
+                                let control = control.clone();
                                 move || {
                                     let mut controller = Controller::load()?;
                                     let executor = DaemonStageReportingExecutor::new(
-                                        CancellableProcessExecutor::new(cancelled),
+                                        control.executor(),
                                         state,
                                         session_id.clone(),
                                     );
@@ -216,7 +216,7 @@ impl RuntimeState {
                             .await
                             .context("load controller for daemon resume task")??;
                         let executor = DaemonStageReportingExecutor::new(
-                            CancellableProcessExecutor::new(cancelled.clone()),
+                            control.executor(),
                             state.clone(),
                             session_id.clone(),
                         );
@@ -267,7 +267,7 @@ impl RuntimeState {
                         })
                         .await?;
                         if !from_parent {
-                            state.resume_owned_children(&session_id, &cancelled).await?;
+                            state.resume_owned_children(&session_id, &control).await?;
                         }
                         Ok(DaemonLifecycleResult::Done)
                     },
@@ -285,7 +285,7 @@ impl RuntimeState {
     async fn resume_owned_children(
         self: &Arc<Self>,
         parent_id: &str,
-        cancelled: &Arc<AtomicBool>,
+        control: &LifecycleControl,
     ) -> Result<()> {
         let children = blocking({
             let parent_id = parent_id.to_owned();
@@ -323,7 +323,7 @@ impl RuntimeState {
             return Ok(());
         }
         let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled.clone()),
+            control.executor(),
             self.clone(),
             parent_id.to_owned(),
         );
@@ -690,7 +690,7 @@ impl RuntimeState {
         let retained = Arc::new(Mutex::new(None));
         self.run_lifecycle(session_id, kind, {
             let retained = retained.clone();
-            move |state, session_id, cancelled, _session_admission| async move {
+            move |state, session_id, control, _session_admission| async move {
                 let mut controller = Controller::load()?;
                 if kind == LifecycleKind::ArchiveStopped {
                     ensure!(
@@ -699,7 +699,7 @@ impl RuntimeState {
                     );
                 }
                 let executor = DaemonStageReportingExecutor::new(
-                    CancellableProcessExecutor::new(cancelled),
+                    control.executor(),
                     state,
                     session_id.clone(),
                 );
@@ -966,7 +966,7 @@ impl RuntimeState {
                 kind,
                 request.lifecycle_start(key),
                 Some(acceptance),
-                move |state, session_id, cancelled, _session_admission| async move {
+                move |state, session_id, control, _session_admission| async move {
                     let _accepted_work = accepted_work;
                     let retired = blocking({
                         let session_id = session_id.clone();
@@ -1043,7 +1043,7 @@ impl RuntimeState {
                         move || {
                             let mut controller = Controller::load()?;
                             let executor = DaemonStageReportingExecutor::new(
-                                CancellableProcessExecutor::new(cancelled),
+                                control.executor(),
                                 state.clone(),
                                 session_id.clone(),
                             );

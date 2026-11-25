@@ -918,6 +918,12 @@ impl SharedCredentials {
         self.0.read().await
     }
 
+    pub(super) async fn write(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, std::result::Result<CredentialEndpoint, String>> {
+        self.0.write().await
+    }
+
     pub(super) async fn drain(&self) {
         let _guard = self.0.write().await;
     }
@@ -4040,6 +4046,48 @@ pub(super) async fn serve_client_with_shared_credentials(
                 write_logged_response(&mut writer, &response, &session_id, "cpu_usage").await?;
                 continue;
             }
+            if matches!(&envelope.request, RelayRequest::ReadRetiredLogins { .. } | RelayRequest::AckRetiredLogin { .. }) {
+                // Share the credential admission boundary: Hold sets its state
+                // then drains this guard before preservation/commit. An ack can
+                // never delete a receipt while a reload is committing it.
+                let (read_guard, write_guard) = if matches!(&envelope.request, RelayRequest::AckRetiredLogin { .. }) {
+                    (None, Some(credentials.write().await))
+                } else {
+                    (Some(credentials.read().await), None)
+                };
+                let held = relay.observe().expect("relay state lock poisoned").in_place_move_hold_active();
+                let root = relay_root.clone();
+                let request = envelope.request.clone();
+                let result = mj_core::runtime::spawn_blocking(move || -> Result<RelayResponsePayload> {
+                    if held || super::reload_commit::retired_logins_deferred(&root)? {
+                        anyhow::ensure!(matches!(request, RelayRequest::ReadRetiredLogins { .. }), "reload holds retired login acknowledgements");
+                        return Ok(RelayResponsePayload::RetiredLogins { logins: Vec::new(), has_more: false, deferred: true });
+                    }
+                    match request {
+                        RelayRequest::ReadRetiredLogins { after } => {
+                            let (logins, has_more) = super::reload_commit::read_retired_logins_page(&root, after.as_deref(), mj_core::credentials::RETIRED_LOGIN_PAGE_RAW_BYTES)?;
+                            Ok(RelayResponsePayload::RetiredLogins { logins, has_more, deferred: false })
+                        },
+                        RelayRequest::AckRetiredLogin { id, fingerprint } => {
+                            super::reload_commit::ack_retired_login(&root, &id, &fingerprint)?;
+                            Ok(RelayResponsePayload::RetiredLoginAcknowledged)
+                        }
+                        _ => unreachable!(),
+                    }
+                }).await.context("retired login task stopped").and_then(|result| result);
+                drop(read_guard);
+                drop(write_guard);
+                let body = match result {
+                    Ok(payload) => RelayResponseBody::Ok { payload },
+                    Err(error) => RelayResponseBody::Error { error: RelayProtocolError {
+                        code: RelayErrorCode::Internal, message: format!("retired login operation failed: {error:#}"), retryable: true, detail: None,
+                    } },
+                };
+                write_logged_response(&mut writer, &RelayResponseEnvelope {
+                    request_id: envelope.request_id, protocol_version: envelope.protocol_version, body,
+                }, &session_id, "retired_login").await?;
+                continue;
+            }
             if matches!(
                 &envelope.request,
                 RelayRequest::CredentialState
@@ -5588,6 +5636,176 @@ mod preparation_tests {
         assert_eq!(wakes.try_recv(), Ok(()));
         writer.shutdown().await.unwrap();
         handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_place_move_retired_logins_use_only_the_connection_and_ack_durably() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("retired-logins")).unwrap();
+        let login = mj_core::credentials::RetiredLoginSnapshot {
+            id: "move".into(),
+            profile_id: "source".into(),
+            harness: HarnessKind::Codex,
+            store_id: "store".into(),
+            login_relative_path: "auth.json".into(),
+            bytes: serde_json::to_vec(&serde_json::json!({"secret":"x".repeat(70000)})).unwrap(),
+        };
+        std::fs::write(
+            root.join("retired-logins/move.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "operation_id":"move", "store_id":"store", "login":login,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let relay = test_relay(root);
+        let before = relay.lock().unwrap().operational_state();
+        let (client, server) = UnixStream::pair().unwrap();
+        let (wake, _wakes) = mpsc::channel(4);
+        let (fatal, _fatal_reports) = mpsc::channel(1);
+        let handler = mj_core::runtime::spawn(serve_client_with_shared_credentials(
+            server,
+            relay.clone(),
+            wake,
+            SharedCredentials::new(Err("no login".into())),
+            ConnectionRuntime::default(),
+            fatal,
+        ));
+        let (read, mut writer) = client.into_split();
+        let mut reader = BufReader::new(read);
+        std::fs::write(
+            root.join(mj_core::worker_launch::PENDING_RELOAD_FILE),
+            "pending",
+        )
+        .unwrap();
+        let deferred = request(
+            &mut reader,
+            &mut writer,
+            "deferred-retired",
+            RelayRequest::ReadRetiredLogins { after: None },
+        )
+        .await;
+        assert!(matches!(deferred.body, RelayResponseBody::Ok {
+            payload: RelayResponsePayload::RetiredLogins { deferred: true, logins, .. }
+        } if logins.is_empty()));
+        std::fs::remove_file(root.join(mj_core::worker_launch::PENDING_RELOAD_FILE)).unwrap();
+        let response = request(
+            &mut reader,
+            &mut writer,
+            "read-retired",
+            RelayRequest::ReadRetiredLogins { after: None },
+        )
+        .await;
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::RetiredLogins { logins, .. } } if logins == vec![login.clone()])
+        );
+        let response = request(
+            &mut reader,
+            &mut writer,
+            "ack-retired",
+            RelayRequest::AckRetiredLogin {
+                id: "move".into(),
+                fingerprint: mj_core::credentials::credential_fingerprint(&login.bytes),
+            },
+        )
+        .await;
+        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+        assert!(!root.join("retired-logins/move.json").exists());
+        assert_eq!(relay.lock().unwrap().operational_state(), before);
+        assert!(!(RelayRequest::ReadRetiredLogins { after: None }).supported_at(92));
+        assert!(
+            !RelayRequest::AckRetiredLogin {
+                id: "move".into(),
+                fingerprint: mj_core::credentials::credential_fingerprint(&login.bytes)
+            }
+            .supported_at(92)
+        );
+        writer.shutdown().await.unwrap();
+        handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_place_move_retired_listing_serializes_with_ack_on_another_connection() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("retired-logins")).unwrap();
+        let login = mj_core::credentials::RetiredLoginSnapshot {
+            id: "move".into(),
+            profile_id: "source".into(),
+            harness: HarnessKind::Codex,
+            store_id: "store".into(),
+            login_relative_path: "auth.json".into(),
+            bytes: serde_json::to_vec(&serde_json::json!({"padding":"x".repeat(70000)})).unwrap(),
+        };
+        std::fs::write(
+            root.path().join("retired-logins/move.json"),
+            serde_json::to_vec(
+                &serde_json::json!({"operation_id":"move","store_id":"store","login":login}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let credentials = SharedCredentials::new(Err("no login".into()));
+        let relay = test_relay(root.path());
+        let mut connections = Vec::new();
+        for _ in 0..2 {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (wake, _wakes) = mpsc::channel(4);
+            let (fatal, _fatal_reports) = mpsc::channel(1);
+            let handler = mj_core::runtime::spawn(serve_client_with_shared_credentials(
+                server,
+                relay.clone(),
+                wake,
+                credentials.clone(),
+                ConnectionRuntime::default(),
+                fatal,
+            ));
+            let (read, writer) = client.into_split();
+            connections.push((BufReader::new(read), writer, handler));
+        }
+        let (mut reader1, mut writer1, handler1) = connections.pop().unwrap();
+        let (mut reader2, mut writer2, handler2) = connections.pop().unwrap();
+        let lease = credentials.read().await;
+        let (acked, listed) = {
+            let ack = request(
+                &mut reader1,
+                &mut writer1,
+                "ack",
+                RelayRequest::AckRetiredLogin {
+                    id: "move".into(),
+                    fingerprint: mj_core::credentials::credential_fingerprint(&login.bytes),
+                },
+            );
+            tokio::pin!(ack);
+            tokio::time::timeout(crate::test_support::IO_TIMEOUT, async {
+                loop {
+                    tokio::select! {
+                        _ = &mut ack => panic!("acknowledgement bypassed an active listing read guard"),
+                        _ = tokio::time::sleep(Duration::from_millis(1)) => {},
+                    }
+                    if credentials.0.try_read().is_err() { break; }
+                }
+            }).await.unwrap();
+            // The queued exclusive acknowledgement must finish before a new
+            // listing can enumerate/open files. This makes unlink/read races
+            // impossible rather than relying on repeatedly winning the race.
+            let read = request(
+                &mut reader2,
+                &mut writer2,
+                "read",
+                RelayRequest::ReadRetiredLogins { after: None },
+            );
+            drop(lease);
+            tokio::join!(&mut ack, read)
+        };
+        assert!(matches!(acked.body, RelayResponseBody::Ok { .. }));
+        assert!(
+            matches!(listed.body, RelayResponseBody::Ok { payload:RelayResponsePayload::RetiredLogins { logins, has_more:false, .. } } if logins.is_empty())
+        );
+        writer1.shutdown().await.unwrap();
+        writer2.shutdown().await.unwrap();
+        handler1.await.unwrap().unwrap();
+        handler2.await.unwrap().unwrap();
     }
 
     #[tokio::test]

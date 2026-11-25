@@ -958,35 +958,57 @@ async fn run_bridge(
         }
     };
     let opened_now = opened.lock().expect("opened session lock poisoned").clone();
+    let planned_reload = matches!(&result, Ok(Some(SessionRestart::ReloadLaunchConfig { .. })));
+    let mut retirement_error = None;
     let restarting = matches!(&result, Ok(Some(_))) || (result.is_err() && opened_now.is_some());
     // Dropping the transport closes the supervisor's stdin. Give it time to
     // terminate and reap the complete bridge process group before killing the
-    // supervisor itself as a last resort. A planned restart already decided
-    // to kill the child, so a non-zero exit is the expected outcome.
+    // supervisor itself as a last resort. Planned reloads require its successful
+    // retirement acknowledgement; killing that owner cannot prove its writers
+    // are gone and must never authorize destructive promotion.
     if !child_reaped {
         if restarting {
             let exited = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(Ok(_)) => true,
+                Ok(Ok(status)) => {
+                    if planned_reload && !status.success() {
+                        retirement_error = Some(anyhow!(
+                            "ACP supervisor did not confirm bridge retirement: {status}"
+                        ));
+                    }
+                    true
+                }
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, "wait for retiring ACP supervisor");
+                    if planned_reload {
+                        retirement_error =
+                            Some(anyhow!("wait for retiring ACP supervisor: {error}"));
+                    } else {
+                        tracing::warn!(%error, "wait for retiring ACP supervisor");
+                    }
                     false
                 }
-                Err(_) => false,
+                Err(_) => {
+                    if planned_reload {
+                        retirement_error = Some(anyhow!(
+                            "ACP supervisor timed out before confirming bridge retirement"
+                        ));
+                    }
+                    false
+                }
             };
             if !exited {
                 if let Err(error) = child.kill().await {
-                    tracing::warn!(
-                        operation = "acp_bridge_restart",
-                        %error,
-                        "could not kill ACP bridge during planned restart"
-                    );
+                    if planned_reload {
+                        retirement_error = Some(anyhow!("could not retire ACP bridge: {error}"));
+                    } else {
+                        tracing::warn!(%error, "could not kill ACP bridge during restart");
+                    }
                 }
                 if let Err(error) = child.wait().await {
-                    tracing::warn!(
-                        operation = "acp_bridge_restart",
-                        %error,
-                        "could not reap ACP bridge during planned restart"
-                    );
+                    if planned_reload {
+                        retirement_error = Some(anyhow!("could not retire ACP bridge: {error}"));
+                    } else {
+                        tracing::warn!(%error, "could not reap ACP bridge during restart");
+                    }
                 }
             }
         } else {
@@ -1050,6 +1072,12 @@ async fn run_bridge(
     if !restarting && let Some(stderr_tail) = actionable_stderr_tail(&stderr_tail) {
         result = result
             .map_err(|error| error.context(format!("{BRIDGE_STDERR_CONTEXT}\n{stderr_tail}")));
+    }
+    if let Some(error) = retirement_error {
+        if let Ok(Some(SessionRestart::ReloadLaunchConfig { resolved, .. })) = result {
+            let _ = resolved.send(ReloadResolution::refused(format!("{error:#}")));
+        }
+        return Err(error);
     }
     match result {
         Ok(None) => Ok(None),

@@ -2040,7 +2040,7 @@ pub(super) async fn serve_session(
                 on_restart,
                 resolved,
             } => {
-                let preserve_native_session = launch_config.harness == spec.harness;
+                let resume_session = launch_config.native_session_id.clone();
                 return Ok(Some(SessionRestart::ReloadLaunchConfig {
                     launch_config,
                     subagent_mcp_socket,
@@ -2053,7 +2053,7 @@ pub(super) async fn serve_session(
                     leases,
                     #[cfg(unix)]
                     on_restart,
-                    resume_session: preserve_native_session.then(|| session_id.to_string()),
+                    resume_session,
                     resolved,
                 }));
             }
