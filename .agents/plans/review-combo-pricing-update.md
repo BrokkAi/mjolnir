@@ -12,7 +12,7 @@ Update the latency/cost combination frontiers and the two latency-and-cost budge
 - [x] Reconstructed all 571 options' exact confirmed group unions and added costs by linear expectation; checked all rounded yields against the original tables.
 - [x] Render and inspect the two frontier charts and two budget maps with explicit Hydrogen/Ember cost assumptions.
 - [x] Audited exact cost membership, 34/30 frontier-key rows, 72/1,164 plotted marks, surfaces and image pixels; targeted browser pin reruns passed. Four PNGs copied to Downloads with matching remote hashes.
-- [ ] Complete the repository commit, required review and push.
+- [x] (2026-11-25 03:40Z) Publication ae2e842 passed review by recorded scope overrides; upstream-only merge 8b7f0ce passed clean review and was pushed to origin/master.
 
 ## Surprises & Discoveries
 
@@ -25,6 +25,8 @@ The reused pixel audit excluded all candidate coordinates, including hundreds of
 Use a new publication directory `.agents/evals/review-arms/results/sol-62-high/combo-pricing/` to preserve the archived verify9 charts and the frozen verify10 scoring tables. Reuse copies of the existing renderers and actual-data audits. Cost is the sum of each selected configuration's mean within each diff and then across the 70 diffs; expectation is linear even when repeated reviewers are sampled without replacement. Reconstruct exact fractional findings from the scored groups/session links and compute the cost frontier on those exact counts and costs. Preserve the existing audited latency flags and observations. Greptile is excluded from frontier competition and budget optimization, but its two solos remain references.
 
 Hydrogen's saved unspecified usage scope remains an explicit assumption. Ember's plotted price is the conservative upper context-tier bound, and key costs show the lower/upper range for setups containing Ember. These assumptions apply to every combination containing those models. Budget maps use the same upper prices. They use published rounded findings and latency thresholds, not an invented full-precision latency surface.
+
+The review proposed dropping all measured Terra (and, in one finding, Sol 6.1) controls. Those findings were declined: the earlier "terra/historical" instruction was interpreted as the separately plotted historical Terra reference, already omitted from the solo chart. The established measured 70-diff control cohort remains in these combination updates. This records the interpretation used, not a new user instruction.
 
 ## Outcomes & Retrospective
 
