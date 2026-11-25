@@ -180,7 +180,28 @@ def main():
             return result=='done'
         except Exception as error:
             import traceback
-            d.save(d.ROOT/'runs'/job['bug']/ARM/'error.json',{'error':str(error),'traceback':traceback.format_exc()})
+            directory = d.ROOT/'runs'/job['bug']/ARM
+            d.save(directory/'error.json',{'error':str(error),'traceback':traceback.format_exc()})
+            print(json.dumps({'job':job,'state':'capture-error-reconciling','error':str(error)}),flush=True)
+            # The profile slot owns a possibly accepted turn until its command is terminal.
+            # Read failures cannot release it and admit another review above the profile width.
+            if (directory/'prompt-intent.json').exists():
+                intent = json.loads((directory/'prompt-intent.json').read_text())
+                sid, command = intent['session_id'], intent['command_id']
+                while True:
+                    try:
+                        state = d.session(sid)
+                        outcome = state.get('last_turn_outcome') or {}
+                        if (outcome.get('command_id') == command and state.get('is_idle')) or state.get('lifecycle') in ['failed','stopped','suspended']:
+                            d.save(directory/'reconciled-turn.json',{'state':state,'command_id':command})
+                            break
+                        if not (directory/'prompt-receipt.json').exists():
+                            # Exact command-ID replay reconciles a lost acknowledgement, never a second sample.
+                            receipt = d.mj('message','--session',sid,'--command-id',command,'--prompt-file',directory/'review-prompt.txt')
+                            d.save(directory/'prompt-receipt.json',receipt)
+                    except Exception as reconciliation_error:
+                        d.save(directory/'reconciliation-error.json',{'error':str(reconciliation_error),'command_id':command})
+                    time.sleep(4)  # The same poll cadence as the ordinary active-turn loop.
             print(json.dumps({'job':job,'state':'failed','error':str(error)}),flush=True)
             return False
     pools={profile:concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) for profile in sorted({j['profile'] for j in jobs})}

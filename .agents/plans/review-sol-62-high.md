@@ -62,11 +62,16 @@ Run from `.agents/evals/review-arms` with:
 
 The concurrency argument applies separately to each profile's executor. The saved manifests alternate original O job order between codex3 and codex4. Canary rows remain in jobs.json and skip after successful completion. All long-running work uses the installed main daemon through mjx, not the retired private instance. Record command, PID, script digest and log path before leaving a detached run.
 
-The exact verification and scoring commands will be recorded here before those stages launch, after canary capture is validated. They must include pool membership audit, one batch on each judge profile, provider attestation and immutable source checks before scoring; direct unguarded judging is not an alternative.
+After the recorded reviewer driver exits, the single-owner guarded entry point is:
+
+    python3 -B "$S/audit_round.py" freeze
+    python3 -B "$S/run_verification.py"
+
+The entry point can be started while reviews run: it waits for the PID/command in C/reviews-launch.json, then requires all70 completed, captured and cleaned reviews. It builds verify10 from the exact frozen1,726 plus70 new sessions, audits raw membership and hashes, then submits batch0 to claude4 and batch1 to claude7. Both concrete Opus5.5/high completed commands must pass before remaining batches start. Even/odd batch IDs are disjoint profile shards, each at width16. Every batch's completed command, concrete provider, profile and modes are checked before score.py. compare.py runs20,000 paired resamples for low/medium/high in each severity tier; pareto.py preserves old caps plus one high sample and runs the all, medium+high and high frontiers. Receipts/logs are written in C; the final readout is prepared after these gates pass. No direct unguarded judging is an alternative.
 
 ## Validation and Acceptance
 
-Require exactly70 U sessions on the original70 unique diffs, 35 on each requested profile, selected Sol6.2/high on the completed command, positive prompt-to-completion clocks, captured live original image and clean pre/post inventory. No ambiguous or failed attempt is silently replaced. Verify10 must cover exactly1,796 raw sessions with no missing or extra source findings, and retain empty sessions. Every accepted batch must be completed Opus/high on claude4 or claude7 with the concrete provider identity and valid verdict/severity/confidence enums. The readout must state confirmed high-impact yield and its paired comparison, plus all/medium/low counts, reviewer cost and latency. The final PNG must omit the historical Terra point and label combined frontier and Greptile points by name.
+Require exactly70 U sessions on the original70 unique diffs, 35 on each requested profile, selected Sol6.2/high on the completed command, positive prompt-to-completion clocks, captured live original image and clean pre/post inventory. No ambiguous or failed attempt is silently replaced. Verify10 must cover exactly1,796 raw sessions with no missing or extra source findings, and retain all70 diffs via covered sessions. Batch entries must match exactly the nonempty commit set; a wholly empty diff needs no judge call. Every accepted batch must be completed Opus/high on claude4 or claude7 with the concrete provider identity and valid verdict/severity/confidence enums. The readout must state confirmed high-impact yield and its paired comparison, plus all/medium/low counts, reviewer cost and latency. The final PNG must omit the historical Terra point and label combined frontier and Greptile points by name.
 
 ## Idempotence and Recovery
 
@@ -74,7 +79,7 @@ A launch intent without a saved session acknowledgement requires reconciliation 
 
 ## Artifacts and Notes
 
-C/jobs.json and C/canaries.json freeze assignment. The saved native prompt is R/sol-62-repeats/prompt-Q.json. Prior verify9 and original O/P images are immutable references. The new result directory will contain audit scripts, exact reproduction commands, aggregate CSVs, paired comparisons and the report. Detailed raw study data remains local; copy only the requested PNG to Minastirith Downloads.
+C/jobs.json and C/canaries.json freeze assignment. The saved native prompt is R/sol-62-repeats/prompt-Q.json. Prior verify9 and original O/P images are immutable references. The new result directory contains audit scripts and guarded reproduction entry points; aggregate CSVs, paired comparisons and the report follow completion. The currently running reviewer process loaded the source frozen in C/run_reviews-launched.py; later source fixes do not alter that live interpreter. No full-run errors have been reported. Final audits include all70 accepted commands and per-profile overlap, not a subset of successful measurements. Detailed raw study data remains local; copy only the requested PNG to Minastirith Downloads.
 
 ## Interfaces and Dependencies
 

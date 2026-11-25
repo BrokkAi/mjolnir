@@ -65,7 +65,12 @@ def freeze():
     lines=hash_lines(paths);target=C/'baseline.sha256'
     if target.exists():assert target.read_text().splitlines()==lines
     else:target.write_text('\n'.join(lines)+'\n')
-    return dict(sessions=len(sessions),jobs=len(jobs),hashed_files=len(lines))
+    prices=[R/pathlib.Path(row['output']).parent/'measured.json' for row in sessions.values() if row['model']=='greptile']
+    assert len(prices)==140 and all(p.exists() for p in prices)
+    price_lines=hash_lines(prices);price_manifest=C/'baseline-external.sha256'
+    if price_manifest.exists():assert price_manifest.read_text().splitlines()==price_lines
+    else:price_manifest.write_text('\n'.join(price_lines)+'\n')
+    return dict(sessions=len(sessions),jobs=len(jobs),hashed_files=len(lines)+len(price_lines))
 
 
 def reviewers(canaries=False):
@@ -73,9 +78,10 @@ def reviewers(canaries=False):
     assert len(jobs)==(2 if canaries else 70)
     original=load(R/'arm-O-jobs.json');assert len(original)==70
     if not canaries:assert {j['bug'] for j in jobs}=={j['bug'] for j in original}
-    rows=[];events=collections.defaultdict(list);frozen=[C/'jobs.json',C/'canaries.json']
+    rows=[];events=collections.defaultdict(list);frozen=[C/'jobs.json',C/'canaries.json',C/'run_reviews-launched.py',C/'reviews-launch.json']
     for job in jobs:
         path=R/'runs'/job['bug']/'U';done=load(path/'done.json');reviewer,=done['reviewers']
+        assert (path/'suspend.json').exists(), 'Wait for captured-review cleanup before proceeding'
         sid=reviewer['child'];sd=path/'reviewers'/sid[:12]
         assert done['profile']==job['profile'] and done['protocol']=='profile-pinned-top-level-review'
         assert (reviewer['model'],reviewer['effort'],reviewer['profile'])==('gpt-6.2-sol','high',job['profile'])
@@ -124,7 +130,7 @@ def reviewers(canaries=False):
 
 
 def pool():
-    check_hashes('baseline.sha256');check_hashes('new-reviewers.sha256')
+    check_hashes('baseline.sha256');check_hashes('baseline-external.sha256');check_hashes('new-reviewers.sha256')
     expected={s['child']:s for s in load(C/'baseline-sessions.json')+load(C/'reviewer-audit.json')['sessions']}
     key=load(R/'private'/f'key-{ROUND}.json')
     assert len(expected)==len(key['sessions'])==len(set(key['sessions']))==1796
@@ -148,8 +154,10 @@ def pool():
                 assert (sid,index) not in seen;seen.add((sid,index))
                 assert finding['text']==sources[sid][index]
     assert fids==key['findings'].keys() and seen=={(sid,i) for sid,findings in sources.items() for i in range(len(findings))}
+    expected_nonempty={intro for intro,(bug,_) in commits.items() if any(sources[sid] for sid,row in expected.items() if row['bug']==bug)}
+    assert seen_commits==expected_nonempty
     assert len(commits)==70
-    return dict(sessions=len(expected),diffs=70,raw_findings=len(seen),judged_diffs=len(seen_commits),zero_finding_sessions=sum(not x for x in sources.values()))
+    return dict(wholly_empty_diffs=len(commits)-len(expected_nonempty),sessions=len(expected),diffs=70,raw_findings=len(seen),judged_diffs=len(seen_commits),zero_finding_sessions=sum(not x for x in sources.values()))
 
 
 def judges(batches=None):
