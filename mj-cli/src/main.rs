@@ -33,7 +33,6 @@ mod ec2;
 mod go;
 mod hints;
 mod import;
-mod logging;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -55,6 +54,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use mj_client::logging;
 use mj_core::config::Config;
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::collections::BTreeMap;

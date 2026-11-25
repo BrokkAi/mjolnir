@@ -32,7 +32,7 @@ const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// `mj sessions` or `mj wait` invocation must never crowd the long-running
 /// daemon's own log out of a single shared newest-N window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ProcessKind {
+pub enum ProcessKind {
     /// The persistent per-user daemon (`mj daemon-run`).
     Daemon,
     /// An interactive dashboard or other terminal-owning surface (no
@@ -56,7 +56,7 @@ impl ProcessKind {
     }
 }
 
-pub(crate) struct ControllerLog {
+pub struct ControllerLog {
     _writer_guard: ReliableWorkerGuard,
 }
 
@@ -193,7 +193,7 @@ fn write_log_messages<W: Write>(
 // asynchronous writer has not yet run. This is diagnostic I/O, not UI work.
 static PANIC_LOG: OnceLock<ResilientWriter<DeferredLogFile>> = OnceLock::new();
 
-pub(crate) fn panic_log(reason: &str) {
+pub fn panic_log(reason: &str) {
     mj_core::diagnostic_stderr!("{reason}");
     if let Some(writer) = PANIC_LOG.get() {
         let _ = writer
@@ -239,7 +239,7 @@ impl Write for DeferredLogFile {
 }
 
 impl ControllerLog {
-    pub(crate) fn start(command: &'static str, kind: ProcessKind) -> Result<Self> {
+    pub fn start(command: &'static str, kind: ProcessKind) -> Result<Self> {
         let data_dir = mj_core::config::data_dir();
         let directory = data_dir.join("logs");
         if let Err(error) =
@@ -314,7 +314,7 @@ fn log_filename(kind: ProcessKind) -> String {
 fn current_daemon_pid(data_dir: &Path) -> Option<u32> {
     let path = data_dir.join("daemon.json");
     let body = fs::read(path).ok()?;
-    let metadata: mj_client::daemon::DaemonMetadata = serde_json::from_slice(&body).ok()?;
+    let metadata: crate::daemon::DaemonMetadata = serde_json::from_slice(&body).ok()?;
     Some(metadata.pid)
 }
 
@@ -343,7 +343,7 @@ fn log_timestamp(name: &str) -> Option<String> {
     mj_core::logging::parse_log_name(name).map(|name| name.started)
 }
 
-pub(crate) fn daemon_log_path(data_dir: &Path, pid: u32) -> Result<Option<PathBuf>> {
+pub fn daemon_log_path(data_dir: &Path, pid: u32) -> Result<Option<PathBuf>> {
     let directory = data_dir.join("logs");
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -402,7 +402,7 @@ fn prune_logs_since(
             // or age; it may still be writing to it.
             continue;
         }
-        if pid.is_some_and(mj_client::daemon::process_is_alive) {
+        if pid.is_some_and(crate::daemon::process_is_alive) {
             // A process that is still running may still be writing its log.
             continue;
         }
