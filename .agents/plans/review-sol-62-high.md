@@ -11,8 +11,8 @@ Add one GPT 6.2 Sol/high review on each of the original 70 historical mjolnir di
 - [x] (2026-11-25 00:42Z) Confirmed Sol 6.2/high on codex3/codex4 and usable quota on those profiles plus claude4/claude7.
 - [x] Prepared arm U and a 70-job manifest, alternating 35 jobs per Codex profile. Prepared two canaries included in those 70.
 - [x] (2026-11-25 01:03Z) Two original canaries passed profile/model, exact native high-effort turn binding, original image/harness, unchanged checkout and output/clock audit; durations119.3/122.4s, four raw findings each.
-- [ ] Full70 manifest launched with two executors of width16, total32; two accepted canaries skip. Receipt R/sol-62-high/reviews-launch.json and log reviews.log.
-- [ ] Freeze verify9 cohort and add the 70 U sessions to a fresh blinded verify10 pool; verify exact session and finding membership.
+- [x] (2026-11-25 01:30Z) All70 reviews completed and passed audit, 35/profile, no failures or extra reviewer samples. Observed simultaneous reviewer turns peaked at12 on codex3 and13 on codex4.
+- [x] Fresh verify10 pool audit passed:1,796 sessions,3,550 raw findings,409 empty sessions,69 nonempty diffs in35batches; all70 diffs retained via session membership.
 - [ ] Run Opus/high canaries on claude4 and claude7, attest actual provider/model/effort, then finish all batches using only those judge profiles.
 - [ ] Score all/low/medium/high and medium+high; compare high with low and medium on the same 70 diffs and publish costs/latencies and confidence intervals.
 - [ ] Update and deliver the combined PNG, excluding historical Terra, then complete repository review and push.
@@ -30,6 +30,8 @@ Use explicit profile-pinned top-level review sessions to honor 16 concurrent job
 Retain all verify9 sessions in fresh Opus judging so high, medium and low share adjudication and grouping. No Neon judges are permitted. Judge routes are claude4 and claude7, alias opus at high effort; completed turn usage must identify concrete `claude-opus-5-5`, allowing the known Haiku auxiliary only. No builds, installs or daemon/profile changes are needed.
 
 ## Outcomes & Retrospective
+
+All70 high-effort samples passed capture and immutable-input audits. The pool has246 additional raw findings beyond verify9 and exactly70 new session IDs. Initial judge creation was rejected before session registration because the saved verifier workspace ID no longer existed in the main store. The trace references3053122-144/145 show the unknown-workspace trigger; neither canary accepted a model prompt. The original blinded pool is preserved, and the study workspace reference was repaired. verify_driver.py now consults the daemon workspace list before trusting its cached ID.
 
 Two of70 high-effort reviews are accepted, one per requested profile. Each returned four raw findings; none is a confirmed finding until the fresh blinded Opus round. Native effort was proven from captured rollout prompt/turn_context despite the API usage effort field being null. The original Codex0.170/ACP1.15.1 and image were observed. Full cohort is running; setup/capture recoveries reused the same two sessions and did not sample either review again.
 
