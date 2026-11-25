@@ -7,11 +7,11 @@ ENV MISE_DATA_DIR=/opt/mise \
     CARGO_HOME=/opt/cargo \
     MISE_TRUSTED_CONFIG_PATHS=/opt/mj-image/recipe \
     MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS=rust,node,python,ruby,go \
-    PATH=/opt/mise/shims:$PATH
+    PATH=/opt/mise/shims:/opt/mj-image/bin:$PATH
 WORKDIR /opt/mj-image/recipe
 RUN mkdir -p '.' && printf '%s' 'MjQK' | base64 -d > '.nvmrc' && chmod 0644 '.nvmrc'
 RUN mkdir -p '.' && printf '%s' 'W3Rvb2xzXQpweXRob24gPSAiMy4xNSIK' | base64 -d > 'mise.toml' && chmod 0644 'mise.toml'
-RUN mise bootstrap packages apply --yes && mise install && mkdir -p /opt/mise /opt/rustup /opt/cargo && chown -R hel /opt/mise /opt/rustup /opt/cargo
+RUN mise bootstrap packages apply --yes && mise install && rm -rf '/opt/mj-image/bin' && mkdir -p '/opt/mj-image/bin' && dirs=$(mise bin-paths) && printf '%s\n' "$dirs" | while IFS= read -r dir; do [ -d "$dir" ] || continue; for bin in "$dir"/*; do [ -f "$bin" ] && [ -x "$bin" ] || continue; name=${bin##*/}; [ -e '/opt/mj-image/bin'"/$name" ] && continue; escaped=$(printf '%s' "$bin" | sed "s/'/'\\\\''/g"); printf "#!/bin/sh\nexec '%s' \"\$@\"\n" "$escaped" > '/opt/mj-image/bin'"/$name" && chmod 0755 '/opt/mj-image/bin'"/$name" || exit 1; done; done && mkdir -p /opt/mise /opt/rustup /opt/cargo && chown -R hel /opt/mise /opt/rustup /opt/cargo
 LABEL dev.mj.image.recipe="3034e48e2589d2e18248de896fce6ae6787d0c89ae9cd1f760cb6cb9dd5080b4" \
     dev.mj.image.mise="2026.11.9" \
     dev.mj.image.platform="linux/amd64"

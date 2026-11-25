@@ -1346,7 +1346,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
         .find(|command| command.purpose == "install Git")
         .unwrap();
     assert!(bootstrap.args.last().unwrap().contains("command -v git"));
-    assert!(bootstrap.args.last().unwrap().contains("command -v gh"));
+    assert!(bootstrap.args.last().unwrap().contains("gh --version"));
     assert!(
         bootstrap
             .args

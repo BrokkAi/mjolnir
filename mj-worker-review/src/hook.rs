@@ -90,6 +90,74 @@ documentation_only_push() {
   empty_tree=$(git hash-object -t tree --stdin < /dev/null) || return 1
   documentation_only "$empty_tree" "$1"
 }
+# The branch the remote's last fetch recorded as its default; never a local branch.
+remote_default_branch() {
+  for cm_candidate in "refs/remotes/$1/HEAD" "refs/remotes/$1/main" "refs/remotes/$1/master"; do
+    git rev-parse --verify --quiet "$cm_candidate^{commit}" 2>/dev/null && return 0
+  done
+  return 1
+}
+# Accept a two-parent merge whose whole tree is exactly what Git makes by merging
+# one reviewed point with upstream history: no resolution or extra edit is present.
+# Arguments: pushed object, its tree, destination tip, remote name, remote URL.
+# The cm_ names keep the caller's loop variables intact. Anything unproven fails.
+clean_upstream_merge_push() {
+  cm_local_sha=$1
+  cm_tree=$2
+  cm_remote_sha=$3
+  cm_remote_name=$4
+  cm_remote_url=$5
+  cm_remote_commit=
+  cm_local_commit=$(git rev-parse --verify --quiet "$cm_local_sha^{commit}" 2>/dev/null) || return 1
+  cm_parents=$(git rev-list --parents -n 1 "$cm_local_commit" 2>/dev/null) || return 1
+  # shellcheck disable=SC2086
+  set -- $cm_parents
+  [ "$#" -eq 3 ] || return 1
+  cm_parent1=$2
+  cm_parent2=$3
+  # An update must keep the destination's history.
+  case "$cm_remote_sha" in
+    *[!0]*)
+      cm_remote_commit=$(git rev-parse --verify --quiet "$cm_remote_sha^{commit}" 2>/dev/null) || return 1
+      git merge-base --is-ancestor "$cm_remote_commit" "$cm_local_commit" 2>/dev/null || return 1
+      ;;
+  esac
+  # The second parent must already be published: the destination's tip, or
+  # history in the default branch last fetched from the same URL.
+  if [ -n "$cm_remote_commit" ] && [ "$cm_parent2" = "$cm_remote_commit" ]; then
+    :
+  elif cm_fetch_url=$(git remote get-url -- "$cm_remote_name" 2>/dev/null) && [ "$cm_fetch_url" = "$cm_remote_url" ]; then
+    cm_default_ref=$(remote_default_branch "$cm_remote_name") || return 1
+    git merge-base --is-ancestor "$cm_parent2" "$cm_default_ref" 2>/dev/null || return 1
+  else
+    return 1
+  fi
+  # The reviewed point is a clean review or a chosen baseline, never an override.
+  # It must lead into the first parent and not yet be part of upstream history.
+  cm_bases=$(git for-each-ref --merged="$cm_parent1" --no-merged="$cm_parent2" \
+    --format='%(objectname)' refs/mj/reviewed/) || return 1
+  [ -n "$cm_bases" ] || return 1
+  # shellcheck disable=SC2086
+  set -- $cm_bases
+  if [ "$#" -gt 1 ]; then
+    cm_bases=$(git merge-base --independent "$@") || return 1
+    # shellcheck disable=SC2086
+    set -- $cm_bases
+  fi
+  [ "$#" -eq 1 ] || return 1
+  cm_reviewed=$1
+  # A conflict exits 1: resolutions are new work that needs review.
+  cm_merged_tree=$(git merge-tree --write-tree --allow-unrelated-histories --no-messages \
+    "$cm_reviewed" "$cm_parent2" 2>/dev/null) || return 1
+  [ "$cm_merged_tree" = "$cm_tree" ] || return 1
+  # Unreviewed commits between the reviewed point and the first parent must not
+  # have needed a conflict resolution that happens to match upstream's side.
+  if [ "$cm_parent1" != "$cm_reviewed" ]; then
+    cm_actual_tree=$(git merge-tree --write-tree --allow-unrelated-histories --no-messages \
+      "$cm_parent1" "$cm_parent2" 2>/dev/null) || return 1
+    [ "$cm_actual_tree" = "$cm_tree" ] || return 1
+  fi
+}
 if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
   while read -r local_ref local_sha remote_ref remote_sha; do
     case "$local_sha" in
@@ -98,6 +166,10 @@ if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
     esac
     tree=$(git rev-parse --verify "$local_sha^{tree}") || exit 1
     if ! git show-ref --verify --quiet "refs/mj/reviewed/$tree" && ! git show-ref --verify --quiet "refs/mj/overridden/$tree"; then
+      if clean_upstream_merge_push "$local_sha" "$tree" "$remote_sha" "$1" "$2"; then
+        echo "mj: $local_ref cleanly merges reviewed work with upstream history; review is not required." >&2
+        continue
+      fi
       if documentation_only_push "$local_sha" "$remote_sha" "$1" "$2"; then
         echo "mj: $local_ref changes only plain documentation; review is not required." >&2
         continue
@@ -763,5 +835,315 @@ mod tests {
             fs::read_to_string(hooks.join("pre-push.before-mj")).unwrap(),
             "earlier hook"
         );
+    }
+
+    /// Another clone publishes a commit to `origin/main`; the checkout fetches it.
+    fn publish_upstream(temp: &Path, path: &str, contents: &[u8]) -> String {
+        let root = temp.join("checkout");
+        let other = temp.join("other");
+        if other.exists() {
+            git(&other, &["pull", "-q", "--ff-only", "origin", "main"]);
+        } else {
+            let origin = temp.join("origin.git");
+            git(
+                temp,
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    other.to_str().unwrap(),
+                ],
+            );
+            git(&other, &["config", "user.name", "Upstream Test"]);
+            git(&other, &["config", "user.email", "upstream@example.test"]);
+        }
+        commit_file(&other, path, contents);
+        git(&other, &["push", "-q", "origin", "HEAD:main"]);
+        git(&root, &["fetch", "-q", "origin"]);
+        git(&other, &["rev-parse", "HEAD"])
+    }
+
+    fn merge_upstream(root: &Path) -> String {
+        git(root, &["merge", "-q", "--no-edit", "origin/main"]);
+        git(root, &["rev-parse", "HEAD"])
+    }
+
+    /// A reviewed feature commit on the local branch, with the hook installed.
+    fn reviewed_feature() -> (tempfile::TempDir, PathBuf, String) {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        commit_file(&root, "feature.txt", b"reviewed feature\n");
+        commit_file(&root, "tracked.txt", b"local\n");
+        reviewed(&root);
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        (temp, root, head)
+    }
+
+    fn rejected_as_unreviewed(output: &GitOutput) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(output.status, 0, "{stderr}");
+        assert!(stderr.contains("has not been reviewed."), "{stderr}");
+    }
+
+    fn accepted_as_a_clean_merge(output: &GitOutput) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status, 0, "{stderr}");
+        assert!(
+            stderr.contains("cleanly merges reviewed work with upstream history"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn hook_exempts_clean_merges_of_reviewed_work_with_upstream_history() {
+        let (temp, root, _) = reviewed_feature();
+        publish_upstream(temp.path(), "upstream.txt", b"first\n");
+        let first = merge_upstream(&root);
+        accepted_as_a_clean_merge(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        // The merge has no review of its own, yet a second upstream commit
+        // still merges onto it by the same reviewed point.
+        assert!(!git(&root, &["for-each-ref", "refs/mj/reviewed/"]).contains(&first));
+        publish_upstream(temp.path(), "upstream.txt", b"second\n");
+        merge_upstream(&root);
+        accepted_as_a_clean_merge(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        // The destination's own tip may be the merged upstream parent.
+        accepted_as_a_clean_merge(&push(&root, true, &["HEAD:refs/heads/main"]));
+    }
+
+    #[test]
+    fn hook_clean_merge_exemption_checks_every_ref_and_runs_the_preserved_hook() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let hooks = root.join(".git/hooks");
+        fs::write(
+            hooks.join("pre-push"),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > hook-arguments\ncat > hook-input\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(hooks.join("pre-push"), fs::Permissions::from_mode(0o755)).unwrap();
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        commit_file(&root, "feature.txt", b"reviewed feature\n");
+        reviewed(&root);
+        // The branch already exists on the remote when the merge arrives.
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/feature"]).status, 0);
+        publish_upstream(temp.path(), "upstream.txt", b"upstream\n");
+        let merge = merge_upstream(&root);
+        accepted_as_a_clean_merge(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        assert!(
+            fs::read_to_string(root.join("hook-input"))
+                .unwrap()
+                .starts_with(&format!("HEAD {merge} refs/heads/feature "))
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("hook-arguments"))
+                .unwrap()
+                .lines()
+                .next(),
+            Some("origin")
+        );
+        // An exempt ref does not exempt an unreviewed sibling in the same push.
+        fs::remove_file(root.join("hook-input")).unwrap();
+        git(&root, &["checkout", "-q", "-b", "side", "HEAD~"]);
+        commit_file(&root, "side.txt", b"unreviewed\n");
+        let side = git(&root, &["rev-parse", "HEAD"]);
+        let output = push(
+            &root,
+            true,
+            &[
+                &format!("{merge}:refs/heads/merged"),
+                &format!("{side}:refs/heads/side"),
+            ],
+        );
+        rejected_as_unreviewed(&output);
+        assert!(!root.join("hook-input").exists());
+    }
+
+    #[test]
+    fn hook_clean_merge_exemption_refuses_resolutions_and_extra_edits() {
+        let (temp, root, base) = reviewed_feature();
+        publish_upstream(temp.path(), "upstream.txt", b"upstream\n");
+        for edit in ["an extra file", "a mode change"] {
+            git(
+                &root,
+                &["merge", "-q", "--no-commit", "--no-ff", "origin/main"],
+            );
+            if edit == "an extra file" {
+                fs::write(root.join("extra.txt"), "extra\n").unwrap();
+                git(&root, &["add", "extra.txt"]);
+            } else {
+                git(&root, &["update-index", "--chmod=+x", "feature.txt"]);
+            }
+            git(&root, &["commit", "-qm", "merge with another change"]);
+            rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+            git(&root, &["reset", "-q", "--hard", &base]);
+        }
+        // A conflict resolved by hand is new work.
+        publish_upstream(temp.path(), "tracked.txt", b"upstream\n");
+        let conflicted = SystemGit
+            .run(
+                &root,
+                &GitCommand {
+                    arguments: ["merge", "-q", "--no-edit", "origin/main"]
+                        .map(Into::into)
+                        .to_vec(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_ne!(conflicted.status, 0);
+        fs::write(root.join("tracked.txt"), "resolved\n").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-qm", "resolve the conflict"]);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+    }
+
+    #[test]
+    fn hook_clean_merge_exemption_needs_a_reviewed_baseline_not_an_override() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        let head = commit(&root, "overridden feature");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_overridden_tree(&SystemGit, &root, &tree, &head).unwrap();
+        publish_upstream(temp.path(), "upstream.txt", b"upstream\n");
+        merge_upstream(&root);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        crate::capture::record_review_base(&SystemGit, &root, &tree, &head).unwrap();
+        accepted_as_a_clean_merge(&push(&root, true, &["HEAD:refs/heads/feature"]));
+    }
+
+    #[test]
+    fn hook_clean_merge_exemption_refuses_unproven_parents_and_destinations() {
+        let (temp, root, base) = reviewed_feature();
+        let branch = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        publish_upstream(temp.path(), "upstream.txt", b"first\n");
+        // Unreviewed work between the reviewed point and the merge.
+        commit_file(&root, "unreviewed.txt", b"unreviewed\n");
+        merge_upstream(&root);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        git(&root, &["reset", "-q", "--hard", &base]);
+        // A local branch from before the reviewed work is not upstream history.
+        let first = git(&root, &["rev-list", "--max-parents=0", "HEAD"]);
+        git(&root, &["checkout", "-q", "-b", "side", &first]);
+        commit_file(&root, "side.txt", b"unreviewed\n");
+        git(&root, &["checkout", "-q", &branch]);
+        git(&root, &["merge", "-q", "--no-edit", "side"]);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        git(&root, &["reset", "-q", "--hard", &base]);
+        // Three parents are not an ordinary merge, even with the right tree.
+        let tree = git(&root, &["merge-tree", "--write-tree", &base, "origin/main"]);
+        let octopus = git(
+            &root,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &base,
+                "-p",
+                "origin/main",
+                "-p",
+                &first,
+                "-m",
+                "octopus",
+            ],
+        );
+        git(&root, &["reset", "-q", "--hard", &octopus]);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        git(&root, &["reset", "-q", "--hard", &base]);
+        // Fetch history says nothing about a different push destination.
+        let elsewhere = temp.path().join("elsewhere.git");
+        git(
+            temp.path(),
+            &["init", "--bare", "-q", elsewhere.to_str().unwrap()],
+        );
+        git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                elsewhere.to_str().unwrap(),
+            ],
+        );
+        merge_upstream(&root);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        git(&root, &["config", "--unset", "remote.origin.pushurl"]);
+        // The merge is fine, but force-pushing it would discard newer upstream work.
+        accepted_as_a_clean_merge(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        publish_upstream(temp.path(), "upstream.txt", b"second\n");
+        rejected_as_unreviewed(&push(&root, true, &["+HEAD:refs/heads/main"]));
+    }
+
+    #[test]
+    fn hook_clean_merge_exemption_refuses_reverts_of_merged_work_and_ambiguous_baselines() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        let branch = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        // Reviewed work is published, then upstream builds on it and the local
+        // branch reverts that build before merging newer upstream history.
+        commit_file(&root, "feature.txt", b"reviewed feature\n");
+        reviewed(&root);
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+        publish_upstream(temp.path(), "published.txt", b"published\n");
+        git(&root, &["merge", "-q", "--ff-only", "origin/main"]);
+        git(&root, &["rm", "-q", "published.txt"]);
+        git(&root, &["commit", "-qm", "revert the published commit"]);
+        publish_upstream(temp.path(), "upstream.txt", b"newer\n");
+        merge_upstream(&root);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
+        // Two incomparable reviewed points do not choose a baseline.
+        git(&root, &["checkout", "-q", "-b", "left", &branch]);
+        commit_file(&root, "left.txt", b"reviewed left\n");
+        reviewed(&root);
+        git(&root, &["checkout", "-q", "-b", "right", &branch]);
+        // Upstream will publish the same change, so this point alone adds nothing.
+        commit_file(&root, "upstream.txt", b"newest\n");
+        reviewed(&root);
+        git(&root, &["checkout", "-q", "left"]);
+        git(&root, &["merge", "-q", "--no-edit", "right"]);
+        publish_upstream(temp.path(), "upstream.txt", b"newest\n");
+        merge_upstream(&root);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/ambiguous"]));
+    }
+
+    #[test]
+    fn hook_clean_merge_exemption_refuses_unreviewed_work_resolved_to_the_upstream_side() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        commit_file(&root, "feature.txt", b"reviewed feature\n");
+        reviewed(&root);
+        let reviewed_commit = git(&root, &["rev-parse", "HEAD"]);
+        // Unreviewed work edits a line that upstream also edits; the merge
+        // takes upstream's side, so its tree equals Git's merge of the
+        // reviewed point with upstream.
+        commit_file(&root, "tracked.txt", b"unreviewed\n");
+        let upstream = publish_upstream(temp.path(), "tracked.txt", b"upstream\n");
+        let clean = git(
+            &root,
+            &["merge-tree", "--write-tree", &reviewed_commit, &upstream],
+        );
+        let conflicted = SystemGit
+            .run(
+                &root,
+                &GitCommand {
+                    arguments: ["merge", "-q", "--no-edit", "origin/main"]
+                        .map(Into::into)
+                        .to_vec(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_ne!(conflicted.status, 0);
+        git(&root, &["checkout", "--theirs", "tracked.txt"]);
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-qm", "take upstream's side"]);
+        assert_eq!(git(&root, &["rev-parse", "HEAD^{tree}"]), clean);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
     }
 }

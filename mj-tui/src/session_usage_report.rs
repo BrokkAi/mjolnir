@@ -21,6 +21,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UsageControl {
@@ -200,10 +201,122 @@ fn dollars(cost: CostUsdTicks, partial: bool) -> String {
     format!("${:.3}{plus}", ticks as f64 / 10_000_000_000.0)
 }
 
+/// Use the same provider snapshot as quota pools; file-backed profiles can
+/// remain unresolved until background discovery finishes.
+fn provider_totals(
+    dashboard: &DashboardState,
+    report: &SessionUsageReport,
+    width: u16,
+) -> Vec<String> {
+    struct ProviderTotal {
+        cost: CostUsdTicks,
+        partial: bool,
+        quota_partial: bool,
+        quotas: Vec<(Option<u64>, Option<u32>)>,
+    }
+    impl Default for ProviderTotal {
+        fn default() -> Self {
+            Self {
+                cost: Ok(0),
+                partial: false,
+                quota_partial: false,
+                quotas: Vec::new(),
+            }
+        }
+    }
+    let label_for = |id: &str| match dashboard.config.profiles.get(id) {
+        None => format!("{id} (unconfigured)"),
+        Some(profile) => {
+            crate::render::quota_pools::profile_provider(id, profile, &dashboard.quota_providers)
+                .display_name()
+                .to_owned()
+        }
+    };
+    let mut totals: BTreeMap<String, ProviderTotal> = BTreeMap::new();
+    for usage in &report.profile_usage {
+        let label = usage
+            .profile
+            .as_deref()
+            .map_or_else(|| "Unattributed profile".to_owned(), label_for);
+        let total = totals.entry(label).or_default();
+        // Overflow is an unknown estimate, never a wrapped dollar total.
+        total.cost = mj_core::usage::add_cost(total.cost, usage.cost_usd_ticks)
+            .unwrap_or(Err(mj_core::usage::UnknownCost));
+        total.partial |= usage.coverage.is_partial();
+    }
+    // The report owns account membership: idle and unreadable weekly accounts
+    // are included; API accounts have no weekly capacity to pool.
+    for quota in &report.quota_usage {
+        let total = totals.entry(label_for(&quota.profile)).or_default();
+        total.quota_partial |= quota.partial;
+        total
+            .quotas
+            .push((quota.consumed_basis_points, quota.monthly_price_usd));
+    }
+    let mut totals: Vec<_> = totals.into_iter().collect();
+    totals.sort_by(|(a, ac), (b, bc)| {
+        mj_core::usage::descending_cost(&ac.cost, &bc.cost).then_with(|| a.cmp(b))
+    });
+    let mut lines = Vec::<String>::new();
+    for (label, total) in totals {
+        let unweighted = total
+            .quotas
+            .iter()
+            .any(|(_, price)| price.unwrap_or(0) == 0);
+        let quota =
+            if total.quotas.is_empty() || total.quotas.iter().any(|(used, _)| used.is_none()) {
+                "quota n/a".to_owned()
+            } else {
+                // Match quota pools: if any plan weight is unknown, use equal
+                // weights for every member rather than mixing incompatible units.
+                let mut weighted = 0.0;
+                let mut weights = 0.0;
+                for (used, price) in &total.quotas {
+                    let weight = if unweighted {
+                        1.0
+                    } else {
+                        f64::from(price.unwrap_or(0))
+                    };
+                    weighted += used.unwrap_or(0) as f64 * weight;
+                    weights += weight;
+                }
+                format!(
+                    "~{:.1}%{}{}",
+                    weighted / weights / 100.0,
+                    if total.quota_partial {
+                        " (partial)"
+                    } else {
+                        ""
+                    },
+                    if unweighted { " unweighted" } else { "" }
+                )
+            };
+        let amount = format!("{} · {quota}", dollars(total.cost, total.partial));
+        let label_width = (width as usize).saturating_sub(Line::raw(amount.as_str()).width() + 1);
+        let entry = format!(
+            "{} {amount}",
+            truncate_to_cells(&label, label_width, Truncate::SUMMARY)
+        );
+        if let Some(line) = lines.last_mut()
+            && Line::raw(line.as_str()).width() + 3 + Line::raw(entry.as_str()).width()
+                <= width as usize
+        {
+            line.push_str(" · ");
+            line.push_str(&entry);
+        } else {
+            lines.push(entry);
+        }
+    }
+    if !lines.is_empty() {
+        lines.push("Weekly quota consumed in window · all account use".into());
+    }
+    lines
+}
+
 pub(crate) fn render(
     frame: &mut Frame,
     area: Rect,
-    _dashboard: &DashboardState,
+    dashboard: &DashboardState,
     dialog: &SessionUsageDialog,
     surfaces: &mut FrameSurfaces,
 ) {
@@ -285,7 +398,46 @@ pub(crate) fn render(
     } else {
         2
     };
-    let chart_y = inner.y + if compact { 3 } else { 5 };
+    let header_height = if compact { 3 } else { 5 };
+    // The chart label row occupies one of these rows; normal mode adds a gap.
+    let row_gap = if compact { 1 } else { 2 };
+    let hints = [
+        "Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models",
+        "Sub-agents included · profile filters turns · + partial · base rates",
+    ];
+    let visible_hints = &hints[usize::from(compact)..];
+    let footer_height = visible_hints.len() as u16 + 1;
+    let mut provider_lines = match &dialog.report {
+        Some(Ok(report)) => provider_totals(dashboard, report, inner.width),
+        _ => Vec::new(),
+    };
+    // Keep the chart and at least one selectable detail row on short screens.
+    let provider_height = provider_lines.len().min(
+        inner
+            .height
+            .saturating_sub(header_height + bar_rows + row_gap + footer_height + 1)
+            as usize,
+    ) as u16;
+    if provider_lines.len() > provider_height as usize && provider_height > 0 {
+        let explanation = provider_lines.last().cloned().unwrap_or_default();
+        let visible = provider_height.saturating_sub(2) as usize;
+        let hidden = provider_lines.len() - 1 - visible;
+        provider_lines.truncate(visible);
+        provider_lines.push(format!("… {hidden} more provider rows (enlarge terminal)"));
+        if provider_height > 1 {
+            provider_lines.push(explanation);
+        }
+    }
+    let chart_y = inner.y + header_height + provider_height;
+    frame.render_widget(
+        Paragraph::new(provider_lines.join("\n")),
+        Rect::new(
+            inner.x,
+            chart_y - provider_height,
+            inner.width,
+            provider_height,
+        ),
+    );
     render_hour_chart(
         frame,
         Rect::new(inner.x, chart_y, inner.width, bar_rows + 1),
@@ -293,14 +445,12 @@ pub(crate) fn render(
         bar_rows,
         &mut form,
     );
-    let rows_y = chart_y + bar_rows + if compact { 1 } else { 2 };
+    let rows_y = chart_y + bar_rows + row_gap;
     let rows_area = Rect::new(
         inner.x,
         rows_y,
         inner.width,
-        inner
-            .bottom()
-            .saturating_sub(rows_y + if compact { 2 } else { 3 }),
+        inner.bottom().saturating_sub(rows_y + footer_height),
     );
     match &dialog.report {
         None => frame.render_widget(
@@ -320,12 +470,7 @@ pub(crate) fn render(
                     "Total {} · {window} · estimated API USD",
                     dollars(report.cost_usd_ticks, partial),
                 )),
-                Rect::new(
-                    inner.x,
-                    inner.y + if compact { 2 } else { 4 },
-                    inner.width,
-                    1,
-                ),
+                Rect::new(inner.x, inner.y + header_height - 1, inner.width, 1),
             );
             let mut lines = Vec::new();
             let mut row_map = Vec::new();
@@ -449,11 +594,7 @@ pub(crate) fn render(
             }
         }
     }
-    let hints = [
-        "Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models",
-        "Sub-agents included · profile filters turns · + partial · base rates",
-    ];
-    for (row, hint) in hints[usize::from(compact)..].iter().rev().enumerate() {
+    for (row, hint) in visible_hints.iter().rev().enumerate() {
         frame.render_widget(
             Paragraph::new(*hint).style(theme::muted()),
             Rect::new(inner.x, inner.bottom() - 2 - row as u16, inner.width, 1),

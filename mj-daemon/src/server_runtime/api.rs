@@ -4882,6 +4882,42 @@ impl SubagentBackend for ApiBackend {
         self.exports.clone().dashboard_backend()
     }
 
+    /// The store's report plus the weekly quota each enabled quota-bearing
+    /// profile consumed over its span. The quota poller's publications give
+    /// the identities its history is stored under; nothing is cached here.
+    fn usage_report(
+        &self,
+        query: mj_core::usage::SessionUsageQuery,
+    ) -> BoxFuture<'_, Result<mj_core::usage::SessionUsageReport>> {
+        Box::pin(async move {
+            let config = self.profile_catalog.live()?;
+            let profiles: Vec<_> = {
+                let reports = self
+                    .quota_reports
+                    .lock()
+                    .map_err(|_| anyhow!("profile quota reports lock poisoned"))?;
+                config
+                    .enabled_profiles()
+                    .filter(|(id, _)| query.profile.as_deref().is_none_or(|wanted| wanted == *id))
+                    .filter_map(|(id, _)| {
+                        mj_controller::quota_telemetry::quota_usage_profile(id, reports.get(id))
+                    })
+                    .collect()
+            };
+            let models = mj_controller::profile_config::advertised_models();
+            mj_core::runtime::spawn_blocking(move || {
+                let mut report = mj_controller::database::load_session_usage_report(&query, models)?;
+                report.quota_usage = mj_controller::quota_telemetry::weekly_quota_usage(
+                    profiles,
+                    report.since_ms,
+                    report.until_ms,
+                );
+                Ok::<_, anyhow::Error>(report)
+            })
+            .await?
+        })
+    }
+
     fn create_bundle(
         &self,
         source: String,
