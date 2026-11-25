@@ -11,18 +11,11 @@ enum SuspendInvocation {
 async fn release_idle_workspace_leases(
     leases: Vec<mj_controller::controller::IdleWorkspaceLease>,
 ) -> Result<()> {
-    let mut first_error = None;
-    for lease in leases {
-        if let Err(error) = lease.release().await
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    futures::future::join_all(leases.into_iter().map(|lease| lease.release()))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+        .map(drop)
 }
 
 /// Lease a running worker, or accept a parked session whose foreground
