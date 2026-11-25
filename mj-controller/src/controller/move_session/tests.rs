@@ -2328,6 +2328,109 @@ mod direct_peer_route {
     }
 }
 
+/// The retained-source stop before a Move retry keeps the 15-second cleanup
+/// bound on every command and the executor's own cancellation: a person's
+/// cancel ends it (it is not marked shutdown-only), and so does shutdown.
+mod retained_source_stop {
+    use std::io::Read;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use mj_core::targets::{
+        CommandExecutor, CommandOutput, CommandSpec, DeadlinePause, TargetLocator,
+    };
+
+    struct BoundedProbe {
+        cancelled: bool,
+        bounds: Mutex<Vec<(Duration, bool)>>,
+    }
+
+    impl CommandExecutor for BoundedProbe {
+        fn execute(&self, _: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            anyhow::bail!("the stop must run through the bounded cleanup path")
+        }
+
+        fn execute_cleanup_with_timeout(
+            &self,
+            command: &CommandSpec,
+            timeout: Duration,
+        ) -> anyhow::Result<CommandOutput> {
+            self.bounds
+                .lock()
+                .unwrap()
+                .push((timeout, command.is_shutdown_only()));
+            if self.cancelled && !command.is_shutdown_only() {
+                anyhow::bail!("operation cancelled while {}", command.purpose);
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancelled
+        }
+
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+    }
+
+    #[test]
+    fn stop_keeps_the_cleanup_bound_and_the_executors_cancellation() {
+        let backend = TargetLocator::LocalBare {
+            worker_root: "/tmp/mj-retained-source-stop/retained-session".to_owned(),
+        };
+        let probe = BoundedProbe {
+            cancelled: false,
+            bounds: Mutex::default(),
+        };
+        super::super::stop_retained_source_worker(&backend, "retained-session", &probe).unwrap();
+        let bounds = probe.bounds.lock().unwrap().clone();
+        assert!(!bounds.is_empty());
+        assert!(
+            bounds
+                .iter()
+                .all(|bound| *bound == (Duration::from_secs(15), false)),
+            "{bounds:?}"
+        );
+
+        let cancelled = BoundedProbe {
+            cancelled: true,
+            bounds: Mutex::default(),
+        };
+        let error =
+            super::super::stop_retained_source_worker(&backend, "retained-session", &cancelled)
+                .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("operation cancelled"),
+            "{error:#}"
+        );
+    }
+}
+
 #[test]
 fn move_session_sealed_continuity_survives_config_changes_and_absent_native_identity() {
     let state_a = sample_target("source");

@@ -18,7 +18,7 @@ pub(crate) struct SummaryReading {
 pub(crate) fn minimized_targets_line(
     dashboard: &DashboardState,
     width: u16,
-    focused: bool,
+    pressed: bool,
 ) -> Line<'static> {
     let now_epoch_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -74,14 +74,14 @@ pub(crate) fn minimized_targets_line(
             }
         })
         .collect::<Vec<_>>();
-    summary_row("Targets", &readings, width, focused)
+    summary_row("Targets", &readings, width, pressed)
 }
 
 /// A weighted reading for each independently metered provider pool.
 pub(crate) fn minimized_quota_line(
     dashboard: &DashboardState,
     width: u16,
-    focused: bool,
+    pressed: bool,
     now: u64,
 ) -> Line<'static> {
     let mut readings = Vec::new();
@@ -131,24 +131,34 @@ pub(crate) fn minimized_quota_line(
         }
     }
     readings.extend(statuses);
-    summary_row("Profiles", &readings, width, focused)
+    summary_row("Profiles", &readings, width, pressed)
 }
 
 /// A minimized pane's single row, drawn as the pane's own title so it keeps
 /// the rule the full pane has. Readings are comma-separated and truncated
-/// rather than wrapped, because the row is one row.
+/// rather than wrapped, because the row is one row. The label is the pane's
+/// dropdown button, drawn pressed while the pointer holds it down.
 pub(crate) fn summary_row(
     label: &str,
     readings: &[SummaryReading],
     width: u16,
-    _focused: bool,
+    pressed: bool,
 ) -> Line<'static> {
     // A minimized pane is still a pane, so its one row opens the way a
     // bordered one does and the rule carries on between the label and the
-    // readings: `─ Profiles ── claude-1 63% ────`.
-    let (opening, divider) = ("─ ", " ── ");
-    let mut spans = vec![Span::raw(format!("{opening}{label}{divider}"))];
-    let mut used = opening.chars().count() + label.chars().count() + divider.chars().count();
+    // readings: `─ Profiles ▾ ── claude-1 63% ────`.
+    let (opening, divider) = ("─", "── ");
+    let title = crate::surface_controls::pane_title_label(label, true);
+    let mut used = opening.chars().count() + title.chars().count() + divider.chars().count();
+    let mut spans = vec![
+        Span::raw(opening),
+        if pressed {
+            Span::styled(title, theme::selection(true))
+        } else {
+            Span::raw(title)
+        },
+        Span::raw(divider),
+    ];
     // Leave room for the rule the title runs into, so the readings never push
     // it off the row and it never butts straight against a value.
     let budget = usize::from(width).saturating_sub(4);
@@ -2190,7 +2200,7 @@ mod tests {
                 70,
                 9,
             );
-            let minimized = minimized_quota_line(&dashboard, 110, true, now);
+            let minimized = minimized_quota_line(&dashboard, 110, false, now);
             // Hard-won: quota review: Kimi's Week balance vanished behind its Month window.
             let (mut dashboard, now) = fixture();
             dashboard

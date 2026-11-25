@@ -83,8 +83,49 @@ where the earlier run stopped for latency. Its yield is recalibrated using the
 same eight matched controls with fresh `verify10` group labels; its workload
 cost estimate is unchanged. Transfer to the remaining 54 diffs is unmeasured.
 Greptile is a solo service reference; repository context could not be pinned
-to each diff commit, and it is excluded from the model frontier. Hydrogen,
-Kimi and Ember still lack prices and are not plotted on this cost chart.
+to each diff commit, and it is excluded from the model frontier. Hydrogen, Kimi and Ember now use a separate
+[API pricing overlay](additional-model-prices.json); the original scored and
+Pareto CSVs stay frozen. DSF/medium remains unplotted as requested.
+
+### Newly priced models
+
+Verified on 2026-11-25, in USD per million tokens:
+
+| Model | Fresh input | Cached input | Output | Estimated mean cost per review |
+|---|---:|---:|---:|---:|
+| Hydrogen/medium | $1.50 | $0.075 | $7.50 | $0.212 |
+| Hydrogen/high | $1.50 | $0.075 | $7.50 | $0.659 |
+| Kimi K3.1 Pro/high | $2.00 | $0.20 | $10.00 | $0.434 |
+| Ember/xhigh, under 200k context | $0.10 | $0.004 | $0.50 | $0.026 lower bound |
+| Ember/xhigh, over 200k context | $0.30 | $0.012 | $1.50 | $0.078 upper bound |
+
+Sources: [Google standard Hydrogen pricing](https://aistudio.google.com/docs/pricing#gemini-4-hydrogen),
+[Moonshot's model rates](https://platform.kimi.ai/),
+[Moonshot cache accounting](https://platform.kimi.ai/docs/guide/context-caching),
+and [Meta Ember pricing](https://dev.meta.ai/models/muse-ember).
+
+[price_additional_models.py](price_additional_models.py) reconstructs all four
+70-diff cost estimates from the exact 280 retained reviewer usage captures.
+Cached reads are billed separately from fresh input. Output already includes
+thinking, so thought tokens are not added a second time. Kimi input includes
+cache reads/writes; Hydrogen input excludes them. The Kimi five-minute write
+rate is $2/M, replacing rather than adding to the fresh-input category; all
+saved write counters are zero. API equivalents exclude setup, judging, taxes,
+subscription fees and differences in service-specific billing.
+
+The newly priced models carry `†` in the key or direct label. All 140 Hydrogen
+captures have `scope=unspecified`: the chart **assumes** these completed-prompt
+reports are whole-turn counters, following their additive accounting form;
+that scope was not established for these historical sessions. These prices
+are conditional estimates, not certified full-turn spend. All 70 Kimi and 70
+Ember captures explicitly report complete turns.
+
+Ember's request-level context sizes were not retained. Its whisker therefore
+runs from pricing all observed tokens at the under-200k rate to pricing all
+at the over-200k rate. Its marker uses the **upper endpoint**, not an invented
+context mix. This is a tariff bound, not a confidence interval. Frontier names
+and the dashed line use that conservative Ember price and Hydrogen's stated
+scope assumption; uncertain costs could change actual frontier membership.
 
 ## Collection and judging
 

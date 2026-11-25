@@ -1306,6 +1306,22 @@ mod tests {
             assert_eq!(popup.x, pane.x + 1, "{name}");
             let (x, y) = entry(popup, 0);
             assert_eq!(cell_text(&lines, x, y, 7), "Refresh", "{lines:#?}");
+
+            // The minimized row carries the same dropdown mark, and clicking
+            // it opens the same menu from the same cell.
+            let mut d = dashboard_with_session(running_session());
+            for pane in [SupportPane::Targets, SupportPane::Quota] {
+                d.set_pane_size(pane, crate::PaneSize::Minimized);
+            }
+            let lines = drawn(&mut d, 140, 40);
+            let title = point(&lines, &format!("{name} ▾"));
+            click(&mut d, title);
+            let (lines, popup) = drawn_menu(&mut d);
+            let pane = d.pane_areas.expect("pane areas")[index];
+            assert!(popup.bottom() <= pane.y, "{name}: {lines:#?}");
+            assert_eq!(popup.x, pane.x + 1, "{name}");
+            let (x, y) = entry(popup, 0);
+            assert_eq!(cell_text(&lines, x, y, 7), "Refresh", "{lines:#?}");
         }
     }
 

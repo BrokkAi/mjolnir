@@ -272,6 +272,34 @@ pub(crate) fn register_pane_title_menu(
     form.is_armed(control)
 }
 
+/// Registers a minimized support pane's title, which the row draws as
+/// `─ Name ▾`, as the button that opens its menu. It sits where the bordered
+/// pane's title does, so the menu hangs from the same cell.
+pub(crate) fn register_minimized_title_menu(
+    dashboard: &DashboardState,
+    pane: SupportPane,
+    area: Rect,
+) -> bool {
+    let name = match pane {
+        SupportPane::Targets => "Targets",
+        SupportPane::Quota => "Profiles",
+        SupportPane::Sessions | SupportPane::Notifications => return false,
+    };
+    let width = Line::raw(pane_title_label(name, true)).width();
+    let budget =
+        crate::render::pane_title_content_width(area.width, dashboard.pane_maximize_enabled(pane));
+    register_pane_title_menu(
+        dashboard,
+        pane,
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            u16::try_from(width).unwrap_or(u16::MAX).min(budget),
+            area.height.min(1),
+        ),
+    )
+}
+
 /// Registers the clear chip that ends a filtered Sessions title, drawn at
 /// `area` as part of the title, and draws it pressed while the pointer holds
 /// it down.

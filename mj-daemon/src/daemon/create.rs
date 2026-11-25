@@ -721,14 +721,14 @@ impl RuntimeState {
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = mj_controller::upgrade::activity_unless_draining("session admission")?;
         let skip_remembering_subagent_policy = delegation_notice.is_some();
-        let path_cancelled = control.cancelled.clone();
+        let path_control = control.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
         let (registered, review_notice, oracle_notice) = blocking(move || {
             let mut controller = Controller::load()?;
-            let path_executor =
-                mj_controller::targets::CancellableProcessExecutor::new(path_cancelled)
-                    .with_deadline(Duration::from_secs(30));
+            let path_executor = path_control
+                .executor()
+                .with_deadline(Duration::from_secs(30));
             let project_directory = request
                 .project_directory
                 .as_deref()
@@ -903,7 +903,8 @@ impl RuntimeState {
             session_id,
             LifecycleKind::Create,
             start,
-            move |state, session_id, cancelled, _session_admission| async move {
+            move |state, session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 state
                     .run_admitted_create(
                         session_id,
@@ -933,7 +934,8 @@ impl RuntimeState {
             LifecycleKind::Create,
             super::lifecycle::LifecycleStart::request(request_key, None, Some(control.clone())),
             Some(acceptance),
-            move |state, session_id, cancelled, _session_admission| async move {
+            move |state, session_id, control, _session_admission| async move {
+ let cancelled = control.cancelled.clone();
                 let capacity = state
                     .admit_container_launch(
                         &record.target_template_id,
@@ -1056,7 +1058,7 @@ impl RuntimeState {
             control.request_cancel("session publication failed");
         }
         let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled),
+            control.executor(),
             state.clone(),
             session_id.clone(),
         );

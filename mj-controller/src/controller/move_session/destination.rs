@@ -127,6 +127,10 @@ impl<E: CommandExecutor> CommandExecutor for MoveCleanupExecutor<'_, E> {
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         self.0.execute_cleanup(command)
     }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.0.shutdown_interrupted()
+    }
 }
 
 fn argument<'a>(args: &'a [String], key: &str) -> Result<&'a str> {
