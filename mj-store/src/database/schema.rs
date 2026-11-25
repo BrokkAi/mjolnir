@@ -3681,8 +3681,11 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     // And a managed checkout's path derives from its descriptor, so its
     // `project_directory` is NULL: an older daemon rejects such a record, and
     // reads NULL as a bundle workspace.
-    // Work is O(rows of `subagent_sessions`) and two triggers; no large blob
-    // table is touched. Existing `sessions.project_directory` values stay: a
+    // `target_secret_scrub_pending` marks a store upgraded from an earlier
+    // revision, whose recorded runtimes may hold resolved secrets the daemon
+    // rewrites once at its next start; a new store never gets the row.
+    // Work is O(rows of `subagent_sessions`), two triggers, and four existence
+    // probes; no large blob table is scanned. Existing `sessions.project_directory` values stay: a
     // legacy sub-agent whose parent is gone has no other record of its path.
     if version < 157 {
         let transaction =
@@ -3693,6 +3696,15 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
             "UPDATE subagent_sessions
                 SET record_json = json_remove(record_json, '$.reviewer_launch.environment')
               WHERE json_type(record_json, '$.reviewer_launch.environment') IS NOT NULL;
+             CREATE TABLE IF NOT EXISTS target_secret_scrub_pending (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1)
+             ) STRICT;
+             INSERT OR IGNORE INTO target_secret_scrub_pending(singleton)
+                 SELECT 1 WHERE EXISTS(SELECT 1 FROM sessions)
+                     OR EXISTS(SELECT 1 FROM session_moves)
+                     OR EXISTS(SELECT 1 FROM retained_move_sources)
+                     OR EXISTS(SELECT 1 FROM environments)
+                     OR EXISTS(SELECT 1 FROM environment_workers);
              DROP TRIGGER IF EXISTS project_discovery_insert;
              DROP TRIGGER IF EXISTS project_discovery_update;
              CREATE TRIGGER project_discovery_insert AFTER INSERT ON sessions
@@ -6299,6 +6311,20 @@ mod reader_tests {
             )
             .unwrap();
         assert_eq!((environment, profile.as_str()), (None, "reviewer"));
+        // The store held sessions, so the daemon repairs its recorded runtimes
+        // once; a store created at this revision has nothing to repair.
+        let pending = |connection: &Connection| -> i64 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM target_secret_scrub_pending",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(pending(&upgraded), 1);
+        let fresh = open_writer(&directory.path().join("fresh.sqlite3")).unwrap();
+        assert_eq!(pending(&fresh), 0);
         assert!(
             load_state_from(&path)
                 .unwrap()
@@ -6590,6 +6616,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 157 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS target_secret_scrub_pending;")
+                .unwrap();
+        }
         if version < 156 {
             for column in ["region", "aws_profile"] {
                 if legacy_schema::table_has_column(&connection, "ec2_move_grants", column).unwrap()

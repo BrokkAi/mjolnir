@@ -11,6 +11,9 @@ pub struct ProjectDiscoveryChange {
     /// The path the session record stores. Absent for a managed checkout,
     /// whose path derives from its descriptor.
     pub directory: Option<PathBuf>,
+    /// The managed checkout recorded with the change, which still names the
+    /// source project when the session is gone before discovery runs.
+    pub managed_worktree: Option<mj_core::state::ManagedWorktree>,
     pub target_id: String,
 }
 
@@ -300,7 +303,7 @@ pub fn finish_project_seed(harness: &str, home: &Path) -> Result<()> {
 
 pub fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscoveryChange>> {
     let connection = open_reader(&database_path())?;
-    let mut statement=connection.prepare("SELECT sequence,session_id,directory,target_template_id
+    let mut statement=connection.prepare("SELECT sequence,session_id,directory,managed_worktree,target_template_id
         FROM project_discovery_changes WHERE sequence>(SELECT sequence FROM project_discovery_progress WHERE singleton=1)
         OR (?1 AND sequence IN (SELECT sequence FROM project_discovery_failures)) ORDER BY sequence LIMIT CASE WHEN ?1 THEN -1 ELSE 128 END")?;
     statement
@@ -309,15 +312,23 @@ pub fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscoveryChan
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<Vec<u8>>>(2)?,
-                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?
         .map(|row| {
-            let (sequence, session_id, directory, target_id) = row?;
+            let (sequence, session_id, directory, managed_worktree, target_id) = row?;
+            let managed_worktree = managed_worktree
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .with_context(|| {
+                    format!("read the managed checkout queued for discovery of {session_id}")
+                })?;
             Ok(ProjectDiscoveryChange {
                 sequence,
                 session_id,
                 directory: directory.as_deref().map(blob_to_path),
+                managed_worktree,
                 target_id,
             })
         })

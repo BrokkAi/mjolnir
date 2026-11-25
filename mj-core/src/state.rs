@@ -1181,7 +1181,7 @@ impl ManagedWorktree {
             .source_project_directory
             .strip_prefix(&self.source_repository)
             .ok()?;
-        Some(self.worktree_root.join(relative))
+        Some(crate::target_path::join(&self.worktree_root, relative))
     }
 
     fn validate(&self, session_id: &str, stored_project_directory: Option<&Path>) -> Result<()> {
@@ -3522,7 +3522,9 @@ impl State {
         self.validate()?;
         config.validate()?;
         for session in self.sessions.values() {
-            session.validate_configuration(config)?;
+            if let Some(issue) = self.configuration_issue(session, config) {
+                return Err(crate::refusal::Refusal::precondition(issue).into());
+            }
         }
         Ok(())
     }

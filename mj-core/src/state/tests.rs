@@ -2510,3 +2510,70 @@ fn target_runtime_records_secret_references_and_resolves_them_only_per_launch() 
     let legacy: TargetRuntimeSettings = serde_json::from_str(&legacy).unwrap();
     assert!(legacy.environment_references.is_empty());
 }
+
+// A sub-agent records no checkout of its own: it works in its owner's. Strict
+// validation must judge it by that checkout, not demand a configured bundle
+// for a parent that is a plain project directory.
+#[test]
+fn strict_validation_judges_a_borrowed_sub_agent_by_its_owners_checkout() {
+    let mut config = sample_config();
+    config.bundles.clear();
+    let mut parent = checkout_session("raw-parent");
+    parent.project = None;
+    parent.project_directory = Some(PathBuf::from("/work/plain-directory"));
+    let mut child = checkout_session("raw-child");
+    child.project = None;
+    child.project_directory = None;
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.environment_owners = [
+        (parent.id.clone(), parent.id.clone()),
+        (child.id.clone(), parent.id.clone()),
+    ]
+    .into_iter()
+    .collect();
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentMetadata {
+            kind: crate::subagent::SubagentKind::Worker,
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Borrow checkout".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            request_key: "request".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+            handback_tool: false,
+            orchestrator: false,
+            reported_finish: None,
+        },
+    );
+    state.validate_against_config(&config).unwrap();
+    // The record alone cannot name the borrowed checkout.
+    assert!(child.configuration_issue(&config).is_some());
+}
+
+#[test]
+fn a_managed_checkout_directory_keeps_posix_separators() {
+    let worktree = ManagedWorktree {
+        kind: ManagedCheckoutKind::Clone,
+        source_project_directory: PathBuf::from("/srv/repo/packages/app"),
+        source_repository: PathBuf::from("/srv/repo"),
+        worktree_root: PathBuf::from("/srv/repo/.mj/clones/s1"),
+        branch: "main".into(),
+        target: ManagedWorktreeTarget::Ssh {
+            destination: "dev@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        base_commit: None,
+    };
+    let directory = worktree.checkout_directory().unwrap();
+    assert_eq!(
+        crate::target_path::text(&directory),
+        "/srv/repo/.mj/clones/s1/packages/app"
+    );
+}

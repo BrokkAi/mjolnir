@@ -85,7 +85,8 @@ impl PollableWorkerInputs {
             || (self.config.profiles.get(&record.last_profile)
                 == config.profiles.get(&record.last_profile)
                 && self.config.github == config.github
-                && record.configuration_issue(&self.config) == record.configuration_issue(config)
+                && self.records.configuration_issue(record, &self.config)
+                    == self.records.configuration_issue(record, config)
                 && match (
                     record.target_runtime_settings(&self.config),
                     record.target_runtime_settings(config),

@@ -1226,7 +1226,7 @@ pub fn reconnect_command(
         .sessions
         .get(session_id)
         .with_context(|| format!("unknown session {session_id}"))?;
-    session.validate_configuration(config)?;
+    session.validate_configuration_in(&state.checkout(session_id)?, config)?;
     let locator = session.target.as_ref().context("session has no target")?;
     let backend = backend_locator(locator, session, config)?;
     targets::reconnect_plan(&backend, session_id)?
@@ -1243,6 +1243,45 @@ mod tests {
     use mj_core::state::{SessionState, TargetLocator};
     use mj_core::subagent::{CHILD_REPORT_DIR_ENV, SubagentKind, SubagentRecord};
     use mj_targets::test_isolation::{IsolatedTest, test_name};
+
+    // A sub-agent records no checkout of its own, so its configuration must
+    // be judged by its owner's: a plain project directory needs no bundle.
+    #[test]
+    fn reconnect_accepts_a_borrowed_sub_agent_of_a_bare_raw_session() {
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/profile")),
+        );
+        let session = |id: &str, directory: Option<&str>| {
+            let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+            session.state = SessionState::Running;
+            session.target_template_id = "localhost".into();
+            session.bundle_id = "no-such-bundle".into();
+            session.project = None;
+            session.project_directory = directory.map(PathBuf::from);
+            session.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: PathBuf::from("/workers").join(id),
+            }));
+            session
+        };
+        let parent = session("11111111111111111111111111111111", Some("/work/raw"));
+        let child = session("22222222222222222222222222222222", None);
+        let mut state = State::default();
+        for record in [&parent, &child] {
+            state.sessions.insert(record.id.clone(), record.clone());
+        }
+        state.environment_owners = [
+            (parent.id.clone(), parent.id.clone()),
+            (child.id.clone(), parent.id.clone()),
+        ]
+        .into_iter()
+        .collect();
+        reconnect_command(&config, &state, &child.id).unwrap();
+    }
 
     #[test]
     fn stage_candidate_preserves_live_files() {

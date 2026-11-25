@@ -5,7 +5,11 @@
 //! `environment`, and the database cannot tell which values were secrets.
 //! The configuration can: this rewrites each recorded runtime so that every
 //! key the session's target now defines as a reference becomes that reference.
-//! It is idempotent, so it runs at every daemon start.
+//! Revision 157 marks a store upgraded from an earlier revision in
+//! `target_secret_scrub_pending`; the first daemon start rewrites it and clears
+//! the mark in the same transaction. A later start does nothing, so a literal
+//! a session recorded after the upgrade is never mistaken for a legacy secret
+//! when its target's configuration later turns that key into a reference.
 use super::*;
 use mj_core::config::EnvironmentValue;
 use serde_json::Value;
@@ -199,8 +203,9 @@ const COPIES: [RuntimeCopies; 4] = [
         id_column: "lease_id",
         json_column: "runtime_json",
         locations: &[("", None)],
-        row_template: "(SELECT target_template_id FROM sessions
-                         WHERE sessions.session_id=environment_workers.worker_session_id)",
+        // A lease keeps the target it was created on, which differs from its
+        // session's current target for a Move's retained source.
+        row_template: "target_template_id",
     },
 ];
 
@@ -208,9 +213,6 @@ const COPIES: [RuntimeCopies; 4] = [
 /// configuration defines as a reference. Returns the rows changed.
 pub fn scrub_resolved_target_secrets(config: &mj_core::config::Config) -> Result<usize> {
     let references = TargetEnvironmentReferences::from_config(config);
-    if references.by_target.is_empty() {
-        return Ok(0);
-    }
     submit_database_write("scrub_resolved_target_secrets", move |connection| {
         scrub_resolved_target_secrets_in(connection, &references)
     })
@@ -220,8 +222,26 @@ fn scrub_resolved_target_secrets_in(
     connection: &mut Connection,
     references: &TargetEnvironmentReferences,
 ) -> Result<usize> {
-    let without_a_target = references.without_a_target();
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM target_secret_scrub_pending WHERE singleton=1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !pending {
+        return Ok(0);
+    }
+    if references.by_target.is_empty() {
+        // Nothing is configured as a reference, so no recorded value can be
+        // one; the repair is complete and must not run against later config.
+        tx.execute(
+            "DELETE FROM target_secret_scrub_pending WHERE singleton=1",
+            [],
+        )?;
+        tx.commit()?;
+        return Ok(0);
+    }
+    let without_a_target = references.without_a_target();
     let mut changed = 0;
     let sessions = tx
         .prepare(
@@ -289,6 +309,10 @@ fn scrub_resolved_target_secrets_in(
             }
         }
     }
+    tx.execute(
+        "DELETE FROM target_secret_scrub_pending WHERE singleton=1",
+        [],
+    )?;
     tx.commit()?;
     Ok(changed)
 }
@@ -353,6 +377,42 @@ mod tests {
                 [placement.to_string()],
             )
             .unwrap();
+        // A lease keeps the target it was created on: a Move's retained source
+        // still holds the old target's runtime while its session moved on.
+        connection
+            .execute(
+                "INSERT INTO environment_workers(lease_id, environment_id, worker_session_id, kind, host, resource_id, target_template_id, runtime_json)
+                 SELECT 'retained-source', environment_id, worker_session_id, kind, host, resource_id, 'old-target', ?1
+                   FROM environment_workers WHERE worker_session_id='scrubbed' LIMIT 1",
+                [serde_json::to_string(&runtime(&[("API_KEY", "old-target-literal")])).unwrap()],
+            )
+            .unwrap();
+        // A store created at this revision has nothing to repair; one upgraded
+        // from an earlier revision is marked by the migration.
+        let pending = |connection: &Connection| -> i64 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM target_secret_scrub_pending",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(pending(&connection), 0);
+        assert_eq!(
+            scrub_resolved_target_secrets_in(
+                &mut connection,
+                &TargetEnvironmentReferences::default()
+            )
+            .unwrap(),
+            0
+        );
+        connection
+            .execute(
+                "INSERT INTO target_secret_scrub_pending(singleton) VALUES (1)",
+                [],
+            )
+            .unwrap();
         let mut templates = TargetEnvironmentReferences {
             by_target: BTreeMap::from([(
                 "sandbox".to_owned(),
@@ -366,6 +426,15 @@ mod tests {
         let changed = scrub_resolved_target_secrets_in(&mut connection, &templates).unwrap();
         // The session row, its environment, and its worker lease.
         assert_eq!(changed, 3);
+        assert_eq!(pending(&connection), 0, "the repair runs once");
+        let retained: String = connection
+            .query_row(
+                "SELECT runtime_json FROM environment_workers WHERE lease_id='retained-source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(retained.contains("old-target-literal"), "{retained}");
         let reference = EnvironmentValue::FromSecret("stored".into());
         let scrubbed = state_io::load_session_with(&connection, "scrubbed")
             .unwrap()
@@ -422,6 +491,23 @@ mod tests {
             scrub_resolved_target_secrets_in(&mut connection, &templates).unwrap(),
             0
         );
+        // A literal recorded after the upgrade stays a literal when its
+        // target's configuration later makes that key a reference.
+        let mut later = super::super::tests::session("later", "project");
+        later.target_template_id = "sandbox".into();
+        later.target_runtime = Some(std::sync::Arc::new(runtime(&[("API_KEY", "plain")])));
+        save_session_to(&path, &later).unwrap();
+        assert_eq!(
+            scrub_resolved_target_secrets_in(&mut connection, &templates).unwrap(),
+            0
+        );
+        let kept = state_io::load_session_with(&connection, "later")
+            .unwrap()
+            .unwrap()
+            .target_runtime
+            .unwrap();
+        assert_eq!(kept.environment["API_KEY"], "plain");
+        assert!(kept.environment_references.is_empty());
         // A key another target gives a plain value is never guessed at for a
         // runtime that does not name its target.
         templates.literal_keys.insert("API_KEY".into());
