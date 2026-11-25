@@ -12,7 +12,7 @@ use base64::Engine;
 use clap::{Args, Subcommand, ValueEnum};
 use mj_core::config::{
     Config, ContainerTemplate, Machine, SshConnection, TargetBuildCache, TargetTemplate,
-    config_dir, config_path, mbx_s3_location, validate_id,
+    config_path, mbx_s3_location, validate_id,
 };
 use mj_core::subprocess::run_with_input;
 use serde::{Deserialize, Serialize};
@@ -433,7 +433,7 @@ fn records(root: &Path) -> Result<Vec<Record>> {
 
 pub(crate) async fn run(args: Ec2Args) -> Result<()> {
     mj_core::runtime::spawn_blocking(move || {
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         match args.command {
             Ec2Command::Create(args) => create(args, &root),
             Ec2Command::List(args) => list(args, &root),
@@ -2504,7 +2504,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(bin.join("multi-region"), "").unwrap();
         // Hard-won: #1523: a deleted default subnet stopped the region-only search.
         fs::write(
@@ -2671,7 +2671,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(bin.join("fail-launch"), "").unwrap();
         create(create_args(), &root).unwrap_err();
         let superseded = records(&root).unwrap().pop().unwrap();
@@ -2715,7 +2715,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(bin.join("errors.json"), serde_json::to_vec(&json!([
             {"operation":"run-instances","code":"InsufficientInstanceCapacity","message":"No capacity"},
             {"operation":"delete-security-group","code":"UnauthorizedOperation","message":"Cleanup refused"}
@@ -2762,7 +2762,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         for uncertain in [true, false] {
             if uncertain {
                 fs::write(bin.join("lost-launch-response"), "").unwrap();
@@ -2816,7 +2816,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(
             bin.join("ebs-settings"),
             r#"{"VolumeSize":512,"Throughput":500,"Iops":12000}"#,
@@ -2987,7 +2987,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(bin.join("nitro"), "").unwrap();
         let bundle_image = "ghcr.io/example/project:built";
         Config::update(|config| {
@@ -3173,7 +3173,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(bin.join("nvme"), "").unwrap();
         fs::write(bin.join("fail-launch"), "").unwrap();
         let error = create(create_args(), &root).unwrap_err();
@@ -3429,7 +3429,7 @@ else:
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
-        let root = config_dir().join("ec2");
+        let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(bin.join("nvme"), "").unwrap();
         fs::write(bin.join("fail-image-pull"), "").unwrap();
         create(create_args(), &root).unwrap();

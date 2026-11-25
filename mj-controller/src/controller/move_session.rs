@@ -4750,15 +4750,20 @@ pub(super) fn transfer_move_snapshot_to_destination(
         None
     } else {
         try_build_direct_peer_config(
-            operation,
+            &operation.operation_id,
             source,
             source_worker_root,
             destination,
             destination_worker_root,
             keep,
             executor,
+            &transport::ec2_grant::AwsCliEc2Client::default(),
+            &mj_core::ec2_records::lookup_ec2_host_for_locator,
         )
     };
+    // Keys appended below belong to this attempt; anything before them was
+    // carried over from an earlier interrupted attempt.
+    let attempt_keys_start = operation.granted_keys.len();
     if let Some(peer) = direct_peer.as_ref() {
         // Persist ephemeral key ownership BEFORE installing keys on either host,
         // preserving any carried-over unrevoked keys from earlier moves.
@@ -4779,7 +4784,7 @@ pub(super) fn transfer_move_snapshot_to_destination(
                         .join(format!("mj-move-{}.known_hosts", peer.operation_id)),
                 ),
                 authorized_keys_path: Some(peer.source_authorized_keys.clone()),
-                worker_bin: Some(peer.source_worker_bin.clone()),
+                worker_bin: Some(peer.source_host_worker_bin.clone()),
                 ssh_target: src_ssh,
             },
             mj_core::state::GrantedMoveKey {
@@ -4794,7 +4799,7 @@ pub(super) fn transfer_move_snapshot_to_destination(
                         .join(format!("mj-move-{}.pull.known_hosts", peer.operation_id)),
                 ),
                 authorized_keys_path: Some(peer.destination_authorized_keys.clone()),
-                worker_bin: Some(peer.destination_worker_bin.clone()),
+                worker_bin: Some(peer.destination_host_worker_bin.clone()),
                 ssh_target: dst_ssh,
             },
         ]);
@@ -4826,14 +4831,20 @@ pub(super) fn transfer_move_snapshot_to_destination(
         direct_peer.as_ref(),
         ec2_manager.as_ref(),
     );
-    if !operation.granted_keys.is_empty() {
-        let remaining = transport::cleanup_interrupted_move_credentials(
-            &operation.operation_id,
-            &operation.granted_keys,
-            &[source, destination],
-            executor,
-        );
-        operation.granted_keys = remaining;
+    let attempt_removed = drop_credentials_removed_by_transfer(
+        &mut operation.granted_keys,
+        attempt_keys_start,
+        direct_peer.as_ref(),
+    );
+    if attempt_removed || !operation.granted_keys.is_empty() {
+        if !operation.granted_keys.is_empty() {
+            operation.granted_keys = transport::cleanup_interrupted_move_credentials(
+                &operation.operation_id,
+                &operation.granted_keys,
+                &[source, destination],
+                executor,
+            );
+        }
         operation.updated_at = now();
         let _ = crate::database::save_move_operation(operation);
         if !operation.granted_keys.is_empty() {
@@ -4860,6 +4871,23 @@ pub(super) fn transfer_move_snapshot_to_destination(
     Ok(receipt)
 }
 
+/// Forget the keys this attempt recorded (those from `attempt_keys_start`) when
+/// the transfer's own cleanup reports it removed them all, which it also does
+/// after a failed transfer. Running the recovery cleanup over them would only
+/// repeat its SSH calls. Keys carried over from earlier attempts stay.
+fn drop_credentials_removed_by_transfer(
+    granted_keys: &mut Vec<mj_core::state::GrantedMoveKey>,
+    attempt_keys_start: usize,
+    peer: Option<&transport::DirectPeerConfig>,
+) -> bool {
+    let removed =
+        peer.is_some_and(|peer| peer.cleanup.is_clean()) && granted_keys.len() > attempt_keys_start;
+    if removed {
+        granted_keys.truncate(attempt_keys_start);
+    }
+    removed
+}
+
 fn format_transfer_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -4874,84 +4902,272 @@ fn format_transfer_bytes(bytes: u64) -> String {
 
 /// Probe verified peer SSH host keys and paths over the daemon's already-trusted
 /// SSH connections to build a `DirectPeerConfig` for `DirectPush` / `DirectPull`.
-/// Returns `None` when either endpoint is local or lacks a host-side worker
-/// binary for `authorized-keys`, falling back cleanly to framed `DaemonStream`.
+/// Returns `None` when either endpoint is local, is a Docker or Apple container
+/// target, or lacks a runnable host-side worker binary for `authorized-keys`,
+/// falling back cleanly to framed `DaemonStream`.
+///
+/// EC2 instances are identified only through `ec2_lookup` (the local `mj ec2`
+/// records); nothing on a remote host is asked who it is. Two instances in one
+/// VPC and region talk over private IPs, otherwise over public IPs, and each
+/// side's security group gets the grant its peer needs.
+#[allow(clippy::too_many_arguments)]
 fn try_build_direct_peer_config(
-    operation: &MoveOperation,
+    operation_id: &str,
     source: &mj_core::targets::TargetLocator,
     source_worker_root: &str,
     destination: &mj_core::targets::TargetLocator,
     destination_worker_root: &str,
     keep: transport::KeepTransferOptions,
     executor: &(impl CommandExecutor + Sync),
+    ec2: &impl transport::ec2_grant::Ec2SecurityGroupClient,
+    ec2_lookup: &dyn Fn(
+        &mj_core::targets::TargetLocator,
+    ) -> Option<mj_core::ec2_records::Ec2InstanceRef>,
 ) -> Option<transport::DirectPeerConfig> {
-    let (src_ssh, src_host_worker_bin) = direct_ssh_endpoint(source, source_worker_root)?;
-    let (dst_ssh, dst_host_worker_bin) = direct_ssh_endpoint(destination, destination_worker_root)?;
-    let src_host_locator = mj_core::targets::TargetLocator::SshBare {
-        ssh: src_ssh.clone(),
-        workspace: String::new(),
-        worker_id: None,
-    };
-    let dst_host_locator = mj_core::targets::TargetLocator::SshBare {
-        ssh: dst_ssh.clone(),
-        workspace: String::new(),
-        worker_id: None,
-    };
-    let (src_home, src_host_key) = probe_ssh_host_identity(&src_host_locator, executor)?;
-    let (dst_home, dst_host_key) = probe_ssh_host_identity(&dst_host_locator, executor)?;
-    let ssh_host = |ssh: &mj_core::targets::SshTarget| {
-        ssh.destination
-            .rsplit_once('@')
-            .map_or(ssh.destination.as_str(), |(_, host)| host)
-            .to_owned()
+    let (src_ssh, src_host_worker) = direct_ssh_endpoint(source, source_worker_root)?;
+    let (dst_ssh, dst_host_worker) = direct_ssh_endpoint(destination, destination_worker_root)?;
+    let host_locator =
+        |ssh: &mj_core::targets::SshTarget| mj_core::targets::TargetLocator::SshBare {
+            ssh: ssh.clone(),
+            workspace: String::new(),
+            worker_id: None,
+        };
+    let src_probe = probe_ssh_host_identity(&host_locator(src_ssh), &src_host_worker, executor)?;
+    let dst_probe = probe_ssh_host_identity(&host_locator(dst_ssh), &dst_host_worker, executor)?;
+    let source_ec2 = resolve_ec2_endpoint(source, ec2_lookup, ec2);
+    let destination_ec2 = resolve_ec2_endpoint(destination, ec2_lookup, ec2);
+    let route = plan_direct_ec2_route(
+        ssh_host_of(src_ssh),
+        ssh_host_of(dst_ssh),
+        source_ec2.as_ref(),
+        destination_ec2.as_ref(),
+    );
+    let rewrite_destination = |ssh: &mj_core::targets::SshTarget, address: &Option<String>| match (
+        address,
+        ssh.destination.rsplit_once('@'),
+    ) {
+        (Some(address), Some((user, _))) => format!("{user}@{address}"),
+        (Some(address), None) => address.clone(),
+        (None, _) => ssh.destination.clone(),
     };
     Some(transport::DirectPeerConfig {
-        operation_id: operation.operation_id.clone(),
-        source_address: ssh_host(src_ssh),
-        destination_address: ssh_host(dst_ssh),
-        destination_ssh_destination: dst_ssh.destination.clone(),
-        source_ssh_destination: src_ssh.destination.clone(),
-        destination_host_key: dst_host_key,
-        source_host_key: src_host_key,
-        source_stage_dir: std::path::PathBuf::from(&src_home).join(".cache/mjolnir/move-stage"),
-        destination_stage_dir: std::path::PathBuf::from(&dst_home)
+        operation_id: operation_id.to_owned(),
+        source_address: route
+            .source_address
+            .clone()
+            .unwrap_or_else(|| ssh_host_of(src_ssh)),
+        destination_address: route
+            .destination_address
+            .clone()
+            .unwrap_or_else(|| ssh_host_of(dst_ssh)),
+        destination_ssh_destination: rewrite_destination(dst_ssh, &route.destination_ssh_address),
+        source_ssh_destination: rewrite_destination(src_ssh, &route.source_ssh_address),
+        destination_host_key: dst_probe.host_key,
+        source_host_key: src_probe.host_key,
+        source_stage_dir: std::path::PathBuf::from(&src_probe.home)
             .join(".cache/mjolnir/move-stage"),
-        destination_authorized_keys: std::path::PathBuf::from(&dst_home)
+        destination_stage_dir: std::path::PathBuf::from(&dst_probe.home)
+            .join(".cache/mjolnir/move-stage"),
+        destination_authorized_keys: std::path::PathBuf::from(&dst_probe.home)
             .join(".ssh/authorized_keys"),
-        source_authorized_keys: std::path::PathBuf::from(&src_home).join(".ssh/authorized_keys"),
-        source_worker_bin: src_host_worker_bin,
-        destination_worker_bin: dst_host_worker_bin,
-        destination_ec2_grant: None,
-        source_ec2_grant: None,
+        source_authorized_keys: std::path::PathBuf::from(&src_probe.home)
+            .join(".ssh/authorized_keys"),
+        source_worker_bin: format!("{source_worker_root}/hel"),
+        destination_worker_bin: format!("{destination_worker_root}/hel"),
+        source_host_worker_bin: src_probe.host_worker_bin,
+        destination_host_worker_bin: dst_probe.host_worker_bin,
+        destination_ec2_grant: route.destination_grant,
+        source_ec2_grant: route.source_grant,
         keep,
+        cleanup: Default::default(),
     })
+}
+
+fn ssh_host_of(ssh: &mj_core::targets::SshTarget) -> String {
+    ssh.destination
+        .rsplit_once('@')
+        .map_or(ssh.destination.as_str(), |(_, host)| host)
+        .to_owned()
+}
+
+/// An EC2 endpoint's identity from local records and its network placement.
+struct Ec2Endpoint {
+    instance: mj_core::ec2_records::Ec2InstanceRef,
+    network: transport::ec2_grant::Ec2InstanceNetwork,
+}
+
+impl Ec2Endpoint {
+    fn security_group(&self) -> Option<&str> {
+        self.network.security_group_ids.first().map(String::as_str)
+    }
+
+    fn grant(&self, peer_ip: &str) -> Option<transport::ec2_grant::Ec2GrantTarget> {
+        Some(transport::ec2_grant::Ec2GrantTarget::new(
+            transport::ec2_grant::Ec2GrantKey::ssh(self.security_group()?, format!("{peer_ip}/32")),
+            transport::ec2_grant::Ec2GrantRoute::new(
+                Some(self.instance.region.clone()),
+                self.instance.aws_profile.clone(),
+            ),
+        ))
+    }
+}
+
+/// `None` when the locator is not a recorded EC2 instance or AWS cannot
+/// describe it; that endpoint then simply gets no security-group grant.
+fn resolve_ec2_endpoint(
+    locator: &mj_core::targets::TargetLocator,
+    lookup: &dyn Fn(
+        &mj_core::targets::TargetLocator,
+    ) -> Option<mj_core::ec2_records::Ec2InstanceRef>,
+    ec2: &impl transport::ec2_grant::Ec2SecurityGroupClient,
+) -> Option<Ec2Endpoint> {
+    let instance = lookup(locator)?;
+    match ec2.describe_instance(
+        &instance.instance_id,
+        Some(&instance.region),
+        instance.aws_profile.as_deref(),
+    ) {
+        Ok(network) => Some(Ec2Endpoint { instance, network }),
+        Err(err) => {
+            tracing::warn!(
+                instance_id = %instance.instance_id,
+                error = %err,
+                "could not describe EC2 instance for direct Move; no security-group grant for it"
+            );
+            None
+        }
+    }
+}
+
+/// Addresses and security-group grants a direct Move uses between two hosts.
+#[derive(Debug, Default)]
+struct DirectEc2Route {
+    /// Address of the source as the destination sees it (`authorized_keys` `from=`).
+    source_address: Option<String>,
+    destination_address: Option<String>,
+    /// Host the other side's SSH connects to when it replaces the configured one.
+    source_ssh_address: Option<String>,
+    destination_ssh_address: Option<String>,
+    destination_grant: Option<transport::ec2_grant::Ec2GrantTarget>,
+    source_grant: Option<transport::ec2_grant::Ec2GrantTarget>,
+}
+
+fn plan_direct_ec2_route(
+    source_host: String,
+    destination_host: String,
+    source: Option<&Ec2Endpoint>,
+    destination: Option<&Ec2Endpoint>,
+) -> DirectEc2Route {
+    let mut route = DirectEc2Route::default();
+    match (source, destination) {
+        (Some(src), Some(dst)) => {
+            let same_vpc = src.network.vpc_id.is_some()
+                && src.network.vpc_id == dst.network.vpc_id
+                && src.instance.region == dst.instance.region;
+            if same_vpc
+                && let (Some(src_ip), Some(dst_ip)) =
+                    (&src.network.private_ip, &dst.network.private_ip)
+                && src.security_group().is_some()
+                && dst.security_group().is_some()
+            {
+                route.source_address = Some(src_ip.clone());
+                route.destination_address = Some(dst_ip.clone());
+                route.source_ssh_address = Some(src_ip.clone());
+                route.destination_ssh_address = Some(dst_ip.clone());
+                route.destination_grant = dst.grant(src_ip);
+                route.source_grant = src.grant(dst_ip);
+            } else if let (Some(src_ip), Some(dst_ip)) =
+                (&src.network.public_ip, &dst.network.public_ip)
+            {
+                route.source_address = Some(src_ip.clone());
+                route.destination_address = Some(dst_ip.clone());
+                route.destination_grant = dst.grant(src_ip);
+                route.source_grant = src.grant(dst_ip);
+            }
+        }
+        (Some(src), None) => {
+            if destination_host.parse::<std::net::Ipv4Addr>().is_ok() {
+                route.source_grant = src.grant(&destination_host);
+            }
+        }
+        (None, Some(dst)) => {
+            if source_host.parse::<std::net::Ipv4Addr>().is_ok() {
+                route.destination_grant = dst.grant(&source_host);
+            }
+        }
+        (None, None) => {}
+    }
+    route
+}
+
+/// How the host-side worker binary (the one that edits `authorized_keys`) is
+/// found. A bare or EC2 host runs the session's own `{worker_root}/hel`; a
+/// container host has no such binary on the host, so the probe looks for one
+/// that runs there.
+enum HostWorker {
+    Known(String),
+    FindOnPodmanHost,
+    FindOnNitroHost,
 }
 
 fn direct_ssh_endpoint<'a>(
     locator: &'a mj_core::targets::TargetLocator,
     worker_root: &str,
-) -> Option<(&'a mj_core::targets::SshTarget, String)> {
+) -> Option<(&'a mj_core::targets::SshTarget, HostWorker)> {
+    use mj_core::targets::TargetLocator;
     match locator {
-        mj_core::targets::TargetLocator::SshBare { ssh, .. }
-        | mj_core::targets::TargetLocator::AwsEc2 { ssh, .. } => {
-            Some((ssh, format!("{worker_root}/hel")))
+        TargetLocator::SshBare { ssh, .. } | TargetLocator::AwsEc2 { ssh, .. } => {
+            Some((ssh, HostWorker::Known(format!("{worker_root}/hel"))))
         }
+        TargetLocator::SshPodman { ssh, .. } => Some((ssh, HostWorker::FindOnPodmanHost)),
+        TargetLocator::SshNitro { ssh, .. } => Some((ssh, HostWorker::FindOnNitroHost)),
+        // Docker and Apple container hosts keep the framed daemon stream.
         _ => None,
     }
 }
 
+struct SshHostProbe {
+    home: String,
+    host_key: String,
+    host_worker_bin: String,
+}
+
+/// One SSH round trip: the login home, the trusted SSH host key and, for
+/// container hosts, a host worker binary that runs here and knows
+/// `authorized-keys`. `None` when any of them is missing.
 fn probe_ssh_host_identity(
     host_locator: &mj_core::targets::TargetLocator,
+    host_worker: &HostWorker,
     executor: &(impl CommandExecutor + Sync),
-) -> Option<(String, String)> {
+) -> Option<SshHostProbe> {
+    let find_worker = |candidates: &str| {
+        format!(
+            "{{ {candidates}ls -t -- \"$HOME\"/.local/share/hel/workers/worker-binaries/*/hel 2>/dev/null; }} | \
+             while IFS= read -r cand; do \
+               if [ -x \"$cand\" ] && \"$cand\" worker authorized-keys --help >/dev/null 2>&1; then \
+                 printf '%s\\n' \"$cand\"; break; fi; done"
+        )
+    };
+    let worker_line = match host_worker {
+        HostWorker::Known(_) => String::new(),
+        HostWorker::FindOnPodmanHost => find_worker(""),
+        HostWorker::FindOnNitroHost => {
+            find_worker("printf '%s\\n' \"$HOME/.local/share/hel/microvm/hel\"; ")
+        }
+    };
+    let mut script = String::from(
+        "printf '%s\\n' \"$HOME\"\n\
+         key=$( (cat /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || cat /etc/ssh/ssh_host_rsa_key.pub 2>/dev/null) | head -n 1)\n\
+         printf '%s\\n' \"$key\"\n",
+    );
+    if !worker_line.is_empty() {
+        script.push_str(&worker_line);
+        script.push('\n');
+    }
     let spec = mj_core::targets::locator_command(
         mj_core::targets::SshTrafficClass::Control,
         host_locator,
-        vec![
-            "sh".into(),
-            "-c".into(),
-            "printf '%s\\n' \"$HOME\" && (cat /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || cat /etc/ssh/ssh_host_rsa_key.pub 2>/dev/null) | head -n 1".into(),
-        ],
+        vec!["sh".into(), "-c".into(), script],
     )
     .purpose("probe trusted SSH host identity for direct Move");
     let out = executor.execute(&spec).ok()?;
@@ -4968,7 +5184,20 @@ fn probe_ssh_host_identity(
     if home.is_empty() || key_type.is_empty() || key_b64.is_empty() {
         return None;
     }
-    Some((home, format!("{key_type} {key_b64}")))
+    let host_worker_bin = match host_worker {
+        HostWorker::Known(bin) => bin.clone(),
+        HostWorker::FindOnPodmanHost | HostWorker::FindOnNitroHost => {
+            lines.next()?.trim().to_owned()
+        }
+    };
+    if host_worker_bin.is_empty() {
+        return None;
+    }
+    Some(SshHostProbe {
+        home,
+        host_key: format!("{key_type} {key_b64}"),
+        host_worker_bin,
+    })
 }
 
 fn legacy_shim_move_operation(

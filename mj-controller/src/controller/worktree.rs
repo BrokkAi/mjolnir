@@ -1894,11 +1894,127 @@ fn checkout_position_text(head_commit: &str, branch: Option<&str>) -> String {
     }
 }
 
+/// Everything [`inspect_raw_project`] asks of a remote project, in one SSH
+/// round trip. The directory is a positional argument, never script text. A
+/// required answer that fails ends the script, since the rest could only
+/// repeat the failure; the upstream is asked only for a named branch.
+const RAW_PROJECT_PROBES: &str = r#"probe toplevel git -C "$1" rev-parse --show-toplevel || exit 0
+probe prefix git -C "$1" rev-parse --show-prefix || exit 0
+probe git_dir git -C "$1" rev-parse --absolute-git-dir || exit 0
+probe common_git_dir git -C "$1" rev-parse --path-format=absolute --git-common-dir || exit 0
+if probe branch git -C "$1" symbolic-ref --quiet --short HEAD && [ -n "$out" ]; then
+    probe upstream git -C "$1" for-each-ref --format='%(upstream:short)' "refs/heads/$out"
+fi
+exit 0
+"#;
+
+fn inspect_raw_project_over_ssh(
+    executor: &impl CommandExecutor,
+    target: &ManagedWorktreeTarget,
+    selected: &Path,
+) -> Result<RawProjectInspection> {
+    const PURPOSE: &str = "inspect raw project Git state";
+    let command = managed_target_command(
+        SshTrafficClass::Control,
+        target,
+        "sh",
+        [
+            "-c".to_owned(),
+            format!("{}{RAW_PROJECT_PROBES}", targets::PROBE_HELPER_SH),
+            "mj-inspect-raw-project".into(),
+            selected.to_string_lossy().into_owned(),
+        ],
+    )
+    .purpose(PURPOSE);
+    let output = executor.execute(&command)?;
+    // The script exits 0 whatever its probes did, so another status means the
+    // shell or the connection failed before the probes could speak.
+    ensure!(
+        output.status == 0,
+        "{PURPOSE} failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut probes = targets::parse_framed_probes(&output.stdout, targets::DEFAULT_PROBE_FRAMES);
+    fn answer(
+        probes: &mut std::collections::BTreeMap<String, CommandOutput>,
+        name: &str,
+        purpose: &str,
+    ) -> Result<CommandOutput> {
+        probes
+            .remove(name)
+            .with_context(|| format!("{purpose} returned no answer"))
+    }
+    let stdout =
+        |probes: &mut std::collections::BTreeMap<String, CommandOutput>,
+         name: &str,
+         purpose: &str| command_stdout(answer(probes, name, purpose)?, purpose);
+    let repository = git_output_path(
+        target,
+        PathBuf::from(stdout(
+            &mut probes,
+            "toplevel",
+            "resolve raw project repository root",
+        )?),
+    )?;
+    let prefix = stdout(
+        &mut probes,
+        "prefix",
+        "resolve raw project relative directory",
+    )?;
+    let git_dir = git_output_path(
+        target,
+        PathBuf::from(stdout(
+            &mut probes,
+            "git_dir",
+            "resolve raw project Git directory",
+        )?),
+    )?;
+    let common_git_dir = git_output_path(
+        target,
+        mj_core::local_git::resolve_git_path(
+            &repository,
+            &stdout(
+                &mut probes,
+                "common_git_dir",
+                "resolve raw project common Git directory",
+            )?,
+        )?,
+    )?;
+    let branch = answer(&mut probes, "branch", "resolve raw project branch")?;
+    let named_branch = match branch.status {
+        0 => !String::from_utf8(branch.stdout)
+            .context("raw project branch was not UTF-8")?
+            .trim()
+            .is_empty(),
+        1 | 128 => false,
+        status => bail!(
+            "resolve raw project branch failed with status {status}: {}",
+            String::from_utf8_lossy(&branch.stderr).trim()
+        ),
+    };
+    let upstream = if named_branch {
+        let upstream = stdout(&mut probes, "upstream", "resolve raw project upstream")?;
+        (!upstream.is_empty()).then_some(upstream)
+    } else {
+        None
+    };
+    Ok(RawProjectInspection {
+        source_project_directory: target_path::join(&repository, Path::new(&prefix)),
+        source_repository: repository,
+        primary_checkout: git_dir == common_git_dir,
+        upstream,
+    })
+}
+
 fn inspect_raw_project(
     executor: &impl CommandExecutor,
     target: &ManagedWorktreeTarget,
     selected: &Path,
 ) -> Result<RawProjectInspection> {
+    if matches!(target, ManagedWorktreeTarget::Ssh { .. }) {
+        return inspect_raw_project_over_ssh(executor, target, selected);
+    }
     let repository = git_output_path(
         target,
         PathBuf::from(managed_git_stdout(

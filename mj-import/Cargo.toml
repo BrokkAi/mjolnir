@@ -33,7 +33,7 @@ reqwest.workspace = true
 rusqlite.workspace = true
 ruzstd.workspace = true
 serde.workspace = true
-serde_json = { workspace = true, features = ["raw_value"] }
+serde_json.workspace = true
 sessionwiki.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

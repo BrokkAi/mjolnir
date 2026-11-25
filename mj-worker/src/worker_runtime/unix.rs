@@ -1405,8 +1405,8 @@ mod history_tests {
         send(
             &mut connections[0],
             RelayRequest::HistoryQuery {
-                query: HistoryQuery::TraceFile {
-                    path: "a.rs".into(),
+                query: HistoryQuery::SearchSessions {
+                    query: "a".into(),
                     limit: 20,
                 },
             },
@@ -4174,7 +4174,7 @@ pub(super) async fn serve_client_with_shared_credentials(
             if matches!(&envelope.request, RelayRequest::HistoryQuery { .. } | RelayRequest::HistoryRequests | RelayRequest::CompleteHistoryRequest { .. }) {
                 let operation = envelope.request.method_name();
                 let result: Result<RelayResponsePayload> = match envelope.request {
-                    RelayRequest::HistoryRequests => Ok(RelayResponsePayload::HistoryRequests { requests: project_memory.history.requests() }),
+                    RelayRequest::HistoryRequests => Ok(RelayResponsePayload::HistoryRequests { requests: project_memory.history.requests_for_protocol(envelope.protocol_version) }),
                     RelayRequest::CompleteHistoryRequest { result } => {
                         project_memory.history.complete(result);
                         Ok(RelayResponsePayload::HistoryRequestCompleted)
@@ -4184,7 +4184,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                             Err(anyhow::anyhow!("history tools are unavailable in this worker; resume with a current controller"))
                         } else {
                             tokio::select! {
-                                result = project_memory.history.query(query, &project_memory.cwd) => result.map(|result| RelayResponsePayload::HistoryResult { result }),
+                                result = project_memory.history.query(query) => result.map(|result| RelayResponsePayload::HistoryResult { result }),
                                 disconnected = reader.fill_buf() => {
                                     match disconnected {
                                         Ok(_) => return Ok(()),

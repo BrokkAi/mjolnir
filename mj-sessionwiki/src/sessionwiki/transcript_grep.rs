@@ -47,6 +47,7 @@ pub(super) struct GrepHit {
 #[derive(Debug, Clone, Default)]
 pub(super) struct GrepResult {
     pub hits: Vec<GrepHit>,
+    #[cfg_attr(not(test), allow(dead_code))] // Retained for legacy grep passage tests.
     pub omitted_after: usize,
 }
 
@@ -166,7 +167,7 @@ fn matches_in(text: &str, needles: &[String]) -> Vec<(usize, usize)> {
 }
 
 /// Cap one message around its first match and rebase the match ranges.
-fn excerpt(
+pub(super) fn excerpt(
     text: &str,
     hits: &[(usize, usize)],
     chars: usize,

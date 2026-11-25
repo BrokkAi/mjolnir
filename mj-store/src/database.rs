@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 155;
+const SCHEMA_VERSION: i64 = 156;
 
 pub mod web_push;
 pub use web_push::*;

@@ -1,4 +1,4 @@
-//! MCP server for project history search and code provenance.
+//! MCP server for project history search and transcript reading.
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::io;
@@ -102,19 +102,112 @@ mod tests {
         for name in ["list", "read", "write"] {
             assert!(!names.contains(&name), "unexpected document tool {name}");
         }
-        for name in [
-            "search_sessions",
-            "get_session_brief",
-            "search_session",
-            "read_session",
-            "trace_file",
-            "session_files",
-            "blame_file",
-        ] {
-            assert!(names.contains(&name), "history tool {name} is missing");
-        }
+        assert_eq!(
+            names,
+            ["search_history", "get_session_brief", "read_session",]
+        );
+        let search = &tools[0]["inputSchema"]["properties"];
+        assert!(
+            search.get("session_id").is_none(),
+            "alias must stay unadvertised"
+        );
+        assert_eq!(search["session_ids"]["maxItems"], 50);
+        assert_eq!(search["limit"]["maximum"], 50);
+        assert_eq!(search["context_messages"]["maximum"], 5);
 
         client.shutdown(std::net::Shutdown::Write).unwrap();
         serving.join().unwrap();
+    }
+
+    /// Serve one history request from a stand-in worker and return the query it
+    /// received.
+    fn forwarded_query(arguments: Value, name: &str) -> mj_core::history::HistoryQuery {
+        use mj_core::relay::{
+            RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
+            RelayResponsePayload,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("history.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let envelope: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let RelayRequest::HistoryQuery { query } = envelope.request else {
+                panic!("expected a history query");
+            };
+            serde_json::to_writer(
+                &mut stream,
+                &RelayResponseEnvelope {
+                    request_id: envelope.request_id,
+                    protocol_version: envelope.protocol_version,
+                    body: RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::HistoryResult {
+                            result: mj_core::history::HistoryResult {
+                                request_id: "r".into(),
+                                value: json!({"ok": true}),
+                                is_error: false,
+                            },
+                        },
+                    },
+                },
+            )
+            .unwrap();
+            stream.write_all(b"\n").unwrap();
+            query
+        });
+        let client = history::Client::new(Some(socket));
+        let (value, is_error) = client
+            .call(&json!({"name": name, "arguments": arguments}))
+            .unwrap();
+        assert!(!is_error, "{value}");
+        worker.join().unwrap()
+    }
+
+    #[test]
+    fn search_history_accepts_both_session_spellings_and_legacy_tools_still_dispatch() {
+        use mj_core::history::{HistoryQuery, merged_search_history_session_ids};
+        let HistoryQuery::SearchHistory {
+            session_ids,
+            session_id,
+            limit,
+            ..
+        } = forwarded_query(
+            json!({"query": "quokka", "session_ids": ["a", "b"], "session_id": "b"}),
+            "search_history",
+        )
+        else {
+            panic!("expected SearchHistory");
+        };
+        assert_eq!(limit, 20);
+        assert_eq!(
+            merged_search_history_session_ids(session_ids.as_deref(), session_id.as_deref()),
+            ["a", "b"]
+        );
+        assert!(matches!(
+            forwarded_query(json!({"query": "x"}), "search_sessions"),
+            HistoryQuery::SearchSessions { .. }
+        ));
+        assert!(matches!(
+            forwarded_query(json!({"session_id": "s", "query": "x"}), "search_session"),
+            HistoryQuery::SearchSession { .. }
+        ));
+        let client = history::Client::new(None);
+        for (name, arguments) in [
+            ("trace_file", json!({"path": "src/lib.rs"})),
+            ("session_files", json!({"session_id": "s"})),
+            (
+                "blame_file",
+                json!({"path": "src/lib.rs", "start_line": 1, "end_line": 1}),
+            ),
+        ] {
+            let error = client
+                .call(&json!({"name": name, "arguments": arguments}))
+                .unwrap_err();
+            assert!(error.to_string().contains("unknown variant"), "{error}");
+        }
     }
 }

@@ -418,18 +418,24 @@ impl Controller {
     fn prepare_borrowed_create(
         &self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<(targets::TargetLocator, String, Option<String>)> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
         targets::verify_locator(&backend, session_id)?;
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-        self.prepare_subagent_report_dir(session_id, &backend, syncing)?;
-        let staged_aws_profile = self.prepare_worker_files(
-            session_id,
-            &backend,
-            &worker_root,
-            syncing,
-            super::worker_binary::LaunchHistory::Stored,
+        // A borrowed child's report directory is already recorded, so creating
+        // it on the target does not depend on staging the worker files.
+        let ((), staged_aws_profile) = execute_concurrent_lanes(
+            || self.prepare_subagent_report_dir(session_id, &backend, syncing),
+            || {
+                self.prepare_worker_files(
+                    session_id,
+                    &backend,
+                    &worker_root,
+                    syncing,
+                    super::worker_binary::LaunchHistory::Stored,
+                )
+            },
         )?;
         mj_core::test_hooks::reach_test_hook("subagent_create_before_worker_start")?;
         Ok((backend, worker_root, staged_aws_profile))
@@ -1295,7 +1301,7 @@ impl Controller {
     async fn connect_and_start_worker(
         &self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         backend: &targets::TargetLocator,
         worker_root: &str,
         initialize_workspace: bool,

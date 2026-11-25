@@ -7057,6 +7057,7 @@ impl CommandExecutor for MbxStagingRecorder {
 
 const SESSION_WORKER_ROOT: &str = "/var/lib/hel/workers/0123456789abcdef0123456789abcdef";
 
+#[cfg(target_os = "linux")]
 fn ssh_podman_locator() -> targets::TargetLocator {
     targets::TargetLocator::SshPodman {
         ssh: SshTarget {

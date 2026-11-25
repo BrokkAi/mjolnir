@@ -17208,7 +17208,10 @@ async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
             },
         }));
     mj_controller::database::save_materialized_session(&conversation).unwrap();
-    sessionwiki::index::open().unwrap();
+    // This test pauses synchronization before migration; start with the runtime tokenizer.
+    let index = sessionwiki::index::open().unwrap();
+    sessionwiki::index::set_tokenizer_spec(&index, "porter unicode61").unwrap();
+    drop(index);
     let state = test_runtime_state_loading_the_store();
     let waiting_state = Arc::clone(&state);
     let waiting =
@@ -18823,6 +18826,7 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
     config
         .targets
         .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.save().unwrap();
     for (id, state) in [
         ("interrupted", SessionState::Disconnected),
         ("running-peer", SessionState::Running),
@@ -18834,8 +18838,7 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
         }));
         mj_controller::database::save_new_session(&record, None, false, false).unwrap();
     }
-    let mut controller = Controller::load().unwrap();
-    controller.config = config;
+    let controller = Controller::load().unwrap();
     let mut state = test_runtime_state_with(controller);
     Arc::get_mut(&mut state).unwrap().committed =
         Some(mj_controller::database::subscribe_committed_state().unwrap());
