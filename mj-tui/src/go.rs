@@ -146,34 +146,37 @@ impl DashboardState {
         let Some(go) = &self.go else {
             return action;
         };
-        let mut reveal_profile = None;
+        // The recipe's choices apply where they are still offered; anything
+        // else keeps the wizard's own default.
+        let recipe_choices = go.recipe.as_ref().map(|recipe| {
+            (
+                self.profile_offered(&recipe.profile_id)
+                    .then(|| recipe.profile_id.clone()),
+                self.target_offered(&recipe.target_id)
+                    .then(|| recipe.target_id.clone()),
+            )
+        });
+        let reveal_provider = recipe_choices
+            .as_ref()
+            .and_then(|(profile, _)| profile.as_deref())
+            .and_then(|id| crate::wizards::NewWizard::provider_for_profile(self, id));
         if let crate::Mode::New(wizard) = &mut self.mode {
             // The local source is explicit. A remote bare path is requested
             // separately after target selection, never guessed from this path.
             wizard.project_directory = go.directory.to_string_lossy().into_owned().into();
-            if let Some(recipe) = &go.recipe {
-                wizard.profile = self
-                    .config
-                    .enabled_profiles()
-                    .position(|(id, _)| id == recipe.profile_id)
-                    .unwrap_or(0);
-                wizard.focused_provider = None;
-                reveal_profile = Some(wizard.profile);
-                wizard.target = self
-                    .config
-                    .targets
-                    .keys()
-                    .position(|id| id == &recipe.target_id)
-                    .unwrap_or(0);
+            if let (Some(recipe), Some((profile, target))) = (&go.recipe, recipe_choices) {
+                if let Some(id) = profile {
+                    wizard.set_profile_choice(crate::wizards::ProfileChoice::Profile(id));
+                }
+                if let Some(id) = target {
+                    wizard.target = id;
+                }
                 wizard.create_managed_worktree = recipe.create_managed_worktree.unwrap_or(false);
                 wizard.resource_allocation = recipe.resource_allocation.clone();
                 wizard.mounts.mounts = recipe.additional_mounts.clone();
-            }
-        }
-        if let Some(profile_index) = reveal_profile {
-            let provider = crate::wizards::NewWizard::provider_for_profile(self, profile_index);
-            if let (Some(provider), crate::Mode::New(wizard)) = (provider, &mut self.mode) {
-                wizard.expanded_providers.insert(provider);
+                if let Some(provider) = reveal_provider {
+                    wizard.expanded_providers.insert(provider);
+                }
             }
         }
         action

@@ -75,7 +75,14 @@ fn claude_missing_session() -> serde_json::Value {
 }
 
 fn recover_missing_native_session(harness: &str, missing_error: serde_json::Value, used: bool) {
-    recover_native_session_from(RelayOrigin::Journal, harness, Some(missing_error), used);
+    recover_native_session_from(
+        RelayOrigin::Journal,
+        harness,
+        Some(missing_error),
+        used,
+        None,
+        None,
+    );
 }
 
 /// The bridge loads the original thread unless given a JSON-RPC error.
@@ -84,6 +91,8 @@ fn recover_native_session_from(
     harness: &str,
     missing_error: Option<serde_json::Value>,
     used: bool,
+    prior_used_session: Option<&str>,
+    prompt_context: Option<&str>,
 ) {
     let original = if missing_error.is_some() {
         "missing-thread"
@@ -105,6 +114,7 @@ fn recover_native_session_from(
             r#"import json, sys
 log = {log}
 error = json.loads({error})
+context = {context}
 modes = {{"currentModeId": "agent",
           "availableModes": [{{"id": "agent", "name": "Guardian"}},
                              {{"id": "auto", "name": "Auto"}}]}}
@@ -127,6 +137,8 @@ for line in sys.stdin:
         result = {{"sessionId": "replacement", "modes": modes}}
     elif method == "session/prompt":
         assert request["params"]["sessionId"] == {ready:?}, request
+        if context is not None:
+            assert context in json.dumps(request), request
         # Answer the way a real agent does: the reply streams as an update on
         # the session the prompt named, then the prompt returns (R8-1).
         print(json.dumps({{"jsonrpc": "2.0", "method": "session/update", "params": {{
@@ -142,6 +154,10 @@ for line in sys.stdin:
 "#,
             log = serde_json::to_string(&log).unwrap(),
             error = serde_json::to_string(&serde_json::to_string(&missing_error).unwrap()).unwrap(),
+            context = match prompt_context {
+                Some(text) => serde_json::to_string(text).unwrap(),
+                None => "None".into(),
+            },
         ),
     )
     .unwrap();
@@ -149,6 +165,17 @@ for line in sys.stdin:
     match origin {
         RelayOrigin::Journal => {
             let mut relay = DurableRelay::open(&root, SESSION_ID, "prior-worker").unwrap();
+            if let Some(prior) = prior_used_session {
+                relay
+                    .record_observation(RelayObservation::SessionOpened {
+                        native_session_id: prior.into(),
+                        resumed: false,
+                        native_continuity_lost: false,
+                        replaced_unused_native_session_id: None,
+                    })
+                    .unwrap();
+                relay.mark_native_session_used().unwrap();
+            }
             relay
                 .record_observation(RelayObservation::SessionOpened {
                     native_session_id: original.into(),
@@ -157,6 +184,9 @@ for line in sys.stdin:
                     replaced_unused_native_session_id: None,
                 })
                 .unwrap();
+            if let Some(text) = prompt_context {
+                relay.install_prompt_context(text.to_owned()).unwrap();
+            }
             let accepted = relay.handle(RelayRequestEnvelope {
                 request_id: "submit-queued-prompt".into(),
                 protocol_version: RELAY_PROTOCOL_VERSION,
@@ -176,7 +206,10 @@ for line in sys.stdin:
             if used {
                 relay.mark_native_session_used().unwrap();
             }
-            assert_eq!(relay.native_session_may_have_history(), used);
+            assert_eq!(
+                relay.native_session_may_have_history(),
+                used && prior_used_session.is_none()
+            );
         }
         RelayOrigin::RestoredSeed => {
             // What `restore_checkpoint` leaves for a session suspended with
@@ -420,6 +453,19 @@ fn claude_missing_unused_session_recovers_after_worker_restart() {
     recover_missing_native_session("claude", claude_missing_session(), false);
 }
 
+// Hard-won: #1701: a used prior native session made a fresh non-resumed open look like it had history.
+#[test]
+fn claude_fresh_session_after_used_identity_recovers_after_worker_restart() {
+    recover_native_session_from(
+        RelayOrigin::Journal,
+        "claude",
+        Some(claude_missing_session()),
+        false,
+        Some("old-antigravity"),
+        Some("HANDOFF-1701"),
+    );
+}
+
 #[test]
 fn used_native_history_is_not_replaced_after_worker_restart() {
     recover_missing_native_session(
@@ -442,12 +488,16 @@ fn a_never_prompted_session_resumes_fresh_from_its_checkpoint() {
         "codex",
         Some(codex_missing_thread("thread not found: missing-thread")),
         false,
+        None,
+        None,
     );
     recover_native_session_from(
         RelayOrigin::RestoredSeed,
         "claude",
         Some(claude_missing_session()),
         false,
+        None,
+        None,
     );
     // A checkpoint that cannot vouch for the session keeps it protected.
     recover_native_session_from(
@@ -455,13 +505,15 @@ fn a_never_prompted_session_resumes_fresh_from_its_checkpoint() {
         "codex",
         Some(codex_missing_thread("thread not found: missing-thread")),
         true,
+        None,
+        None,
     );
 }
 
 // Hard-won: dc5d9891a: a restored session whose only turns were mailbox wakes was replaced although loadable
 #[test]
 fn codex_loads_a_restored_thread_marked_unused_by_the_seed() {
-    recover_native_session_from(RelayOrigin::RestoredSeed, "codex", None, false);
+    recover_native_session_from(RelayOrigin::RestoredSeed, "codex", None, false, None, None);
 }
 
 #[test]

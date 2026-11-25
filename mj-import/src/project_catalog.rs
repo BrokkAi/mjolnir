@@ -201,6 +201,9 @@ fn reconcile_config(
                                 session.bundle_id == *id
                                     && has_no_recorded_checkout_directory(&state, session)
                             })
+                            .filter_map(|session| {
+                                Some((session, state.checkout(&session.id).ok()?))
+                            })
                             .collect::<Vec<_>>(),
                     )?;
                 }
@@ -357,22 +360,31 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 !executor.cancellation_requested(),
                 "project discovery cancelled"
             );
-            let mut discovered_directory = change.directory.clone();
+            let mut discovered_directory = change.directory.clone().unwrap_or_default();
             let result = (|| {
                 let stored_state = database::load_state()?;
                 let known = stored_state.sessions.get(&change.session_id).cloned();
                 let path = stored_state
                     .checkout(&change.session_id)
                     .ok()
-                    .map(|checkout| match checkout {
+                    .and_then(|checkout| match checkout {
                         mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
-                            worktree.source_project_directory.clone()
+                            Some(worktree.source_project_directory.clone())
                         }
-                        mj_core::state::Checkout::Attached { path } => path.to_path_buf(),
+                        mj_core::state::Checkout::Attached { path } => Some(path.to_path_buf()),
                         mj_core::state::Checkout::ManagedWorkspace
                         | mj_core::state::Checkout::Borrowed { .. } => change.directory.clone(),
                     })
-                    .unwrap_or_else(|| change.directory.clone());
+                    // The session can be gone before discovery runs; the
+                    // change still names its source project.
+                    .or_else(|| {
+                        change
+                            .managed_worktree
+                            .as_ref()
+                            .map(|worktree| worktree.source_project_directory.clone())
+                    })
+                    .or_else(|| change.directory.clone())
+                    .context("session records no project directory to discover")?;
                 discovered_directory.clone_from(&path);
                 let recorded = known
                     .as_ref()
@@ -400,7 +412,10 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                     accept_directory(target, &path, executor)?
                 };
                 if let Some(session) = known.as_ref().filter(|session| session.project.is_none()) {
-                    migrate_memory(&project, None, &[session])?;
+                    let checkout = stored_state
+                        .checkout(&session.id)
+                        .unwrap_or_else(|_| session.checkout());
+                    migrate_memory(&project, None, &[(session, checkout)])?;
                 }
                 database::bind_session_project(&change.session_id, &id, &project)?;
                 if matches!(target, TargetTemplate::LocalBare) {
@@ -431,7 +446,7 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
 fn migrate_memory(
     project: &ProjectBundleSnapshot,
     bundle: Option<&ProjectBundle>,
-    sessions: &[&mj_core::state::SessionRecord],
+    sessions: &[(&mj_core::state::SessionRecord, mj_core::state::Checkout<'_>)],
 ) -> Result<()> {
     use mj_core::project_memory::{
         ProjectMemoryIdentity as Project, RepositoryMemoryIdentity as Repository,
@@ -454,8 +469,8 @@ fn migrate_memory(
             .collect::<Result<Vec<_>>>()?;
         legacy.push(Project::bundle(primary, members).key()?);
     }
-    for session in sessions {
-        legacy.push(Project::for_legacy_session(session, bundle, None)?.key()?);
+    for (session, checkout) in sessions {
+        legacy.push(Project::for_legacy_session(session, checkout, bundle, None)?.key()?);
     }
     for key in legacy {
         for conflict in
@@ -677,11 +692,15 @@ mod tests {
         record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: root.path().join("workers").join(&record.id),
         }));
-        let raw_key =
-            ProjectMemoryIdentity::for_legacy_session(&record, Some(&legacy_bundle), None)
-                .unwrap()
-                .key()
-                .unwrap();
+        let raw_key = ProjectMemoryIdentity::for_legacy_session(
+            &record,
+            &record.checkout(),
+            Some(&legacy_bundle),
+            None,
+        )
+        .unwrap()
+        .key()
+        .unwrap();
         let raw_root = mj_core::config::data_dir()
             .join("projects")
             .join(raw_key)
@@ -968,6 +987,108 @@ mod tests {
             database::project_discovery_changes(false)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    // A managed checkout stores no project directory, so its discovery change
+    // carries the descriptor; the source project is still found when the
+    // session is deleted before discovery runs.
+    #[test]
+    fn discovery_finds_a_managed_checkouts_source_after_its_session_is_deleted() {
+        const CHILD: &str = "MJ_PROJECT_CATALOG_MANAGED_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut command = CommandSpec::new(
+                std::env::current_exe().unwrap().to_string_lossy(),
+                [
+                    "--exact",
+                    "project_catalog::tests::discovery_finds_a_managed_checkouts_source_after_its_session_is_deleted",
+                    "--nocapture",
+                ],
+            )
+            .purpose("isolated managed checkout discovery regression");
+            command.env.extend([
+                (CHILD.into(), "1".into()),
+                (
+                    "MJ_CONFIG_DIR".into(),
+                    directory
+                        .path()
+                        .join("config")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "MJ_DATA_DIR".into(),
+                    directory.path().join("data").to_string_lossy().into_owned(),
+                ),
+            ]);
+            let output = ProcessExecutor.execute(&command).unwrap();
+            assert_eq!(
+                output.status,
+                0,
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let repository = root.path().join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Discovery Test"],
+            vec!["config", "user.email", "discovery@example.invalid"],
+            vec!["commit", "--allow-empty", "-qm", "initial"],
+        ] {
+            let mut command = CommandSpec::new("git", ["-C", &repository.to_string_lossy()])
+                .purpose("initialize managed discovery repository");
+            command.args.extend(args.into_iter().map(str::to_owned));
+            assert_eq!(ProcessExecutor.execute(&command).unwrap().status, 0);
+        }
+        Config::update(|config| {
+            config.profiles.clear();
+            config.bundles.clear();
+            config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+            Ok(())
+        })
+        .unwrap();
+        let mut record = crate::database::test_session("managed-gone", "legacy-raw");
+        record.project_directory = None;
+        record.target_template_id = "localhost".into();
+        record.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+            kind: mj_core::state::ManagedCheckoutKind::Clone,
+            source_project_directory: repository.clone(),
+            source_repository: repository.clone(),
+            worktree_root: repository.join(".mj/clones/managed-gone"),
+            branch: "main".into(),
+            target: mj_core::state::ManagedWorktreeTarget::Local,
+            base_commit: None,
+        }));
+        database::save_session(&record).unwrap();
+        let queued = database::project_discovery_changes(false).unwrap();
+        assert_eq!(queued.len(), 1, "a pathless managed checkout is queued");
+        assert_eq!(queued[0].directory, None);
+        database::delete_session(&record.id).unwrap();
+        assert!(
+            !database::load_state()
+                .unwrap()
+                .sessions
+                .contains_key(&record.id)
+        );
+
+        let errors = refresh(
+            &CancellableProcessExecutor::with_timeout(Duration::from_secs(30)),
+            false,
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let view = database::read_project_catalog().unwrap();
+        assert_eq!(view.locations.len(), 1);
+        assert_eq!(
+            view.locations[0].repository_root,
+            repository.canonicalize().unwrap()
         );
     }
 }

@@ -791,7 +791,7 @@ impl Controller {
         // needed to repair them. Operations validate the session they act on.
         self.state.validate()?;
         for session in self.state.sessions.values() {
-            if let Some(issue) = session.configuration_issue(&self.config) {
+            if let Some(issue) = self.state.configuration_issue(session, &self.config) {
                 tracing::warn!(session_id = %session.id, "{issue}");
             }
         }

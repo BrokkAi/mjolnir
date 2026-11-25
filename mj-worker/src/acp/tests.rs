@@ -517,7 +517,7 @@ fn opencode_mcp_calls_always_reach_the_person() {
     }
 }
 
-/// agy 1.5.11 titles an MCP call `mcp_<server>_<tool>` and names no server in
+/// agy 1.5.15 titles an MCP call `mcp_<server>_<tool>` and names no server in
 /// the request, so a title cannot tell an owned tool from a lookalike. Its own
 /// `mcp(<server>/*)` grant can: the worker stages one per registered owned
 /// server in agy's project file and answers none of agy's requests itself.
@@ -651,6 +651,158 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
     std::fs::write(&project, "unchanged").unwrap();
     stage_antigravity_grants(&spec).unwrap();
     assert_eq!(std::fs::read_to_string(&project).unwrap(), "unchanged");
+}
+
+/// agy 1.5.15's terminal sandbox leaves an additional directory read-only
+/// unless the project file holds `write_file(<dir>/)` for it, so the worker
+/// stages one per directory. Each launch replaces what an earlier launch
+/// staged and keeps a person's own rules, even `write_file` ones.
+#[test]
+fn antigravity_additional_directories_are_granted_writes_and_replaced_each_launch() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("config/projects/default-cli-project.json");
+    let staged_record = home.path().join("mj-staged-write-grants.json");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    let own_write = format!(
+        "write_file({})",
+        home.path().join("personal").join("").display()
+    );
+    std::fs::write(
+        &project,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": "default-cli-project",
+            "permissionGrants": {
+                "permissionGrants": {
+                    "allow": ["command(gh pr list)", own_write],
+                    "deny": ["write_file(/never/)"]
+                },
+                "v2Migrated": true
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut spec = reload_fallback_spec(HarnessKind::Antigravity);
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    spec.environment.insert(
+        "MJ_ANTIGRAVITY_HOME".into(),
+        home.path().to_string_lossy().into_owned(),
+    );
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let user_home = home.path().join("user-home");
+    spec.environment
+        .insert(home_variable.into(), user_home.to_str().unwrap().into());
+    let rule = |directory: &Path| format!("write_file({})", directory.join("").display());
+    let allowed = |project: &Path| -> Vec<String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(project).unwrap()).unwrap();
+        value["permissionGrants"]["permissionGrants"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let clone = home.path().join("owner-clone");
+    let cache = home.path().join("tool-cache");
+    // A directory named twice is granted once, and the grant ends at its
+    // separator, so a same-prefix sibling stays outside it.
+    spec.additional_directories = vec![clone.clone(), cache.clone(), clone.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let staged = allowed(&project);
+    for directory in [&clone, &cache] {
+        assert_eq!(
+            staged.iter().filter(|r| **r == rule(directory)).count(),
+            1,
+            "{staged:?}"
+        );
+    }
+    assert!(
+        rule(&clone).ends_with(&format!("{})", std::path::MAIN_SEPARATOR)),
+        "{}",
+        rule(&clone)
+    );
+    assert!(staged.contains(&own_write), "{staged:?}");
+    let denied: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    assert_eq!(
+        denied["permissionGrants"]["permissionGrants"]["deny"],
+        serde_json::json!(["write_file(/never/)"])
+    );
+    assert_eq!(denied["permissionGrants"]["v2Migrated"], true);
+    // Staging again is stable.
+    stage_antigravity_grants(&spec).unwrap();
+    assert_eq!(allowed(&project), staged);
+    // A launch with other directories removes the earlier grants.
+    let mount = home.path().join("mount");
+    spec.additional_directories = vec![mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let replaced = allowed(&project);
+    assert!(replaced.contains(&rule(&mount)), "{replaced:?}");
+    assert!(replaced.contains(&own_write), "{replaced:?}");
+    for directory in [&clone, &cache] {
+        assert!(!replaced.contains(&rule(directory)), "{replaced:?}");
+    }
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&std::fs::read(&staged_record).unwrap()).unwrap(),
+        vec![rule(&mount)]
+    );
+    // A directory the person already granted themselves stays theirs: it is
+    // never recorded, so a later launch without it keeps the rule.
+    let granted = home.path().join("granted");
+    let mut own: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    own["permissionGrants"]["permissionGrants"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push(rule(&granted).into());
+    std::fs::write(&project, serde_json::to_vec(&own).unwrap()).unwrap();
+    spec.additional_directories = vec![granted.clone(), mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let both = allowed(&project);
+    assert_eq!(
+        both.iter().filter(|r| **r == rule(&granted)).count(),
+        1,
+        "{both:?}"
+    );
+    assert!(both.contains(&rule(&mount)), "{both:?}");
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&std::fs::read(&staged_record).unwrap()).unwrap(),
+        vec![rule(&mount)]
+    );
+    spec.additional_directories = vec![mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    assert!(allowed(&project).contains(&rule(&granted)));
+    // A launch with none leaves only the person's own write rules.
+    spec.additional_directories.clear();
+    stage_antigravity_grants(&spec).unwrap();
+    let cleared = allowed(&project);
+    assert!(cleared.contains(&own_write), "{cleared:?}");
+    assert!(!cleared.iter().any(|r| r == &rule(&mount)), "{cleared:?}");
+    // A rule recorded by a launch that crashed before it reached the project
+    // file is still removed once it did.
+    std::fs::write(&staged_record, serde_json::to_vec(&[rule(&clone)]).unwrap()).unwrap();
+    let mut crashed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    crashed["permissionGrants"]["permissionGrants"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push(rule(&clone).into());
+    std::fs::write(&project, serde_json::to_vec(&crashed).unwrap()).unwrap();
+    stage_antigravity_grants(&spec).unwrap();
+    assert!(!allowed(&project).contains(&rule(&clone)));
+    // A relative directory or the filesystem root fails visibly and changes
+    // nothing, instead of granting writes below the wrong directory.
+    let before = std::fs::read_to_string(&project).unwrap();
+    for bad in [
+        PathBuf::from("relative/directory"),
+        home.path().ancestors().last().unwrap().to_path_buf(),
+    ] {
+        spec.additional_directories = vec![mount.clone(), bad.clone()];
+        let error = stage_antigravity_grants(&spec).unwrap_err().to_string();
+        assert!(error.contains("additional directory"), "{bad:?}: {error}");
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), before);
+    }
 }
 
 #[test]
@@ -863,7 +1015,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         ("mcp  mj-review  set baseline", offers_review),
                         ("mcp  mj-review_  request review", false),
                         ("mcp  mj-agents  handback", offers("handback")),
-                        ("mcp  mj-memory  trace file src/lib.rs", true),
+                        ("mcp  mj-memory  read session abc123", true),
                         // A configured reviewer server is not Mjolnir's,
                         // whatever its name.
                         ("mcp  mj-tools  run", false),
@@ -896,7 +1048,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         None
                     );
                     assert_eq!(
-                        dsh_answer(&approvals, "mcp  mj-memory  search sessions").is_some(),
+                        dsh_answer(&approvals, "mcp  mj-memory  search history").is_some(),
                         guardian
                     );
                 }
@@ -9698,24 +9850,39 @@ for line in sys.stdin:
 #[cfg(unix)]
 #[tokio::test]
 async fn reload_launch_config_spawns_updated_command_args_and_writes_supervisor_spec() {
+    exercise_planned_reload_continuity(None, false).await;
+    exercise_planned_reload_continuity(Some("ses-initial"), false).await;
+}
+
+#[cfg(unix)]
+async fn exercise_planned_reload_continuity(resume: Option<&str>, fail_retirement: bool) {
     let _ = mj_harness_install::login_environment::initialize_from_parent();
     let temp = tempfile::tempdir().unwrap();
+    if fail_retirement {
+        std::fs::write(temp.path().join("fail-retirement"), "").unwrap();
+    }
     let bridge_script = |session_id: &str| {
         format!(
             r#"
 import json, sys
+from pathlib import Path
 for line in sys.stdin:
     req = json.loads(line)
     if "method" not in req or "id" not in req:
         continue
     m = req["method"]
+    with Path("{session_id}-methods").open("a") as methods:
+        methods.write(m + "\n")
     if m == "initialize":
-        res = {{"protocolVersion": 1}}
-    elif m == "session/new":
-        res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}]}}}}
+        res = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
+    elif m in ("session/new", "session/load"):
+        res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}, {{"id": "agent-full-access", "name": "Full access"}}]}}}}
     else:
         res = {{}}
     print(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}), flush=True)
+if "{session_id}" == "ses-initial":
+    Path("auth.json").write_text(json.dumps({{"last_refresh":"2026-11-25T00:00:00Z","tokens":{{"refresh_token":"retired-grant"}}}}))
+    if Path("fail-retirement").exists(): sys.exit(1)
 "#
         )
     };
@@ -9725,6 +9892,8 @@ for line in sys.stdin:
     });
     spec.cwd = temp.path().to_path_buf();
     spec.harness = HarnessKind::Codex;
+    spec.resume_session = Some("ses-initial".into());
+    spec.native_session_history = NativeSessionHistory::MayHaveHistory;
     spec.command = "python3".into();
     spec.args = vec!["-u".into(), "-c".into(), bridge_script("ses-initial")];
 
@@ -9744,7 +9913,8 @@ for line in sys.stdin:
     let mut next_launch =
         crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
     next_launch.cwd = temp.path().to_path_buf();
-    next_launch.harness = HarnessKind::Claude;
+    next_launch.harness = HarnessKind::Codex;
+    next_launch.native_session_id = resume.map(str::to_owned);
     let next_command = PathBuf::from("python3");
     let next_args = vec![
         "-u".into(),
@@ -9758,6 +9928,39 @@ for line in sys.stdin:
     let mut next_supervisor = crate::worker_runtime::AcpSupervisorSpec::from(&next_launch);
     next_supervisor.command = next_command.clone();
     next_supervisor.args = next_args.clone();
+    // Candidate preparation precedes the source's final refresh on stdin EOF.
+    let candidate = temp.path().join("reload-candidates/continuity");
+    std::fs::create_dir_all(candidate.join("profile")).unwrap();
+    let stale =
+        br#"{"last_refresh":"2026-11-24T00:00:00Z","tokens":{"refresh_token":"stale-grant"}}"#;
+    std::fs::write(temp.path().join("auth.json"), stale).unwrap();
+    std::fs::write(candidate.join("profile/auth.json"), stale).unwrap();
+    next_launch.write(&temp.path().join("launch.json")).unwrap();
+    next_launch.write(&candidate.join("launch.json")).unwrap();
+    let ownership = serde_json::json!({"version":3,"session_id":"session","profile_id":"source",
+        "bundle_id":"bundle","target_template_id":"target"});
+    for path in [
+        temp.path().join("ownership.json"),
+        candidate.join("ownership.json"),
+    ] {
+        std::fs::write(path, serde_json::to_vec(&ownership).unwrap()).unwrap();
+    }
+    let manifest = mj_core::worker_launch::ReloadCandidateManifest {
+        operation_id: "continuity".into(),
+        expected_store_id: "store".into(),
+        candidate_id: "continuity".into(),
+        harness: HarnessKind::Codex,
+        target_profile_home: temp.path().to_string_lossy().into_owned(),
+        clear_paths: vec!["auth.json".into()],
+        protected_paths: Vec::new(),
+        shared_login: None,
+        clear_github_token: false,
+    };
+    std::fs::write(
+        candidate.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
@@ -9772,7 +9975,7 @@ for line in sys.stdin:
             leases: None,
             on_restart: Some(Box::new(HarnessReloadTransition {
                 commit: None,
-                harness: HarnessKind::Claude,
+                harness: HarnessKind::Codex,
                 claude_login_path: None,
                 boundary_mailbox_hook_available: false,
                 mailbox_delivery_mode: None,
@@ -9786,6 +9989,29 @@ for line in sys.stdin:
         .await
         .unwrap();
 
+    if fail_retirement {
+        assert!(
+            matches!(resolution.await.unwrap(), ReloadResolution::RefusedBeforeCommit(message) if message.contains("retirement"))
+        );
+        assert!(runtime.await.unwrap().is_err());
+        assert!(candidate.exists());
+        assert!(
+            !temp
+                .path()
+                .join(mj_core::worker_launch::PENDING_RELOAD_FILE)
+                .exists()
+        );
+        assert!(!temp.path().join("retired-logins").exists());
+        assert!(
+            std::fs::read_to_string(temp.path().join("auth.json"))
+                .unwrap()
+                .contains("retired-grant")
+        );
+        while let Ok(event) = event_rx.try_recv() {
+            assert!(!matches!(event, RuntimeEvent::HarnessRestarting { .. }));
+        }
+        return;
+    }
     let applied = loop {
         match tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
             .await
@@ -9812,14 +10038,30 @@ for line in sys.stdin:
         !spawned.exists(),
         "replacement process started before the barrier"
     );
+    let pending = mj_core::worker_launch::PendingInPlaceReload {
+        operation_id: "continuity".into(),
+        expected_store_id: "store".into(),
+        candidate_id: "continuity".into(),
+        git_setup_name: None,
+    };
+    crate::worker_runtime::reload_commit::commit_pending_reload(temp.path(), &pending).unwrap();
+    crate::worker_runtime::reload_commit::apply_committed_reload(temp.path(), &pending).unwrap();
+    let retired = crate::worker_runtime::reload_commit::read_retired_logins(temp.path()).unwrap();
+    assert_eq!(retired.len(), 1);
+    assert!(String::from_utf8_lossy(&retired[0].bytes).contains("retired-grant"));
+    assert_eq!(
+        std::fs::read(temp.path().join("auth.json")).unwrap(),
+        retired[0].bytes
+    );
     applied.send(Ok(None)).unwrap();
 
-    assert!(matches!(
-        resolution
-            .await
-            .expect("reload reply channel should resolve"),
-        ReloadResolution::Started
-    ));
+    let resolution = resolution
+        .await
+        .expect("reload reply channel should resolve");
+    assert!(
+        matches!(resolution, ReloadResolution::Started),
+        "{resolution:?}"
+    );
 
     let written_spec = std::fs::read_to_string(&supervisor_path).unwrap();
     assert!(
@@ -9835,11 +10077,20 @@ for line in sys.stdin:
             native_session_id, ..
         } = event
         {
-            assert_eq!(native_session_id, "ses-reloaded");
+            assert_eq!(native_session_id, resume.unwrap_or("ses-reloaded"));
             break;
         }
     }
     assert!(spawned.exists());
+    let methods = std::fs::read_to_string(temp.path().join("ses-reloaded-methods")).unwrap();
+    assert_eq!(
+        methods.lines().any(|method| method == "session/new"),
+        resume.is_none()
+    );
+    assert_eq!(
+        methods.lines().any(|method| method == "session/load"),
+        resume.is_some()
+    );
     shutdown.cancel();
     let _ = runtime.await;
 }
@@ -10017,4 +10268,10 @@ fn reload_launch_config_clears_stale_accepted_config_selectors() {
     spec.initial_model = cross_harness.initial_model.clone();
     assert_eq!(spec.startup_model().as_deref(), Some("claude-sonnet"));
     assert!(spec.accepted_config.lock().unwrap().effort.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_launch_config_failed_retirement_refuses_before_destructive_commit() {
+    exercise_planned_reload_continuity(None, true).await;
 }

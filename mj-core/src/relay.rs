@@ -223,7 +223,12 @@ pub const RELAY_FILE_ATTACHMENT_PROTOCOL: u32 = 90;
 pub const RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL: u32 = 91;
 /// 92 adds the unified `search_history` history query.
 pub const RELAY_SEARCH_HISTORY_PROTOCOL: u32 = 92;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SEARCH_HISTORY_PROTOCOL;
+/// 93 preserves retired copied logins and obeys planned native-session identity.
+pub const RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL: u32 = 93;
+/// 94 adds `read_session` backward paging (`tail`/`before`), `max_message_chars`,
+/// `"self"`, and `role="dialogue"`.
+pub const RELAY_READ_SESSION_V2_PROTOCOL: u32 = 94;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_READ_SESSION_V2_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

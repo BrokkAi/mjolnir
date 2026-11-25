@@ -168,15 +168,15 @@ impl<R: BufRead> BufRead for ShutdownReader<R> {
     }
 }
 
-/// Advertise `search_history`, `get_session_brief`, and `read_session`.
-/// `search_sessions` and `search_session` still dispatch through
+/// Advertise `search_history` and `read_session`. `get_session_brief`,
+/// `search_sessions`, and `search_session` still dispatch through
 /// [`Client::call`] for resumed transcripts and older workers; retire their
 /// variants and handlers once
-/// `MINIMUM_WORKER_PROTOCOL > RELAY_SEARCH_HISTORY_PROTOCOL`.
+/// `RELAY_MIN_PROTOCOL_VERSION >= RELAY_READ_SESSION_V2_PROTOCOL`.
 pub(super) fn tool_definitions() -> Vec<Value> {
     let page = json!({"type":"integer","minimum":1,"maximum":100,"default":20});
     let chars = json!({"type":"integer","minimum":1,"maximum":64000,"default":16000});
-    let id = json!({"type":"string","description":"A session ID, a unique prefix of one, or a native session UUID, as returned by search_history or another history tool."});
+    let id = json!({"type":"string","description":"A session ID, a unique prefix of one, a native session UUID, or \"self\" for the calling session."});
     let index = json!({"type":"integer","minimum":0,"default":0});
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| {
         json!({"name":name,"description":description,
@@ -203,7 +203,7 @@ Indexed snapshots can lag live sessions and may omit timestamps or older tool ou
         json!({
             "query":{"type":"string","description":"Terms, \"phrases\", `a OR b` alternatives, and `prefix*` terms. Not a regular expression."},
             "session_ids":{"type":"array","items":{"type":"string"},"maxItems":50,"description":"Search only these sessions: session IDs, unique prefixes, native UUIDs, or \"self\" for the calling session. Omit to search all sessions."},
-            "role":{"type":"string","enum":["user","assistant","tool"],"description":"Match only messages from this role."},
+            "role":{"type":"string","enum":["user","assistant","tool","dialogue"],"description":"Match only messages from this role. \"dialogue\" matches user and assistant messages, not tool summaries."},
             "order":{"type":"string","enum":["newest","oldest"],"default":"newest","description":"Order sessions and within-session messages newest or oldest first."},
             "limit":{"type":"integer","minimum":1,"maximum":50,"default":20,"description":"Hits per page. Context messages do not count."},
             "context_messages":{"type":"integer","minimum":0,"maximum":5,"default":0,"description":"Adjacent messages to return before and after each hit."},
@@ -215,15 +215,26 @@ Indexed snapshots can lag live sessions and may omit timestamps or older tool ou
     vec![
         search_history,
         tool(
-            "get_session_brief",
-            "Read a bounded overview of an indexed session before choosing passages to inspect. session_id accepts a session ID, a unique prefix, or a native session UUID.",
-            json!({"session_id":id,"max_chars":chars}),
-            vec!["session_id"],
-        ),
-        tool(
             "read_session",
-            "Read a bounded transcript page. To expand a search_history hit, pass its i as start (start=max(0, i-2), limit=6 shows context) and, to continue a cut message, its next_offset as offset. Follow next.start/offset to continue inside long messages. role=user produces an outline. session_id accepts a session ID, a unique prefix, or a native session UUID. Cite session ID and message indices.",
-            json!({"session_id":id,"start":index,"offset":index,"role":{"type":"string","enum":["user","assistant","tool"]},"limit":page,"max_chars":chars}),
+            "Read a bounded page of an indexed session transcript. The reply names the session (title, tool, project, started, ended, total_messages) and each message carries i, role, text, offset, text_chars, and next_offset when cut. \
+session_id accepts a session ID, a unique prefix, a native session UUID, or \"self\" for the calling session (a sub-agent gets its parent session ID and report_dir instead). \
+Forward: start=max(0, i-2), limit=6 expands a search_history hit; follow next (start, offset) to continue inside a long message. \
+Backward: tail=true reads the last page in chronological order; before=i reads the page ending before message i, and earlier.before gives the next such cursor. \
+Drop tail and before (and pass limit=1) when following next after a cut backward message. tail and before cannot be combined with start or offset. \
+role=\"user\" gives an outline of prompts (sub-agent reports can arrive as user messages); \"assistant\"; \"dialogue\" gives user and assistant turns without tool summaries; \"tool\" gives compact tool summaries, including peer send_message calls. \
+max_message_chars=N skims: it shows at most N characters of each message, pages on whole messages, and 0 means no cap. \
+Indexed snapshots can lag live sessions and may omit timestamps or older tool output. Cite session ID and message indices.",
+            json!({
+                "session_id":id,
+                "start":index,
+                "offset":index,
+                "tail":{"type":"boolean","default":false,"description":"Read the final page, chronologically. Not with start or offset."},
+                "before":{"type":"integer","minimum":0,"description":"Read the page that ends before this message index (exclusive). Not with start or offset."},
+                "role":{"type":"string","enum":["user","assistant","tool","dialogue"],"description":"Only messages from this role; \"dialogue\" is user plus assistant."},
+                "limit":page,
+                "max_chars":chars,
+                "max_message_chars":{"type":"integer","minimum":0,"maximum":64000,"description":"Show at most this many characters of each message; 0 means no cap."}
+            }),
             vec!["session_id"],
         ),
     ]

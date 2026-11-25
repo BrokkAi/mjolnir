@@ -1,0 +1,142 @@
+{
+  "round": "verify10",
+  "rows": 571,
+  "non_greptile_options": 386,
+  "greptile_solo": 2,
+  "greptile_combinations_excluded": 183,
+  "priced_configurations": 14,
+  "price_basis": "Same verified standard API estimates as the solo chart; Ember upper endpoint.",
+  "notes": [
+    "Hydrogen costs assume its saved unspecified-scope reports cover the full turn.",
+    "Ember costs use the conservative over-200k tier; ranges show all-under vs all-over bounds.",
+    "Prices cover reviewer turns, excluding setup, judging and subscriptions."
+  ],
+  "sources": {
+    "/mnt/optane/review-arms-20261113/verify10/sessions.csv": "01985c1de14c474eeb172a2ecf2ad72a9ef227d77bcb730cd7fce1a01335baf5",
+    "/mnt/optane/review-arms-20261113/verify10/groups.csv": "551370ff3c3936834e3f6f1890045741cb8e0233c126ca8c6295fcb3724423c7",
+    "/mnt/optane/review-arms-20261113/verify10/session_groups.csv": "efaadb200304ce38b1e18ce18b4fa6c8efffec27e6845b252d3571dc528d6957",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/019e66ba790bc2afc9cff5040d9e6318/.agents/evals/review-arms/results/sol-62-high/additional-model-prices.json": "78957d292339f80cfe518c5eeca37a41dbfa9baf7fb2d509d062a1b8cab70c6b",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/019e66ba790bc2afc9cff5040d9e6318/.agents/evals/review-arms/results/sol-62-high/pareto.csv": "785cf884b2aa5efb4e67d3f71f8713aaa1b830e5d6d8aeb442b5ce62faf660af",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/019e66ba790bc2afc9cff5040d9e6318/.agents/evals/review-arms/results/sol-62-high/pareto-sev-high-medium.csv": "7196aae0979f5d60124806122e1fae1b6745f8301aef7d7f76fdd3982bc2e5de",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/019e66ba790bc2afc9cff5040d9e6318/.agents/evals/review-arms/results/sol-62-high/pareto-sev-high.csv": "0a991e3a0e2ada2b64928e29727d00d7c700958f0d3d29ce6f3901607f18b637"
+  },
+  "frontiers": {
+    "all": [
+      "2\u00d7 Terra/high",
+      "2\u00d7 Terra/high + Terra/xhigh",
+      "2\u00d7 Terra/high + gpt-6.2-sol/medium",
+      "2\u00d7 Terra/xhigh",
+      "2\u00d7 Terra/xhigh + gpt-6.2-sol/low",
+      "2\u00d7 Terra/xhigh + gpt-6.2-sol/medium",
+      "3\u00d7 gpt-6.2-sol/medium",
+      "Terra/high",
+      "Terra/high + 2\u00d7 gpt-6.2-sol/medium",
+      "Terra/high + Terra/xhigh",
+      "Terra/high + Terra/xhigh + gpt-6.2-sol/medium",
+      "Terra/high + gpt-6.2-sol/medium",
+      "Terra/xhigh",
+      "Terra/xhigh + 2\u00d7 gpt-6.2-sol/medium",
+      "Terra/xhigh + gpt-6.2-sol/low",
+      "Terra/xhigh + gpt-6.2-sol/medium",
+      "gpt-6.2-sol/medium"
+    ],
+    "medium-high": [
+      "2\u00d7 Terra/high",
+      "2\u00d7 Terra/high + Terra/xhigh",
+      "2\u00d7 Terra/high + gpt-6.2-sol/medium",
+      "2\u00d7 Terra/xhigh",
+      "2\u00d7 Terra/xhigh + gpt-6.2-sol/high",
+      "2\u00d7 Terra/xhigh + gpt-6.2-sol/medium",
+      "3\u00d7 gpt-6.2-sol/medium",
+      "Sol/xhigh + Terra/xhigh + gpt-6.2-sol/high",
+      "Terra/high",
+      "Terra/high + 2\u00d7 Terra/xhigh",
+      "Terra/high + 2\u00d7 gpt-6.2-sol/medium",
+      "Terra/high + Terra/xhigh",
+      "Terra/high + Terra/xhigh + gpt-6.2-sol/high",
+      "Terra/high + Terra/xhigh + gpt-6.2-sol/medium",
+      "Terra/high + gpt-6.2-sol/medium",
+      "Terra/xhigh",
+      "Terra/xhigh + 2\u00d7 gpt-6.2-sol/medium",
+      "Terra/xhigh + gpt-6.2-sol/high + gpt-6.2-sol/medium",
+      "Terra/xhigh + gpt-6.2-sol/medium",
+      "gpt-6.2-sol/medium"
+    ],
+    "high": [
+      "2\u00d7 Terra/high",
+      "2\u00d7 Terra/xhigh",
+      "2\u00d7 Terra/xhigh + gpt-6.2-sol/high",
+      "2\u00d7 Terra/xhigh + gpt-6.2-sol/medium",
+      "3\u00d7 gpt-6.2-sol/medium",
+      "Sol/high",
+      "Sol/high + 2\u00d7 gpt-6.2-sol/medium",
+      "Sol/medium + Terra/xhigh",
+      "Sol/xhigh + gpt-6.2-sol/low + gpt-6.2-sol/medium",
+      "Terra/high",
+      "Terra/high + Terra/xhigh",
+      "Terra/xhigh",
+      "Terra/xhigh + gpt-6.2-sol/high",
+      "Terra/xhigh + gpt-6.2-sol/low",
+      "gpt-6.2-sol/high",
+      "gpt-6.2-sol/medium"
+    ]
+  },
+  "config_cost_bounds": {
+    "Terra/high": [
+      "91453/2100000",
+      "91453/2100000"
+    ],
+    "Sol/high": [
+      "175877/1050000",
+      "175877/1050000"
+    ],
+    "Sol/medium": [
+      "139779/1400000",
+      "139779/1400000"
+    ],
+    "Greptile/base": [
+      "1",
+      "1"
+    ],
+    "Greptile/plus": [
+      "3",
+      "3"
+    ],
+    "Terra/xhigh": [
+      "32549/350000",
+      "32549/350000"
+    ],
+    "Sol/xhigh": [
+      "461579/1400000",
+      "461579/1400000"
+    ],
+    "Ember/xhigh": [
+      "64816989/2500000000",
+      "194450967/2500000000"
+    ],
+    "Gemini/high": [
+      "131865363/200000000",
+      "131865363/200000000"
+    ],
+    "Kimi/high": [
+      "21684813142857143/50000000000000000",
+      "21684813142857143/50000000000000000"
+    ],
+    "Gemini/medium": [
+      "5289288294642857/25000000000000000",
+      "5289288294642857/25000000000000000"
+    ],
+    "gpt-6.2-sol/medium": [
+      "36103/150000",
+      "36103/150000"
+    ],
+    "gpt-6.2-sol/low": [
+      "239513/2100000",
+      "239513/2100000"
+    ],
+    "gpt-6.2-sol/high": [
+      "50479/175000",
+      "50479/175000"
+    ]
+  }
+}

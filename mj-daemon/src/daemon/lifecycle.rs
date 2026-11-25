@@ -76,7 +76,7 @@ type LifecycleWork = Box<
     dyn FnOnce(
             Arc<RuntimeState>,
             String,
-            Arc<AtomicBool>,
+            LifecycleControl,
             SessionAdmission,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<DaemonLifecycleResult>> + Send>,
@@ -85,11 +85,13 @@ type LifecycleWork = Box<
 
 fn boxed_lifecycle_work<F, Fut>(work: F) -> LifecycleWork
 where
-    F: FnOnce(Arc<RuntimeState>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+    F: FnOnce(Arc<RuntimeState>, String, LifecycleControl, SessionAdmission) -> Fut
+        + Send
+        + 'static,
     Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
 {
-    Box::new(move |state, session_id, cancelled, admission| {
-        Box::pin(work(state, session_id, cancelled, admission))
+    Box::new(move |state, session_id, control, admission| {
+        Box::pin(work(state, session_id, control, admission))
     })
 }
 
@@ -101,7 +103,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.start_or_join_lifecycle_for_workspace(session_id, kind, None, work)
@@ -115,7 +117,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         let mut start = LifecycleStart::request(String::new(), None, None);
@@ -132,7 +134,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.start_or_join_lifecycle_with_key(session_id, kind, resume_workspace_id, None, work)
@@ -148,7 +150,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.start_or_join_lifecycle_controlled(
@@ -172,7 +174,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.admit_lifecycle(
@@ -213,7 +215,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<LifecycleWatch>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.admit_lifecycle_mode(
@@ -237,7 +239,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<StartedLifecycle>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         self.admit_lifecycle_mode(
@@ -668,6 +670,7 @@ impl RuntimeState {
                 {
                     control.grant_commit();
                 }
+                let operation_control = control.clone();
                 let cancelled = control.cancelled.clone();
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
                 let acceptance =
@@ -727,7 +730,7 @@ impl RuntimeState {
                     // add an admission hold of its own.
                     let cleanup_state = state.clone();
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled.clone()),
+                        operation_control.executor(),
                         operation_state.clone(),
                         operation_id.clone(),
                     );
@@ -833,7 +836,7 @@ impl RuntimeState {
                                         .scope(operation(
                                             operation_state,
                                             operation_id,
-                                            cancelled,
+                                            operation_control,
                                             session_admission,
                                         ))
                                         .await
@@ -888,8 +891,7 @@ impl RuntimeState {
                                 .lifecycle
                                 .get_mut(&operation_session_id)
                                 .expect("Restart owns its lifecycle until completion");
-                            let user_cancelled =
-                                matches!(active.phase, LifecyclePhase::CancellingRestart);
+                            let user_cancelled = active.cancelled_restart_releases_intent();
                             active.phase = LifecyclePhase::CompletingRestart;
                             user_cancelled
                                 .then(|| active.restart_intent.clone())
@@ -1155,7 +1157,7 @@ impl RuntimeState {
         work: F,
     ) -> Result<DaemonLifecycleResult>
     where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+        F: FnOnce(Arc<Self>, String, LifecycleControl, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         let result = self.start_or_join_lifecycle(session_id, kind, work).await?;

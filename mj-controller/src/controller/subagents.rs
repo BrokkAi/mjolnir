@@ -480,7 +480,9 @@ impl Controller {
             last_profile: request.profile_id.clone(),
             staged_aws_profile: None,
             bundle_id: parent.bundle_id.clone(),
-            project_directory: parent.project_directory.clone(),
+            // A borrowed child works in its owner's checkout, which
+            // `State::checkout` resolves; copying the path would duplicate it.
+            project_directory: None,
             managed_worktree: None,
             review: None,
             // A child works in its parent's tree and gets what its parent got,

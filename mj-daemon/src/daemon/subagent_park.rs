@@ -325,7 +325,8 @@ impl RuntimeState {
                 child,
                 LifecycleKind::Park,
                 start,
-                move |state, session_id, cancelled, admission| async move {
+                move |state, session_id, control, admission| async move {
+ let cancelled = control.cancelled.clone();
                     let controller = blocking(Controller::load).await?;
                     ensure!(
                         controller.config.quota_recovery_enabled()
@@ -353,7 +354,7 @@ impl RuntimeState {
                         "the quota-limited sub-agent is no longer idle"
                     );
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled.clone())
+                        control.executor()
                             .with_deadline(UNPARK_TIMEOUT),
                         state.clone(),
                         session_id.clone(),
@@ -457,10 +458,9 @@ impl RuntimeState {
                 LifecycleKind::Unpark,
                 // A close cancels preparation or readiness observation, then
                 // settles the child through its ordinary lifecycle.
-                |state, session_id, cancelled, session_admission| async move {
+                |state, session_id, control, session_admission| async move {
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled.clone())
-                            .with_deadline(UNPARK_TIMEOUT),
+                        control.executor().with_deadline(UNPARK_TIMEOUT),
                         state.clone(),
                         session_id.clone(),
                     );

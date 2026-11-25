@@ -6,6 +6,9 @@
 # comes from the aqua registry.
 "aqua:cargo-bins/cargo-binstall" = "1.27.0"
 "aqua:aws-cli" = "latest"
+# Ubuntu Noble's apt gh is 2.45.0, which fails against GitHub's sunset
+# projectCards GraphQL field (fixed in gh 2.82.1).
+"aqua:cli/cli" = "2.105.0"
 "cargo:cargo-nextest" = "0.9.143"
 "cargo:cargo-llvm-cov" = "0.8.7"
 "cargo:flamegraph" = "0.6.14"
@@ -47,6 +50,10 @@ postinstall = "for shell in /opt/ms-playwright/chromium_headless_shell-1234/chro
 "apt:fd-find" = "*"
 "apt:file" = "*"
 "apt:git" = "*"
+# Pre-clone `gh auth git-credential` fallback for images built by older mj
+# versions, which do not populate /opt/mj-image/bin. On current images
+# /opt/mise/shims/gh and /opt/mj-image/bin/gh both precede /usr/bin/gh, so
+# gh 2.105.0 (the [tools] entry above) runs everywhere.
 "apt:gh" = "*"
 "apt:heaptrack" = "*"
 "apt:jq" = "*"

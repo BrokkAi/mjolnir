@@ -1181,7 +1181,11 @@ fn row_presentation(
     minimized: bool,
     heading: bool,
 ) -> RowPresentation {
-    let form = if session.configuration_issue(&dashboard.config).is_some() {
+    let form = if dashboard
+        .state
+        .configuration_issue(session, &dashboard.config)
+        .is_some()
+    {
         SessionRowForm::Repair {
             hint: expanded && !minimized,
         }

@@ -174,7 +174,7 @@ fn runtime_state_update(
     let metadata = snapshot.metadata;
     RuntimeStateUpdate {
         subagent_parents: snapshot.subagent_parents,
-        last_subagent_policies: metadata.last_subagent_policies,
+        launch_preferences: metadata.launch_preferences,
         operator_presence: metadata.operator_presence,
         native_agents,
         session_cpu: snapshot.session_cpu,

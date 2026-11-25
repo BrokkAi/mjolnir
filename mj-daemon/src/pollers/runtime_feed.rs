@@ -48,8 +48,7 @@ pub struct RuntimeStateUpdate {
     pub subagent_parents: std::collections::BTreeSet<String>,
     pub operator_presence: mj_core::state::OperatorPresence,
     pub session_cpu: SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
-    pub last_subagent_policies:
-        std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
+    pub launch_preferences: mj_core::state::LaunchPreferences,
     pub native_agents: SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
     pub workspace_names: std::collections::BTreeMap<String, String>,
     pub revision: u64,

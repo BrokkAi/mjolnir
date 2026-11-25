@@ -2160,16 +2160,16 @@ impl LoadedDashboard {
         } = startup;
         let bootstrap = runtime.into_replica();
         let config = bootstrap.projection.metadata.installed_config();
-        let state = mj_core::state::State {
+        let mut state = mj_core::state::State {
             sessions: bootstrap.projection.records.clone(),
             subagents: bootstrap.projection.subagents.clone(),
             environment_owners: bootstrap.projection.environment_owners.clone(),
             operator_presence: bootstrap.projection.metadata.operator_presence,
-            last_subagent_policies: bootstrap.projection.metadata.last_subagent_policies.clone(),
             mount_history: metadata.mount_history,
             container_sizes: metadata.container_sizes,
             ..Default::default()
         };
+        state.apply_launch_preferences(bootstrap.projection.metadata.launch_preferences.clone());
         let launch_recency = (*bootstrap.projection.metadata.launch_recency).clone();
         Self {
             workspace_id: workspace_id.to_owned(),

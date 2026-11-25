@@ -1,9 +1,9 @@
 //! One consistent store snapshot of parent usage and retained descendants.
 use super::*;
 use mj_core::usage::{
-    AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, SessionUsageEstimate,
-    SessionUsageQuery, SessionUsageReport, USAGE_GRAPH_HOURS, UnknownCost, UsageAgentRole,
-    UsageScope, add_cost, descending_cost, graph_start_ms, hour_start_ms,
+    AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileUsageEstimate,
+    SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, USAGE_GRAPH_HOURS, UnknownCost,
+    UsageAgentRole, UsageScope, add_cost, descending_cost, graph_start_ms, hour_start_ms,
 };
 
 use mj_core::usage::model_catalog;
@@ -19,7 +19,7 @@ const REPORT_TURNS_SQL: &str = "SELECT u.session_id, u.body, s.model, s.effort, 
     AND json_extract(u.body, '$.completed_at_ms') <= ?2
     AND (?3 IS NULL OR s.profile=?3)";
 
-const REPORT_ACTIVE_SQL: &str = "SELECT m.session_id FROM materialized_sessions m
+const REPORT_ACTIVE_SQL: &str = "SELECT m.session_id, s.profile FROM materialized_sessions m
     LEFT JOIN session_turn_selections s ON s.session_id=m.session_id
         AND s.command_id=json_extract(m.active_turn_json, '$.command_id')
     WHERE m.active_turn_json IS NOT NULL
@@ -169,6 +169,8 @@ fn load_with(
         (UsageAgentRole::Subagent, BTreeMap::new()),
         (UsageAgentRole::Reviewer, BTreeMap::new()),
     ]);
+    // Keyed by each turn's own retained profile, not its parent's.
+    let mut profile_groups: BTreeMap<Option<String>, ProfileUsageEstimate> = BTreeMap::new();
     let mut turns = tx.prepare(REPORT_TURNS_SQL)?;
     let rows = turns.query_map(params![since_ms.min(graph_start), now_ms, wanted], |row| {
         Ok((
@@ -194,6 +196,19 @@ fn load_with(
         let bar = usize::try_from((turn.completed_at_ms - graph_start).div_euclid(HOUR_MS))
             .ok()
             .filter(|bar| *bar < hours.len());
+        // Both coverages count the same turns, so a profile's `+` agrees with
+        // the sessions it covers.
+        let mut profile_group = in_rows.then(|| {
+            profile_groups
+                .entry(turn_profile.clone())
+                .or_insert_with(|| ProfileUsageEstimate {
+                    profile: turn_profile.clone(),
+                    ..Default::default()
+                })
+        });
+        if let Some(group) = &mut profile_group {
+            group.coverage.recorded_turns += 1;
+        }
         if in_rows {
             entry.estimate.coverage.recorded_turns += 1;
         }
@@ -201,6 +216,9 @@ fn load_with(
             Some(usage) if usage.scope == UsageScope::Turn => {
                 if in_rows {
                     entry.estimate.coverage.full_turn_reports += 1;
+                }
+                if let Some(group) = &mut profile_group {
+                    group.coverage.full_turn_reports += 1;
                 }
                 let role = in_rows
                     .then(|| {
@@ -235,6 +253,11 @@ fn load_with(
                         }
                     }
                     let Some(role) = role else { continue };
+                    if let Some(group) = &mut profile_group {
+                        group.cost_usd_ticks =
+                            add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
+                                .context("profile cost overflow")?;
+                    }
                     for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
                         let group = groups.entry(selection.model.clone()).or_insert_with(|| {
                             ModelUsageEstimate {
@@ -253,24 +276,46 @@ fn load_with(
                 if in_rows {
                     entry.estimate.coverage.last_request_reports += 1
                 }
+                if let Some(group) = &mut profile_group {
+                    group.coverage.last_request_reports += 1;
+                }
             }
             Some(_) => {
                 if in_rows {
                     entry.estimate.coverage.unspecified_reports += 1
+                }
+                if let Some(group) = &mut profile_group {
+                    group.coverage.unspecified_reports += 1;
                 }
             }
             None => {
                 if in_rows {
                     entry.estimate.coverage.missing_reports += 1
                 }
+                if let Some(group) = &mut profile_group {
+                    group.coverage.missing_reports += 1;
+                }
             }
         }
     }
     // A turn already running at the start of the window can still consume in it.
     let mut active = tx.prepare(REPORT_ACTIVE_SQL)?;
-    for member in active.query_map(params![until_ms, wanted], |row| row.get::<_, String>(0))? {
-        if let Some(&index) = owners.get(&member?) {
+    let running = active
+        .query_map(params![until_ms, wanted], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (member, turn_profile) in running {
+        if let Some(&index) = owners.get(&member) {
             entries[index].estimate.coverage.unfinished_turns += 1;
+            profile_groups
+                .entry(turn_profile.clone())
+                .or_insert_with(|| ProfileUsageEstimate {
+                    profile: turn_profile,
+                    ..Default::default()
+                })
+                .coverage
+                .unfinished_turns += 1;
         }
     }
     report.hours = hours;
@@ -301,6 +346,11 @@ fn load_with(
     report.sessions.sort_by(|a, b| {
         descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
             .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    report.profile_usage = profile_groups.into_values().collect();
+    report.profile_usage.sort_by(|a, b| {
+        descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
+            .then_with(|| a.profile.cmp(&b.profile))
     });
     for (role, groups) in role_groups {
         let mut models: Vec<_> = groups.into_values().collect();
@@ -767,6 +817,75 @@ mod tests {
         );
         assert_eq!(hourly.agent_usage, before_destroy.agent_usage);
 
+        // Turns group by the profile each recorded, so the grandchild's two
+        // turns split across the restart and its parent's profile is not used.
+        // Costs and coverage stay the sessions' own: only the grouping differs.
+        let by_profile = |report: &SessionUsageReport, profile: Option<&str>| {
+            report
+                .profile_usage
+                .iter()
+                .find(|group| group.profile.as_deref() == profile)
+                .cloned()
+        };
+        assert_eq!(
+            hourly
+                .profile_usage
+                .iter()
+                .map(|group| group.profile.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("codex"), Some("codex2")]
+        );
+        let (codex_usage, codex2_usage) = (
+            by_profile(&hourly, Some("codex")).unwrap(),
+            by_profile(&hourly, Some("codex2")).unwrap(),
+        );
+        // Codex: the root's luna, last-request and null turns, the running
+        // turn, and the grandchild's unpriced custom model before the restart.
+        assert_eq!(codex_usage.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(
+            (
+                codex_usage.coverage.recorded_turns,
+                codex_usage.coverage.full_turn_reports,
+                codex_usage.coverage.last_request_reports,
+                codex_usage.coverage.missing_reports,
+                codex_usage.coverage.unfinished_turns,
+            ),
+            (4, 2, 1, 1, 1)
+        );
+        // Codex2: the child's Opus turn and the grandchild's unknown-cache sol turn.
+        assert_eq!(codex2_usage.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(
+            (
+                codex2_usage.coverage.recorded_turns,
+                codex2_usage.coverage.full_turn_reports,
+                codex2_usage.coverage.unfinished_turns,
+            ),
+            (2, 2, 0)
+        );
+        assert!(codex_usage.coverage.is_partial() && !codex2_usage.coverage.is_partial());
+        let counted = |coverage: &mj_core::storage::UsageCoverage| {
+            [
+                coverage.recorded_turns,
+                coverage.full_turn_reports,
+                coverage.last_request_reports,
+                coverage.unspecified_reports,
+                coverage.missing_reports,
+                coverage.unfinished_turns,
+            ]
+        };
+        let total_by = |coverages: Vec<&mj_core::storage::UsageCoverage>| {
+            coverages.into_iter().fold([0; 6], |mut sum, coverage| {
+                for (sum, n) in sum.iter_mut().zip(counted(coverage)) {
+                    *sum += n;
+                }
+                sum
+            })
+        };
+        assert_eq!(
+            total_by(hourly.profile_usage.iter().map(|g| &g.coverage).collect()),
+            total_by(hourly.sessions.iter().map(|s| &s.coverage).collect())
+        );
+
         // A profile counts the turns recorded on it anywhere in the tree, by
         // the profile at turn start, after the children are destroyed.
         let on = |profile: &str, hour_start_ms| {
@@ -796,6 +915,10 @@ mod tests {
         assert_eq!(priced(&codex.sessions[0]) + priced(tree), priced(root));
         assert_eq!(codex.sessions[0].coverage.recorded_turns, 4);
         assert_eq!(codex.sessions[0].coverage.unfinished_turns, 1);
+        // The profile filter keeps only that profile's group, with the same
+        // counts the filtered tree shows.
+        assert_eq!(codex2.profile_usage, std::slice::from_ref(&codex2_usage));
+        assert_eq!(codex.profile_usage, std::slice::from_ref(&codex_usage));
 
         // The default span is the graph's 24 clock hours; its first hour
         // starts inclusively, and an older or later turn stays out.
@@ -859,6 +982,13 @@ mod tests {
             (now - 23 * HOUR_MS, now - 22 * HOUR_MS - 1)
         );
         assert_eq!(first.sessions.len(), 1);
+        // A selected hour limits the groups to its turns; a priced hour with
+        // full reports is an exact, non-partial cost.
+        assert_eq!(first.profile_usage.len(), 1);
+        assert_eq!(first.profile_usage[0].profile.as_deref(), Some("codex"));
+        assert_eq!(first.profile_usage[0].cost_usd_ticks, Ok(1_050_000_000));
+        assert_eq!(first.profile_usage[0].coverage.recorded_turns, 1);
+        assert!(!first.profile_usage[0].coverage.is_partial());
         assert_eq!(first.sessions[0].coverage.recorded_turns, 1);
         assert_eq!(
             first.sessions[0].cost_usd_ticks,
@@ -870,6 +1000,10 @@ mod tests {
         assert_eq!(last.until_ms, now);
         assert_eq!(last.sessions[0].coverage.unfinished_turns, 1);
         assert_eq!(last.sessions[0].coverage.recorded_turns, 5);
+        assert_eq!(
+            total_by(last.profile_usage.iter().map(|g| &g.coverage).collect()),
+            total_by(last.sessions.iter().map(|s| &s.coverage).collect())
+        );
         assert_eq!(
             priced(&last.sessions[0]) + priced(&first.sessions[0]),
             priced(root)
@@ -899,6 +1033,15 @@ mod tests {
         assert_eq!(two_days.sessions[0].cost_usd_ticks, Ok(105_000_000_000));
         assert_eq!(two_days.sessions[0].coverage.recorded_turns, 1);
         assert!(two_days.sessions[0].suspended);
+        // The suspended parent's turn lands on its own retained profile.
+        assert_eq!(
+            two_days.profile_usage,
+            [ProfileUsageEstimate {
+                profile: Some("claude".into()),
+                coverage: two_days.sessions[0].coverage.clone(),
+                cost_usd_ticks: Ok(105_000_000_000),
+            }]
+        );
         assert!(
             two_days
                 .hours
@@ -926,6 +1069,36 @@ mod tests {
         assert!(historical.agent_usage.contains(&unclassified));
         assert_eq!(role_cost(&historical, UsageAgentRole::Reviewer), Ok(0));
         assert_eq!(historical.sessions, hourly.sessions);
+
+        // A turn that recorded no profile stays unattributed, never the
+        // parent's, and its missing report keeps the group partial.
+        let connection = open(&path)?;
+        let body = serde_json::json!({"command_id":"unrecorded","completed_ordinal":9,"completed_at_ms":now,
+            "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":null});
+        let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+        connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES ('root','unrecorded',9,?1)", [serialize_turn_outcome(&turn)?])?;
+        drop(connection);
+        let unattributed = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let none = by_profile(&unattributed, None).unwrap();
+        assert_eq!(none.cost_usd_ticks, Ok(0));
+        assert_eq!(none.coverage.recorded_turns, 1);
+        assert_eq!(none.coverage.missing_reports, 1);
+        assert!(none.coverage.is_partial());
+        assert_eq!(unattributed.profile_usage[0], none);
+        assert_eq!(
+            by_profile(&unattributed, Some("codex")),
+            Some(codex_usage.clone())
+        );
+        assert_eq!(
+            total_by(
+                unattributed
+                    .profile_usage
+                    .iter()
+                    .map(|g| &g.coverage)
+                    .collect()
+            ),
+            total_by(unattributed.sessions.iter().map(|s| &s.coverage).collect())
+        );
         Ok(())
     }
 

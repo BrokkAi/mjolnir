@@ -406,6 +406,7 @@ pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         excluded_environment: Vec::new(),
         cwd: ".local/share/hel/workspaces/session/repo".into(),
         additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
@@ -6616,10 +6617,9 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
                 replaced_unused_native_session_id: None,
             })
             .unwrap();
-        assert_eq!(
-            relay.native_session_may_have_history(),
-            !native_session_unused,
-            "the replacement opened here and has not been used"
+        assert!(
+            !relay.native_session_may_have_history(),
+            "the replacement opened here and has not been used (unused={native_session_unused})"
         );
     }
 }
@@ -7786,6 +7786,69 @@ fn acp_workspace_roots_add_the_memory_replica_outside_controller_attachments() {
         });
         assert!(acp_additional_directories(&config).is_empty());
     }
+}
+
+#[test]
+fn a_borrowed_childs_preserved_owner_roots_reach_the_sandbox_but_not_review_discovery() {
+    let owner = PathBuf::from("/workspace/owner");
+    let workspace = PathBuf::from("/workspace/api");
+    let cwd = PathBuf::from("/workspace/owner/crates/foo");
+    let tool_cache = PathBuf::from("/cache/tools");
+    for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Muse] {
+        let mut config = launch_config("/profile");
+        config.harness = harness;
+        config.cwd = cwd.clone();
+        config.additional_directories = vec![workspace.clone()];
+        // The working directory and a root already attached are not repeated.
+        config.writable_directories = vec![owner.clone(), cwd.clone(), workspace.clone()];
+
+        let expected = if harness == HarnessKind::Muse {
+            vec![workspace.clone()]
+        } else {
+            vec![workspace.clone(), owner.clone()]
+        };
+        assert_eq!(acp_additional_directories(&config), expected, "{harness:?}");
+        assert_eq!(
+            reviewer_workspace_directories(&config),
+            std::slice::from_ref(&workspace),
+            "{harness:?} reviews only the repositories it was launched with"
+        );
+
+        // The harness sandbox profile starts from the same list as the ACP
+        // launch, tool caches included.
+        let environment = BTreeMap::from([(
+            "MJ_TOOL_CACHE_DIR".to_owned(),
+            tool_cache.display().to_string(),
+        )]);
+        let mut with_cache = expected;
+        if harness != HarnessKind::Muse {
+            with_cache.push(tool_cache.clone());
+        }
+        assert_eq!(
+            acp_session_directories(&config, &environment),
+            with_cache,
+            "{harness:?}"
+        );
+    }
+}
+
+#[test]
+fn the_harness_sandbox_takes_its_directories_from_the_launch_environment() {
+    let mut config = launch_config("/profile");
+    config.harness = HarnessKind::Codex;
+    // The configuration still names a tool cache that the launch removed as
+    // excluded; the sandbox must not grant it back.
+    config
+        .environment
+        .insert("MJ_TOOL_CACHE_DIR".into(), "/cache/excluded".into());
+    config.excluded_environment.push("MJ_TOOL_CACHE_DIR".into());
+    let launch_environment =
+        BTreeMap::from([("MJ_NX_HOME_DIR".to_owned(), "/cache/nx".to_owned())]);
+
+    assert_eq!(
+        unix::harness_sandbox(&config, &launch_environment).directories,
+        [PathBuf::from("/cache/nx")]
+    );
 }
 
 // Hard-won: #1305: one file over 100 KiB blocked every memory snapshot and checkpoint.
@@ -9064,7 +9127,10 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
 async fn acp_supervisor_terminates_descendants_when_parent_input_ends() {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
-    for broken_output in [false, true] {
+    // Own fixture orphans instead of relying on the test host's PID 1 reaper.
+    #[cfg(target_os = "linux")]
+    mj_core::subprocess::orphans::become_subreaper().unwrap();
+    for (broken_output, leader_exits) in [(false, false), (true, false), (false, true)] {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("descendant-writes");
         let ready_path = root.path().join("ready.sock");
@@ -9091,6 +9157,7 @@ read_ready, write_ready = os.pipe()
 if os.fork() == 0:
     os.close(read_ready)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(sys.argv[1] + '.child-pid', 'w') as f: f.write(str(os.getpid()))
     with open(sys.argv[1], 'a') as f: f.write('x')
     with socket.socket(socket.AF_UNIX) as ready:
         ready.connect(sys.argv[2])
@@ -9104,12 +9171,14 @@ if os.fork() == 0:
 os.close(write_ready)
 assert os.read(read_ready, 1) == b'x'
 os.close(read_ready)
+if sys.argv[3] == 'exit': sys.exit(0)
 print('x' * 100000, flush=True)
 while True: time.sleep(1)
 "#
                 .into(),
                 marker.to_string_lossy().into_owned(),
                 ready_path.to_string_lossy().into_owned(),
+                if leader_exits { "exit" } else { "stay" }.into(),
             ],
             environment: BTreeMap::new(),
             excluded_environment: Vec::new(),
@@ -9133,7 +9202,7 @@ while True: time.sleep(1)
         })
         .await;
         let mut held = Some(held);
-        if !broken_output {
+        if !broken_output && !leader_exits {
             drop(held.take());
         }
         let result = tokio::time::timeout(crate::test_support::IO_TIMEOUT, task)
@@ -9145,7 +9214,19 @@ while True: time.sleep(1)
         } else {
             result.unwrap();
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let descendant: i32 =
+            std::fs::read_to_string(root.path().join("descendant-writes.child-pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+        // Success acknowledges group exit, not merely that KILL was sent.
+        // A planned reload's wait for this supervisor cannot finish earlier.
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+
         let size = std::fs::metadata(&marker).unwrap().len();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(

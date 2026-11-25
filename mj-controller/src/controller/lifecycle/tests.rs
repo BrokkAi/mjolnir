@@ -4495,6 +4495,10 @@ esac
 
     impl CommandExecutor for InterruptedProbe {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            // Once cancelled, every command must run on the shutdown-only view.
+            if command.is_shutdown_only() {
+                return ProcessExecutor.execute(command);
+            }
             if command.purpose == "check for Mjolnir session container"
                 && self.cancellation != ProbeCancellation::AtReadmission
             {
@@ -4515,7 +4519,7 @@ esac
             command: &CommandSpec,
             input: &mut (dyn std::io::Read + Send),
         ) -> Result<CommandOutput> {
-            assert!(!self.cancellation_requested());
+            assert!(command.is_shutdown_only() || !self.cancellation_requested());
             ProcessExecutor.execute_with_stdin_without_deadline(command, input)
         }
 
@@ -6782,7 +6786,7 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
 
 #[cfg(unix)]
 #[tokio::test]
-async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local_target() {
+async fn wait_for_stop_runs_shutdown_only_commands_after_cancellation_on_non_local_target() {
     use mj_core::worker_suspend::{
         self as wire, SuspendProgress, SuspendReceipt, SuspendRequest, WorkerIdentity,
     };
@@ -6792,48 +6796,17 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
         atomic::{AtomicUsize, Ordering},
     };
 
-    struct CancelledExecutor;
-
-    impl CommandExecutor for CancelledExecutor {
-        fn execute(
-            &self,
-            _command: &mj_core::targets::CommandSpec,
-        ) -> Result<mj_core::targets::CommandOutput> {
-            anyhow::bail!("cancelled executor must not run target commands")
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-        ) -> Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-            _input: &mut (dyn std::io::Read + Send),
-        ) -> Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn cancellation_requested(&self) -> bool {
-            true
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            true
-        }
-
-        fn pause_deadline(&self) -> targets::DeadlinePause {
-            targets::DeadlinePause::none()
-        }
-    }
-
+    /// A target whose supervisor was cancelled by a person: it refuses every
+    /// command except those marked shutdown-only.
     #[derive(Clone, Default)]
     struct UncancelledTargetFake {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         alive_polls: Arc<AtomicUsize>,
+        cancelled: bool,
+        /// Daemon shutdown, which `shutdown_after_first_poll` starts while the
+        /// first liveness poll runs.
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        shutdown_after_first_poll: bool,
     }
 
     impl CommandExecutor for UncancelledTargetFake {
@@ -6848,14 +6821,30 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             &self,
             command: &mj_core::targets::CommandSpec,
         ) -> Result<mj_core::targets::CommandOutput> {
+            if self.cancelled && !command.is_shutdown_only() {
+                anyhow::bail!("cancelled executor must not run target commands");
+            }
+            if self.shutdown.load(Ordering::SeqCst) {
+                anyhow::bail!("interrupted by daemon shutdown");
+            }
             let joined = command.args.join(" ");
             if let Some(answer) = batched_suspend_probe_answer(
                 command,
                 |name| self.files.lock().unwrap().get(name).cloned(),
                 // Alive on the first bounded wait, dead on the second.
-                || self.alive_polls.fetch_add(1, Ordering::SeqCst) == 0,
+                || {
+                    let first = self.alive_polls.fetch_add(1, Ordering::SeqCst) == 0;
+                    if self.shutdown_after_first_poll {
+                        self.shutdown.store(true, Ordering::SeqCst);
+                    }
+                    first
+                },
                 "",
             ) {
+                // Shutdown that begins while the command runs kills it.
+                if self.shutdown.load(Ordering::SeqCst) {
+                    anyhow::bail!("interrupted by daemon shutdown");
+                }
                 return Ok(answer);
             }
             for name in [
@@ -6902,8 +6891,16 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             self.execute_without_deadline(command)
         }
 
+        fn cancellation_requested(&self) -> bool {
+            self.cancelled
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
-            false
+            self.cancelled
+        }
+
+        fn shutdown_interrupted(&self) -> bool {
+            self.shutdown.load(Ordering::SeqCst)
         }
 
         fn pause_deadline(&self) -> targets::DeadlinePause {
@@ -6959,6 +6956,10 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let op = "origin-delta-suspend-cancel-1".to_owned();
     let target_fake = UncancelledTargetFake::default();
+    let cancelled_fake = UncancelledTargetFake {
+        cancelled: true,
+        ..target_fake.clone()
+    };
     {
         let mut files = target_fake.files.lock().unwrap();
         files.insert(wire::ACCEPTED.to_owned(), serde_json::to_vec(&op).unwrap());
@@ -6995,10 +6996,7 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let attempt =
         origin_delta::OriginDeltaSuspend::load(&controller, session_id, &target_fake).unwrap();
-    attempt
-        .wait_for_stop_with_uncancelled(&CancelledExecutor, &target_fake)
-        .await
-        .unwrap();
+    attempt.wait_for_stop(&cancelled_fake).await.unwrap();
     assert!(
         attempt
             .receipt(&target_fake)
@@ -7011,6 +7009,45 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
     assert_eq!(
         attempt.restart_reason(&target_fake).unwrap().as_deref(),
         Some("suspend was cancelled")
+    );
+
+    // Shutdown arriving after the person's cancel interrupts the wait at its
+    // next command, leaving the accepted request for the next daemon.
+    let interrupted_fake = UncancelledTargetFake {
+        files: Arc::new(Mutex::new(target_fake.files.lock().unwrap().clone())),
+        alive_polls: Arc::default(),
+        cancelled: true,
+        shutdown: Arc::default(),
+        shutdown_after_first_poll: true,
+    };
+    let interrupted = origin_delta::OriginDeltaSuspend::load(
+        &controller,
+        session_id,
+        &UncancelledTargetFake {
+            cancelled: false,
+            shutdown_after_first_poll: false,
+            ..interrupted_fake.clone()
+        },
+    )
+    .unwrap();
+    let error = interrupted
+        .wait_for_stop(&interrupted_fake)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("interrupted by daemon shutdown"),
+        "{error:#}"
+    );
+    assert_eq!(
+        error.downcast_ref::<LifecycleFailureReason>(),
+        Some(&LifecycleFailureReason::SuspendPending)
+    );
+    assert!(
+        interrupted_fake
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(wire::REQUEST)
     );
 }
 
@@ -7342,5 +7379,125 @@ fn checkpoint_report_roots_follow_the_environment_binding_after_owned_child_regi
             .unwrap(),
         [borrowed_root.join(borrowed_id)],
         "the environment retains the borrower report after the borrower is stopped and removed"
+    );
+}
+
+/// Parking a quiescent session after a refused suspend stops its worker under
+/// the failed-launch bound and the shutdown-only view, yields admission around
+/// the stop, and requires the readmission before anything durable is written:
+/// a handoff that closed admission leaves `Parked` unwritten for the next
+/// daemon.
+#[cfg(unix)]
+#[tokio::test]
+async fn parking_a_quiescent_session_yields_admission_and_stops_bounded_before_any_write() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    const NAME: &str =
+        "parking_a_quiescent_session_yields_admission_and_stops_bounded_before_any_write";
+    const SESSION_ID: &str = "parked-rollback-bounds";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
+    #[derive(Default)]
+    struct Probe {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for Probe {
+        fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+            self.events.lock().unwrap().push("unbounded".into());
+            anyhow::bail!("the worker stop must run through the bounded cleanup path")
+        }
+
+        fn execute_cleanup_with_timeout(
+            &self,
+            command: &CommandSpec,
+            timeout: Duration,
+        ) -> Result<CommandOutput> {
+            self.events.lock().unwrap().push(format!(
+                "stop bound={}s shutdown_only={}",
+                timeout.as_secs(),
+                command.is_shutdown_only()
+            ));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn begin_resumable_work(&self) -> Result<()> {
+            self.events.lock().unwrap().push("yield admission".into());
+            Ok(())
+        }
+
+        fn end_resumable_work(&self, _: &'static str) -> Result<()> {
+            self.events.lock().unwrap().push("readmit".into());
+            anyhow::bail!("the daemon handoff closed admission")
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let mut controller = stopped_podman_cleanup_controller(SESSION_ID);
+    controller.state.sessions.get_mut(SESSION_ID).unwrap().state = SessionState::Closing;
+    persist_controller_fixture(&mut controller);
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let probe = Probe::default();
+    let shutdown_only = probe.shutdown_only();
+    let cleanup =
+        shutdown_only.with_cleanup_timeout(crate::controller::FAILED_STARTUP_CLEANUP_TIMEOUT);
+    let error = anyhow::anyhow!("suspend refused");
+    let outcome = crate::worker_lifecycle::run_admitted(&admission, SESSION_ID, async {
+        controller.park_quiescent_session(SESSION_ID, &probe, &cleanup, &error)
+    })
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{outcome:#}").contains("the daemon handoff closed admission"),
+        "{outcome:#}"
+    );
+    assert_eq!(
+        *probe.events.lock().unwrap(),
+        [
+            "yield admission",
+            "stop bound=30s shutdown_only=true",
+            "readmit"
+        ]
+    );
+    assert_eq!(
+        controller.state.sessions[SESSION_ID].state,
+        SessionState::Closing,
+        "a refused readmission leaves the record for the next daemon"
     );
 }

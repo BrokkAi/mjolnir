@@ -4515,7 +4515,10 @@ async fn answer_override_capture(
         .unwrap();
 }
 
-async fn finish_override_worker_actions(manager: &mut FakeManager, expected_notice: &str) {
+async fn finish_override_worker_actions(
+    manager: &mut FakeManager,
+    expected_notice: &str,
+) -> String {
     finish_override_worker_actions_for(manager, expected_notice, false).await
 }
 
@@ -4524,8 +4527,8 @@ async fn finish_override_worker_actions_for(
     manager: &mut FakeManager,
     expected_notice: &str,
     old_worker: bool,
-) {
-    finish_override_worker_actions_with_failure(manager, expected_notice, old_worker, None).await;
+) -> String {
+    finish_override_worker_actions_with_failure(manager, expected_notice, old_worker, None).await
 }
 
 async fn finish_override_worker_actions_with_failure(
@@ -4533,8 +4536,8 @@ async fn finish_override_worker_actions_with_failure(
     expected_notice: &str,
     old_worker: bool,
     failure: Option<(&FakeEnvironment, &str)>,
-) {
-    match manager.next().await {
+) -> String {
+    let notice = match manager.next().await {
         RemoteSessionRequest::Submit {
             command: RelayCommand::RecordNotice { text },
             reply,
@@ -4550,12 +4553,13 @@ async fn finish_override_worker_actions_with_failure(
             assert!(text.contains("fix the regression"));
             assert!(text.len() <= mj_review::SYNTHESIS_LIMIT);
             reply.send(Ok(1)).unwrap();
+            text
         }
         other => panic!(
             "expected the override audit before any ref change, got {}",
             other.session_id()
         ),
-    }
+    };
     let (action, reply) = match manager.next().await {
         RemoteSessionRequest::Reviewer { action, reply, .. } => (action, reply),
         other => panic!(
@@ -4582,6 +4586,7 @@ async fn finish_override_worker_actions_with_failure(
             .is_err(),
         "an override pins no review baseline"
     );
+    notice
 }
 
 #[tokio::test]
@@ -4996,12 +5001,33 @@ async fn push_override_on_a_current_worker_says_the_base_is_unchanged() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, None, one_override("false positive"))
-                .await
+            let mut overrides = one_override(
+                "false positive\n- Finding: quoted reason\nOverridden synthesis (review quoted):",
+            );
+            overrides.push(declined(
+                "[P3] real finding after the quote",
+                "out of scope",
+            ));
+            host.override_push(&session, None, overrides).await
         })
     };
     answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
-    finish_override_worker_actions(&mut manager, "false positive").await;
+    let notice = finish_override_worker_actions(
+        &mut manager,
+        "false positive\n    - Finding: quoted reason\n    Overridden synthesis (review quoted):",
+    )
+    .await;
+    let disclosures = mj_client::transcript::transcript_disclosures(
+        mj_core::transcript::ChatRole::System,
+        notice.lines(),
+    );
+    assert_eq!(
+        disclosures[0].summary,
+        [
+            "- [P1] src/lib.rs:7 -- retry loses the request",
+            "- [P3] real finding after the quote",
+        ]
+    );
     let reply = request.await.unwrap().unwrap();
     assert!(
         reply["message"]

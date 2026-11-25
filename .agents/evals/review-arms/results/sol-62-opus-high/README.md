@@ -1,5 +1,9 @@
 # Sol 6.2 reviewer repeats with Opus 5.5 high verification
 
+The [updated combination charts](../sol-62-high/combo-pricing/README.md) use
+verify10, add Sol 6.2/high and the newly verified Hydrogen/Kimi/Ember prices.
+The charts and tables below preserve the earlier verify9 result.
+
 On the same 70 diffs, one Sol 6.2 medium reviewer found **213.67** distinct
 Opus-confirmed issues in expectation. One Sol 6.2 low reviewer found
 **134.67**, and three independent low reviewers found **179.00** together.
@@ -137,14 +141,21 @@ historical frontier and retain the original per-configuration sample caps.
 
 ### Single-model review performance versus cost
 
-![Single-model yield versus workflow cost, including historical Claude and partial DSF estimates](review-single-model-cost.png)
+![Current single-model results and historical estimates on one cost-versus-yield chart](review-single-model-cost.png)
 
-Both panels now price **single reviews**: current costs per review and historical
-costs per initial-head review. Separate study panels retain their own Terra
-6.1/high = 100 baselines and cost-sorted keys. Filled markers are current
-measurements; hollow markers are historical or partial-cohort DSF results.
-An asterisk identifies the three historical yields that require estimation.
-The series count different source outcomes:
+The single scatter plot combines **current results and historical estimates**
+using **cost per single review**. Yield is normalized to Terra 6.1/high = 100
+within each source study. Filled markers are current measurements; hollow
+markers are historical or partial-cohort DSF results. An asterisk identifies
+three estimated historical yields.
+
+The **combined point-estimate frontier** minimizes cost and maximizes the
+plotted yield index across non-Greptile points. It is descriptive: historical
+and current outcomes use different corpora, grading and normalization baselines.
+Its models and both Greptile solo references are **labeled directly by name**;
+the other eight points use numbers with a lookup key. The frontier is calculated
+from the plotted values, rather than a hardcoded list. These series count
+different source outcomes:
 
 - **Current study:** the single-reviewer rows of [pareto.csv](pareto.csv), from
   the blinded Opus `verify9` round. Yield averages one reviewer's confirmed
@@ -159,8 +170,9 @@ The series count different source outcomes:
   Initial heads come from `revision_index=0` in the metrics. Accepted material
   roots whose source references include those heads give **Terra/high
   28/30/30** and **Haiku/xhigh 22/21/19** over three 47-review passes. Historical
-  yield divides each mean by Terra's **29.333** initial-review material roots;
-  its matching initial-review cost reference is **$0.051**.
+  yield divides each mean by Terra's **29.333** initial-review material roots.
+  This historical Terra baseline is retained only for normalization; its point
+  is omitted from the chart at the user's request.
   Initial-only grades for **Haiku/high, Sonnet/high and Opus/high** were not
   preserved. Their initial-review yields are **estimates**, marked `*` in the
   PNG: each all-revision material-root mean is multiplied by Terra's measured

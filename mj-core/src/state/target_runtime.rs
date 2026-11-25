@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::{SessionRecord, SessionResourceAllocation, TargetLocator};
-use crate::config::{ExecutionPolicy, SshConnection, TargetTemplate};
+use crate::config::{
+    Environment, EnvironmentValue, ExecutionPolicy, SshConnection, TargetTemplate,
+};
 use crate::targets::AdditionalMount;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,7 +16,15 @@ pub struct TargetRuntimeSettings {
     pub kind: String,
     pub connection: TargetConnection,
     pub execution_policy: ExecutionPolicy,
+    /// Literal target environment entries. Values that name a secret live in
+    /// `environment_references`, never here.
     pub environment: BTreeMap<String, String>,
+    /// Entries whose value is read from the daemon's environment or secrets
+    /// file at launch. Only the reference is persisted: the resolved secret
+    /// must not reach SQLite, API responses, or container metadata, and a
+    /// rotated secret applies at the next launch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment_references: BTreeMap<String, EnvironmentValue>,
     /// Shared native build caches selected when this environment was created.
     /// Container mounts cannot follow subsequent machine configuration edits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,6 +36,20 @@ pub struct TargetRuntimeSettings {
 }
 
 impl TargetRuntimeSettings {
+    /// The target environment as a launch delivers it: the literal entries
+    /// and the current value of every reference. This is the only place a
+    /// recorded reference becomes a value, so a rotated secret applies at the
+    /// next launch and a reference that no longer resolves fails by name.
+    pub fn launch_environment(&self) -> anyhow::Result<BTreeMap<String, String>> {
+        let mut environment = self.environment.clone();
+        if !self.environment_references.is_empty() {
+            let references = Environment::from_sources(self.environment_references.clone());
+            references.ensure_resolved()?;
+            environment.extend(references.into_resolved());
+        }
+        Ok(environment)
+    }
+
     /// Whether the harness runs without approvals here: the recorded
     /// execution policy the worker launch enforces, so containers and SSH
     /// bare targets with `permissions = "yolo"` both qualify. The recorded
@@ -267,7 +291,7 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             },
             _ => TargetConnection::Local,
         };
-        let environment = match template {
+        let (environment, environment_references) = match template {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::AppleContainer { container }
@@ -275,15 +299,28 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             | TargetTemplate::SshDocker { container, .. }
             | TargetTemplate::SshAppleContainer { container, .. }
             | TargetTemplate::SshNitro { container, .. } => {
-                container.environment.resolved().clone()
+                let mut literals = BTreeMap::new();
+                let mut references = BTreeMap::new();
+                for (key, source) in container.environment.sources() {
+                    match source {
+                        EnvironmentValue::Literal(value) => {
+                            literals.insert(key.clone(), value.clone());
+                        }
+                        reference => {
+                            references.insert(key.clone(), reference.clone());
+                        }
+                    }
+                }
+                (literals, references)
             }
-            _ => BTreeMap::new(),
+            _ => (BTreeMap::new(), BTreeMap::new()),
         };
         Self {
             kind: template.kind_name().into(),
             connection,
             execution_policy: template.execution_policy(),
             environment,
+            environment_references,
             tool_cache: None,
             container_settings: None,
         }

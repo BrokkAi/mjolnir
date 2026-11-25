@@ -102,9 +102,18 @@ mod tests {
         for name in ["list", "read", "write"] {
             assert!(!names.contains(&name), "unexpected document tool {name}");
         }
-        assert_eq!(
-            names,
-            ["search_history", "get_session_brief", "read_session",]
+        assert_eq!(names, ["search_history", "read_session"]);
+        let read = &tools[1]["inputSchema"]["properties"];
+        for key in ["tail", "before", "role", "max_message_chars"] {
+            assert!(read.get(key).is_some(), "read_session must expose {key}");
+        }
+        assert_eq!(read["max_message_chars"]["minimum"], 0);
+        assert_eq!(read["max_message_chars"]["maximum"], 64000);
+        assert!(
+            read["role"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("dialogue"))
         );
         let search = &tools[0]["inputSchema"]["properties"];
         assert!(
@@ -194,6 +203,11 @@ mod tests {
         assert!(matches!(
             forwarded_query(json!({"session_id": "s", "query": "x"}), "search_session"),
             HistoryQuery::SearchSession { .. }
+        ));
+        // Retired from tools/list, but resumed transcripts can still call it.
+        assert!(matches!(
+            forwarded_query(json!({"session_id": "s"}), "get_session_brief"),
+            HistoryQuery::GetSessionBrief { .. }
         ));
         let client = history::Client::new(None);
         for (name, arguments) in [

@@ -245,10 +245,13 @@ pub fn worker_launch_config(
     Option<ProjectMemoryLaunchConfig>,
     String,
 )> {
+    // One resolution per launch: the AWS decision and the worker's
+    // environment must see the same secret values.
+    let target_environment = target.launch_environment()?;
     let aws_source = crate::aws_credentials::source_for_staged_profile(
         profile,
         backend,
-        &target.environment,
+        &target_environment,
         session.staged_aws_profile.as_deref(),
     )?;
     worker_launch_config_with_checkout(
@@ -259,6 +262,7 @@ pub fn worker_launch_config(
         backend,
         worker_workspace,
         target,
+        target_environment,
         config,
         aws_source.as_ref(),
     )
@@ -273,6 +277,8 @@ pub fn worker_launch_config_with_checkout(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
+    // `target.launch_environment()`, resolved once by the caller.
+    mut target_environment: std::collections::BTreeMap<String, String>,
     config: &mj_core::config::Config,
     aws_source: Option<&mj_core::aws_credentials::AwsCredentialSource>,
 ) -> Result<(
@@ -284,12 +290,20 @@ pub fn worker_launch_config_with_checkout(
     let execution_policy = target.execution_policy;
     let target_profile_home = target_profile_home(backend, session_id, profile);
     let workspace = launch_workspace_paths(checkout, bundle, backend, &worker_workspace)?;
-    let cwd = worker_workspace
-        .working_directories
-        .iter()
-        .fold(PathBuf::from(&workspace.0), |cwd, directory| {
-            mj_core::target_path::join(&cwd, directory)
-        });
+    // A borrowed child's working directory moves `cwd` below (or away from)
+    // its owner's checkout. Every directory the fold leaves, the owner's root
+    // included, stays writable so the repository the child works in keeps a
+    // writable Git directory. They are not `additional_directories`: review
+    // discovery and Muse's single-repository check read that list.
+    let mut visited = vec![PathBuf::from(&workspace.0)];
+    for directory in worker_workspace.working_directories.iter() {
+        let next = mj_core::target_path::join(
+            visited.last().expect("the owner root starts the fold"),
+            directory,
+        );
+        visited.push(next);
+    }
+    let cwd = visited.pop().expect("the owner root starts the fold");
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
     additional_directories.extend(
         mj_core::state::applied_container_settings(worker_workspace.owner.unwrap_or(session))
@@ -297,6 +311,15 @@ pub fn worker_launch_config_with_checkout(
             .iter()
             .map(|resource| resource.destination.clone()),
     );
+    let mut writable_directories = Vec::new();
+    for directory in visited {
+        if directory != cwd
+            && !additional_directories.contains(&directory)
+            && !writable_directories.contains(&directory)
+        {
+            writable_directories.push(directory);
+        }
+    }
     if profile.kind == mj_core::config::HarnessKind::Muse && !additional_directories.is_empty() {
         bail!(
             "{} ACP does not support multiple workspace roots; use a single-repository bundle",
@@ -304,7 +327,6 @@ pub fn worker_launch_config_with_checkout(
         );
     }
     let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
-    let mut target_environment = target.environment.clone();
     let podman_container = backend.container_engine() == Some("podman");
     let nitro_build_cache =
         session.build_cache.is_some() && matches!(backend, targets::TargetLocator::SshNitro { .. });
@@ -437,6 +459,7 @@ pub fn worker_launch_config_with_checkout(
     // the memory launch config below depends on the session's choice.
     let mut project_memory = project_memory_launch(
         session,
+        checkout,
         bundle,
         &workspace,
         &target_profile_home,
@@ -558,6 +581,7 @@ pub fn worker_launch_config_with_checkout(
             excluded_environment,
             cwd,
             additional_directories,
+            writable_directories,
             native_session_id: session.native_session_id.clone(),
             project_memory: project_memory.clone(),
             execution_policy,

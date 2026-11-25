@@ -1160,9 +1160,15 @@ sessions omit it, even if the profile contains a user copy. Your own `skills/`
 directory is left alone.
 
 Session recall is provided by the `mj-memory` MCP server:
-`search_history`, `get_session_brief`, and `read_session`. They query the controller's
+`search_history` and `read_session`. They query the controller's
 session index on local, container, and SSH targets without installing `sw` or
-copying the index to the target. Claude receives these history tools and keeps
+copying the index to the target. `read_session` returns the session's title,
+tool, project, start and end times, and message count with each page. It reads
+backward with `tail` or `before`, filters `role="dialogue"` (user and assistant
+turns without tool summaries; `search_history` accepts it too), skims long
+transcripts with `max_message_chars`, and accepts `"self"` for the calling
+session. A sub-agent's `"self"` names its parent session and report directory,
+because sub-agent transcripts are not indexed. Claude receives these history tools and keeps
 native project notes. Other harnesses read and write their session's project
 memory replica with their own file tools. Applicable history tools are
 registered again when a session resumes.

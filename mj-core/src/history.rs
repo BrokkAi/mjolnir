@@ -8,6 +8,13 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_PENDING: usize = 8;
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
+/// Caller-relative session spelling accepted by `search_history` and `read_session`.
+pub const SELF_SESSION_ALIAS: &str = "self";
+
+pub fn is_self_alias(id: &str) -> bool {
+    id == SELF_SESSION_ALIAS
+}
+
 pub fn page_default() -> usize {
     20
 }
@@ -53,6 +60,11 @@ pub enum HistoryQuery {
         #[serde(default = "page_default")]
         limit: usize,
     },
+    /// No longer advertised by `mj-memory`, but older active workers can still
+    /// send it inside `HistoryRequests`, where `deny_unknown_fields` would fail
+    /// the entire poll if it were deleted. Delete once
+    /// `RELAY_MIN_PROTOCOL_VERSION >= RELAY_READ_SESSION_V2_PROTOCOL` (the floor
+    /// is currently 1, so this is effectively permanent).
     GetSessionBrief {
         session_id: String,
         #[serde(default = "text_default")]
@@ -71,6 +83,9 @@ pub enum HistoryQuery {
         #[serde(default = "text_default")]
         max_chars: usize,
     },
+    /// `tail`, `before`, `max_message_chars`, `role="dialogue"`, and `"self"` need
+    /// [`crate::relay::RELAY_READ_SESSION_V2_PROTOCOL`]; the new fields are omitted
+    /// from the wire when unset so plain reads still reach older controllers.
     ReadSession {
         session_id: String,
         #[serde(default)]
@@ -83,6 +98,15 @@ pub enum HistoryQuery {
         limit: usize,
         #[serde(default = "text_default")]
         max_chars: usize,
+        /// Read the last page, chronologically.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        tail: bool,
+        /// Read the page that ends before this message index (exclusive).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<usize>,
+        /// Per-message character cap; zero means no cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_message_chars: Option<usize>,
     },
 }
 
@@ -122,10 +146,7 @@ impl HistoryQuery {
                     "query must contain 1–4096 bytes"
                 );
                 if let Some(role) = role {
-                    ensure!(
-                        matches!(role.as_str(), "user" | "assistant" | "tool"),
-                        "role must be user, assistant, or tool"
-                    );
+                    ensure_role(role)?;
                 }
                 if let Some(order) = order {
                     ensure!(
@@ -153,16 +174,66 @@ impl HistoryQuery {
             _ => {}
         }
         if let Self::ReadSession {
-            role: Some(role), ..
+            role,
+            start,
+            offset,
+            tail,
+            before,
+            ..
         } = self
         {
-            ensure!(
-                matches!(role.as_str(), "user" | "assistant" | "tool"),
-                "role must be user, assistant, or tool"
-            );
+            if let Some(role) = role {
+                ensure_role(role)?;
+            }
+            if *tail || before.is_some() {
+                ensure!(*start == 0, "tail/before cannot be combined with start");
+                ensure!(*offset == 0, "tail/before cannot be combined with offset");
+            }
         }
         Ok(())
     }
+
+    /// The lowest relay protocol that understands this query, and the feature
+    /// name to report when the connected controller is older. The controller
+    /// gate and the worker's local failure both ask here.
+    pub fn protocol_requirement(&self) -> (u32, &'static str) {
+        use crate::relay::{RELAY_READ_SESSION_V2_PROTOCOL, RELAY_SEARCH_HISTORY_PROTOCOL};
+        match self {
+            Self::SearchHistory { role, .. } if role.as_deref() == Some("dialogue") => (
+                RELAY_READ_SESSION_V2_PROTOCOL,
+                "search_history with role=\"dialogue\"",
+            ),
+            Self::SearchHistory { .. } => (RELAY_SEARCH_HISTORY_PROTOCOL, "search_history"),
+            Self::ReadSession {
+                session_id,
+                role,
+                tail,
+                before,
+                max_message_chars,
+                ..
+            } if *tail
+                || before.is_some()
+                || max_message_chars.is_some()
+                || role.as_deref() == Some("dialogue")
+                || is_self_alias(session_id) =>
+            {
+                (
+                    RELAY_READ_SESSION_V2_PROTOCOL,
+                    "read_session (tail/before/dialogue/max_message_chars/self)",
+                )
+            }
+            Self::ReadSession { .. } => (16, "read_session"),
+            _ => (16, "history query"),
+        }
+    }
+}
+
+fn ensure_role(role: &str) -> Result<()> {
+    ensure!(
+        matches!(role, "user" | "assistant" | "tool" | "dialogue"),
+        "role must be user, assistant, tool, or dialogue"
+    );
+    Ok(())
 }
 
 // Older workers still send "blame": null on surviving history requests.
@@ -240,6 +311,59 @@ mod tests {
             merged_search_history_session_ids(None, Some("only")),
             ["only"]
         );
+    }
+
+    #[test]
+    fn read_session_wire_omits_new_fields_unless_used_and_legacy_shapes_parse() {
+        use crate::relay::{RELAY_READ_SESSION_V2_PROTOCOL, RelayRequest};
+        let plain: HistoryQuery = serde_json::from_value(serde_json::json!({
+            "tool": "read_session",
+            "arguments": {"session_id": "s", "start": 3}
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(&plain).unwrap();
+        let arguments = wire["arguments"].as_object().unwrap();
+        for key in ["tail", "before", "max_message_chars"] {
+            assert!(!arguments.contains_key(key), "{key} leaked: {wire}");
+        }
+        assert_eq!(plain.protocol_requirement().0, 16);
+        let tail: HistoryQuery = serde_json::from_value(serde_json::json!({
+            "tool": "read_session",
+            "arguments": {"session_id": "s", "tail": true}
+        }))
+        .unwrap();
+        tail.validate().unwrap();
+        let request = RelayRequest::HistoryQuery { query: tail };
+        assert_eq!(request.minimum_protocol(), RELAY_READ_SESSION_V2_PROTOCOL);
+        assert!(!request.supported_at(RELAY_READ_SESSION_V2_PROTOCOL - 1));
+        // Older workers send the brief request unchanged.
+        let brief: HistoryQuery = serde_json::from_value(serde_json::json!({
+            "tool": "get_session_brief",
+            "arguments": {"session_id": "s"}
+        }))
+        .unwrap();
+        assert_eq!(brief.protocol_requirement().0, 16);
+    }
+
+    #[test]
+    fn read_session_validation_rejects_forward_cursors_with_backward_paging_and_accepts_zero_cap() {
+        let read = |arguments: serde_json::Value| -> Result<()> {
+            let query: HistoryQuery = serde_json::from_value(
+                serde_json::json!({"tool": "read_session", "arguments": arguments}),
+            )
+            .unwrap();
+            query.validate()
+        };
+        assert!(read(serde_json::json!({"session_id": "s", "tail": true, "start": 1})).is_err());
+        assert!(read(serde_json::json!({"session_id": "s", "before": 5, "offset": 1})).is_err());
+        read(serde_json::json!({"session_id": "s", "before": 5, "start": 0, "offset": 0})).unwrap();
+        read(serde_json::json!({"session_id": "s", "role": "dialogue", "max_message_chars": 0}))
+            .unwrap();
+        let mut dialogue = search("q", None, None);
+        if let HistoryQuery::SearchHistory { role, .. } = &mut dialogue {
+            *role = Some("dialogue".into());
+        }
+        dialogue.validate().unwrap();
     }
 
     #[test]
