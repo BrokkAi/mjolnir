@@ -17,11 +17,12 @@ def export():
     payload['vmax'] = panel['max_f']
     data = json.dumps(payload, separators=(',', ':'), ensure_ascii=True).replace('</', '<\\/')
     layout = '\nmain{max-width:1000px;padding:12px 16px 16px}.panels{display:block}\n'
+    scale = colorbar_svg(payload['vmax']).replace('Expected confirmed findings ', 'Low+ confirmed findings ')
     page = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Low+ review findings</title><style>{CSS}{layout}</style></head>
 <body><main>
-{colorbar_svg(payload['vmax'])}
+{scale}
 <div class="panels"><figure>{svg_panel(panel, payload['domain'], payload['vmax'])}</figure></div>
 <div id="tip" role="status"></div>
 <script id="budget-data" type="application/json">{data}</script>
