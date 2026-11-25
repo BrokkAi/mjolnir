@@ -53,13 +53,12 @@ impl RuntimeState {
                 super::lifecycle::LifecycleStart::request(key, Some(workspace_id), control),
                 Some(acceptance),
                 move |state, session_id, control, session_admission| async move {
-                    let cancelled = control.cancelled.clone();
                     let _workspace_admission = _workspace_admission;
                     state
                         .restart_admitted_with_acceptance(
                             &session_admission,
                             session_id,
-                            cancelled,
+                            control,
                             None,
                             acknowledge_container_recreation,
                             Some(accepted),
@@ -143,14 +142,13 @@ impl RuntimeState {
                         holds_through_drain: false,
                     },
                     move |state, session_id, control, session_admission| async move {
-                        let cancelled = control.cancelled.clone();
                         // A recovered intent keeps the rules it was started with,
                         // including an automatic one's refusal to interrupt work.
                         state
                             .restart_admitted(
                                 &session_admission,
                                 session_id,
-                                cancelled,
+                                control,
                                 Some(intent),
                                 false,
                             )
@@ -187,14 +185,14 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_admission: &mj_controller::recovery_gate::SessionAdmission,
         session_id: String,
-        cancelled: Arc<AtomicBool>,
+        control: LifecycleControl,
         recovered: Option<mj_controller::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
     ) -> Result<DaemonLifecycleResult> {
         self.restart_admitted_with_acceptance(
             session_admission,
             session_id,
-            cancelled,
+            control,
             recovered,
             acknowledge_container_recreation,
             None,
@@ -206,7 +204,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_admission: &mj_controller::recovery_gate::SessionAdmission,
         session_id: String,
-        cancelled: Arc<AtomicBool>,
+        control: LifecycleControl,
         recovered: Option<mj_controller::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
         acceptance: Option<LifecycleAcceptanceSender>,
@@ -220,7 +218,7 @@ impl RuntimeState {
         let result = Box::pin(self.restart_admitted_inner(
             session_admission,
             &session_id,
-            cancelled,
+            control,
             recovered,
             acknowledge_container_recreation,
             acceptance,
@@ -234,11 +232,12 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_admission: &mj_controller::recovery_gate::SessionAdmission,
         session_id: &str,
-        cancelled: Arc<AtomicBool>,
+        control: LifecycleControl,
         recovered: Option<mj_controller::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
         acceptance: Option<LifecycleAcceptanceSender>,
     ) -> Result<DaemonLifecycleResult> {
+        let cancelled = control.cancelled.clone();
         let move_operation = mj_controller::database::load_move_operation(session_id)?;
         ensure!(
             !move_operation
@@ -288,7 +287,7 @@ impl RuntimeState {
 
         if let Some(plan) = &mut intent.container_upgrade {
             let executor = DaemonStageReportingExecutor::new(
-                CancellableProcessExecutor::new(cancelled.clone()),
+                control.executor(),
                 self.clone(),
                 session_id.to_owned(),
             );
@@ -348,7 +347,7 @@ impl RuntimeState {
         }
 
         let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled.clone()),
+            control.executor(),
             self.clone(),
             session_id.to_owned(),
         );

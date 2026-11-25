@@ -3412,15 +3412,43 @@ async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     assert!(control.executor().shutdown_interrupted());
 
     // The dashboard moves a cancelled Restart or container upgrade to its own
-    // phase; shutdown must still stop that rollback.
-    for kind in [LifecycleKind::Restart, LifecycleKind::UpgradeContainer] {
+    // phase; shutdown must still stop that rollback, a Resume's too. Each
+    // lifecycle's executor comes from its control, so the shutdown-only view
+    // of it ends a stalled command at once.
+    for (kind, phase) in [
+        (LifecycleKind::Restart, LifecyclePhase::CancellingRestart),
+        (
+            LifecycleKind::UpgradeContainer,
+            LifecyclePhase::CancellingRestart,
+        ),
+        (LifecycleKind::Resume, LifecyclePhase::Cancelling),
+    ] {
+        let restart = matches!(phase, LifecyclePhase::CancellingRestart);
         let control = LifecycleControl::default();
         let mut cancelled = operation(kind, control.clone());
         assert!(cancelled.request_cancel("test-session", "person cancel from dashboard"));
-        cancelled.phase = LifecyclePhase::CancellingRestart;
+        cancelled.phase = phase;
         assert!(!control.stopped_for_shutdown());
-        assert!(cancelled.cancelled_restart_releases_intent());
+        assert_eq!(cancelled.cancelled_restart_releases_intent(), restart);
+
+        let executor = control.executor();
+        let rollback = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = executor
+                .shutdown_only()
+                .execute(&CommandSpec::new("sh", ["-c", "sleep 30"]));
+            (result, started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(300));
         assert!(cancelled.interrupt_for_shutdown());
+        let (result, elapsed) = rollback.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("operation cancelled"),
+            "{kind:?}: {error:#}"
+        );
+        assert!(elapsed < Duration::from_secs(20), "{kind:?}: {elapsed:?}");
+
         assert!(control.stopped_for_shutdown());
         // The dying daemon leaves the durable intent to its successor.
         assert!(!cancelled.cancelled_restart_releases_intent());

@@ -283,23 +283,31 @@ impl RuntimeState {
                                     state.clone(),
                                     session_id.clone(),
                                 );
+                                // Both the inventory and the acceptance record
+                                // read and write the target, so both run with
+                                // admission yielded: a handoff must not wait on a
+                                // stalled target. The record is written whole or
+                                // not at all, so a person's cancel must not cut it
+                                // short (shutdown-only view); shutdown still does,
+                                // and the next daemon recovers a leftover record.
                                 executor.begin_resumable_work()?;
-                                let inventory = controller.preflight_origin_delta_suspension(
-                                    &session_id,
-                                    &consent,
-                                    &executor,
-                                );
-                                executor.end_resumable_work("accept managed clone suspend")?;
-                                inventory?;
-                                // The record is written whole or not at all, so a
-                                // person's cancel must not cut it short; shutdown
-                                // still does, and the next daemon recovers it.
-                                mj_core::runtime::off_async_worker(|| {
-                                    controller.record_origin_delta_suspend_acceptance(
+                                let accepted = controller
+                                    .preflight_origin_delta_suspension(
                                         &session_id,
-                                        &executor.shutdown_only(),
+                                        &consent,
+                                        &executor,
                                     )
-                                })?;
+                                    .and_then(|inventory| {
+                                        mj_core::runtime::off_async_worker(|| {
+                                            controller.record_origin_delta_suspend_acceptance(
+                                                &session_id,
+                                                &executor.shutdown_only(),
+                                            )
+                                        })
+                                        .map(|()| inventory)
+                                    });
+                                executor.end_resumable_work("accept managed clone suspend")?;
+                                accepted?;
                             }
                         } else if consent.without_checkpoint && !consent.confirm_no_checkpoint {
                             let sid = session_id.clone();

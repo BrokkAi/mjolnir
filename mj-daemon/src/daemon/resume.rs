@@ -145,7 +145,6 @@ impl RuntimeState {
                     ),
                     Some(acceptance),
                     move |state, session_id, control, _session_admission| async move {
-                        let cancelled = control.cancelled.clone();
                         let _admission = _admission;
                         let session = blocking({
                             let session_id = session_id.clone();
@@ -175,7 +174,7 @@ impl RuntimeState {
                             .is_some_and(|session| session.state == SessionState::Running)
                         {
                             accepted.send_replace(Some(Ok(())));
-                            state.resume_owned_children(&session_id, &cancelled).await?;
+                            state.resume_owned_children(&session_id, &control).await?;
                             return Ok(DaemonLifecycleResult::Done);
                         }
                         // Suspend may have produced this stopped placement while
@@ -268,7 +267,7 @@ impl RuntimeState {
                         })
                         .await?;
                         if !from_parent {
-                            state.resume_owned_children(&session_id, &cancelled).await?;
+                            state.resume_owned_children(&session_id, &control).await?;
                         }
                         Ok(DaemonLifecycleResult::Done)
                     },
@@ -286,7 +285,7 @@ impl RuntimeState {
     async fn resume_owned_children(
         self: &Arc<Self>,
         parent_id: &str,
-        cancelled: &Arc<AtomicBool>,
+        control: &LifecycleControl,
     ) -> Result<()> {
         let children = blocking({
             let parent_id = parent_id.to_owned();
@@ -324,7 +323,7 @@ impl RuntimeState {
             return Ok(());
         }
         let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled.clone()),
+            control.executor(),
             self.clone(),
             parent_id.to_owned(),
         );

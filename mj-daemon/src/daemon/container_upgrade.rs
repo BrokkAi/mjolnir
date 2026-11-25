@@ -171,6 +171,7 @@ impl RuntimeState {
                 let admitted = blocking({
                     let session_id = session_id.clone();
                     let cancelled = cancelled.clone();
+                    let control = control.clone();
                     move || {
                         if let Some(intent) = existing { return Ok(intent); }
                         let operation_id = new_command_id("container-upgrade")?;
@@ -200,7 +201,7 @@ impl RuntimeState {
                 let intent = admitted?;
                 state.bind_restart_intent(&session_id, &intent.operation_id)?;
                 accepted.send_replace(Some(Ok(())));
-                state.restart_admitted(&session_admission, session_id, cancelled, Some(intent), false).await
+                state.restart_admitted(&session_admission, session_id, control, Some(intent), false).await
             },
         ).await?;
         let runtime = self.clone();
