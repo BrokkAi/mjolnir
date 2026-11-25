@@ -173,20 +173,28 @@ impl RuntimeState {
         self.projects.clone()
     }
 
-    pub(super) fn borrower_registration_gate(&self, session_id: &str) -> Arc<tokio::sync::RwLock<()>> {
+    pub(crate) fn borrower_registration_gate(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<tokio::sync::RwLock<()>>> {
         let owner_id = self
             .owner()
             .controller()
             .state
             .workspace_owner(session_id)
-            .map(|owner| owner.id.clone())
-            .unwrap_or_else(|_| session_id.to_owned());
-        self.borrower_registration_gates
+            .ok()
+            .map(|owner| owner.id.clone())?;
+        let mut gates = self
+            .borrower_registration_gates
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(owner_id)
-            .or_default()
-            .clone()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = gates.get(&owner_id).and_then(std::sync::Weak::upgrade) {
+            return Some(existing);
+        }
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        gates.insert(owner_id, Arc::downgrade(&gate));
+        Some(gate)
     }
 
     pub(crate) async fn stop_viewer_background_task(

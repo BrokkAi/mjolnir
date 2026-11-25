@@ -412,8 +412,11 @@ impl RuntimeState {
         request: mj_controller::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = mj_controller::upgrade::activity("subagent admission")?;
-        let borrower_gate = (!request.orchestrator)
-            .then(|| self.borrower_registration_gate(&request.parent_session_id));
+        let borrower_gate = if request.orchestrator {
+            None
+        } else {
+            self.borrower_registration_gate(&request.parent_session_id)
+        };
         let _borrower_guard = match borrower_gate.as_ref() {
             Some(gate) => Some(gate.try_read().map_err(|_| {
                 mj_core::refusal::Refusal::precondition(

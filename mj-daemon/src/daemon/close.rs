@@ -71,7 +71,8 @@ async fn acquire_suspend_blocker_lease(
         Some(record)
             if !parent
                 && (!record.state.is_active()
-                    || matches!(record.state, SessionState::Error | SessionState::Lost)) =>
+                    || (matches!(record.state, SessionState::Error | SessionState::Lost)
+                        && record.target.is_none())) =>
         {
             drop(admission);
             Ok(None)
@@ -172,15 +173,21 @@ impl RuntimeState {
                         error.holders.join(", ")
                     ))
                 })?;
-            // Serialize against concurrent borrower sub-agent registration on
-            // this workspace owner so no new borrower can start while we scan
-            // borrowers and mutate the checkout.
-            let borrower_gate = runtime.borrower_registration_gate(&session_id);
+            // Serialize against concurrent borrower sub-agent/reviewer
+            // registration on this workspace owner so no new borrower can
+            // start while we scan borrowers and mutate the checkout.
+            let borrower_gate = runtime
+                .borrower_registration_gate(&session_id)
+                .ok_or_else(|| mj_core::refusal::Refusal::precondition("unknown session"))?;
             let _borrower_write_guard = borrower_gate.try_write().map_err(|_| {
                 mj_core::refusal::Refusal::precondition(
                     "Cannot fix suspend blockers while a sub-agent is starting on this workspace.",
                 )
             })?;
+            // Sync durable registrations committed just before we took the
+            // write guard (including reviewer children registered directly in
+            // the controller store) before enumerating active borrowers.
+            runtime.reload_controller().await?;
             // Foreground admissions stay alive across remediation so a borrower
             // cannot unpark or start a turn underneath the checkout edit.
             let mut admissions = vec![admission];
