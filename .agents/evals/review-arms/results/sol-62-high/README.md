@@ -71,8 +71,10 @@ plots retain the stated usage-scope and context-tier assumptions.
 The chart retains the requested shared axes: estimated USD per single review
 and yield relative to Terra 6.1/high = 100 within each source study. The
 historical Terra point is omitted; its normalization denominator is retained.
-Frontier models, both Haiku efforts and Greptile solo references are named
-directly; other points use numbers in the key. Kimi is labeled `K3.1 Pro/high`.
+Frontier models and Greptile solo references are named directly and stay out
+of the numbered key. Other points, including **Haiku/xhigh (point 5)**, use
+numbers in the key. Haiku/high keeps its direct frontier label. Cost bounds
+are shown as ranges in the key, with no horizontal pricing bars on the plot. Kimi is labeled `K3.1 Pro/high`.
 It has no mark on either combination frontier, so this relabel changes the
 visible single-model chart only. Sol 6.2 high is below medium on all-confirmed yield
 while costing more, so it does not join that point-estimate frontier.
@@ -84,7 +86,7 @@ and [the medium + high table](pareto-sev-high-medium.csv), freshly judged in
 Those are different-corpus estimates: Haiku/high, Sonnet/high and Opus/high
 initial yields assume Terra's 88/145 initial-to-workflow retention transfers
 to those arms. Haiku/xhigh uses recovered initial-only grades and a pricing
-bound; both Haiku efforts are labeled directly on the chart. No historical Claude
+bound. Haiku/high is named on the plot; Haiku/xhigh is listed in the key. No historical Claude
 reviewer was rerun here. The combined frontier is descriptive across studies
 and launch protocols, rather than a controlled ranking.
 

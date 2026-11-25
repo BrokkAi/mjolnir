@@ -77,7 +77,9 @@
   ],
   "display": {
     "Kimi/high": "K3.1 Pro/high",
-    "both_haiku_efforts_named": true,
-    "historical_terra_point_omitted": true
+    "historical_terra_point_omitted": true,
+    "direct_names": "Frontier models and Greptile solo references only; excluded from the numbered key",
+    "haiku_xhigh": "Numbered key entry, no direct name label",
+    "cost_bounds": "Ranges in the numbered key; no horizontal plot bars"
   }
 }
