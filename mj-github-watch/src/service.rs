@@ -566,7 +566,7 @@ async fn classify_recorded_items(
     for session in sessions.iter().filter(|session| !session.no_github_events) {
         let id = session.id.clone();
         let boundary =
-            blocking_db(move || database::load_github_classification_boundary(&id)).await?;
+            blocking_db(move || database::load_github_classification_frontier(&id)).await?;
         if let Some(boundary) = boundary {
             boundaries.insert(session.id.clone(), boundary);
         } else {
@@ -596,10 +596,7 @@ async fn classify_recorded_items(
             {
                 continue;
             }
-            let Some(boundary) = boundaries.get(&session.id) else {
-                continue;
-            };
-            if !boundary.accepts_created_at(&item.created_at)? {
+            if !boundaries.contains_key(&session.id) {
                 continue;
             }
             let failure = failures.get(&(item.number, session.id.clone()));
@@ -681,7 +678,7 @@ async fn classify_recorded_items(
                 item,
                 ClassificationTarget {
                     id: session.id,
-                    clear_ordinal: boundary.clear_ordinal,
+                    clear_ordinal: boundary,
                 },
                 attempts,
                 evidence,
@@ -3711,7 +3708,9 @@ mod tests {
             )
             .unwrap();
         };
-        record_items(1..=2, at(-60));
+        // Include more pending pairs than one poll can classify, with GitHub's
+        // clock ahead of the worker, plus a failed pair that is due to retry.
+        record_items(1..=MAX_CLASSIFICATIONS_PER_POLL as u64 + 2, at(60));
         database::record_github_classification_failure(
             "acme".into(),
             "repo".into(),
@@ -3736,13 +3735,21 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(classifier.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            classifier.calls.load(Ordering::SeqCst),
+            MAX_CLASSIFICATIONS_PER_POLL
+        );
         assert!(
             database::load_github_watches("acme", "repo")
                 .unwrap()
                 .is_empty()
         );
         assert!(database::pending_mailbox_events(100).unwrap().is_empty());
+        assert!(
+            database::load_github_classification_failures("acme", "repo")
+                .unwrap()
+                .is_empty()
+        );
 
         // Generation fencing also rejects an old verdict for an item whose
         // timestamp is later than the clear (clock skew cannot bypass it).
@@ -3752,7 +3759,6 @@ mod tests {
 
         // More old pairs than the per-poll batch must not crowd out new work.
         let fresh = MAX_CLASSIFICATIONS_PER_POLL as u64 + 4;
-        record_items(3..=fresh - 1, at(-60));
         let cleared = database::load_materialized_session("cleared")
             .unwrap()
             .unwrap();
@@ -3770,6 +3776,8 @@ mod tests {
             .to_rfc3339_opts(SecondsFormat::Secs, true);
         // A PR opened after the clear can carry the same whole-second timestamp.
         record_items(fresh..=fresh, clear_second.clone());
+        // First-seen items remain eligible when GitHub's clock is behind too.
+        record_items(fresh + 1..=fresh + 1, at(-60));
         classify_recorded_items(
             "acme",
             "repo",
@@ -3781,22 +3789,29 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(classifier.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            classifier.calls.load(Ordering::SeqCst),
+            MAX_CLASSIFICATIONS_PER_POLL + 2
+        );
         let watches = database::load_github_watches("acme", "repo").unwrap();
         assert_eq!(
             watches.iter().map(|watch| watch.number).collect::<Vec<_>>(),
-            [fresh as i64]
+            [fresh as i64, fresh as i64 + 1]
         );
         let mail = database::pending_mailbox_events(100).unwrap();
-        assert_eq!(mail.len(), 1);
-        assert!(mail[0].event_key.contains(&format!("#{fresh}:interest:")));
+        assert_eq!(mail.len(), 2);
+        assert!(
+            mail.iter()
+                .any(|entry| entry.event_key.contains(&format!("#{fresh}:interest:")))
+        );
 
         // Rebuilding one session must not prevent another from receiving mail.
         database::save_materialized_session(&mj_core::state::MaterializedSession::empty("cleared"))
             .unwrap();
         let mut healthy = database::test_session("healthy", "project");
-        healthy.created_at = clear_second;
+        healthy.created_at = at(90);
         database::save_session(&healthy).unwrap();
+        record_items(fresh + 2..=fresh + 2, at(120));
         classify_recorded_items(
             "acme",
             "repo",
@@ -3808,7 +3823,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(classifier.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            classifier.calls.load(Ordering::SeqCst),
+            MAX_CLASSIFICATIONS_PER_POLL + 3
+        );
         assert!(
             database::pending_mailbox_events(100)
                 .unwrap()

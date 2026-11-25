@@ -47,44 +47,37 @@ pub(super) fn clear_github_subscriptions_with(
         "UPDATE github_watch_classifications SET interested=0, created=0 WHERE session_id=?1",
         [session_id],
     )?;
+    // Feed recording, reset, and classification share the writer. Give every
+    // already-recorded item a neutral receipt, including pending and failed
+    // pairs, without comparing GitHub timestamps to the worker's clock.
+    connection.execute(
+        "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
+             kind, title, url, created_at, interested, created)
+         SELECT owner, repo, number, ?1, kind, title, url, created_at, 0, 0
+         FROM github_seen_items WHERE true
+         ON CONFLICT(owner, repo, number, session_id) DO NOTHING",
+        [session_id],
+    )?;
+    connection.execute(
+        "DELETE FROM github_watch_classification_failures WHERE session_id=?1",
+        [session_id],
+    )?;
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GithubClassificationBoundary {
-    pub clear_ordinal: u64,
-    started_at_ms: Option<i64>,
-}
-
-impl GithubClassificationBoundary {
-    pub fn accepts_created_at(&self, created_at: &str) -> Result<bool> {
-        let Some(started_at_ms) = self.started_at_ms else {
-            return Ok(true);
-        };
-        // GitHub timestamps have whole-second precision. Overlap the clear's
-        // second so an item opened just after it is not lost permanently.
-        Ok(chrono::DateTime::parse_from_rfc3339(created_at)
-            .context("invalid GitHub item creation time")?
-            .timestamp()
-            >= started_at_ms.div_euclid(1000))
-    }
 }
 
 /// Capture before reading classification evidence. The writer checks this
 /// generation again in the transaction that creates subscriptions and mail.
 /// `None` defers a session whose projection is rebuilding behind its receipt.
-pub fn load_github_classification_boundary(
-    session_id: &str,
-) -> Result<Option<GithubClassificationBoundary>> {
+pub fn load_github_classification_frontier(session_id: &str) -> Result<Option<u64>> {
     let mut connection = open_reader(&database_path())?;
     let tx = connection.transaction()?;
-    github_classification_boundary_with(&tx, session_id)
+    github_classification_frontier_with(&tx, session_id)
 }
 
-fn github_classification_boundary_with(
+fn github_classification_frontier_with(
     connection: &Connection,
     session_id: &str,
-) -> Result<Option<GithubClassificationBoundary>> {
+) -> Result<Option<u64>> {
     let (clear_ordinal, applied_ordinal): (u64, u64) = connection.query_row(
         "SELECT COALESCE((SELECT through_ordinal FROM mailbox_reset_frontiers WHERE session_id=?1), 0),
                 COALESCE((SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?1), 0)",
@@ -94,13 +87,7 @@ fn github_classification_boundary_with(
     if applied_ordinal < clear_ordinal {
         return Ok(None);
     }
-    Ok(Some(GithubClassificationBoundary {
-        clear_ordinal,
-        started_at_ms: materialized::last_materialized_context_boundary_with_time(
-            connection, session_id,
-        )?
-        .map(|(_, at_ms)| at_ms),
-    }))
+    Ok(Some(clear_ordinal))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,15 +335,14 @@ pub fn commit_github_item_classification(
     let has_event = event.is_some();
     let inserted = submit_database_write("commit_github_item_classification", move |connection| {
         let tx = connection.transaction()?;
-        let Some(boundary) = github_classification_boundary_with(&tx, &classification.session_id)?
+        let Some(clear_ordinal) =
+            github_classification_frontier_with(&tx, &classification.session_id)?
         else {
             return Ok((false, false));
         };
-        // SQLite serializes this decision with /clear. Neither evidence from
-        // an older conversation nor an older pending item can restore a watch.
-        if boundary.clear_ordinal != classification.clear_ordinal
-            || !boundary.accepts_created_at(&classification.created_at)?
-        {
+        // SQLite serializes this decision with /clear. Evidence from an older
+        // conversation cannot restore a watch or deliver a notification.
+        if clear_ordinal != classification.clear_ordinal {
             return Ok((false, false));
         }
         let mut enqueued_lifecycle = false;
