@@ -639,11 +639,24 @@ async fn resolve_with_environment(
             harness.display_name()
         );
     }
-    let root = managed_harness_cache_root(
+    match managed_harness_cache_root(
         environment.get("XDG_CACHE_HOME").map(OsStr::new),
         environment.get("HOME").map(OsStr::new),
-    )?;
-    resolve_at_async(&root, harness, execution_policy, environment).await
+    ) {
+        Ok(root) => resolve_at_async(&root, harness, execution_policy, environment).await,
+        Err(cache_error) => {
+            let mut environment = environment.clone();
+            let mut managed_node = if harness_uses_node_runtime(harness) {
+                ensure_node_runtime(&mut environment).await?
+            } else {
+                None
+            };
+            match try_baked_harness(harness, execution_policy, &environment, &mut managed_node)? {
+                Some(baked) => Ok(baked),
+                None => Err(cache_error),
+            }
+        }
+    }
 }
 
 async fn resolve_at_async(
@@ -1579,10 +1592,25 @@ async fn ensure_node_runtime_with_minimum(
     if system_node_is_compatible(environment, minimum_version).await {
         return Ok(None);
     }
-    let root = managed_node_cache_root(
+    let root = match managed_node_cache_root(
         environment.get("XDG_CACHE_HOME").map(OsStr::new),
         environment.get("HOME").map(OsStr::new),
-    )?;
+    ) {
+        Ok(root) => root,
+        Err(cache_error) => {
+            if let Some(baked) = baked
+                && baked_node_is_usable(&baked, minimum_version, &metadata)?
+            {
+                prepend_path(environment, &baked.join("bin"))?;
+                return Ok(Some(ManagedNodeRuntime {
+                    path: baked,
+                    lease_path: None,
+                    _lease: None,
+                }));
+            }
+            return Err(cache_error);
+        }
+    };
 
     if let Some(baked) = baked {
         let cached = root.join(baked.file_name().context("baked Node folder")?);
@@ -2588,6 +2616,40 @@ mod tests {
             if kind == HarnessKind::Muse {
                 assert_eq!(managed.command, dir.join("node_modules/.bin/muse-acp"));
             }
+            for relative in [false, true] {
+                let mut no_cache = environment.clone();
+                no_cache.remove("HOME");
+                no_cache.remove("XDG_CACHE_HOME");
+                if relative {
+                    no_cache.insert("XDG_CACHE_HOME".into(), "relative-cache".into());
+                }
+                let resolved = runtime
+                    .block_on(resolve_with_environment(
+                        kind,
+                        ExecutionPolicy::ConfiguredApprovals,
+                        &no_cache,
+                    ))
+                    .unwrap();
+                assert_eq!(resolved.entrypoint, dir.join(selected.entrypoint));
+                assert!(resolved.lease_path.is_none());
+                assert!(resolved.cache_root.is_none());
+                no_cache.remove("MJ_TEST_BAKED_HARNESS_ROOT");
+                let error = runtime
+                    .block_on(resolve_with_environment(
+                        kind,
+                        ExecutionPolicy::ConfiguredApprovals,
+                        &no_cache,
+                    ))
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains(if relative {
+                        "must be absolute"
+                    } else {
+                        "HOME or XDG_CACHE_HOME"
+                    }),
+                    "{error:#}"
+                );
+            }
             complete_fake(
                 &cache.join(kind.id()),
                 kind,
@@ -2768,6 +2830,46 @@ exit "$MJ_NPM_STATUS"
         );
         assert!(!root.path().join("unused-home").exists());
         assert!(!baked.join(LEASE_FILE).exists());
+        for relative in [false, true] {
+            let mut no_cache = environment.clone();
+            no_cache.remove("HOME");
+            no_cache.remove("XDG_CACHE_HOME");
+            no_cache.insert(
+                "PATH".into(),
+                root.path().join("missing").display().to_string(),
+            );
+            if relative {
+                no_cache.insert("XDG_CACHE_HOME".into(), "relative-cache".into());
+            }
+            let selected = runtime
+                .block_on(ensure_node_runtime_with_minimum(
+                    &mut no_cache,
+                    NODE_MINIMUM_VERSION,
+                ))
+                .unwrap()
+                .unwrap();
+            assert_eq!(selected.path(), baked);
+            assert!(selected.lease_path().is_none());
+            no_cache.remove("MJ_TEST_BAKED_HARNESS_ROOT");
+            no_cache.insert(
+                "PATH".into(),
+                root.path().join("missing").display().to_string(),
+            );
+            let error = runtime
+                .block_on(ensure_node_runtime_with_minimum(
+                    &mut no_cache,
+                    NODE_MINIMUM_VERSION,
+                ))
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(if relative {
+                    "must be absolute"
+                } else {
+                    "HOME or XDG_CACHE_HOME"
+                }),
+                "{error:#}"
+            );
+        }
         environment.insert(
             "XDG_CACHE_HOME".into(),
             root.path().join("writable").display().to_string(),

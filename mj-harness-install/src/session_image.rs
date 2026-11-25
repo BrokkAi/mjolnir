@@ -199,6 +199,90 @@ mod tests {
     }
 
     #[test]
+    fn node_image_branch_uses_compatible_system_node_without_glibc() {
+        let real_node =
+            crate::program_path::find_program_on_path("node", std::env::var_os("PATH").as_deref())
+                .unwrap();
+        let base = ImageBase {
+            reference: format!("example.invalid/base@sha256:{}", "a".repeat(64)),
+            ..Default::default()
+        };
+        let artifact = crate::runtime_manifests::artifact("node", "linux-x86_64").unwrap();
+        let interpreter = artifact.interpreter.unwrap();
+        for dsh in [false, true] {
+            let kinds = if dsh {
+                vec![HarnessKind::Claude, HarnessKind::Dsh]
+            } else {
+                vec![HarnessKind::Claude]
+            };
+            let (stage, _, _) = harness_stage(&base, "linux/amd64", &kinds).unwrap();
+            let command = stage
+                .lines()
+                .find(|line| line.starts_with("RUN ") && line.contains(BAKED_NODE_MANIFEST_FILE))
+                .unwrap()
+                .strip_prefix("RUN ")
+                .unwrap();
+            assert!(command.contains(&node_version_check_script(if dsh {
+                DSH_ACP_MINIMUM_NODE_VERSION
+            } else {
+                NODE_MINIMUM_VERSION
+            })));
+            assert!(command.contains("tar -xzf"));
+            for (version, compatible) in [("18.0.0", false), ("22.0.0", !dsh), ("24.9.0", true)] {
+                let root = tempfile::tempdir().unwrap();
+                let bin = root.path().join("bin");
+                std::fs::create_dir(&bin).unwrap();
+                executable(
+                    &bin.join("node"),
+                    &format!(
+                        r#"#!/bin/sh
+exec '{}' -e 'require("vm").runInNewContext(process.argv[1], {{process: {{versions: {{node: process.env.MJ_TEST_NODE_VERSION}}, exit: process.exit.bind(process)}}}})' "$2"
+"#,
+                        real_node.display()
+                    ),
+                );
+                for name in ["npm", "npx"] {
+                    executable(&bin.join(name), "#!/bin/sh\nexit 0\n");
+                }
+                let archive = root.path().join("archive.tar.gz");
+                std::fs::write(&archive, "must be removed").unwrap();
+                let store = root.path().join("store");
+                let command = command
+                    .replace(
+                        &interpreter,
+                        root.path().join("missing-loader").to_str().unwrap(),
+                    )
+                    .replace("/opt/mj-harnesses", store.to_str().unwrap())
+                    .replace("/tmp/mj-node.tar.gz", archive.to_str().unwrap());
+                let output = Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(command)
+                    .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                    .env("MJ_TEST_NODE_VERSION", version)
+                    .stdin(Stdio::null())
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    compatible,
+                    "{version} dsh={dsh}: {output:?}"
+                );
+                assert!(!archive.exists());
+                let installed =
+                    store.join(format!("node/node-v{NODE_VERSION}-{}", artifact.target));
+                assert!(installed.is_dir());
+                assert!(!installed.join(BAKED_NODE_MANIFEST_FILE).exists());
+                assert!(!installed.join("bin").exists());
+                if !compatible {
+                    assert!(
+                        String::from_utf8_lossy(&output.stderr).contains("requires glibc loader")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn image_install_scripts_check_parses_npm_json_with_node() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("scripts.json");
@@ -479,10 +563,17 @@ fn emit_embedded_file(text: &mut String, dest: &str, bytes: &[u8], mode: &str) {
 
 /// Keep receipts and permissions in the install layer to avoid copying the
 /// installed tree into a second overlayfs layer.
-fn emit_install_run(text: &mut String, command: &str, dir: &str, receipt: &str, bytes: &[u8]) {
+fn install_command_with_receipt(command: &str, dir: &str, receipt: &str, bytes: &[u8]) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!(
+        "{command} && printf '%s' '{encoded}' | base64 -d > '{dir}/{receipt}' && chmod -R a+rX {dir}"
+    )
+}
+
+fn emit_install_run(text: &mut String, command: &str, dir: &str, receipt: &str, bytes: &[u8]) {
     text.push_str(&format!(
-        "RUN {command} && printf '%s' '{encoded}' | base64 -d > '{dir}/{receipt}' && chmod -R a+rX {dir}\n"
+        "RUN {}\n",
+        install_command_with_receipt(command, dir, receipt, bytes)
     ));
 }
 
@@ -503,6 +594,11 @@ fn harness_stage(
         return Ok((String::new(), String::new(), String::new()));
     }
     let key = format!("linux-{}", platform_arch(platform)?);
+    let min_node = if kinds.contains(&HarnessKind::Dsh) {
+        DSH_ACP_MINIMUM_NODE_VERSION
+    } else {
+        NODE_MINIMUM_VERSION
+    };
     let needs_node = kinds.iter().copied().any(harness_uses_node_runtime);
     let missing_node = needs_node && base.baked_node.as_deref() != Some(NODE_VERSION);
     let missing: Vec<_> = kinds
@@ -539,8 +635,7 @@ fn harness_stage(
             "ADD --checksum=sha256:{} {} /tmp/mj-node.tar.gz\nENV PATH={node_dir}/bin:$PATH\n",
             node.sha256, node.url
         ));
-        emit_install_run(
-            &mut stage,
+        let install = install_command_with_receipt(
             &format!(
                 "mkdir -p {BAKED_HARNESS_ROOT}/node && tar -xzf /tmp/mj-node.tar.gz -C {BAKED_HARNESS_ROOT}/node && rm /tmp/mj-node.tar.gz && {node_dir}/bin/node --version && {node_dir}/bin/npm --version && {node_dir}/bin/npx --version"
             ),
@@ -548,6 +643,15 @@ fn harness_stage(
             BAKED_NODE_MANIFEST_FILE,
             &serde_json::to_vec(&BakedNodeManifest::current())?,
         );
+        let command = if let Some(interpreter) = &node.interpreter {
+            let node_check = node_version_check_script(min_node);
+            format!(
+                "if [ -f '{interpreter}' ]; then {install}; else rm -f /tmp/mj-node.tar.gz && mkdir -p {node_dir} && (command -v node >/dev/null 2>&1 && {node_check} && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 || {{ echo 'Mjolnir pinned Node.js requires glibc loader {interpreter}; install Node.js {min_node}+, npm, and npx in this base image' >&2; exit 1; }}); fi"
+            )
+        } else {
+            install
+        };
+        stage.push_str(&format!("RUN {command}\n"));
         copies.push_str(&format!("COPY --from=mj-harnesses {node_dir} {node_dir}\n"));
     } else if needs_node {
         stage.push_str(&format!("ENV PATH={node_dir}/bin:$PATH\n"));

@@ -110,6 +110,7 @@ pub struct RuntimeArtifact {
     pub sha256: String,
     pub target: String,
     pub filename: String,
+    pub interpreter: Option<String>,
 }
 pub fn artifact(kind: &str, key: &str) -> Result<RuntimeArtifact> {
     artifact_from_metadata(kind, &manifest(kind)?, key)
@@ -175,6 +176,7 @@ pub fn artifact_from_metadata(
         target,
         filename,
         sha256,
+        interpreter: p["interpreter"].as_str().map(str::to_owned),
     })
 }
 
