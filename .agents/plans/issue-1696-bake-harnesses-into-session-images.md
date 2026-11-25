@@ -16,12 +16,10 @@ To see this working end-to-end, run `mj image build --print` against a repositor
 
 - [x] (2026-11-25 17:04Z) Completed read-only reconnaissance of `mj-harness-install`, `mj-server/src/server/session_images.rs`, `mj-cli/src/image_commands.rs`, `mj-worker`, `mj-accounts`, `tests/e2e/mise_images.py`, and all eight harness runtime manifests.
 - [x] (2026-11-25 17:13Z) Claimed BrokkAi/mjolnir#1696 (`agent-in-progress`) and authored this ExecPlan.
-- [x] Milestone 1: Shared pinned-manifest accessors, read-only `/opt/mj-harnesses` resolution in `mj-core`, `mj-harness-install`, and `mj-worker`, plus temporary `--cache` cleanup in runtime `install_npm`.
-- [x] Milestone 2: Deterministic multi-stage harness baking in `mj-harness-install/src/session_image.rs`, base-image `dev.mj.harnesses.*` label detection in `mj-server/src/server/session_images.rs`, `mj image base` CLI subcommand and `scripts/build-session-base-image.sh`, plus `mj image status` wording and skill docs.
-- [x] Milestone 3 (delegated scope): Targeted Cargo tests, clippy, changed-file rustfmt, crate-boundary verification, and shell syntax check completed. Review, commit, and push are explicitly excluded by the delegated assignment. The CLI build-print golden initially exposed an empty-parent bug in the shared emitter; fixed it and reran only that failing test successfully.
-- [ ] Milestone 4: Isolated real Podman/container verification confirming `<1 s` harness preparation, zero `_cacache` leak, and stale-pin detection via `mj image status`, followed by updating this plan and closing #1696.
-
-- Implemented shared typed artifact accessors, read-only baked resolution, deterministic two-stage image recipes, base image labels, local base CLI, helper script, and focused precedence/cache/determinism tests. Final validation results are recorded in the implementation agent report directory.
+- [x] (2026-11-25 17:48Z) Milestone 1: Shared pinned-manifest accessors (`mj-harness-install/src/runtime_manifests.rs`), read-only `/opt/mj-harnesses` resolution in `mj-core`, `mj-harness-install`, and `mj-worker`, plus temporary `--cache` cleanup in runtime `install_npm`.
+- [x] (2026-11-25 17:48Z) Milestone 2: Deterministic multi-stage harness baking in `mj-harness-install/src/session_image.rs`, base-image `dev.mj.harnesses.*` label detection in `mj-server/src/server/session_images.rs`, `mj image base` CLI subcommand and `scripts/build-session-base-image.sh`, plus `mj image status` wording (`out of date`) and skill docs.
+- [x] (2026-11-25 18:11Z) Milestone 3: Targeted Cargo tests, clippy, changed-file rustfmt, crate-boundary verification, shell syntax/smoke checks, 4 rounds of 3-reviewer pre-push review (fixing incomplete-cache fallback, locked baked recheck, legacy DSH launch-script recognition, separate npm script-status stderr, `dnf`/`apk`/`zypper` Grok fallbacks, non-glibc base Node fallback, and missing/relative cache-env baked resolution; overriding disabled-profile baking, `WORKDIR "/"` unquoting, and musl system-Node label edge case), merged cleanly and pushed to `origin/master` (`b27ad3468`, commits `ff25a56cf`, `7c7a22c0b`, `d50077d00`, `58478fc7b`).
+- [x] (2026-11-25 18:28Z) Milestone 4: Isolated real Podman verification (`verify-1696-podman`, `.mj/agents/11a329857f59ab9d679b1cdf64254306/RESULTS.md`) confirming real `mj image build` + `mj image status` + label skip + stale detection, offline (`--network=none`) `mj-worker` preparation in `39.7 ms` (Claude) / `27.1 ms` (Codex) with zero `/root/.cache/mjolnir` and zero `/root/.npm`, and all eight harnesses + pinned Node verified offline in the generic base image built by `scripts/build-session-base-image.sh`.
 
 ## Surprises & Discoveries
 
@@ -60,7 +58,16 @@ To see this working end-to-end, run `mj image build --print` against a repositor
 
 ## Outcomes & Retrospective
 
-Milestones 1 and 2 are implemented. Milestone 3 code/tests/static validation is tracked in the implementation report. No commit or push is authorized for this delegated implementation; parent review and Milestone 4 real-container verification remain pending.
+All four milestones are complete and pushed to `origin/master` (`b27ad3468`, commits `ff25a56cf`, `7c7a22c0b`, `d50077d00`, `58478fc7b`).
+
+Measured real Podman acceptance at `b27ad3468` (`.mj/agents/11a329857f59ab9d679b1cdf64254306/RESULTS.md`, isolated `--instance verify-1696`, `/usr/bin/env -i`, no default daemon or real credentials):
+
+- Real `mj image build` against `docker.io/library/buildpack-deps:noble` with enabled Claude and Codex profiles built and pushed cleanly in `100.60 s` (`3.04 GB`), stamped `dev.mj.harnesses.{node,claude,codex}` and `Config.WorkingDir == "/"`, left zero `/root/.npm` (`_cacache`) and zero `/tmp/mj-*`, and `mj image status` reported `current` (`0.36 s`).
+- Rebuilding with the newly published image as the base via `mj image build --print` omitted Stage 1 (`AS mj-harnesses`) and all `COPY --from` layers completely while retaining `LABEL dev.mj.harnesses.*`. Enabling `open-code` in the isolated config immediately flipped `mj image status` to `out of date`.
+- Fresh container offline (`--network=none`) `mj-worker` harness preparation (`managed_remote` forcing resolution with clean `HOME=/root`) dropped from `13.8–21.0 s` (Claude) and `12.0 s` (Codex) to `39.7 ms` (Claude; `0.197 s` full `podman run`) and `27.1 ms` (Codex; `0.198 s` full `podman run`), with zero `/root/.cache/mjolnir` and zero `/root/.npm` created.
+- Running `scripts/build-session-base-image.sh` against `docker.io/library/buildpack-deps:noble` built a `5.34 GB` generic base image containing all 9 labels (`node` + all 8 harnesses) and `Config.WorkingDir == "/"`. Every manifest (`mj-node.json` + all 8 `mj-harness.json` files) validated and all 11 baked entrypoints (`node`, `agy`, `kimi`, `grok`, `agent`, `muse`, `muse-acp`, `dsh-acp`, `opencode`, `claude-agent-acp`, `claude`, `codex-acp`, `codex`) exited 0 on `--version` fully offline (`--network=none`), including Grok's `.zst` decompression via Node 24's built-in `zlib.createZstdDecompress()` with no `zstd` binary in Noble. Note: placing Podman's isolated temporary `HOME` under `/mnt/optane/tmp` (ZFS) caused rootless Podman to fall back to `vfs` storage, making Buildah's post-commit `deleteSuccessfulIntermediateCtrs` (`os.RemoveAll`) slow on large intermediate trees; normal host overlay/fuse-overlayfs storage does not hit this.
+
+Remaining optional user/ops step: publishing the generic all-harnesses base image (e.g. `ghcr.io/brokkai/mjolnir/session-base`) via a GHCR GitHub Actions workflow (which requires a workflow-scoped token) and flipping package visibility to public if desired as a future default session base.
 
 ## Context and Orientation
 
