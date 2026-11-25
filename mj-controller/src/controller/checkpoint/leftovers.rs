@@ -18,8 +18,8 @@ use crate::session_manager::new_command_id;
 use crate::targets::CommandExecutor;
 
 use super::host_cache::{
-    HostCacheTarget, SNAPSHOT_CACHE_TEMP_PREFIX, local_snapshot_cache_dir, parse_host_cache_key,
-    remove_host_cache_file,
+    HostCachePathFailure, HostCacheTarget, SNAPSHOT_CACHE_TEMP_PREFIX, local_snapshot_cache_dir,
+    parse_host_cache_key, remove_host_cache_file,
 };
 
 /// How long a host-side snapshot archive copy is retained before expiry sweep.
@@ -361,8 +361,14 @@ fn sweep_host_snapshot_group(
                     "could not remove overdue host snapshot cache file; keeping row for retry"
                 );
                 if matches!(host, HostCacheTarget::Ssh(_)) {
-                    record_host_sweep_failure(host_key, now);
-                    return swept;
+                    if error.is::<HostCachePathFailure>() {
+                        // The host answered; only this path failed. Its other
+                        // rows are still worth trying.
+                        clear_host_sweep_backoff(host_key);
+                    } else {
+                        record_host_sweep_failure(host_key, now);
+                        return swept;
+                    }
                 }
             }
         }
@@ -916,5 +922,98 @@ mod tests {
         assert_eq!(hosts.calls_to("a.example"), calls + 1);
         assert_eq!(sweep(recovered + chrono::Duration::seconds(60)).count, 0);
         assert_eq!(hosts.calls_to("a.example"), calls + 2);
+    }
+
+    /// Runs the remote command line an SSH command carries in a local `sh`, as
+    /// the host's SSH daemon would.
+    #[cfg(unix)]
+    struct LocalRemoteShell;
+
+    #[cfg(unix)]
+    impl CommandExecutor for LocalRemoteShell {
+        fn execute(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> Result<crate::targets::CommandOutput> {
+            crate::targets::ProcessExecutor.execute(&crate::targets::CommandSpec::new(
+                "sh",
+                ["-c", command.args.last().unwrap().as_str()],
+            ))
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+    }
+
+    /// A reachable host whose removal fails for one path (here a non-empty
+    /// directory where an archive should be) says nothing about the host's
+    /// other copies: they are still removed in the same sweep, and the host is
+    /// not backed off.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_specific_removal_failure_on_a_reachable_host_does_not_starve_its_other_rows() {
+        if !in_isolated_store(
+            "a_path_specific_removal_failure_on_a_reachable_host_does_not_starve_its_other_rows",
+            "MJ_HOST_SWEEP_PATH_FAILURE_CHILD",
+        ) {
+            return;
+        }
+        clear_host_sweep_backoff_for_test();
+        let directory = tempfile::tempdir().unwrap();
+        let stuck = directory.path().join("stuck.hel.zip");
+        std::fs::create_dir_all(stuck.join("contents")).unwrap();
+        let host = super::super::host_cache::host_cache_key(&ssh_locator("a.example"));
+        let now = Utc::now();
+        let record = |session: &str, path: &Path, age_hours: i64| {
+            crate::database::record_host_snapshot_cache_entry(
+                session,
+                &host,
+                "sha",
+                &path.to_string_lossy(),
+                &(now - chrono::Duration::hours(age_hours)).to_rfc3339(),
+            )
+            .unwrap();
+        };
+        let archive = |name: &str| {
+            let path = directory.path().join(name);
+            std::fs::write(&path, b"archive").unwrap();
+            path
+        };
+        let second = archive("second.hel.zip");
+        record("sess-stuck", &stuck, 60);
+        record("sess-second", &second, 50);
+
+        let swept = sweep_expired_host_snapshot_cache(&LocalRemoteShell, now, &|| false);
+        assert_eq!(swept.count, 1);
+        assert_eq!(rows("sess-stuck"), 1, "the failed row is kept for retry");
+        assert_eq!(rows("sess-second"), 0, "the next row is not starved");
+        assert!(!second.exists());
+
+        // The host answered, so a copy that becomes overdue is swept at once.
+        let third = archive("third.hel.zip");
+        record("sess-third", &third, 49);
+        let swept = sweep_expired_host_snapshot_cache(&LocalRemoteShell, now, &|| false);
+        assert_eq!(swept.count, 1);
+        assert_eq!((rows("sess-stuck"), rows("sess-third")), (1, 0));
     }
 }

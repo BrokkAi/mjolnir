@@ -766,6 +766,26 @@ fn stage_ssh_container_cache(
     Ok(())
 }
 
+/// What the remote removal script prints first, before it touches any file.
+const REMOTE_REMOVE_REACHED_MARKER: &str = "__mj_cache_rm_reached__";
+
+/// OpenSSH's own exit status for a connection that failed.
+const SSH_TRANSPORT_FAILURE_STATUS: i32 = 255;
+
+/// A removal that failed on a host that answered: the path, not the host, is
+/// the problem. Any other error from [`remove_host_cache_file`] on an SSH host
+/// means the host was not reached.
+#[derive(Debug)]
+pub(crate) struct HostCachePathFailure(String);
+
+impl std::fmt::Display for HostCachePathFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HostCachePathFailure {}
+
 /// Remove a cached snapshot archive file from `host`.
 ///
 /// Succeeds if the file is removed OR was already absent. Returns `Err` if the
@@ -818,7 +838,9 @@ pub(crate) fn remove_host_cache_file(
             // Only a per-copy directory of the snapshot cache is ever swept
             // or removed. A retained suspend staging file lives in the shared
             // `.local/share/hel/transfers` directory, which stays.
-            let script = "set -eu; p=$1; dir=$(dirname -- \"$p\"); \
+            let script = format!(
+                "set -eu; printf '%s\\n' {REMOTE_REMOVE_REACHED_MARKER}; \
+                          p=$1; dir=$(dirname -- \"$p\"); \
                           rm -f -- \"$p\"; \
                           case \"$dir\" in \
                               */.cache/mjolnir/snapshot-cache/*|.cache/mjolnir/snapshot-cache/*) \
@@ -827,27 +849,39 @@ pub(crate) fn remove_host_cache_file(
                                       rm -f -- \"$tmp\"; \
                                   done; \
                                   rmdir -- \"$dir\" 2>/dev/null || true ;; \
-                          esac";
+                          esac"
+            );
             let command = mj_core::targets::ssh_command_owned(
                 SshTrafficClass::Control,
                 ssh,
                 vec![
                     "sh".to_owned(),
                     "-c".to_owned(),
-                    script.to_owned(),
+                    script,
                     "hel-snapshot-cache-remove".to_owned(),
                     path.to_owned(),
                 ],
             )
             .purpose("remove host snapshot cache archive");
             let output = executor.execute(&command)?;
-            ensure!(
-                output.status == 0,
+            if output.status == 0 {
+                return Ok(0);
+            }
+            let message = format!(
                 "remove remote snapshot cache file failed with status {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
-            Ok(0)
+            // The script announces itself before touching anything, so its
+            // marker proves the host answered and the failure is this path's.
+            let reached = output.status != SSH_TRANSPORT_FAILURE_STATUS
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line == REMOTE_REMOVE_REACHED_MARKER);
+            if reached {
+                return Err(HostCachePathFailure(message).into());
+            }
+            bail!("{message}")
         }
     }
 }
