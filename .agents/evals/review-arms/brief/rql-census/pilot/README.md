@@ -115,6 +115,42 @@ before that report exists. A failed pooled prescience verdict stops all pilot
 launches, including G, and a re-freeze cannot clear it. The private gold cases and pilot bug IDs are
 excluded from every prompt.
 
+## Diff reading
+
+Codex cuts one `exec_command` output at the model's 10,000-token policy (about 40,000 bytes) and
+keeps only the head and tail, whatever `max_output_tokens` the model asks for. Stage 2a sessions
+read the diff in one command, so 25 of its 35 diffs were cut (writers too: 117 of 125 writer
+rollouts carry the marker). `--writer-diff-reading` and `--reviewer-diff-reading` choose how each
+role reads the diff; they are independent, so a reviewer-only rerun keeps the accepted briefs.
+
+- `trees-and-diffstat` (default since 7345e9020) gives reviewers the baseline and captured tree
+  IDs plus the diffstat and lets the session choose its reads. It adds no diff-reading inputs.
+  The frozen Stage 2a artifacts used the old single-command prompt and verify only with the code
+  frozen at the Stage 2a worktree (`.mj/worktrees/rql-stage2a-42f04e093/`), not current master.
+- `bounded-reads-v2` keeps Stage 2a task wording and lists numbered `git diff` reads of at most 32,000 bytes each (small files
+  batched, large files read in byte windows ending at line boundaries). Together they print the
+  whole diff once. The patch bytes are pinned with `--full-index` (the session's history is cut
+  short, so abbreviated `index` lines would differ in length from the planning clone's) and the
+  other `audit.py`-accepted flags in `pilot_review.PATCH_FLAGS`; planning runs without system or
+  global git config and refuses a clone whose own config sets `diff.*`, `color.*` or
+  `core.quotePath`, because the rest have no accepted flag and the pinned session image has no git
+  config. Planning reads git attributes from the head tree (what every session has checked out)
+  and refuses a non-empty `.git/info/attributes`. A changed file with other changed paths under one
+  of its paths (a file replaced by a directory, a move into its own name) gets its own read that
+  excludes those exact paths with `:(exclude,literal)path`. Each job's `inputs.json` records `writer_diff_reading` or
+  `reviewer_diff_reading` and a digest of the instruction text, budget and flags, and
+  `prompt_sha256` covers the rendered list.
+
+Each read redoes rename detection on its own paths. A diff whose rename candidates exceed
+`diff.renameLimit` could therefore pair a move in a small read that the full diff prints as a
+deletion and an addition. Before a paid run on a new corpus, check that the concatenated reads of
+every diff equal `git diff` with the same flags. That check was run by hand for the 35 Stage 2a
+diffs, on the host and with the pinned image's git 2.47.3; it is not automated.
+
+`tool_output_token_limit` in the Codex overlay would raise the policy, but it applies to every
+session of the profile and the model still chooses `max_output_tokens` (the reviewers chose 30,000,
+below the 48,800 tokens of the largest diff), so the harness splits the diff instead.
+
 ## Evidence and recovery
 
 The default root is `/mnt/optane/review-arms-pilot`. Under

@@ -5,6 +5,7 @@ from io import StringIO
 import hashlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -12,6 +13,7 @@ import tarfile
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 
 import pilot_run as pilot
 import audit
@@ -1022,6 +1024,189 @@ if not (attempt / "recover").exists():
         actual = pilot_review.prompt_with_rubric(rubric, ("tree-a", "tree-b", 2, "Table"), "Task", "Brief.")
         self.assertEqual(actual.encode(), rubric + b"\n" + expected.encode())
 
+    def test_bounded_diff_reads_reach_a_diff_larger_than_the_exec_cap(self):
+        # Codex 0.168/0.170 cut one exec_command output at 10,000 tokens, about 40,000 bytes
+        # (codex-rs/core/src/tools/context.rs), however many tokens the model asks for.
+        exec_cap = 40_000
+        repo = self.root / "repo"
+        repo.mkdir()
+
+        def git(*args, cwd=repo):
+            return subprocess.check_output(["git", "-C", cwd, *args], env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"})
+
+        def write(name, data):
+            (repo / name).write_bytes(data)
+
+        git("init", "-q", "-b", "main", cwd=self.root / "repo")
+        git("config", "user.email", "t@example.invalid")
+        git("config", "user.name", "t")
+        lines = b"".join(b"line %05d of a file that the change rewrites\n" % n for n in range(3000))
+        write("big.txt", lines)
+        write("old name.txt", b"".join(b"renamed %04d\n" % n for n in range(200)))
+        write("a.txt", b"decoy\n")
+        write("[ab].txt", b"glob\n")
+        write("wide.txt", b"x\n")
+        write("foo", b"a file that becomes a directory\n")
+        (repo / "bar").mkdir()
+        write("bar/x", b"x\n")
+        write("bar/y", b"y\n")
+        # Moves between a path and a directory of its own name, with a sibling in another record.
+        moved = b"".join(b"moved line %03d\n" % n for n in range(12))
+        write("rn1", moved)
+        (repo / "rn2").mkdir()
+        moved2 = b"".join(b"other moved line %03d\n" % n for n in range(12))
+        write("rn2/inner.txt", moved2)
+        write("rn2/gone.txt", b"gone\n")
+        write("blob.dat", b"text in the base\n")
+        write("mv3", b"".join(b"third moved line %03d\n" % n for n in range(12)))
+        git("add", "-A")
+        git("commit", "-q", "-m", "base")
+        base = git("rev-parse", "HEAD").decode().strip()
+        write("big.txt", lines.replace(b"line", b"LINE"))
+        git("mv", "old name.txt", "new name.txt")
+        write("new name.txt", (repo / "new name.txt").read_bytes() + b"tail\n")
+        write("a.txt", b"decoy changed\n")
+        write("[ab].txt", b"glob changed\n")
+        write("wide.txt", ("\u00e9" * 40_000 + "\n").encode())  # one 80,000-byte line
+        # A file replaced by a directory and a directory by a file: `:(literal)foo` alone would
+        # also match foo/inner.txt.
+        git("rm", "-q", "foo", "bar/x", "bar/y")
+        (repo / "foo").mkdir()
+        write("foo/inner.txt", b"inner\n")
+        write("bar", b"a directory that becomes a file\n")
+        # A move into a nested path of its own name, beside an added file in that directory.
+        git("mv", "mv3", "mv3.tmp")
+        (repo / "mv3").mkdir()
+        (repo / "mv3/sub").mkdir()
+        git("mv", "mv3.tmp", "mv3/sub/kept.txt")
+        write("mv3/sub/new.txt", b"new\n")
+        git("rm", "-q", "rn1", "rn2/inner.txt", "rn2/gone.txt")
+        (repo / "rn1").mkdir()
+        write("rn1/inner.txt", moved)
+        write("rn1/other.txt", b"sibling\n")
+        write("rn2", moved2)
+        # Binary in the session's checkout, text in a planning clone that is at the base.
+        write(".gitattributes", b"blob.dat -diff\n")
+        write("blob.dat", b"text in the head\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "change")
+        head = git("rev-parse", "HEAD").decode().strip()
+        git("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", base)
+
+        # Planning sees the default configuration whatever the host sets; the session's clone has a
+        # different abbreviation length, context and color. The reads must print the planned bytes.
+        host_config = self.root / "host.gitconfig"
+        host_config.write_text("[diff]\n\tnoprefix = true\n\tcontext = 0\n")
+        # The host's own attributes files, which --attr-source does not replace.
+        for home in (self.root / "xdg/git", self.root / "home/.config/git"):
+            home.mkdir(parents=True)
+            (home / "attributes").write_text("big.txt -diff\nwide.txt binary\n")
+        with (unittest.mock.patch.object(pilot.driver, "REPO", str(repo)),
+              unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config),
+                                                    "XDG_CONFIG_HOME": str(self.root / "xdg"),
+                                                    "HOME": str(self.root / "home")})):
+            capture = pilot_review.capture({"base_commit": base, "intro_commit": head})
+            reads = pilot_review.plan_reads(pilot_review.file_diffs(*capture[:2]))
+        reader = self.root / "reader"
+        git("-c", "advice.detachedHead=false", "clone", "-q", "--no-local", str(repo), str(reader), cwd=self.root)
+        git("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", head, cwd=reader)
+        for key, value in (("core.abbrev", "12"), ("diff.context", "1"), ("color.ui", "always")):
+            git("config", key, value, cwd=reader)
+        # What the session prints: its checkout is at the head, whatever the planning clone has.
+        full = git("diff", *pilot_review.PATCH_FLAGS, *capture[:2], cwd=reader)
+        self.assertIn(b"diff --git a/big.txt b/big.txt", full)
+        self.assertGreater(len(full), 3 * exec_cap)
+        outputs = [subprocess.check_output(["bash", "-c", pilot_review.read_command(*capture[:2], read)], cwd=reader)
+                   for read in reads]
+        self.assertGreater(len(reads), 3)
+        self.assertEqual(b"".join(outputs), full)
+        for read, output in zip(reads, outputs, strict=True):
+            self.assertEqual(len(output), read[2])
+            self.assertLessEqual(len(output), pilot_review.READ_BYTES)
+            self.assertLess(pilot_review.READ_BYTES, exec_cap)
+            output.decode()
+        excludes = [tuple(read[3]) for read in reads]
+        self.assertIn(("foo/inner.txt",), excludes)
+        self.assertIn(("bar/x", "bar/y"), excludes)
+        # A move into or out of a directory of its own name keeps its other path.
+        self.assertIn(("rn1/other.txt",), excludes)
+        self.assertIn(("rn2/gone.txt",), excludes)
+        self.assertIn(("mv3/sub/new.txt",), excludes)  # the leaf, not its directory `mv3/sub`
+        self.assertTrue(any(b"rename from mv3\nrename to mv3/sub/kept.txt" in out for out in outputs))
+        self.assertTrue(any(b"rename from rn1\nrename to rn1/inner.txt" in out for out in outputs))
+        self.assertTrue(any(b"rename from rn2/inner.txt\nrename to rn2\n" in out for out in outputs))
+        self.assertIn(b"Binary files", full.split(b"diff --git a/blob.dat")[1])
+        # A non-empty .git/info/attributes in the planning clone can differ from the session's.
+        (repo / ".git/info/attributes").write_text("*.dat diff=other\n")
+        with unittest.mock.patch.object(pilot.driver, "REPO", str(repo)):
+            with self.assertRaisesRegex(ValueError, "info/attributes"):
+                pilot_review.file_diffs(*capture[:2])
+        (repo / ".git/info/attributes").unlink()
+        # A repository whose own config can change the patch is refused, not planned.
+        git("config", "diff.algorithm", "patience")
+        with unittest.mock.patch.object(pilot.driver, "REPO", str(repo)):
+            with self.assertRaisesRegex(ValueError, "diff.algorithm"):
+                pilot_review.file_diffs(*capture[:2])
+        git("config", "--unset", "diff.algorithm")
+
+        # The default adds no diff-reading inputs; bounded reads bind each role independently.
+        manifest = pilot.load_manifest(manifest_fixture().replace(b"first", b"zqxone").replace(b"second", b"zqxtwo"))
+        manifest["diffs"][0].update(intro=head, base=base)
+        raw = json.dumps(manifest).encode()
+        catalogue = (pilot.driver.SCRIPTS / "brief/rql-census/rql-documented-steps.md").read_text()
+        row = manifest["diffs"][0]
+        args = SimpleNamespace(run_root=self.root / "runs", profile="p")
+        writer = {"job": f"{row['key']}/G/r1/writer", "diff": row["key"], "arm": "G", "replicate": 1,
+                  "kind": "writer", "slot": None}
+        reviewer = dict(writer, job=f"{row['key']}/N/r1/reviewer-1", arm="N", kind="reviewer", slot=1)
+
+        def render(**reading):
+            runner = pilot.Pilot(args, {}, manifest, raw, "image", catalogue.encode(), None, **reading)
+            with (unittest.mock.patch.object(pilot, "repository", lambda *_: None),
+                  unittest.mock.patch.object(pilot.driver, "REPO", str(repo))):
+                return runner.render(writer), runner.render(reviewer)
+
+        old_writer, old_reviewer = render()
+        self.assertIn(f"`git diff {base} HEAD`", old_writer["prompt"])
+        self.assertIn(f"Baseline tree: {capture[0]}\nCaptured tree: {capture[1]}", old_reviewer["prompt"])
+        self.assertFalse([key for key in old_writer["inputs"] | old_reviewer["inputs"] if "diff_reading" in key])
+        # The default captures in the caller's environment, as Stage 2a did: a host config that
+        # turns rename detection off still reaches its diffstat, and bounded planning ignores it.
+        host_config.write_text("[diff]\n\trenames = false\n")
+        plain = [*pilot_review.PATCH_FLAGS[:2], "--shortstat", *capture[:2]]
+        inherited = subprocess.check_output(["git", "-C", repo, "diff", *plain],
+                                            env={**os.environ, "GIT_CONFIG_GLOBAL": str(host_config)}).decode().strip()
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config)}):
+            _, renames_off_reviewer = render()
+        self.assertIn(f"Repository: . -- {inherited}", renames_off_reviewer["prompt"])
+        self.assertNotIn(f"Repository: . -- {inherited}", old_reviewer["prompt"])
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config)}):
+            _, renames_off_bounded = render(reviewer_diff_reading=pilot_review.BOUNDED_READS)
+        self.assertEqual(renames_off_bounded["prompt"].split("Per-file diffstat")[0],
+                         render(reviewer_diff_reading=pilot_review.BOUNDED_READS)[1]["prompt"].split("Per-file diffstat")[0])
+        new_writer, new_reviewer = render(writer_diff_reading=pilot_review.BOUNDED_READS,
+                                          reviewer_diff_reading=pilot_review.BOUNDED_READS)
+        for params, kind in ((new_writer, "writer"), (new_reviewer, "reviewer")):
+            self.assertEqual(params["inputs"][f"{kind}_diff_reading"], pilot_review.BOUNDED_READS)
+            self.assertRegex(params["inputs"][f"{kind}_diff_reading_sha256"], "^[0-9a-f]{64}$")
+            for read in reads:
+                self.assertIn(pilot_review.read_command(*capture[:2], read), params["prompt"])
+        self.assertNotIn("git diff {base}", new_writer["prompt"])
+        self.assertNotIn("Run this exact command", new_reviewer["prompt"])
+        # Pin the complete bounded prompt rendered by the pre-merge implementation.
+        fixed = pilot_review.prompt_with_rubric(b"Rubric", ("tree-a", "tree-b", 2, "Table"),
+                                                "Task", "Brief.", reads=[(("a.txt",), None, 123, ())])
+        self.assertEqual(pilot.digest(fixed.encode()),
+                         "fd7804e6e367ed3c23391ed740300995e4d2c90bc4b439624922decb49cafd40")
+        self.assertEqual(new_reviewer["inputs"]["review_template_sha256"],
+                         pilot.digest(pilot_review.STAGE2A_TEMPLATE.encode()))
+        self.assertNotEqual(new_writer["inputs"]["prompt_sha256"], old_writer["inputs"]["prompt_sha256"])
+        # A reviewer-only change keeps the writer's prompt and inputs, so the accepted briefs stand.
+        only_writer, only_reviewer = render(reviewer_diff_reading=pilot_review.BOUNDED_READS)
+        self.assertEqual(only_writer["inputs"], old_writer["inputs"])
+        self.assertEqual(only_writer["prompt"], old_writer["prompt"])
+        self.assertEqual(only_reviewer["inputs"], new_reviewer["inputs"])
+
     def test_audit_rejects_unpinned_history_network_and_cache(self):
         transcript = self.root / "transcript.json"
         calls = [
@@ -1078,6 +1263,270 @@ if not (attempt / "recover").exists():
         exposed = pilot_cache_probe.attest(checkout, pin, pin, cache)
         self.assertFalse(exposed["passed"])
         self.assertEqual(exposed["snapshots"]["later.bundle"]["outside_pin"], [later])
+
+    def test_concurrent_matrix_orders_reviewers_after_writers_and_drains_on_halt(self):
+        import threading
+
+        groups = pilot.select_jobs(self.manifest, diff="mjolnir/first", arms=["N", "G", "R"])
+        started = []
+        done = set()
+        lock = threading.Lock()
+        active_count = 0
+        max_active = 0
+        writer_barrier = threading.Barrier(2, timeout=5)
+        reviewer_order_ok = True
+
+        def complete(job):
+            with lock:
+                return job["job"] in done
+
+        def execute(job):
+            nonlocal active_count, max_active, reviewer_order_ok
+            key = job["job"]
+            with lock:
+                active_count += 1
+                max_active = max(max_active, active_count)
+                started.append(key)
+                if job["kind"] == "reviewer":
+                    all_writers = {m["job"] for m in groups["mjolnir/first"] if m["kind"] == "writer"}
+                    if not all_writers <= done:
+                        reviewer_order_ok = False
+            try:
+                if job["kind"] == "writer":
+                    writer_barrier.wait()
+                with lock:
+                    done.add(key)
+                return "done"
+            finally:
+                with lock:
+                    active_count -= 1
+
+        with redirect_stdout(StringIO()):
+            rc = pilot.run_matrix(self.root, groups, "codex", complete, execute, FakeQuota("90"), concurrency=4)
+        self.assertEqual(rc, 0)
+        self.assertTrue(reviewer_order_ok)
+        self.assertGreaterEqual(max_active, 2)
+        self.assertEqual(len(done), len(groups["mjolnir/first"]))
+
+        # Verify halt drains already-running peers cleanly without launching dependents.
+        done.clear()
+        started.clear()
+        release_peer = threading.Event()
+        peer_finished = threading.Event()
+        both_started = threading.Barrier(2, timeout=5)
+
+        def execute_halt(job):
+            key = job["job"]
+            with lock:
+                started.append(key)
+            if key == "mjolnir/first/G/r1/writer":
+                both_started.wait()
+                return "interrupted: test"
+            if key == "mjolnir/first/R/r1/writer":
+                both_started.wait()
+                release_peer.wait(timeout=5)
+                with lock:
+                    done.add(key)
+                peer_finished.set()
+                return "done"
+            with lock:
+                done.add(key)
+            return "done"
+
+        def trigger_release():
+            both_started_check = 0
+            while both_started_check < 100 and not peer_finished.is_set():
+                if "mjolnir/first/G/r1/writer" in started and "mjolnir/first/R/r1/writer" in started:
+                    release_peer.set()
+                    return
+                both_started_check += 1
+                threading.Event().wait(0.01)
+
+        releaser = threading.Thread(target=trigger_release, daemon=True)
+        releaser.start()
+        with redirect_stdout(StringIO()):
+            rc = pilot.run_matrix(self.root, groups, "codex", complete, execute_halt, FakeQuota("90"), concurrency=2)
+        releaser.join(timeout=5)
+        self.assertEqual(rc, 1)
+        self.assertTrue(peer_finished.is_set())
+        self.assertIn("mjolnir/first/R/r1/writer", done)
+        self.assertNotIn("mjolnir/first/G/r1/reviewer-1", started)
+        self.assertTrue((self.root / "active-diff.json").exists())
+
+    def test_concurrent_matrix_observes_completed_failure_before_refilling(self):
+        import threading
+
+        groups = pilot.select_jobs(self.manifest, diff="mjolnir/first", arms=["G", "R", "R-loc"])
+        done = set()
+        started = []
+        lock = threading.Lock()
+        probing_third = threading.Event()
+        second_finished = threading.Event()
+        both_running = threading.Barrier(2, timeout=5)
+
+        def complete(job):
+            key = job["job"]
+            with lock:
+                is_done = key in done
+                g_done = "mjolnir/first/G/r1/writer" in done
+            if key == "mjolnir/first/R-loc/r1/writer" and g_done and not is_done:
+                probing_third.set()
+                second_finished.wait(timeout=5)
+                # Give the worker future a tick to mark itself done after returning.
+                threading.Event().wait(0.02)
+            return is_done
+
+        def execute(job):
+            key = job["job"]
+            with lock:
+                started.append(key)
+            if key == "mjolnir/first/G/r1/writer":
+                both_running.wait()
+                with lock:
+                    done.add(key)
+                return "done"
+            if key == "mjolnir/first/R/r1/writer":
+                both_running.wait()
+                probing_third.wait(timeout=5)
+                try:
+                    return "interrupted: peer failed during refill"
+                finally:
+                    second_finished.set()
+            with lock:
+                done.add(key)
+            return "done"
+
+        with redirect_stdout(StringIO()):
+            rc = pilot.run_matrix(self.root, groups, "codex", complete, execute, FakeQuota("90"), concurrency=2)
+        self.assertEqual(rc, 1)
+        self.assertEqual(set(started), {"mjolnir/first/G/r1/writer", "mjolnir/first/R/r1/writer"})
+
+    def test_pilot_audit_verifies_codex_rollout_rql_mcp_and_file_change(self):
+        own = "a" * 32
+        brief_path = f"/workspace/{own}/mjolnir/brief.md"
+        transcript = self.root / "transcript.json"
+        rollout_dir = self.root / audit.ROLLOUT_DIRECTORY
+        rollout_dir.mkdir()
+        rollout_file = rollout_dir / "rollout-1.jsonl"
+        pages = [{
+            "cwd": f"/workspace/{own}/mjolnir",
+            "items": [
+                {
+                    "seq": 1,
+                    "role": "tool",
+                    "body": {"call": {
+                        "toolCallId": "exec-rql-1",
+                        "title": "mcp.rql.rql_query",
+                        "kind": "execute",
+                        "status": "completed",
+                        "rawInput": {"server": "rql", "tool": "rql_query", "arguments": {"query": "(function)"}},
+                    }},
+                },
+                {
+                    "seq": 2,
+                    "role": "tool",
+                    "body": {"call": {
+                        "toolCallId": "exec-edit-1",
+                        "title": "Editing files",
+                        "kind": "edit",
+                        "status": "completed",
+                        "content": [{"type": "diff", "path": brief_path, "newText": ""}],
+                    }},
+                },
+            ],
+        }]
+        pilot.driver.save(transcript, pages)
+        pilot.driver.save(self.root / "pre-inventory.json", {
+            "cwd": f"/workspace/{own}/mjolnir", "head": "b" * 40,
+            "status": "", "ignored": "", "tracked_symlinks": [], "tracked_symlink_targets": {},
+        })
+        rollout_rows = [
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "McpToolCall", "id": "exec-rql-1", "server": "rql", "tool": "rql_query",
+            }}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "FileChange", "id": "exec-edit-1",
+                "changes": {brief_path: {"type": "add"}},
+            }}},
+        ]
+        rollout_file.write_text("\n".join(json.dumps(row) for row in rollout_rows) + "\n")
+        ok = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertTrue(ok["passed"], ok["hits"])
+        no_rql = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=False)
+        self.assertFalse(no_rql["passed"])
+        self.assertTrue(any(hit["seq"] == 1 and hit["kind"] == "needs-inspection" for hit in no_rql["hits"]))
+        # Without rollout evidence, neither the Codex MCP card nor the pathless edit card is accepted.
+        rollout_file.unlink()
+        missing = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(missing["passed"])
+        self.assertEqual({hit["seq"] for hit in missing["hits"]}, {1, 2})
+        # Outside-workspace rollout edit is caught.
+        rollout_rows[1]["payload"]["item"]["changes"] = {"/etc/hosts": {"type": "update", "move_path": None}}
+        rollout_file.write_text("\n".join(json.dumps(row) for row in rollout_rows) + "\n")
+        disagree = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(disagree["passed"])
+        self.assertTrue(any("disagree" in hit["snippet"] for hit in disagree["hits"]))
+        # An in_progress Codex MCP card left open when the turn ended requires positive host-log corroboration.
+        in_progress_pages = [{
+            "cwd": f"/workspace/{own}/mjolnir",
+            "items": [{
+                "seq": 1,
+                "role": "tool",
+                "body": {"call": {
+                    "toolCallId": "exec-rql-bg",
+                    "title": "mcp.rql.rql_query",
+                    "kind": "execute",
+                    "status": "in_progress",
+                    "rawInput": {"server": "rql", "tool": "rql_query", "arguments": {"query": "(function)"}},
+                    "_meta": {"is_mcp_tool_call": True},
+                }},
+            }],
+        }]
+        pilot.driver.save(transcript, in_progress_pages)
+        rollout_file.write_text("")
+        # Without host queries-<sid>.jsonl corroboration, an empty rollout must reject the unfinished card.
+        bg_no_host = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_no_host["passed"])
+        queries_log = self.root / f"queries-{own}.jsonl"
+        queries_log.write_text(json.dumps({"session": own, "query": "(function)", "page": 1, "status": "ok"}) + "\n")
+        bg_ok = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertTrue(bg_ok["passed"], bg_ok["hits"])
+        bg_denied = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=False)
+        self.assertFalse(bg_denied["passed"])
+        # A contradictory rollout McpToolCall rejects the in_progress card even when host log has the query.
+        rollout_file.write_text(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "McpToolCall", "id": "exec-rql-bg", "server": "mj-memory", "tool": "search_sessions",
+        }}}) + "\n")
+        bg_conflict = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_conflict["passed"])
+        # A truncated/malformed rollout must also reject an in_progress card.
+        rollout_file.write_text("{not valid json\n")
+        bg_corrupt = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_corrupt["passed"])
+        # A completed RQL call consumes its host-log entry so a duplicate forged in_progress card fails.
+        rollout_file.write_text(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "McpToolCall", "id": "exec-rql-done", "server": "rql", "tool": "rql_query",
+        }}}) + "\n")
+        replay_pages = [{
+            "cwd": f"/workspace/{own}/mjolnir",
+            "items": [
+                {
+                    "seq": 1,
+                    "role": "tool",
+                    "body": {"call": {
+                        "toolCallId": "exec-rql-done",
+                        "title": "mcp.rql.rql_query",
+                        "kind": "execute",
+                        "status": "completed",
+                        "rawInput": {"server": "rql", "tool": "rql_query", "arguments": {"query": "(function)"}},
+                    }},
+                },
+                in_progress_pages[0]["items"][0],
+            ],
+        }]
+        pilot.driver.save(transcript, replay_pages)
+        bg_replay = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_replay["passed"])
 
 
 if __name__ == "__main__":

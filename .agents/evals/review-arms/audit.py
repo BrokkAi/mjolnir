@@ -62,6 +62,7 @@ def audit_reviewer(transcript_path, own_workspace, *, cwd=None, inventory=None):
 
 
 ROLLOUT_DIRECTORY = "codex-rollout"
+ROLLOUT_UNREADABLE = object()
 PASSING_HIT_KINDS = {"interpreter-screened", "in-place-edit"}
 
 
@@ -103,6 +104,146 @@ def rollout_commands(paths):
     return {identifier: command for identifier, command in commands.items() if identifier not in conflicts}
 
 
+def rollout_mcp_calls(paths):
+    """Index Codex's durable MCP tool call IDs so mcp.rql.rql_query cannot be spoofed."""
+    if not paths:
+        return {ROLLOUT_UNREADABLE: True}
+    calls, conflicts = {}, set()
+    try:
+        for path in paths:
+            with path.open(encoding="utf-8") as rows:
+                for line in rows:
+                    entry = json.loads(line)
+                    event = entry.get("payload") or {}
+                    item = event.get("item") or {}
+                    if (entry.get("type") != "event_msg" or event.get("type") != "item_completed"
+                            or item.get("type") != "McpToolCall"):
+                        continue
+                    identifier, server, tool = item.get("id"), item.get("server"), item.get("tool")
+                    if not isinstance(identifier, str) or not identifier:
+                        continue
+                    if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
+                        conflicts.add(identifier)
+                        continue
+                    record = (server, tool)
+                    if calls.setdefault(identifier, record) != record:
+                        conflicts.add(identifier)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {ROLLOUT_UNREADABLE: True}
+    for identifier in conflicts:
+        calls[identifier] = None
+    return calls
+
+
+def rollout_file_changes(paths):
+    """Index Codex's durable FileChange IDs for ACP Editing files cards."""
+    edits, conflicts = {}, set()
+    try:
+        for path in paths:
+            with path.open(encoding="utf-8") as rows:
+                for line in rows:
+                    entry = json.loads(line)
+                    event = entry.get("payload") or {}
+                    item = event.get("item") or {}
+                    if (entry.get("type") != "event_msg" or event.get("type") != "item_completed"
+                            or item.get("type") != "FileChange"):
+                        continue
+                    identifier, changes = item.get("id"), item.get("changes")
+                    if not isinstance(identifier, str) or not identifier:
+                        continue
+                    if not isinstance(changes, dict) or not changes:
+                        conflicts.add(identifier)
+                        continue
+                    targets, has_move, valid = [], False, True
+                    for target, change in changes.items():
+                        if (not isinstance(target, str) or not target or "\0" in target
+                                or not isinstance(change, dict)
+                                or change.get("type") not in {"add", "update", "delete", "move"}):
+                            valid = False
+                            break
+                        targets.append(target)
+                        if change.get("type") == "move":
+                            has_move = True
+                        move_path = change.get("move_path")
+                        if move_path is not None:
+                            if not isinstance(move_path, str) or not move_path or "\0" in move_path:
+                                valid = False
+                                break
+                            targets.append(move_path)
+                            has_move = True
+                    if not valid:
+                        conflicts.add(identifier)
+                        continue
+                    record = (tuple(dict.fromkeys(targets)), has_move)
+                    if edits.setdefault(identifier, record) != record:
+                        conflicts.add(identifier)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+    return {identifier: record for identifier, record in edits.items() if identifier not in conflicts}
+
+
+def host_rql_queries(path, own_workspace):
+    """Count host-logged (query, page) RQL deliveries for this session."""
+    counts = Counter()
+    if not path.is_file():
+        return counts
+    try:
+        with path.open(encoding="utf-8") as rows:
+            for line in rows:
+                entry = json.loads(line)
+                if not isinstance(entry, dict) or entry.get("session") != own_workspace:
+                    continue
+                query, page = entry.get("query"), entry.get("page")
+                if isinstance(query, str) and type(page) is int and page >= 1:
+                    counts[(query, page)] += 1
+    except (OSError, ValueError, AttributeError, TypeError):
+        return Counter()
+    return counts
+
+
+def rql_call_key(raw):
+    arguments = raw.get("arguments")
+    if not isinstance(arguments, dict) or set(arguments) - {"query", "page"}:
+        return None
+    query, page = arguments.get("query"), arguments.get("page", 1)
+    if not isinstance(query, str) or type(page) is not int or page < 1:
+        return None
+    return query, page
+
+
+def is_rql_mcp_call(call, rollout_mcp=None, rollout=None, unfinished_host_queries=None):
+    title, kind, raw = call.get("title"), call.get("kind"), call.get("rawInput")
+    if title in ("rql_query", "mcp__rql__rql_query") and kind != "execute":
+        return True
+    if (title == "mcp.rql.rql_query" and kind == "execute" and call.get("name") is None
+            and isinstance(raw, dict) and raw.get("server") == "rql" and raw.get("tool") == "rql_query"
+            and set(raw) <= {"server", "tool", "arguments"}):
+        identifier = call.get("toolCallId")
+        if rollout is not None and identifier in rollout:
+            return False
+        if rollout_mcp is not None:
+            if ROLLOUT_UNREADABLE in rollout_mcp:
+                return False
+            if identifier in rollout_mcp:
+                return rollout_mcp[identifier] == ("rql", "rql_query")
+            # A background Codex JS-exec MCP call still in_progress when the turn finishes
+            # has no item_completed McpToolCall in rollout-*.jsonl; require an unmatched
+            # host-side delivery record in queries-<session>.jsonl.
+            meta = call.get("_meta")
+            key = rql_call_key(raw)
+            if (isinstance(identifier, str) and bool(identifier)
+                    and call.get("status") == "in_progress"
+                    and isinstance(meta, dict) and meta.get("is_mcp_tool_call") is True
+                    and call.get("rawOutput") is None and not (call.get("content") or [])
+                    and key is not None and unfinished_host_queries
+                    and unfinished_host_queries[key] > 0):
+                unfinished_host_queries[key] -= 1
+                return True
+            return False
+        return True
+    return False
+
+
 def call_command(call):
     raw = call.get("rawInput")
     command = raw.get("command", raw.get("cmd", raw.get("argv"))) if isinstance(raw, dict) else raw
@@ -133,8 +274,9 @@ def tool_succeeded(call, body, rollout_exit):
 
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
-         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False,
-         antigravity=False, tracked_head=None, tracked_symlink_targets=None, claude_code_version=None):
+         rollout=None, rollout_mcp=None, rollout_files=None, host_queries=None, allow_in_place_edits=False,
+         tracked_symlinks=None, tracked_paths=None, engine=False, antigravity=False, tracked_head=None,
+         tracked_symlink_targets=None, claude_code_version=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
@@ -143,6 +285,22 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
     hits, calls = [], 0
     audited_engine_calls = {}
     scripts, written = ScriptEvidence(checkout, tracked_paths, tracked_symlinks), set()
+    unfinished_host_queries = Counter(host_queries) if host_queries else Counter()
+    if allow_rql and rollout_mcp is not None and ROLLOUT_UNREADABLE not in rollout_mcp and unfinished_host_queries:
+        for page in pages:
+            for item in page["items"]:
+                if item.get("role") != "tool":
+                    continue
+                call = (item.get("body") or {}).get("call") or {}
+                raw = call.get("rawInput")
+                if (call.get("title") == "mcp.rql.rql_query" and call.get("kind") == "execute"
+                        and call.get("name") is None and isinstance(raw, dict)
+                        and raw.get("server") == "rql" and raw.get("tool") == "rql_query"
+                        and set(raw) <= {"server", "tool", "arguments"}
+                        and (rollout is None or call.get("toolCallId") not in rollout)
+                        and rollout_mcp.get(call.get("toolCallId")) == ("rql", "rql_query")
+                        and (key := rql_call_key(raw)) is not None and unfinished_host_queries[key] > 0):
+                    unfinished_host_queries[key] -= 1
     # Older transcript pages lack harness metadata. Use native card evidence
     # from any page so an opaque card cannot bypass the session's catalogue.
     antigravity = antigravity or any(
@@ -184,8 +342,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 if not findings and engine_calls is not None and isinstance(identifier, str):
                     engine_calls.setdefault(identifier, seq)
                 continue
-            if (not antigravity and allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query")
-                    and call.get("kind") != "execute"):
+            if not antigravity and allow_rql and is_rql_mcp_call(call, rollout_mcp, rollout, unfinished_host_queries):
                 continue
             if commits is not None:
                 match = None
@@ -214,6 +371,30 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                         scripts.clear()
                         edit_paths.blocked = True
                         continue
+                elif (not antigravity and rollout_files is not None and call.get("kind") == "edit"
+                        and call.get("name") is None and call.get("rawInput") is None
+                        and not (call.get("locations") or [])
+                        and (rollout is None or call.get("toolCallId") not in rollout)):
+                    file_match = rollout_files.get(call.get("toolCallId"))
+                    if file_match is not None:
+                        paths, has_move = file_match
+                        diff_entries = [
+                            entry for entry in (call.get("content") or [])
+                            if isinstance(entry, dict) and entry.get("type") == "diff"
+                        ]
+                        if any(not isinstance(entry.get("path"), str) or entry["path"] not in paths
+                               for entry in diff_entries):
+                            hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
+                                         "snippet": "Codex transcript and rollout edited paths disagree"})
+                            scripts.clear()
+                            edit_paths.blocked = True
+                            continue
+                        has_move = has_move or any(
+                            isinstance(entry.get("_meta"), dict) and entry["_meta"].get("kind") == "move"
+                            for entry in diff_entries
+                        )
+                        call = {**call, "kind": "move" if has_move else "edit",
+                                "locations": [{"path": path} for path in paths]}
                 observed = {}
                 edit_index = 0
                 for name, snippet in pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
@@ -608,7 +789,7 @@ GIT_FLAGS = set("""
     --no-patch --oneline --no-decorate --decorate --no-color --color --no-ext-diff
     --no-textconv --binary --cached --staged --no-renames --find-renames --find-copies
     --ignore-space-at-eol --ignore-space-change --ignore-all-space --ignore-submodules --submodule
-    --full-index --full-tree --reverse --word-diff --exit-code --minimal --patience --histogram
+    --full-index --full-tree --reverse --word-diff --exit-code --check --minimal --patience --histogram
     --first-parent --no-merges --merges --parents --quiet --verify --short --show-toplevel
     --show-prefix --show-object-format --is-inside-work-tree --path-format --absolute-git-dir
     --git-common-dir --git-dir --literal-pathspecs --relative --no-relative --porcelain
@@ -1368,20 +1549,336 @@ def subprocess_hits(value, own_workspace, commits, single_commit, cwd="", writte
         yield "needs-inspection", "subprocess argv is not visible in interpreter source"
 
 
+READ_ONLY_PYTHON_MODULES = {
+    "bisect": frozenset({"bisect", "bisect_left", "bisect_right"}),
+    "collections": frozenset({"Counter", "defaultdict", "deque", "OrderedDict"}),
+    "difflib": frozenset({"unified_diff", "context_diff", "ndiff", "SequenceMatcher", "get_close_matches"}),
+    "heapq": frozenset({"heapify", "heappush", "heappop", "nlargest", "nsmallest"}),
+    "itertools": frozenset({
+        "chain", "combinations", "compress", "count", "cycle", "dropwhile", "filterfalse",
+        "groupby", "islice", "pairwise", "permutations", "product", "repeat", "starmap",
+        "takewhile", "tee", "zip_longest",
+    }),
+    "json": frozenset({"loads", "dumps", "JSONDecodeError"}),
+    "math": frozenset({"ceil", "floor", "sqrt", "inf", "nan", "isclose", "gcd", "log", "log2", "log10"}),
+    "pathlib": frozenset({"Path", "PurePath", "PurePosixPath"}),
+    "re": frozenset({
+        "compile", "search", "match", "fullmatch", "split", "findall", "finditer",
+        "sub", "subn", "escape", "I", "IGNORECASE", "M", "MULTILINE", "S", "DOTALL",
+        "X", "VERBOSE", "A", "ASCII", "NOFLAG",
+    }),
+    "string": frozenset({
+        "ascii_letters", "ascii_lowercase", "ascii_uppercase", "digits", "hexdigits",
+        "punctuation", "whitespace",
+    }),
+    "subprocess": frozenset({"check_output", "run", "PIPE", "STDOUT", "DEVNULL", "CalledProcessError"}),
+    "textwrap": frozenset({"dedent", "indent", "fill", "wrap", "shorten"}),
+}
+READ_ONLY_PYTHON_BUILTINS = frozenset({
+    "abs", "all", "any", "ascii", "bin", "bool", "bytes", "chr", "dict", "divmod",
+    "enumerate", "filter", "float", "format", "frozenset", "hash", "hex", "int",
+    "isinstance", "iter", "len", "list", "map", "max", "min", "next", "oct", "ord",
+    "pow", "print", "range", "repr", "reversed", "round", "set", "slice", "sorted",
+    "str", "sum", "tuple", "zip",
+})
+READ_ONLY_PYTHON_EXCEPTIONS = frozenset({
+    "AssertionError", "Exception", "FileNotFoundError", "IndexError", "KeyError",
+    "OSError", "RuntimeError", "StopIteration", "TypeError", "UnicodeDecodeError",
+    "ValueError", "ZeroDivisionError",
+})
+# Excludes every mutating Path method (including Python 3.14 Path.copy/move) and
+# handles .replace separately so 1-arg Path.replace(target) is always rejected.
+READ_ONLY_PYTHON_METHODS = frozenset({
+    "as_posix", "exists", "glob", "is_dir", "is_file", "is_relative_to", "is_symlink",
+    "iterdir", "joinpath", "lstat", "match", "read_bytes", "read_text", "relative_to",
+    "resolve", "rglob", "samefile", "stat", "with_name", "with_stem", "with_suffix",
+    "capitalize", "casefold", "center", "count", "decode", "encode", "endswith",
+    "expandtabs", "find", "format", "index", "isalnum", "isalpha", "isascii",
+    "isdecimal", "isdigit", "isidentifier", "islower", "isnumeric", "isprintable",
+    "isspace", "istitle", "isupper", "join", "ljust", "lower", "lstrip", "partition",
+    "removeprefix", "removesuffix", "rfind", "rindex", "rjust", "rpartition", "rsplit",
+    "rstrip", "split", "splitlines", "startswith", "strip", "swapcase", "title",
+    "upper", "zfill",
+    "add", "append", "clear", "difference", "discard", "extend", "get", "insert",
+    "intersection", "issubset", "issuperset", "items", "keys", "most_common", "pop",
+    "popleft", "remove", "reverse", "setdefault", "sort", "symmetric_difference",
+    "union", "update", "values",
+    "end", "findall", "finditer", "fullmatch", "group", "groupdict", "groups",
+    "search", "span", "start", "sub", "subn",
+    "get_matching_blocks", "get_opcodes", "ratio", "quick_ratio",
+})
+READ_ONLY_PYTHON_PROPERTIES = frozenset({
+    "parts", "parent", "parents", "name", "suffix", "suffixes", "stem", "anchor",
+    "drive", "root", "stdout", "stderr", "returncode", "args", "string", "pos",
+    "endpos", "lastindex", "lastgroup", "re", "regs", "pattern", "flags",
+    "groupindex", "st_size", "st_mtime", "real", "imag", "a", "b", "size",
+})
+READ_ONLY_SUBPROCESS_GIT_VERBS = frozenset({
+    "diff", "show", "log", "status", "rev-parse", "ls-files", "merge-base",
+    "cat-file", "grep", "blame", "name-rev", "describe",
+})
+READ_ONLY_SUBPROCESS_PROGRAMS = frozenset({
+    "rg", "grep", "egrep", "fgrep", "cat", "head", "tail", "wc", "nl", "ls",
+    "stat", "readlink", "realpath",
+})
+
+
+PYTHON_MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".so", ".pyd")
+SHADOWABLE_STDLIB_MODULES = frozenset(
+    getattr(sys, "stdlib_module_names", frozenset())
+    | {
+        "sitecustomize", "usercustomize", "sre_compile", "sre_constants", "sre_parse",
+        "pipes", "imp", "distutils", "pkg_resources", "apport_python_hook",
+    }
+)
+
+
+def _is_python_module_filename(name):
+    return name.endswith(PYTHON_MODULE_SUFFIXES) or ".so." in name
+
+
+def _entry_may_shadow_import(rest, protected):
+    head, sep, _ = rest.partition("/")
+    if not sep and _is_python_module_filename(head):
+        return True
+    return head.startswith("_") or head in protected or head.split(".", 1)[0] in protected
+
+
+def _python_imports_unshadowed(modules, scripts, cwd, written):
+    if (scripts is None or scripts.opaque or scripts.tracked is None or scripts.symlinks is None
+            or not scripts.checkout or not isinstance(cwd, str) or not cwd
+            or ".." in cwd.split("/") or ".." in scripts.checkout.split("/")):
+        return False
+    root = posixpath.normpath(scripts.checkout).rstrip("/")
+    current = posixpath.normpath(cwd)
+    if current != root and not current.startswith(root + "/"):
+        return False
+    rel_dir = "" if current == root else current.removeprefix(root + "/") + "/"
+    if rel_dir:
+        rel_path = pathlib.PurePosixPath(rel_dir.rstrip("/"))
+        if str(rel_path) in scripts.symlinks or any(str(parent) in scripts.symlinks for parent in rel_path.parents):
+            return False
+    # Any direct, transitive, or lazy stdlib import resolves against sys.path[0] == cwd.
+    # Reject if cwd contains any Python module file, any private '_'-prefixed entry,
+    # or any directory/entry matching an imported or standard-library module name.
+    protected = set(modules) | SHADOWABLE_STDLIB_MODULES
+    known = scripts.tracked | scripts.symlinks
+    for path in known:
+        if path.startswith(rel_dir) and _entry_may_shadow_import(path.removeprefix(rel_dir), protected):
+            return False
+    cwd_prefix = current.rstrip("/") + "/"
+    for path in scripts.opaque_paths:
+        if path.startswith(cwd_prefix) and _entry_may_shadow_import(path.removeprefix(cwd_prefix), protected):
+            return False
+    for name in written or ():
+        if (_is_python_module_filename(name) or name.startswith("_")
+                or name in protected or name.split(".", 1)[0] in protected):
+            return False
+    for key in scripts:
+        if not isinstance(key, str):
+            return False
+        if key.startswith(cwd_prefix) and _entry_may_shadow_import(key.removeprefix(cwd_prefix), protected):
+            return False
+    return True
+
+
+def _is_read_only_subprocess_call(node, imports, written):
+    if len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
+        return False
+    try:
+        argv = ast.literal_eval(node.args[0])
+    except (ValueError, TypeError, SyntaxError):
+        return False
+    if (not isinstance(argv, (list, tuple)) or not argv
+            or not all(isinstance(word, str) and word and "\0" not in word for word in argv)):
+        return False
+    for kw in node.keywords:
+        if kw.arg is None:
+            return False
+        if kw.arg in {"text", "capture_output", "check"}:
+            if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool)):
+                return False
+        elif kw.arg in {"encoding", "errors"}:
+            if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)):
+                return False
+        elif kw.arg == "stderr":
+            if not ((isinstance(kw.value, ast.Constant) and kw.value.value is None)
+                    or python_name(kw.value, imports) in {"subprocess.PIPE", "subprocess.STDOUT", "subprocess.DEVNULL"}):
+                return False
+        else:
+            return False
+    try:
+        program = system_program(argv[0], written or ())
+    except InspectionRequired:
+        return False
+    args = list(argv[1:])
+    if program == "git":
+        while args[:1] == ["-C"] and len(args) > 1:
+            args = args[2:]
+        if not args or args[0] not in READ_ONLY_SUBPROCESS_GIT_VERBS:
+            return False
+        split = args.index("--") if "--" in args else len(args)
+        if any(word == "--output" or word.startswith("--output=") for word in args[1:split]):
+            return False
+        return True
+    return program in READ_ONLY_SUBPROCESS_PROGRAMS
+
+
+def python_is_read_only(tree, scripts, cwd, written):
+    """Prove an inline Python AST cannot create, remove, modify, or relocate any file or symlink."""
+    nodes = list(ast.walk(tree))
+    imports = {}
+    imported_modules = set()
+    for node in nodes:
+        if isinstance(node, (ast.ClassDef, ast.AsyncFunctionDef, ast.AsyncFor, ast.AsyncWith,
+                             ast.Await, ast.Global, ast.Nonlocal, ast.With)):
+            return False
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in READ_ONLY_PYTHON_MODULES:
+                    return False
+                bound = alias.asname or alias.name
+                if bound in imports and imports[bound] != alias.name:
+                    return False
+                imports[bound] = alias.name
+                imported_modules.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or node.module not in READ_ONLY_PYTHON_MODULES:
+                return False
+            allowed_members = READ_ONLY_PYTHON_MODULES[node.module]
+            for alias in node.names:
+                if alias.name == "*" or alias.name not in allowed_members:
+                    return False
+                bound = alias.asname or alias.name
+                target = f"{node.module}.{alias.name}"
+                if bound in imports and imports[bound] != target:
+                    return False
+                imports[bound] = target
+            imported_modules.add(node.module)
+
+    if not _python_imports_unshadowed(imported_modules, scripts, cwd, written):
+        return False
+
+    stores = Counter()
+    local_defs = set()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            stores[node.id] += 1
+        elif isinstance(node, ast.arg):
+            stores[node.arg] += 1
+        elif isinstance(node, ast.FunctionDef):
+            stores[node.name] += 1
+            local_defs.add(node.name)
+        elif isinstance(node, NAMED_BINDING_NODES):
+            if node.name is not None:
+                stores[node.name] += 1
+        elif isinstance(node, MATCH_MAPPING_NODES) and node.rest is not None:
+            stores[node.rest] += 1
+    if stores.keys() & imports.keys():
+        return False
+
+    # These symbols may only appear as the direct callee of an ast.Call:
+    # subprocess.{check_output,run} must have validated argv/kwargs, and
+    # pathlib.{Path,PurePath,PurePosixPath} must never be held as a class
+    # object (which would permit 2-arg unbound Path.replace(p, target)).
+    direct_call_only = {
+        "subprocess.check_output", "subprocess.run",
+        "pathlib.Path", "pathlib.PurePath", "pathlib.PurePosixPath",
+    }
+    validated_direct_funcs = set()
+    validated_replace_funcs = set()
+    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, (ast.Name, ast.Attribute)):
+            return False
+        name = python_name(node.func, imports)
+        if name in {"subprocess.check_output", "subprocess.run"}:
+            if not _is_read_only_subprocess_call(node, imports, written):
+                return False
+            validated_direct_funcs.add(node.func)
+            continue
+        if isinstance(node.func, ast.Name):
+            ident = node.func.id
+            if ident in imports:
+                target = imports[ident]
+                mod, dot, member = target.partition(".")
+                if not dot or member not in READ_ONLY_PYTHON_MODULES.get(mod, ()):
+                    return False
+                if target in direct_call_only:
+                    validated_direct_funcs.add(node.func)
+            elif ident in local_defs and stores[ident] == 1:
+                pass
+            elif ident in READ_ONLY_PYTHON_BUILTINS and ident not in stores:
+                if ident == "print" and any(kw.arg in (None, "file") for kw in node.keywords):
+                    return False
+            else:
+                return False
+        else:
+            attr = node.func.attr
+            if attr.startswith("_"):
+                return False
+            if isinstance(node.func.value, ast.Name) and node.func.value.id in imports:
+                mod = imports[node.func.value.id]
+                if "." in mod or attr not in READ_ONLY_PYTHON_MODULES.get(mod, ()):
+                    return False
+                if f"{mod}.{attr}" in direct_call_only:
+                    validated_direct_funcs.add(node.func)
+            elif attr == "replace":
+                if (len(node.args) < 2 or any(isinstance(a, ast.Starred) for a in node.args)
+                        or node.keywords or name in {"Path.replace", "pathlib.Path.replace"}):
+                    return False
+                validated_replace_funcs.add(node.func)
+            elif attr not in READ_ONLY_PYTHON_METHODS:
+                return False
+
+    for node in nodes:
+        if isinstance(node, ast.Attribute):
+            if not isinstance(node.ctx, ast.Load) or node.attr.startswith("_"):
+                return False
+            if node in validated_direct_funcs or node in validated_replace_funcs:
+                continue
+            if isinstance(node.value, ast.Name) and node.value.id in imports:
+                mod = imports[node.value.id]
+                if "." in mod or node.attr not in READ_ONLY_PYTHON_MODULES.get(mod, ()):
+                    return False
+                if f"{mod}.{node.attr}" in direct_call_only:
+                    return False
+            elif node.attr not in READ_ONLY_PYTHON_METHODS | READ_ONLY_PYTHON_PROPERTIES:
+                return False
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            ident = node.id
+            if ident.startswith("__"):
+                return False
+            if ident in imports:
+                if imports[ident] in direct_call_only and node not in validated_direct_funcs:
+                    return False
+            elif ident in stores:
+                pass
+            elif ident not in READ_ONLY_PYTHON_BUILTINS | READ_ONLY_PYTHON_EXCEPTIONS:
+                return False
+    return True
+
+
 def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd="", written=None, *,
-                     edit_paths=None):
+                     edit_paths=None, scripts=None):
     # Literal screening does not prove an interpreter cannot move or create
-    # a link indirectly, for example through an alias or an imported module.
-    if edit_paths is not None:
-        edit_paths.blocked = True
+    # a link indirectly, unless an inline Python AST is proven read-only.
+    read_only_python = False
+    had_non_passing_hit = False
     # This screen sees source literals, not runtime values. A protected path
     # built dynamically (e.g. expanduser('~') plus computed pieces) can pass.
     if program in PYTHON:
         try:
             tree = ast.parse(source)
         except SyntaxError:
+            if edit_paths is not None:
+                edit_paths.blocked = True
             yield "needs-inspection", "interpreter source could not be parsed"
             return
+        read_only_python = python_is_read_only(tree, scripts, cwd, written)
+        if edit_paths is not None and not read_only_python:
+            edit_paths.blocked = True
         nodes = list(ast.walk(tree))
         imports = {}
         for node in nodes:
@@ -1396,22 +1893,32 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
                       for arg_node in ast.walk(node.args[0])}
         for node in nodes:
             if node not in argv_nodes and isinstance(node, ast.Constant) and isinstance(node.value, str):
-                yield from source_literal_hits(node.value, own_workspace, cwd)
+                for hit in source_literal_hits(node.value, own_workspace, cwd):
+                    had_non_passing_hit |= hit[0] not in PASSING_HIT_KINDS
+                    yield hit
             if not isinstance(node, ast.Call):
                 continue
             name = python_name(node.func, imports)
             if NETWORK_CALL.match(name):
+                had_non_passing_hit = True
                 yield "network-command", name
             elif name in OPAQUE_CALLS or name.startswith("base64.") and "decode" in name:
+                had_non_passing_hit = True
                 yield "needs-inspection", f"opaque interpreter operation {name}"
             elif name in PROCESS_CALLS:
                 try:
                     argv = ast.literal_eval(node.args[0]) if node.args else None
                 except (ValueError, TypeError, SyntaxError):
                     argv = None
-                yield from subprocess_hits(argv, own_workspace, commits, single_commit, cwd, written,
-                                           edit_paths=edit_paths)
+                for hit in subprocess_hits(argv, own_workspace, commits, single_commit, cwd, written,
+                                           edit_paths=edit_paths):
+                    had_non_passing_hit |= hit[0] not in PASSING_HIT_KINDS
+                    yield hit
+        if edit_paths is not None and had_non_passing_hit:
+            edit_paths.blocked = True
     else:
+        if edit_paths is not None:
+            edit_paths.blocked = True
         # Inspect literal strings and recognizable calls in inline non-Python
         # source. Interpolated code remains subject to the literal-only limit.
         for match in re.finditer(QUOTED_SOURCE.rstrip(), source):
@@ -1658,9 +2165,10 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         for arg in inline[2:]:
             yield from source_literal_hits(arg, own_workspace, cwd)
         yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd, written,
-                                    edit_paths=edit_paths)
+                                    edit_paths=edit_paths, scripts=scripts)
         if scripts is not None:
-            yield from interpreter_writes(scripts, program, inline[1], cwd, [inline[0], *inline[2:]], own_workspace)
+            yield from interpreter_writes(scripts, program, inline[1], cwd, [inline[0], *inline[2:]], own_workspace,
+                                          written=written, inline=True)
     elif program in SEARCH:
         files, operands, trailing = search_operands(program, args)
         for path in files + operands + trailing:
@@ -1903,8 +2411,28 @@ def record_script_write(scripts, written, words, redirections, source, cwd, stag
         written.add(posixpath.basename(words[-1]))
     if program == "touch":
         written.update(posixpath.basename(path) for path in file_operands(words[1:]))
-    if program in {"cp", "mv", "ln"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
+    if program in {"cp", "mv", "ln"}:
         scripts.clear()  # A destination can name a directory or be a symlink.
+    elif program == "git":
+        git_args, git_cwd = list(words[1:]), cwd
+        while git_args[:1] == ["-C"] and len(git_args) > 1:
+            git_cwd = one_or_many(resolve_paths(git_args[1], git_cwd))
+            git_args = git_args[2:]
+        if git_args[:1] in (["checkout"], ["switch"]):
+            scripts.clear()
+        elif git_args:
+            split = git_args.index("--") if "--" in git_args else len(git_args)
+            tokens = iter(git_args[1:split])
+            for token in tokens:
+                name, equals, value = token.partition("=")
+                if name == "--output":
+                    out_path = value if equals else next(tokens, None)
+                    if out_path:
+                        written.add(posixpath.basename(out_path))
+                        forget_script(scripts, out_path, git_cwd)
+                    else:
+                        scripts.clear()
+                        break
     elif program == "rm":
         dict.clear(scripts)  # Directory operands may remove more than the named path.
         for path in file_operands(words[1:]):
@@ -1938,18 +2466,21 @@ NAMED_BINDING_NODES = tuple(
 MATCH_MAPPING_NODES = tuple(cls for cls in (getattr(ast, "MatchMapping", None),) if cls is not None)
 
 
-def interpreter_writes(scripts, program, source, cwd, argv, own_workspace):
+def interpreter_writes(scripts, program, source, cwd, argv, own_workspace, *, written=None, inline=False):
     # Preserve only the empty-at-start history when the interpreter's
     # possible mutations can be assigned to specific paths.
     if scripts.tracked is None or program not in PYTHON:
         scripts.clear()
         return
-    dict.clear(scripts)
     try:
-        nodes = list(ast.walk(ast.parse(source)))
+        tree = ast.parse(source)
     except SyntaxError:
         scripts.clear()
         return
+    if inline and python_is_read_only(tree, scripts, cwd, written):
+        return
+    dict.clear(scripts)
+    nodes = list(ast.walk(tree))
 
     stores = Counter()
     for node in nodes:
@@ -2217,14 +2748,19 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                     for arg in arguments[1:]:
                         yield from source_literal_hits(arg, own_workspace, start_dir)
                     yield from interpreter_hits(program, source, own_workspace, commits, single_commit,
-                                                        start_dir, written, edit_paths=edit_paths)
+                                                start_dir, written, edit_paths=edit_paths, scripts=scripts)
                     yield from interpreter_writes(scripts, program, source, start_dir,
-                                                  ["-", *arguments[1:]], own_workspace)
+                                                  ["-", *arguments[1:]], own_workspace,
+                                                  written=written, inline=True)
             except InspectionRequired as error:
                 scripts.clear()
+                if edit_paths is not None:
+                    edit_paths.blocked = True
                 yield "needs-inspection", f"{error}: {shlex.join(words)[:400]}"
     except ValueError as error:
         scripts.clear()
+        if edit_paths is not None:
+            edit_paths.blocked = True
         yield "needs-inspection", f"{error}: {command[:400]}"
     if successful_writes is not None:
         successful_writes.update(staged)
@@ -2702,7 +3238,11 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                       tracked_symlink_targets=before.get("tracked_symlink_targets"),
                       claude_code_version=claude_code_version,
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
-                      rollout=rollout_commands(rollout_paths))
+                      rollout=rollout_commands(rollout_paths),
+                      rollout_mcp=rollout_mcp_calls(rollout_paths),
+                      rollout_files=rollout_file_changes(rollout_paths),
+                      host_queries=host_rql_queries(transcript_path.with_name(f"queries-{own_workspace}.jsonl"),
+                                                    own_workspace))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
     return dict(result, passed=all(hit["kind"] in PASSING_HIT_KINDS for hit in result["hits"]))
