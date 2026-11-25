@@ -1548,7 +1548,6 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
         relay_root.path().join("history-request.json"),
         serde_json::to_vec(&mj_core::history::HistoryRequest {
             request_id: "read-history".into(),
-            blame: None,
             query: mj_core::history::HistoryQuery::ReadSession {
                 session_id: "history-session".into(),
                 start: 0,
@@ -1615,7 +1614,6 @@ async fn worker_search_history_excludes_the_controller_bound_caller_session() {
         relay_root.path().join("history-request.json"),
         serde_json::to_vec(&mj_core::history::HistoryRequest {
             request_id: "search-history".into(),
-            blame: None,
             query: mj_core::history::HistoryQuery::SearchHistory {
                 query: "quokka".into(),
                 session_ids: None,
@@ -1684,10 +1682,9 @@ async fn worker_history_poll_aborts_only_requests_the_worker_no_longer_lists() {
         &request_path,
         serde_json::to_vec(&mj_core::history::HistoryRequest {
             request_id: "keep".into(),
-            blame: None,
-            query: mj_core::history::HistoryQuery::TraceFile {
-                path: "a.rs".into(),
-                limit: 20,
+            query: mj_core::history::HistoryQuery::GetSessionBrief {
+                session_id: "history-session".into(),
+                max_chars: 16_000,
             },
         })
         .unwrap(),

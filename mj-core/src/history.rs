@@ -1,5 +1,4 @@
 //! Read-only session-history requests shared by worker and controller.
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, ensure};
@@ -8,7 +7,6 @@ use serde::{Deserialize, Serialize};
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_PENDING: usize = 8;
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-pub const MAX_BLAME_BYTES: usize = 512 * 1024;
 
 pub fn page_default() -> usize {
     20
@@ -49,7 +47,7 @@ pub enum HistoryQuery {
     },
     /// Retained for resumed transcripts and older workers. Delete this variant,
     /// `SearchSession`, and `transcript_grep::grep_session` once
-    /// `MINIMUM_WORKER_PROTOCOL >= RELAY_SEARCH_HISTORY_PROTOCOL`.
+    /// `MINIMUM_WORKER_PROTOCOL > RELAY_SEARCH_HISTORY_PROTOCOL`.
     SearchSessions {
         query: String,
         #[serde(default = "page_default")]
@@ -85,23 +83,6 @@ pub enum HistoryQuery {
         limit: usize,
         #[serde(default = "text_default")]
         max_chars: usize,
-    },
-    TraceFile {
-        path: String,
-        #[serde(default = "page_default")]
-        limit: usize,
-    },
-    SessionFiles {
-        session_id: String,
-        #[serde(default)]
-        start: usize,
-        #[serde(default = "page_default")]
-        limit: usize,
-    },
-    BlameFile {
-        path: PathBuf,
-        start_line: usize,
-        end_line: usize,
     },
 }
 
@@ -169,24 +150,6 @@ impl HistoryQuery {
                     "query must contain 1–4096 bytes"
                 );
             }
-            Self::TraceFile { path, .. } => ensure!(
-                !path.trim().is_empty() && path.len() <= 4096,
-                "path must contain 1–4096 bytes"
-            ),
-            Self::BlameFile {
-                path,
-                start_line,
-                end_line,
-            } => {
-                ensure!(
-                    !path.as_os_str().is_empty() && path.as_os_str().len() <= 4096,
-                    "invalid file path"
-                );
-                ensure!(
-                    *start_line > 0 && end_line >= start_line && end_line - start_line < 1000,
-                    "request an inclusive range of 1–1000 lines"
-                );
-            }
             _ => {}
         }
         if let Self::ReadSession {
@@ -202,20 +165,11 @@ impl HistoryQuery {
     }
 }
 
+// Older workers still send "blame": null on surviving history requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BlameEvidence {
-    pub repository: PathBuf,
-    pub relative_path: PathBuf,
-    pub porcelain: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HistoryRequest {
     pub request_id: String,
     pub query: HistoryQuery,
-    pub blame: Option<BlameEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -286,6 +240,24 @@ mod tests {
             merged_search_history_session_ids(None, Some("only")),
             ["only"]
         );
+    }
+
+    #[test]
+    fn history_request_accepts_older_worker_blame_null_field() {
+        let request: HistoryRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "older-worker",
+            "query": {
+                "tool": "get_session_brief",
+                "arguments": {"session_id": "session"}
+            },
+            "blame": null
+        }))
+        .unwrap();
+        assert_eq!(request.request_id, "older-worker");
+        assert!(matches!(
+            request.query,
+            HistoryQuery::GetSessionBrief { .. }
+        ));
     }
 
     #[test]
