@@ -22,6 +22,7 @@ pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct McpServer<F> {
     pub name: &'static str,
+    pub instructions: Option<String>,
     pub tools: Vec<Value>,
     /// How often an in-flight call may report progress. Tests shorten it; in
     /// production it is [`PROGRESS_INTERVAL`].
@@ -125,14 +126,20 @@ where
         };
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         let response = match method {
-            "initialize" => rpc_result(
-                id,
-                json!({
-                    "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
-                    "capabilities": {"tools": {"listChanged": false}},
-                    "serverInfo": {"name": server.name, "version": env!("CARGO_PKG_VERSION")}
-                }),
-            ),
+            "initialize" => {
+                let mut response = rpc_result(
+                    id,
+                    json!({
+                        "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
+                        "capabilities": {"tools": {"listChanged": false}},
+                        "serverInfo": {"name": server.name, "version": env!("CARGO_PKG_VERSION")}
+                    }),
+                );
+                if let Some(instructions) = &server.instructions {
+                    response["result"]["instructions"] = json!(instructions);
+                }
+                response
+            }
             "ping" => rpc_result(id, json!({})),
             "tools/list" => rpc_result(id, json!({"tools": server.tools})),
             "tools/call" => {
@@ -236,6 +243,9 @@ where
     stream
         .set_read_timeout(Some(reply_timeout))
         .with_context(|| format!("bound the {what} reply wait"))?;
+    stream
+        .set_write_timeout(Some(reply_timeout))
+        .with_context(|| format!("bound the {what} request write"))?;
     let mut body = serde_json::to_vec(request)?;
     body.push(b'\n');
     stream
@@ -347,6 +357,7 @@ mod tests {
             input.as_bytes(),
             SharedWriter(Arc::clone(&buffer)),
             McpServer {
+                instructions: None,
                 name: "test",
                 tools: vec![json!({"name": "slow", "inputSchema": {"type": "object"}})],
                 progress_interval: interval,

@@ -31,6 +31,7 @@ pub(crate) async fn native_muse_turn(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -196,6 +197,7 @@ for line in sys.stdin:
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
         instruction_role: None,
+        claude_mcp_socket: None,
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: root.path().join("subagents.sock"),
             role: mj_core::subagent::SubagentMcpRole::MessageOnly,
@@ -388,6 +390,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

@@ -13,6 +13,44 @@ use serde::{Deserialize, Serialize};
 use crate::config::HarnessKind;
 
 pub const MANIFEST_FILE: &str = "mj-harness.json";
+pub const BAKED_HARNESS_ROOT: &str = "/opt/mj-harnesses";
+pub const BAKED_NODE_MANIFEST_FILE: &str = "mj-node.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BakedNodeManifest {
+    schema: u32,
+    version: String,
+}
+
+impl BakedNodeManifest {
+    pub fn current() -> Self {
+        Self {
+            schema: 1,
+            version: NODE_VERSION.to_owned(),
+        }
+    }
+}
+
+pub fn baked_node_manifest_matches(path: &Path, version: &str) -> Result<bool> {
+    let file = path.join(BAKED_NODE_MANIFEST_FILE);
+    let body = match std::fs::read(&file) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
+    };
+    Ok(serde_json::from_slice::<BakedNodeManifest>(&body)
+        .is_ok_and(|manifest| manifest.schema == 1 && manifest.version == version))
+}
+
+pub fn baked_harness_install_dir(root: &Path, harness: HarnessKind) -> PathBuf {
+    managed_harness_install_dir(&root.join("harnesses"), harness)
+}
+
+pub fn baked_node_install_dir(root: &Path, folder: &str) -> PathBuf {
+    root.join("node").join(folder)
+}
+
 pub const LEASE_FILE: &str = ".lease";
 pub const CODEX_CLI_ENTRYPOINT: &str = "node_modules/.bin/codex";
 const MANAGED_RUNTIMES_DIR: &str = "mjolnir";
@@ -320,16 +358,38 @@ pub fn dsh_acp_version_supported_script() -> String {
 /// runtime — so this one script is the whole launch path for bare and
 /// container targets alike, and for the model discovery probe.
 pub fn dsh_acp_launch_script() -> String {
+    dsh_acp_launch_script_with_baked(true)
+}
+
+/// Recognize persisted launch descriptions written before baked harness images.
+pub fn legacy_dsh_acp_launch_script() -> String {
+    dsh_acp_launch_script_with_baked(false)
+}
+
+fn dsh_acp_launch_script_with_baked(include_baked: bool) -> String {
     let node_check = node_version_check_script(DSH_ACP_MINIMUM_NODE_VERSION);
+    let baked_check = if include_baked {
+        let baked = baked_harness_install_dir(Path::new(BAKED_HARNESS_ROOT), HarnessKind::Dsh)
+            .join(pin(HarnessKind::Dsh).entrypoint);
+        format!(
+            "elif [ -x '{}' ] && command -v node >/dev/null 2>&1 && {node_check}; then set -- '{}'; ",
+            baked.display(),
+            baked.display()
+        )
+    } else {
+        String::new()
+    };
     format!(
         concat!(
             "if command -v dsh-acp >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && {node_check} && {version_supported}; then ",
             "set -- dsh-acp; ",
+            "{baked_check}",
             "elif command -v node >/dev/null 2>&1 && {node_check} && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
             "set -- npx -y {package}@{version}; ",
             "else echo 'Mjolnir requires dsh-acp {version} or newer with Node.js {node_minimum}+; install or upgrade dsh-acp, Node.js, npm, and npx in the target environment' >&2; exit 127; fi; ",
             "{script}"
         ),
+        baked_check = baked_check,
         node_check = node_check,
         node_minimum = DSH_ACP_MINIMUM_NODE_VERSION,
         version_supported = dsh_acp_version_supported_script(),
@@ -403,7 +463,10 @@ pub fn is_fallback_launch(
     args: &[String],
 ) -> bool {
     let (expected_command, expected_args) = fallback_launch(harness, policy);
-    command == Path::new(&expected_command) && args == expected_args
+    (command == Path::new(&expected_command) && args == expected_args)
+        || (harness == HarnessKind::Dsh
+            && command == Path::new("sh")
+            && args == ["-c".to_owned(), legacy_dsh_acp_launch_script()])
 }
 
 /// The built-in npm launcher, selected on the worker before ACP startup.
@@ -604,6 +667,47 @@ pub struct RuntimeReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dsh_fallback_recognizes_persisted_pre_baked_launch_scripts() {
+        use crate::config::ExecutionPolicy;
+        let legacy = legacy_dsh_acp_launch_script();
+        assert!(!legacy.contains(BAKED_HARNESS_ROOT));
+        assert_ne!(legacy, dsh_acp_launch_script());
+        for policy in [
+            ExecutionPolicy::ConfiguredApprovals,
+            ExecutionPolicy::Unconstrained,
+        ] {
+            let (command, args) = fallback_launch(HarnessKind::Dsh, policy);
+            assert!(is_fallback_launch(
+                HarnessKind::Dsh,
+                policy,
+                Path::new(&command),
+                &args
+            ));
+            assert!(is_fallback_launch(
+                HarnessKind::Dsh,
+                policy,
+                Path::new("sh"),
+                &["-c".into(), legacy.clone()]
+            ));
+            assert!(!is_fallback_launch(
+                HarnessKind::Dsh,
+                policy,
+                Path::new("sh"),
+                &["-c".into(), "exec custom-dsh".into()]
+            ));
+        }
+    }
+
+    #[test]
+    fn dsh_launch_precedence_is_path_then_baked_then_npx() {
+        let script = dsh_acp_launch_script();
+        assert!(
+            script.find("command -v dsh-acp").unwrap() < script.find("/opt/mj-harnesses/").unwrap()
+        );
+        assert!(script.find("/opt/mj-harnesses/").unwrap() < script.find("set -- npx").unwrap());
+    }
 
     #[test]
     fn managed_cache_root_prefers_xdg_and_falls_back_when_it_is_empty() {

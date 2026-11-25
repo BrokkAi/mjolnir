@@ -422,6 +422,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         reader,
         writer,
         crate::mcp_stdio::McpServer {
+            instructions: None,
             name: mj_core::subagent::SUBAGENT_MCP_SERVER,
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
@@ -1137,6 +1138,7 @@ fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
         reader,
         writer,
         crate::mcp_stdio::McpServer {
+            instructions: None,
             name: mj_core::subagent::REVIEW_MCP_SERVER,
             tools: review_tool_definitions(),
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,

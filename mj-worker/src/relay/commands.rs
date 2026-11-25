@@ -423,10 +423,24 @@ impl DurableRelay {
     /// agent's next tool boundary or turn start and never starts a turn.
     /// `key` must be unique among this session's messages.
     pub fn deliver_agent_message(&mut self, source: &str, key: &str, text: String) -> Result<()> {
+        self.deliver_agent_mailbox_event(source, key, text, false)
+    }
+
+    pub fn deliver_agent_wake(&mut self, source: &str, key: &str, text: String) -> Result<()> {
+        self.deliver_agent_mailbox_event(source, key, text, true)
+    }
+
+    fn deliver_agent_mailbox_event(
+        &mut self,
+        source: &str,
+        key: &str,
+        text: String,
+        wake: bool,
+    ) -> Result<()> {
         let event = mj_core::mailbox::MailboxEvent {
             key: key.to_owned(),
             source: source.to_owned(),
-            wake: false,
+            wake,
             created_at_ms: u64::try_from(epoch_millis()).unwrap_or_default(),
             body: mj_core::mailbox::MailboxEventBody::PlainText { text },
         };

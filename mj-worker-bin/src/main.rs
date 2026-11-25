@@ -233,6 +233,13 @@ enum WorkerCommand {
         #[arg(long)]
         destination: PathBuf,
     },
+    /// Serve selective worker utility tools over MCP stdio.
+    ClaudeMcp {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        harness: mj_core::config::HarnessKind,
+    },
     /// Serve project history tools over MCP stdio.
     MemoryMcp {
         /// Accepted for staged Kimi profiles created by older controllers.
@@ -944,6 +951,9 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         ),
         WorkerCommand::InstallResource { destination } => {
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
+        }
+        WorkerCommand::ClaudeMcp { socket, harness } => {
+            mj_worker_mcp::claude_mcp::serve_stdio(&socket, harness)
         }
         WorkerCommand::MemoryMcp {
             _root: _,

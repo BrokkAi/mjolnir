@@ -1,0 +1,251 @@
+name: Publish session base image
+
+on:
+  push:
+    branches: [ 'master' ]
+    # Rebuild when any harness pin, runtime manifest, or session-base generator
+    # input changes.
+    paths:
+      - '.github/workflows/publish-session-base-image.yml'
+      - 'mj-core/src/harness_runtime.rs'
+      - 'mj-core/src/config/harness.rs'
+      - 'mj-harness-install/assets/**'
+      - 'mj-harness-install/src/runtime_manifests.rs'
+      - 'mj-harness-install/src/session_image.rs'
+      - 'mj-cli/src/image_commands.rs'
+      - 'scripts/build-session-base-image.sh'
+  workflow_dispatch: {}
+  # Rebuild weekly so the image picks up fresh buildpack-deps:noble base layers
+  # and OS security updates even when harness pins have not changed.
+  schedule:
+    - cron: '47 5 * * 1'
+
+# The generate job compiles Cargo build scripts, so keep the default token
+# read-only and grant packages: write only to the Docker build and merge jobs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    name: Generate Containerfiles
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: ./.github/actions/cache-rust
+        with:
+          lane: session-base-image
+          build-paths: target/debug
+
+      - name: Build mj CLI
+        run: cargo build --locked -p brokk-mjolnir --bin mj
+
+      - name: Generate per-platform session-base Containerfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="docker.io/library/buildpack-deps:noble"
+          mkdir -p /tmp/containerfiles/amd64 /tmp/containerfiles/arm64
+          for entry in "amd64 linux/amd64" "arm64 linux/arm64"; do
+            read -r arch platform <<< "$entry"
+            docker pull --platform "$platform" "$base"
+            metadata="$(docker image inspect "$base")"
+            field_lines="$(python3 -c '
+          import json, sys
+          image = json.load(sys.stdin)[0]
+          digest = image.get("Digest") or image["RepoDigests"][0].split("@", 1)[1]
+          config = image.get("Config") or {}
+          print(sys.argv[1].split("@", 1)[0] + "@" + digest)
+          print(config.get("User") or "")
+          print(config.get("WorkingDir") or "/")
+          ' "$base" <<< "$metadata")"
+            {
+              IFS= read -r reference
+              IFS= read -r user
+              IFS= read -r workdir
+            } <<< "$field_lines"
+            ./target/debug/mj image base \
+              --base "$reference" \
+              --platform "$platform" \
+              --user "$user" \
+              --workdir "$workdir" \
+              > "/tmp/containerfiles/$arch/Containerfile"
+          done
+
+      - name: Upload amd64 Containerfile
+        uses: actions/upload-artifact@v7
+        with:
+          name: containerfile-amd64
+          path: /tmp/containerfiles/amd64/Containerfile
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload arm64 Containerfile
+        uses: actions/upload-artifact@v7
+        with:
+          name: containerfile-arm64
+          path: /tmp/containerfiles/arm64/Containerfile
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: generate
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Download Containerfile
+        uses: actions/download-artifact@v8
+        with:
+          name: containerfile-${{ matrix.arch }}
+          path: /tmp/containerfile
+
+      - name: Create empty build context
+        shell: bash
+        run: mkdir -p /tmp/empty-context
+
+      # GHCR rejects uppercase paths, and the owner is mixed case on the
+      # upstream repository, so lowercase it here instead of hardcoding it.
+      - name: Resolve image name
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/$owner/mjolnir/session-base" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Each runner is native for its own platform, so no QEMU emulation is
+      # involved. Registry cache keeps unchanged harness layers reusable across
+      # single-harness pin bumps; the weekly schedule run refreshes base layers.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: /tmp/empty-context
+          file: /tmp/containerfile/Containerfile
+          platforms: ${{ matrix.platform }}
+          pull: true
+          provenance: false
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-${{ matrix.arch }}
+          cache-to: ${{ github.ref == 'refs/heads/master' && format('type=registry,ref={0}:buildcache-{1},mode=max', steps.image.outputs.name, matrix.arch) || '' }}
+          labels: |
+            org.opencontainers.image.title=Mjolnir session base
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=buildpack-deps:noble with Mjolnir pinned Node.js and all eight agent harnesses
+            org.opencontainers.image.licenses=GPL-3.0-only
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish manifest
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Resolve image name
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/$owner/mjolnir/session-base" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Join the per-arch untagged manifests into one multi-arch manifest list.
+      # Only master runs advance the floating :latest tag; manual dispatches on
+      # other refs publish only their immutable :sha-<7> tag.
+      - name: Create multi-arch manifest
+        id: publish
+        shell: bash
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          set -euo pipefail
+          tags=(--tag "$IMAGE:sha-${GITHUB_SHA:0:7}")
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            tags+=(--tag "$IMAGE:latest")
+          fi
+          docker buildx imagetools create \
+            "${tags[@]}" \
+            $(printf "$IMAGE@sha256:%s " *)
+          digest="$(docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA:0:7}" \
+            --format '{{.Manifest.Digest}}')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect published image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA:0:7}"

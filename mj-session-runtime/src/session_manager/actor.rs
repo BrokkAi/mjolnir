@@ -333,25 +333,22 @@ pub async fn run_session_actor(
                     continue;
                 }
                 let sync = async {
-                    let snapshot =
-                        sync_actor_connection(&updates.session_gate, &target, &mut connection)
-                            .await?;
-                    // Only the relay actor consumes Guardian requests. A
-                    // lifecycle connection leaves them pending for this tick.
-                    connection
-                        .as_mut()
-                        .expect("synced connection")
-                        .sync_guardian(updates.guardian_stage1.get())
-                        .await?;
-                    let observed_at = tokio::time::Instant::now();
                     let now = tokio::time::Instant::now();
-                    if now >= next_cpu_read {
+                    let cpu_due = now >= next_cpu_read;
+                    let mut cpu_reply = None;
+                    let snapshot = sync_actor_connection_reads(
+                        &updates.session_gate,
+                        &target,
+                        &mut connection,
+                        Some(updates.guardian_stage1.get()),
+                        cpu_due,
+                        &mut cpu_reply,
+                    )
+                    .await?;
+                    let observed_at = tokio::time::Instant::now();
+                    if cpu_due {
                         next_cpu_read = now + Duration::from_secs(10);
-                        let result = connection
-                            .as_mut()
-                            .expect("synced connection")
-                            .cpu_usage()
-                            .await;
+                        let result = cpu_reply.unwrap_or(Ok(None));
                         let value = match result {
                             Ok(Some(usage)) => {
                                 Some(mj_client::runtime_feed::SessionCpuView::Measured { usage })
@@ -1815,6 +1812,17 @@ pub async fn sync_actor_connection(
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
 ) -> Result<Option<ManagedSessionSnapshot>> {
+    sync_actor_connection_reads(gate, target, connection, None, false, &mut None).await
+}
+
+async fn sync_actor_connection_reads(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
+    target: &RelaySessionTarget,
+    connection: &mut Option<StandaloneSession>,
+    actor: Option<Option<&Arc<dyn GuardianStage1>>>,
+    cpu: bool,
+    cpu_reply: &mut Option<Result<Option<mj_core::cpu_usage::SessionCpuUsage>>>,
+) -> Result<Option<ManagedSessionSnapshot>> {
     let (observation, startup_owned) = if target.worker_recovery.is_some() {
         let id = target.session_id.clone();
         let gate = gate.clone();
@@ -1867,6 +1875,10 @@ pub async fn sync_actor_connection(
                 tracing::warn!(session_id = %target.session_id, %error, "could not prune read notifications on relay attachment");
             }
         }
+        if actor.is_some() {
+            let (_, usage) = fresh.sync_reads(actor, cpu).await?;
+            *cpu_reply = usage;
+        }
         fresh.start_observing(target).await;
         let snapshot = fresh.snapshot();
         observe_worker_readiness(target, &snapshot, observation).await?;
@@ -1874,7 +1886,8 @@ pub async fn sync_actor_connection(
         return Ok(Some(snapshot));
     }
     let connection = connection.as_mut().expect("connection was initialized");
-    let changed = connection.sync_in_place().await?;
+    let (changed, usage) = connection.sync_reads(actor, cpu).await?;
+    *cpu_reply = usage;
     connection.start_observing(target).await;
     if changed || observation.is_some() {
         // Readiness can already have been published while the swap owner was

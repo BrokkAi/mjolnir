@@ -2518,6 +2518,15 @@ fn relay_ack_race_peer(
     relay: Arc<Mutex<mj_worker::relay::DurableRelay>>,
     delay_ack: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 ) -> (RelayClient, tokio::task::JoinHandle<Vec<RelayCursor>>) {
+    relay_recording_peer(relay, delay_ack, None)
+}
+
+#[cfg(unix)]
+fn relay_recording_peer(
+    relay: Arc<Mutex<mj_worker::relay::DurableRelay>>,
+    delay_ack: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    calls: Option<Arc<Mutex<Vec<String>>>>,
+) -> (RelayClient, tokio::task::JoinHandle<Vec<RelayCursor>>) {
     use crate::worker_client::test_fixtures::duplex_relay_client;
     use mj_core::relay::{
         RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
@@ -2533,6 +2542,22 @@ fn relay_ack_race_peer(
         let mut delay_ack = delay_ack;
         while let Some(line) = lines.next_line().await.unwrap() {
             let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            if let Some(calls) = &calls {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(request.request.method_name().to_owned());
+                if matches!(request.request, RelayRequest::HistoryRequests) {
+                    assert!(
+                        lines
+                            .get_ref()
+                            .buffer()
+                            .windows(8)
+                            .any(|window| window == b"\"attach\""),
+                        "history and attach must arrive before either response"
+                    );
+                }
+            }
             let mut response = {
                 let mut relay = relay.lock().unwrap();
                 if let RelayRequest::Attach {
@@ -5507,6 +5532,96 @@ async fn turn_end_spills_bulk_details_and_late_updates_recover_full_inputs() {
     assert_eq!(terminal_outputs[0].exit_code, Some(23));
     assert!(terminal_outputs[0].output.text().len() > 64 * 1024);
 
+    drop(connection);
+    peer.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tick_reads_pipeline_without_lifecycle_guardian_consumption_and_retry_ack_gc() {
+    const CHILD: &str = "MJ_TEST_PIPELINED_TICK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "tick_reads_pipeline_without_lifecycle_guardian_consumption_and_retry_ack_gc",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let mut durable =
+        mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "test").unwrap();
+    durable
+        .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+            started_at_ms: 1,
+        })
+        .unwrap();
+    let relay = Arc::new(Mutex::new(durable));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (client, peer) = relay_recording_peer(relay.clone(), None, Some(calls.clone()));
+    let mut connection =
+        StandaloneSession::connect_inner(&leased_relay_target(root.path()), Some(client), None)
+            .await
+            .unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "acknowledge")
+    );
+    calls.lock().unwrap().clear();
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(*calls.lock().unwrap(), vec!["history_requests", "attach"]);
+    calls.lock().unwrap().clear();
+    connection.sync_reads(Some(None), false).await.unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["history_requests", "attach", "guardian_requests"]
+    );
+    calls.lock().unwrap().clear();
+    let (_, cpu) = connection.sync_reads(Some(None), true).await.unwrap();
+    assert!(cpu.is_some());
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            "history_requests",
+            "attach",
+            "guardian_requests",
+            "cpu_usage"
+        ]
+    );
+    calls.lock().unwrap().clear();
+    connection.last_ack_sent = None;
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["history_requests", "attach", "acknowledge"]
+    );
+    calls.lock().unwrap().clear();
+    connection.last_ack_sent = Some(Instant::now() - Duration::from_secs(61));
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["history_requests", "attach", "acknowledge"]
+    );
+    calls.lock().unwrap().clear();
+    relay
+        .lock()
+        .unwrap()
+        .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+            started_at_ms: 2,
+        })
+        .unwrap();
+    connection.sync_in_place().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "acknowledge")
+    );
     drop(connection);
     peer.await.unwrap();
 }

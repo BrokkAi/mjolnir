@@ -167,7 +167,7 @@ async fn prepare_harness_launch_inner(
             .await
             .with_context(|| format!("prepare Node.js for {}", harness.display_name()))?;
         if let Some(node) = &node {
-            spec.node_lease = Some(node.lease_path().to_path_buf());
+            spec.node_lease = node.lease_path().map(Path::to_path_buf);
             spec.environment.insert(
                 "PATH".into(),
                 environment
@@ -212,7 +212,7 @@ async fn prepare_harness_launch_inner(
     environment.extend(located.environment);
     let managed = located.managed;
     if let Some(managed) = &managed {
-        spec.harness_lease = Some(managed.lease_path.clone());
+        spec.harness_lease = managed.lease_path.clone();
     }
     let (spec, environment) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
         let command = if spec.command.is_relative() && spec.command.components().count() > 1 {

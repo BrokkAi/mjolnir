@@ -422,14 +422,11 @@ impl Controller {
                         .cloned()
                         .map(serde_json::from_value)
                         .collect::<serde_json::Result<Vec<ContentBlock>>>()?;
-                    let mut missing = false;
-                    for reference in mj_core::attachment::references(&blocks)? {
-                        if !relay.attachment_present(&reference).await? {
-                            missing = true;
-                            break;
-                        }
-                    }
+                    let images = mj_core::attachment::references(&blocks)?;
                     let files = mj_core::attachment::file_references(&blocks)?;
+                    let (image_presence, _) =
+                        relay.client.attachment_presence(&images, &[]).await?;
+                    let mut missing = image_presence.iter().any(|present| !present);
                     let attachment_kind = if files.is_empty() {
                         "image"
                     } else {

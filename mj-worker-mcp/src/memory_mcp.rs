@@ -23,6 +23,7 @@ fn serve<R: io::BufRead, W: io::Write + Send + Sync + 'static>(
         reader,
         writer,
         crate::mcp_stdio::McpServer {
+            instructions: None,
             name: "mj-memory",
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
