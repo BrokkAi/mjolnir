@@ -3054,6 +3054,141 @@ pub fn workspace_inventory(
         false,
     )
 }
+
+pub struct MovedWorktree {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+#[derive(Default)]
+pub struct SafeBlockerResolution {
+    pub cleared_hidden_paths: Vec<String>,
+    pub moved_worktrees: Vec<MovedWorktree>,
+    pub skipped_worktrees: Vec<String>,
+}
+pub fn resolve_safe_suspend_blockers(
+    runner: &dyn GitCommandRunner,
+    repositories: &[RepositoryInput],
+) -> Result<SafeBlockerResolution> {
+    let inventories = session_inventory(runner, repositories)?;
+    let mut result = SafeBlockerResolution::default();
+    for input in repositories {
+        let inventory = &inventories[&input.id];
+        let root = fs::canonicalize(&input.checkout)?;
+        let mut checkouts = vec![(root.clone(), inventory)];
+        checkouts.extend(
+            inventory
+                .worktrees
+                .iter()
+                .map(|(path, tree)| (root.join(path), tree)),
+        );
+        for (checkout, tree) in checkouts {
+            if tree.raw && tree.operation.is_some() {
+                continue;
+            }
+            let modules =
+                crate::checkpoint::inspect_snapshot_submodules(runner, &checkout, None, false)?;
+            let mut indexes = vec![checkout.clone()];
+            indexes.extend(
+                modules
+                    .initialized
+                    .iter()
+                    .map(|module| checkout.join(&module.path)),
+            );
+            for index in indexes {
+                let paths = crate::archive::git::hidden_tracked_paths(runner, &index)?;
+                // NUL stdin avoids command-line size limits and preserves arbitrary Git paths.
+                let mut stdin = Vec::new();
+                for path in &paths {
+                    stdin.extend_from_slice(crate::archive::slash_path(path)?.as_bytes());
+                    stdin.push(0);
+                }
+                if paths.is_empty() {
+                    continue;
+                }
+                for flag in ["--no-skip-worktree", "--no-assume-unchanged"] {
+                    let output = runner.run(
+                        &index,
+                        &GitCommand {
+                            arguments: ["update-index", flag, "-z", "--stdin"]
+                                .into_iter()
+                                .map(OsString::from)
+                                .collect(),
+                            stdin: stdin.clone(),
+                            env: vec![],
+                        },
+                    )?;
+                    ensure!(
+                        output.status == 0,
+                        "{}",
+                        git_failure("clear hidden index flags", &output)
+                    );
+                }
+                result.cleared_hidden_paths.extend(
+                    paths
+                        .iter()
+                        .map(|path| index.join(path).display().to_string()),
+                );
+            }
+        }
+        if inventory.raw {
+            continue;
+        }
+        for entry in &inventory.unrepresented_worktrees {
+            let tree = &entry.value;
+            if tree.locked || !tree.can_move_inside {
+                result.skipped_worktrees.push(format!(
+                    "{} ({})",
+                    tree.path.display(),
+                    if tree.locked {
+                        "locked"
+                    } else {
+                        "cannot move inside clone"
+                    }
+                ));
+                continue;
+            }
+            let parent = root.join(".mj/worktrees");
+            fs::create_dir_all(&parent)?;
+            let name = tree
+                .path
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new("worktree"));
+            let mut destination = parent.join(name);
+            let mut suffix = 2;
+            while destination.try_exists()? {
+                let mut unique = name.to_os_string();
+                unique.push(format!("-{suffix}"));
+                destination = parent.join(unique);
+                suffix += 1;
+            }
+            let output = runner.run(
+                &input.checkout,
+                &GitCommand {
+                    arguments: vec![
+                        "worktree".into(),
+                        "move".into(),
+                        "--".into(),
+                        tree.path.as_os_str().into(),
+                        destination.as_os_str().into(),
+                    ],
+                    stdin: vec![],
+                    env: vec![],
+                },
+            )?;
+            ensure!(
+                output.status == 0,
+                "{}",
+                git_failure("move external worktree inside clone", &output)
+            );
+            result.moved_worktrees.push(MovedWorktree {
+                from: tree.path.clone(),
+                to: destination,
+            });
+        }
+    }
+    Ok(result)
+}
+
 pub fn session_inventory(
     runner: &dyn GitCommandRunner,
     repositories: &[RepositoryInput],
@@ -4368,6 +4503,58 @@ fn missing_tips(
         .map(|oid| Ok(oid.to_owned()))
         .collect()
 }
+pub fn resolve_worker_suspend_blockers(
+    runner: &dyn GitCommandRunner,
+    spec: &mj_core::suspend_consent::WorkerResolveBlockersSpec,
+) -> Result<mj_core::suspend_consent::WorkerResolveBlockersResult> {
+    let inputs = spec
+        .repositories
+        .iter()
+        .map(|repo| {
+            let mut input = if repo.raw {
+                crate::checkpoint::raw_snapshot_input(
+                    &repo.id,
+                    &repo.path,
+                    None,
+                    None,
+                    PathBuf::new(),
+                )
+            } else if let Some(commits) = &repo.exclude_commits {
+                crate::checkpoint::cutoff_snapshot_input(
+                    &repo.id,
+                    &repo.path,
+                    None,
+                    commits.clone(),
+                    PathBuf::new(),
+                )?
+            } else {
+                crate::checkpoint::managed_clone_snapshot_input(
+                    &repo.id,
+                    &repo.path,
+                    None,
+                    PathBuf::new(),
+                    repo.origin_override.clone(),
+                )?
+            };
+            input.keep_dir = repo.keep_dir.clone();
+            Ok(input)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let result = resolve_safe_suspend_blockers(runner, &inputs)?;
+    Ok(mj_core::suspend_consent::WorkerResolveBlockersResult {
+        cleared_hidden_paths: result.cleared_hidden_paths,
+        skipped_worktrees: result.skipped_worktrees,
+        moved_worktrees: result
+            .moved_worktrees
+            .into_iter()
+            .map(|tree| mj_core::suspend_consent::MovedWorktreeSummary {
+                from: tree.from.display().to_string(),
+                to: tree.to.display().to_string(),
+            })
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4474,6 +4661,91 @@ mod tests {
             worktree_git_invocation(Path::new("/bare.git")),
             "git --git-dir '/bare.git'"
         );
+    }
+
+    #[test]
+    fn safe_suspend_remediation_clears_each_index_and_moves_colliding_worktrees() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let sub = add_submodule(&root, &module);
+        let inside = root.checkout.join(".mj/worktrees/inside");
+        fs::create_dir_all(inside.parent().unwrap()).unwrap();
+        git(
+            &root.checkout,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                inside.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        // Each index owns two flagged entries; both flags on one entry also survive detection.
+        for checkout in [&root.checkout, &inside, &sub] {
+            fs::write(checkout.join("another"), "content").unwrap();
+            git(checkout, &["add", "another"]);
+            git(checkout, &["update-index", "--skip-worktree", "--", "file"]);
+            git(
+                checkout,
+                &["update-index", "--assume-unchanged", "--", "another"],
+            );
+        }
+        let external = [
+            root.temp.path().join("a/lane"),
+            root.temp.path().join("b/lane"),
+            root.temp.path().join("locked"),
+        ];
+        for path in &external {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            git(
+                &root.checkout,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD^",
+                ],
+            );
+        }
+        git(
+            &root.checkout,
+            &["worktree", "lock", external[2].to_str().unwrap()],
+        );
+        let input = crate::checkpoint::managed_clone_snapshot_input(
+            "project",
+            &root.checkout,
+            None,
+            PathBuf::new(),
+            None,
+        )
+        .unwrap();
+        let fixed = resolve_safe_suspend_blockers(&FileGit, std::slice::from_ref(&input)).unwrap();
+        assert_eq!(fixed.cleared_hidden_paths.len(), 6);
+        assert_eq!(fixed.moved_worktrees.len(), 2);
+        assert_eq!(fixed.skipped_worktrees.len(), 1);
+        assert_ne!(fixed.moved_worktrees[0].to, fixed.moved_worktrees[1].to);
+        for tree in &fixed.moved_worktrees {
+            assert!(tree.to.starts_with(root.checkout.join(".mj/worktrees")));
+            assert!(tree.to.join("file").exists());
+        }
+        assert!(external[2].exists());
+        for checkout in [&root.checkout, &inside, &sub] {
+            let flags = git(checkout, &["ls-files", "-v"]);
+            assert!(
+                flags.lines().all(|line| !line.starts_with('S')
+                    && !line.starts_with('s')
+                    && !line.starts_with('h')),
+                "{flags}"
+            );
+        }
+        let inventory = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
+        assert!(inventory["project"].hidden_tracked_edits.is_empty());
+        assert_eq!(inventory["project"].unrepresented_worktrees.len(), 1);
+        assert_eq!(inventory["project"].worktrees.len(), 3);
+        let again = resolve_safe_suspend_blockers(&FileGit, &[input]).unwrap();
+        assert!(again.cleared_hidden_paths.is_empty());
+        assert!(again.moved_worktrees.is_empty());
     }
 
     struct Repo {

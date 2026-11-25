@@ -947,6 +947,8 @@ fn golden_dashboard_dialogs() {
             child_warning_titles: Vec::new(),
             preflight: None,
             viewing_all_untracked: false,
+            resolving_blockers: false,
+            can_prompt: true,
         }));
         assert_eq!(
             dashboard.apply_suspend_preflight(request_id, preflight),
@@ -958,6 +960,10 @@ fn golden_dashboard_dialogs() {
             dashboard.handle_key(key(KeyCode::Char('v')));
             let lines = drawn(&mut dashboard, 100, 28);
             append_dialog_render(&mut output, "suspend blockers expanded", 100, 28, &lines);
+            let prompt = dashboard.handle_key(key(KeyCode::Char('a')));
+            assert!(
+                matches!(prompt, DashboardAction::PromptSession { ref text, .. } if text.contains("linked/file-7.txt") && text.contains("Clear index flags"))
+            );
         }
     }
 
@@ -2254,4 +2260,52 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), retry);
     assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
+}
+
+#[test]
+fn suspend_safe_fix_enters_pending_state_and_refresh_requires_confirmation() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = 77;
+    dashboard.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+        session_id: "session-1".into(),
+        request_id,
+        child_warning_titles: Vec::new(),
+        preflight: None,
+        viewing_all_untracked: false,
+        can_prompt: true,
+        resolving_blockers: false,
+    }));
+    let preflight = mj_core::suspend_consent::SuspendPreflight {
+        session_id: "session-1".into(),
+        blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+            kind: "hidden_tracked_edits".into(),
+            paths: vec!["file".into()],
+            remedy: "Clear flags.".into(),
+        }],
+        ..Default::default()
+    };
+    dashboard.apply_suspend_preflight(request_id, preflight);
+    let _ = drawn(&mut dashboard, 100, 28);
+    let action = dashboard.handle_key(key(KeyCode::Char('f')));
+    assert_eq!(
+        action,
+        DashboardAction::ResolveSuspendBlockers {
+            session_id: "session-1".into(),
+            request_id
+        }
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: true, preflight: None, .. }))
+    );
+    let action = dashboard.apply_suspend_preflight(
+        request_id,
+        mj_core::suspend_consent::SuspendPreflight {
+            session_id: "session-1".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(action, DashboardAction::None);
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: false, preflight: Some(_), .. }))
+    );
 }

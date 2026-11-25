@@ -188,6 +188,11 @@ enum WorkerCommand {
         #[arg(long)]
         spec: PathBuf,
     },
+    /// Clear hidden index flags and move eligible external worktrees inside the clone.
+    ResolveSuspendBlockers {
+        #[arg(long)]
+        spec: PathBuf,
+    },
     /// Run read-only workspace inventory and optional dry-run size estimate on the target.
     SuspendPreflight {
         /// Preflight specification path, or `-` to read it from standard input.
@@ -876,6 +881,11 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         }
         WorkerCommand::BuildId => {
             println!("{}", mj_core::worker_build::worker_build_id());
+            Ok(())
+        }
+        WorkerCommand::ResolveSuspendBlockers { spec } => {
+            let result = mj_worker::checkpoint::resolve_suspend_blockers_from_spec_file(&spec)?;
+            println!("{}", serde_json::to_string(&result)?);
             Ok(())
         }
         WorkerCommand::SuspendPreflight { spec } => {

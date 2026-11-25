@@ -580,6 +580,15 @@ pub(super) struct SuspendPreflightQuery {
     without_checkpoint: bool,
 }
 
+pub(super) async fn resolve_suspend_blockers(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<mj_core::suspend_consent::ResolveSuspendBlockersResponse>, ApiFailure> {
+    Ok(Json(
+        crate::server::handlers::ask_resolve_suspend_blockers(&state, session_id).await?,
+    ))
+}
+
 pub(super) async fn suspend_preflight(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,

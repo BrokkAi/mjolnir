@@ -804,6 +804,19 @@ impl ApiClient {
         }
     }
 
+    pub(crate) async fn resolve_suspend_blockers(
+        &self,
+        session_id: &str,
+    ) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("/sessions/{session_id}/suspend-resolve-blockers"))),
+            )
+            .await?;
+        serde_json::from_slice(&response.bytes().await?)
+            .context("decode blocker remediation result")
+    }
     pub(crate) async fn suspend_preflight(
         &self,
         session_id: &str,

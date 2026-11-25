@@ -52,6 +52,36 @@ impl RuntimeState {
             .map(drop)
     }
 
+    pub async fn resolve_suspend_blockers(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse> {
+        let work = mj_controller::upgrade::activity_unless_draining("resolve suspend blockers")?;
+        let admission = self
+            .session_gate
+            .try_enter_foreground(
+                &session_id,
+                "resolve suspend blockers",
+                mj_controller::recovery_gate::LifecycleOrigin::Person,
+            )
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let runtime = Arc::clone(self);
+        let response = super::terminal_operations::process_probe(None, move |executor| {
+            let _work = work;
+            let _admission = admission;
+            Controller::load()?.resolve_suspend_blockers(&session_id, executor)
+        })
+        .await?;
+        let mut response = response;
+        let current = runtime.runtime_publication()?;
+        response.preflight.interrupting = current
+            .verdicts
+            .get(&response.preflight.session_id)
+            .is_some_and(|verdict| verdict.active_work);
+        response.preflight.children_not_handed_back =
+            super::verdicts::unfinished_suspend_children(&current, &response.preflight.session_id);
+        Ok(response)
+    }
     pub async fn suspend_preflight(
         self: &Arc<Self>,
         session_id: String,

@@ -107,6 +107,15 @@ pub trait ExportRuntime: Send + Sync {
         })
     }
 
+    fn resolve_suspend_blockers(
+        self: Arc<Self>,
+        _session_id: String,
+    ) -> BoxFuture<
+        'static,
+        Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse, anyhow::Error>,
+    > {
+        Box::pin(async { Err(anyhow!("controller unavailable")) })
+    }
     fn suspend_preflight(
         self: Arc<Self>,
         _session_id: String,
@@ -497,6 +506,15 @@ impl ExportRuntime for RuntimeState {
         Box::pin(async move { RuntimeState::purge_untracked(&self, request, cancelled).await })
     }
 
+    fn resolve_suspend_blockers(
+        self: Arc<Self>,
+        session_id: String,
+    ) -> BoxFuture<
+        'static,
+        Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse, anyhow::Error>,
+    > {
+        Box::pin(async move { RuntimeState::resolve_suspend_blockers(&self, session_id).await })
+    }
     fn suspend_preflight(
         self: Arc<Self>,
         session_id: String,
@@ -5310,6 +5328,25 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn resolve_suspend_blockers(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse, String>,
+            ApiFailure,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(self
+                .exports
+                .clone()
+                .resolve_suspend_blockers(session_id)
+                .await
+                .map_err(|error| format!("{error:#}")))
+        })
+    }
     fn suspend_preflight(
         &self,
         session_id: String,

@@ -6924,7 +6924,20 @@ function buildShownSuspendConsent(preflight) {
   };
 }
 
-function confirmSessionSuspension(session) {
+function formatBlockerCleanupPrompt(blockers) {
+  let text = 'Inspect and resolve these suspend blockers. Preserve or push wanted work, then report when ready to suspend.\n';
+  for (const blocker of blockers) {
+    text += `\n${blockerTitle(blocker.kind)}\n`;
+    for (const path of blocker.paths || []) text += `- ${path}\n`;
+    text += `Fix: ${blocker.remedy}\n`;
+  }
+  return text;
+}
+function blockerResolutionSummary(response) {
+  return `Cleared flags on ${response.cleared_hidden_paths.length} paths; moved ${response.moved_worktrees.length} worktrees; skipped ${response.skipped_worktrees.length} worktrees.`;
+}
+
+function confirmSessionSuspension(session, onNotice = () => {}) {
   if (!session) return Promise.resolve(null);
   return new Promise(resolve => {
     const dialog = openSessionDialog('session-suspend-dialog', 'Suspend session');
@@ -6941,9 +6954,12 @@ function confirmSessionSuspension(session) {
     dialog.append(controls);
     cancel.focus();
 
-    request(`/api/v1/sessions/${encodeURIComponent(session.id)}/suspend-preflight`)
-      .then(preflight => {
+    const body = el('div');
+    dialog.insertBefore(body, controls);
+    const renderPreflight = preflight => {
         statusNode.remove();
+        body.replaceChildren();
+        controls.replaceChildren(cancel);
         const blockers = preflight.blockers || [];
         const untrackedCount = (preflight.untracked?.length || 0)
           + (preflight.nested_repositories?.length || 0)
@@ -6951,25 +6967,56 @@ function confirmSessionSuspension(session) {
           + (preflight.keep_dir_entries?.length || 0);
         const ops = preflight.operations || [];
         if (blockers.length) {
-          dialog.insertBefore(el('p', 'danger', 'Cannot suspend until these blockers are resolved:'), controls);
+          body.append(el('p', 'danger', 'Cannot suspend until these blockers are resolved:'));
           const list = el('div');
           for (const [index, b] of blockers.entries()) {
             const section = suspendBlockerSection(b, index);
             list.append(section);
           }
-          dialog.insertBefore(list, controls);
+          body.append(list);
+          if (blockers.some(b => ['hidden_tracked_edits', 'unrepresented_git_state'].includes(b.kind))) {
+            const fix = button('Fix safe blockers & retry', 'primary');
+            fix.onclick = async () => {
+              controls.replaceChildren(cancel);
+              body.replaceChildren(el('p', 'dim', 'Fixing safe blockers…'));
+              try {
+                const response = await request(`/api/v1/sessions/${encodeURIComponent(session.id)}/suspend-resolve-blockers`, { method: 'POST' });
+                renderPreflight(response.preflight);
+                body.prepend(el('p', 'dim', blockerResolutionSummary(response)));
+              } catch (error) {
+                renderPreflight(preflight);
+                body.prepend(el('p', 'danger', `Could not fix safe blockers: ${error?.message || error}`));
+              }
+            };
+            controls.append(fix);
+          }
+          if (!['stopped', 'failed', 'lost', 'archived'].includes(session.lifecycle || session.state)) {
+            const ask = button('Ask session to fix', 'secondary');
+            ask.onclick = async () => {
+              ask.disabled = true;
+              try {
+                await sendSubmission({ action: 'prompt', session_id: session.id, text: formatBlockerCleanupPrompt(blockers) });
+                finish(null);
+                onNotice('Sent suspend-blocker cleanup request.');
+              } catch (error) {
+                ask.disabled = false;
+                body.prepend(el('p', 'danger', `Could not send cleanup request: ${error?.message || error}`));
+              }
+            };
+            controls.append(ask);
+          }
           return;
         }
-        dialog.insertBefore(el('p', '', 'Save a recovery copy and release the environment. You can resume this session later.'), controls);
+        body.append(el('p', '', 'Save a recovery copy and release the environment. You can resume this session later.'));
         if (preflight.raw) {
-          dialog.insertBefore(el('p', 'dim', 'Raw checkout is kept in place; untracked files and unsupported Git state do not travel with the snapshot.'), controls);
+          body.append(el('p', 'dim', 'Raw checkout is kept in place; untracked files and unsupported Git state do not travel with the snapshot.'));
         }
         if (ops.length) {
           const names = ops.map(op => op.kind).join(', ');
-          dialog.insertBefore(el('p', 'danger', `In-progress Git operation (${names}) will be aborted, discarding conflict resolution.`), controls);
+          body.append(el('p', 'danger', `In-progress Git operation (${names}) will be aborted, discarding conflict resolution.`));
         }
         if (untrackedCount > 0) {
-          dialog.insertBefore(el('p', 'danger', `${untrackedCount} untracked ${untrackedCount === 1 ? 'item' : 'items'} will not be kept (ignored files are never kept).`), controls);
+          body.append(el('p', 'danger', `${untrackedCount} untracked ${untrackedCount === 1 ? 'item' : 'items'} will not be kept (ignored files are never kept).`));
           const list = el('ul');
           const paths = [
             ...(preflight.untracked || []).map(e => e.path),
@@ -6978,7 +7025,7 @@ function confirmSessionSuspension(session) {
             ...(preflight.keep_dir_entries || []).map(e => `.mj/keep/${e.path}`),
           ];
           for (const p of paths.slice(0, 10)) list.append(el('li', '', p));
-          dialog.insertBefore(list, controls);
+          body.append(list);
           if (paths.length > 10) {
             const remaining = paths.slice(10);
             const details = el('details');
@@ -6986,26 +7033,26 @@ function confirmSessionSuspension(session) {
             const moreList = el('ul');
             for (const p of remaining) moreList.append(el('li', '', p));
             details.append(moreList);
-            dialog.insertBefore(details, controls);
+            body.append(details);
           }
         }
         if (preflight.keep_dir_bytes > 0) {
-          dialog.insertBefore(el('p', 'dim', `.mj/keep/ size: ${preflight.keep_dir_bytes} bytes (not saved on suspend).`), controls);
+          body.append(el('p', 'dim', `.mj/keep/ size: ${preflight.keep_dir_bytes} bytes (not saved on suspend).`));
         }
         if (session?.chat_phase === 'running' || preflight.interrupting) {
-          dialog.insertBefore(el('p', '', 'The current turn will be interrupted.'), controls);
+          body.append(el('p', '', 'The current turn will be interrupted.'));
         }
         const unfinishedChildren = preflight.children_not_handed_back?.length ?? session.verdict?.unfinished_children ?? 0;
         if (unfinishedChildren > 0) {
-          dialog.insertBefore(el('p', '', unfinishedChildren === 1
+          body.append(el('p', '', unfinishedChildren === 1
             ? '1 sub-agent has not handed back; suspending stops it.'
-            : `${unfinishedChildren} sub-agents have not handed back; suspending stops them.`), controls);
+            : `${unfinishedChildren} sub-agents have not handed back; suspending stops them.`));
         }
         const owningChildren = preflight.owning_children_to_suspend || 0;
         if (owningChildren > 0) {
-          dialog.insertBefore(el('p', '', owningChildren === 1
+          body.append(el('p', '', owningChildren === 1
             ? "Suspending also suspends one child with its own environment and drops that child's untracked files."
-            : `Suspending also suspends ${owningChildren} children with their own environments and drops their untracked files.`), controls);
+            : `Suspending also suspends ${owningChildren} children with their own environments and drops their untracked files.`));
         }
         const hasWarnings = untrackedCount > 0 || ops.length > 0 || preflight.raw || preflight.interrupting || unfinishedChildren > 0 || owningChildren > 0;
         const confirmLabel = untrackedCount > 0
@@ -7014,7 +7061,9 @@ function confirmSessionSuspension(session) {
         const confirmBtn = button(confirmLabel, hasWarnings ? 'danger' : 'primary');
         confirmBtn.onclick = () => finish(buildShownSuspendConsent(preflight));
         controls.append(confirmBtn);
-      })
+    };
+    request(`/api/v1/sessions/${encodeURIComponent(session.id)}/suspend-preflight`)
+      .then(renderPreflight)
       .catch(err => {
         statusNode.textContent = `Could not check workspace: ${err?.message || err}`;
       });
@@ -10778,7 +10827,7 @@ async function runSessionAction(dataset, errorNode, extra) {
   }
   if (dataset.action === 'suspend') {
     const session = sessionById(dataset.id);
-    const consent = await confirmSessionSuspension(session);
+    const consent = await confirmSessionSuspension(session, notice => { errorNode.textContent = notice; });
     if (consent === null) return false;
     extra = { ...extra, suspend_consent: consent };
   }

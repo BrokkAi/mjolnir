@@ -2077,6 +2077,15 @@ impl DaemonClient {
         }
     }
 
+    pub async fn resolve_suspend_blockers(
+        &mut self,
+        session_id: String,
+    ) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse> {
+        self.http()
+            .await?
+            .resolve_suspend_blockers(session_id)
+            .await
+    }
     pub async fn suspend_preflight(
         &mut self,
         session_id: String,

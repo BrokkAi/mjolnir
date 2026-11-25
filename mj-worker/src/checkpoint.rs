@@ -435,6 +435,20 @@ mod recovery_tests {
     }
 }
 
+pub fn resolve_suspend_blockers_from_spec_file(
+    path: &Path,
+) -> Result<mj_core::suspend_consent::WorkerResolveBlockersResult> {
+    let spec = if path == Path::new(EXPORT_SPEC_STDIN) {
+        read_json_from(
+            &mut std::io::stdin().lock(),
+            "resolve suspend blockers spec",
+        )?
+    } else {
+        serde_json::from_slice(&fs::read(path)?)?
+    };
+    mj_checkpoint::snapshot::resolve_worker_suspend_blockers(&SystemGit, &spec)
+}
+
 #[cfg(test)]
 mod restore_spec_stdin_tests {
     use super::*;

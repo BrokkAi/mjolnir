@@ -390,6 +390,15 @@ pub(crate) enum DashboardIoUpdate {
         upgrade_only: bool,
         result: std::result::Result<mj_core::state::ContainerUpgradePreview, String>,
     },
+    SuspendBlockersResolved {
+        session_id: String,
+        request_id: u64,
+        result: Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse, String>,
+    },
+    BlockerPromptSent {
+        session_id: String,
+        result: Result<(), String>,
+    },
     SuspendPreflight {
         session_id: String,
         request_id: u64,
@@ -1588,6 +1597,20 @@ impl DashboardContext {
                 Err(error) => {
                     if upgrade_only { self.dashboard.set_failure_notice(format!("Container upgrade unavailable: {error}")); }
                     else { self.dashboard.show_normal_restart(session_id); }
+                }
+            },
+            DashboardIoUpdate::BlockerPromptSent { session_id, result } => match result {
+                Ok(()) => self.dashboard.set_notice(format!("Sent suspend-blocker cleanup request to {}.", self.session_notice_name(&session_id))),
+                Err(error) => self.dashboard.set_failure_notice(format!("Could not send cleanup request: {error}")),
+            },
+            DashboardIoUpdate::SuspendBlockersResolved { session_id, request_id, result } => match result {
+                Ok(response) => {
+                    self.dashboard.set_notice(response.summary());
+                    self.dashboard.apply_suspend_preflight(request_id, response.preflight);
+                }
+                Err(error) => {
+                    self.dashboard.dismiss_suspend_preflight(&session_id, request_id);
+                    self.dashboard.set_failure_notice(format!("Could not fix safe blockers: {error}"));
                 }
             },
             DashboardIoUpdate::SuspendPreflight {

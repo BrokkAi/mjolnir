@@ -47,8 +47,18 @@ pub(crate) fn confirmation_buttons(
         } => borrowed(&["Cancel"]),
         Confirmation::SuspendSession {
             preflight: Some(preflight),
+            can_prompt,
             ..
-        } if preflight.has_blockers() => borrowed(&["Cancel"]),
+        } if preflight.has_blockers() => {
+            let mut buttons = borrowed(&["Cancel"]);
+            if preflight.has_auto_fixable_blockers() {
+                buttons.push(Cow::Borrowed("Fix safe blockers"));
+            }
+            if *can_prompt {
+                buttons.push(Cow::Borrowed("Ask session to fix"));
+            }
+            buttons
+        }
         Confirmation::SuspendSession {
             preflight: Some(preflight),
             ..
@@ -1587,6 +1597,7 @@ pub(crate) fn confirmation_body(
             child_warning_titles,
             preflight,
             viewing_all_untracked,
+            resolving_blockers,
             ..
         } => {
             let mut lines = vec![session_line(session_id, session_name, width)];
@@ -1707,7 +1718,11 @@ pub(crate) fn confirmation_body(
                     ));
                 }
             } else {
-                lines.push(Line::raw("Checking workspace…"));
+                lines.push(Line::raw(if *resolving_blockers {
+                    "Fixing safe blockers…"
+                } else {
+                    "Checking workspace…"
+                }));
             }
             (" Suspend session? ", lines)
         }

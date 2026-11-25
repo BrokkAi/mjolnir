@@ -964,6 +964,9 @@ async fn stop_tasks(client: &ApiClient, args: &StopTaskArgs) -> Result<StopTaskR
 /// Scratch in `$MJ_KEEP_DIR` travels with Move but is not saved when the session is suspended.
 #[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
+    /// Clear hidden index flags and move eligible worktrees inside the clone.
+    #[arg(long, conflicts_with = "without_checkpoint")]
+    fix_blockers: bool,
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: Option<String>,
@@ -2560,6 +2563,16 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
     let client = ApiClient::connect().await?;
+    if args.fix_blockers {
+        let result = client.resolve_suspend_blockers(session).await?;
+        eprintln!("{}", result.summary());
+        if result.preflight.has_blockers() && !args.dry_run {
+            bail!(
+                "Blockers remain after safe remediation:\n{}",
+                format_suspend_dry_run(&result.preflight)
+            );
+        }
+    }
     if args.dry_run {
         let preflight = client
             .suspend_preflight(session, true, args.without_checkpoint)

@@ -157,6 +157,18 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { Err(ApiError::controller_unavailable().into()) })
     }
 
+    fn resolve_suspend_blockers(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse, String>,
+            ApiFailure,
+        >,
+    > {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
     fn suspend_preflight(
         &self,
         _session_id: String,

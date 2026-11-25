@@ -50,6 +50,39 @@ pub fn suspend_preflight_stdin_command_with_binary(
     )
 }
 
+pub fn resolve_suspend_blockers_stdin_command(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<CommandSpec> {
+    resolve_suspend_blockers_stdin_command_with_binary(locator, session_id, "hel")
+}
+
+pub fn resolve_suspend_blockers_stdin_command_with_binary(
+    locator: &TargetLocator,
+    session_id: &str,
+    binary_name: &str,
+) -> Result<CommandSpec> {
+    ensure!(
+        !binary_name.is_empty() && !binary_name.contains('/') && !binary_name.contains(".."),
+        "invalid worker binary name {binary_name:?}"
+    );
+    let root = worker_root(locator, session_id)?;
+    let args = vec![
+        format!("{root}/{binary_name}"),
+        "worker".into(),
+        "resolve-suspend-blockers".into(),
+        "--spec".into(),
+        EXPORT_SPEC_STDIN.into(),
+    ];
+    crate::targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        locator,
+        session_id,
+        args,
+        "resolve suspend blockers target",
+    )
+}
+
 pub fn capture_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     checkpoint_stdin_command(
         locator,

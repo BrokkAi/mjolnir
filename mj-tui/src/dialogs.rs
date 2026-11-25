@@ -362,6 +362,8 @@ pub(crate) enum Confirmation {
         child_warning_titles: Vec<String>,
         preflight: Option<mj_core::suspend_consent::SuspendPreflight>,
         viewing_all_untracked: bool,
+        can_prompt: bool,
+        resolving_blockers: bool,
     },
     /// Stop or restart asked for while the agent is mid-turn. An idle session
     /// stops without asking; this exists for the one case a mis-click costs
@@ -1845,6 +1847,50 @@ impl DashboardState {
                         confirm_no_checkpoint: true,
                         ..Default::default()
                     },
+                }
+            }
+            (
+                Confirmation::SuspendSession {
+                    session_id,
+                    request_id,
+                    preflight: Some(preflight),
+                    can_prompt,
+                    ..
+                },
+                index,
+            ) if preflight.has_blockers() => {
+                let fixing = preflight.has_auto_fixable_blockers() && index == 1;
+                if fixing {
+                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+                        session_id: session_id.clone(),
+                        request_id,
+                        child_warning_titles: Vec::new(),
+                        preflight: None,
+                        viewing_all_untracked: false,
+                        can_prompt,
+                        resolving_blockers: true,
+                    }));
+                    DashboardAction::ResolveSuspendBlockers {
+                        session_id,
+                        request_id,
+                    }
+                } else if can_prompt
+                    && index
+                        == if preflight.has_auto_fixable_blockers() {
+                            2
+                        } else {
+                            1
+                        }
+                {
+                    self.cancel_modal();
+                    DashboardAction::PromptSession {
+                        session_id,
+                        text: mj_core::suspend_consent::format_blocker_cleanup_prompt(
+                            &preflight.blockers,
+                        ),
+                    }
+                } else {
+                    DashboardAction::None
                 }
             }
             (

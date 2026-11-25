@@ -3435,6 +3435,19 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
             .as_deref()
             .is_some_and(|r| r.contains("merge"))
     );
+    git(&["update-index", "--skip-worktree", "--", "tracked.txt"]);
+    let fixed = controller
+        .resolve_suspend_blockers(session_id, &ProcessExecutor)
+        .unwrap();
+    assert_eq!(fixed.cleared_hidden_paths.len(), 1);
+    assert!(
+        !fixed
+            .preflight
+            .blockers
+            .iter()
+            .any(|b| b.kind == "hidden_tracked_edits")
+    );
+    assert!(git(&["ls-files", "-v"]).starts_with("H "));
 }
 
 #[test]

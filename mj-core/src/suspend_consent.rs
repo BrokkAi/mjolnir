@@ -498,6 +498,43 @@ pub fn format_move_untracked_refusal(count: usize, first_paths: &[String]) -> St
     )
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerResolveBlockersSpec {
+    pub repositories: Vec<WorkerPreflightRepo>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MovedWorktreeSummary {
+    pub from: String,
+    pub to: String,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerResolveBlockersResult {
+    pub cleared_hidden_paths: Vec<String>,
+    pub moved_worktrees: Vec<MovedWorktreeSummary>,
+    pub skipped_worktrees: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveSuspendBlockersResponse {
+    pub cleared_hidden_paths: Vec<String>,
+    pub moved_worktrees: Vec<MovedWorktreeSummary>,
+    pub skipped_worktrees: Vec<String>,
+    pub preflight: SuspendPreflight,
+}
+impl ResolveSuspendBlockersResponse {
+    pub fn summary(&self) -> String {
+        format!(
+            "Cleared flags on {} paths; moved {} worktrees; skipped {} worktrees.",
+            self.cleared_hidden_paths.len(),
+            self.moved_worktrees.len(),
+            self.skipped_worktrees.len()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

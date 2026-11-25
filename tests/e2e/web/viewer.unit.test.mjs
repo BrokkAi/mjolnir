@@ -1664,3 +1664,58 @@ test('suspend blockers show readable titles, five paths, expandable remainder an
   assert.equal(node.children[2].children[1].children.length, 2);
   assert.equal(node.children[3].textContent, 'Fix: Clear index flags.');
 });
+
+test('suspend safe fix refreshes preflight and ask sends the cleanup prompt', async () => {
+  const nodes = [];
+  const make = (tag, cls = '', text = '') => {
+    const node = makeNode(tag);
+    node.className = cls;
+    node.textContent = text;
+    node.remove = () => {};
+    node.focus = () => {};
+    node.close = () => { node.closed = true; };
+    node.insertBefore = (child, before) => {
+      const index = node.children.indexOf(before);
+      node.children.splice(index < 0 ? node.children.length : index, 0, child);
+    };
+    node.prepend = child => node.children.unshift(child);
+    nodes.push(node);
+    return node;
+  };
+  let resolved = false;
+  const submissions = [];
+  const requests = [];
+  const preflight = { blockers: [{ kind: 'hidden_tracked_edits', paths: ['linked/file'], remedy: 'Clear both flags.' }] };
+  const context = vm.createContext({
+    el: make, button: label => make('button', '', label),
+    openSessionDialog: () => make('dialog'),
+    settingsStatus: make('p'),
+    request: async (url, options) => {
+      requests.push({url, options});
+      if (options?.method === 'POST') {
+        resolved = true;
+        return { cleared_hidden_paths: ['linked/file'], moved_worktrees: [], skipped_worktrees: [], preflight };
+      }
+      return preflight;
+    },
+    sendSubmission: async body => submissions.push(body),
+  });
+  const titleStart = viewerSource.indexOf('function blockerTitle(');
+  const titleEnd = viewerSource.indexOf('  return section;', titleStart) + '  return section;\n}'.length;
+  vm.runInContext(viewerSource.slice(titleStart, titleEnd), context);
+  vm.runInContext(sourceBetween('function formatBlockerCleanupPrompt(', '/// The session menu'), context);
+  let notice = '';
+  const finished = context.confirmSessionSuspension({ id: 'session-1', state: 'running' }, text => { notice = text; });
+  await new Promise(resolve => setImmediate(resolve));
+  const fix = nodes.find(n => n.textContent === 'Fix safe blockers & retry');
+  assert.ok(fix);
+  await fix.onclick();
+  assert.equal(resolved, true);
+  assert.ok(requests.some(r => r.url.endsWith('/suspend-resolve-blockers') && r.options.method === 'POST'));
+  const ask = nodes.filter(n => n.textContent === 'Ask session to fix').at(-1);
+  await ask.onclick();
+  await finished;
+  assert.equal(submissions[0].action, 'prompt');
+  assert.match(submissions[0].text, /Hidden tracked edits\n- linked\/file\nFix: Clear both flags/);
+  assert.match(notice, /Sent suspend-blocker/);
+});

@@ -1653,6 +1653,50 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
+        DashboardAction::PromptSession { session_id, text } => {
+            let updates = context.dashboard_io_tx.clone();
+            mj_core::runtime::spawn(async move {
+                let result = async {
+                    crate::api_client::ApiClient::connect()
+                        .await?
+                        .prompt(&session_id, text)
+                        .await
+                        .map(drop)
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                report(
+                    "sending suspend blocker cleanup request",
+                    &updates,
+                    DashboardIoUpdate::BlockerPromptSent { session_id, result },
+                );
+            });
+        }
+        DashboardAction::ResolveSuspendBlockers {
+            session_id,
+            request_id,
+        } => {
+            let updates = context.dashboard_io_tx.clone();
+            mj_core::runtime::spawn(async move {
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .resolve_suspend_blockers(session_id.clone())
+                        .await
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                report(
+                    "fixing safe suspend blockers",
+                    &updates,
+                    DashboardIoUpdate::SuspendBlockersResolved {
+                        session_id,
+                        request_id,
+                        result,
+                    },
+                );
+            });
+        }
         DashboardAction::SuspendPreflight {
             session_id,
             request_id,

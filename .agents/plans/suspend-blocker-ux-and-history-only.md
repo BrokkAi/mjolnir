@@ -18,8 +18,8 @@ After this change, a user suspending a blocked session sees clean, structured bl
 
 - [x] (2026-11-25 17:08Z) Completed read-only reconnaissance across `mj-checkpoint`, `mj-core`, `mj-store`, `mj-worker`, `mj-controller`, `mj-server`, `mj-client`, `mj-tui`, and `mj-cli`, and authored this ExecPlan.
 - [x] Milestone 1: Readable suspend/move blockers and fixed remediation commands across `mj-checkpoint`, `mj-core`, `mj-worker`, `mj-controller`, `mj-tui`, `mj-server` (Web UI), and `mj-cli`, with updated goldens and unit tests.
-- [ ] Milestone 2: Safe one-click blocker remediation (`resolve_safe_suspend_blockers`, `mj-worker resolve-suspend-blockers`, controller orchestration, `POST /api/v1/sessions/{id}/suspend-resolve-blockers`, CLI `--fix-blockers`, TUI & Web UI button) and tests.
-- [ ] Milestone 3: "Ask session to fix" action in TUI and Web UI suspend blocker dialogs and tests.
+- [x] Milestone 2: Safe one-click blocker remediation (`resolve_safe_suspend_blockers`, `mj-worker resolve-suspend-blockers`, controller orchestration, `POST /api/v1/sessions/{id}/suspend-resolve-blockers`, CLI `--fix-blockers`, TUI & Web UI button) and tests.
+- [x] Milestone 3: "Ask session to fix" action in TUI and Web UI suspend blocker dialogs and tests.
 - [ ] Milestone 4: "Suspend with session history only" (`SuspendConsent.history_only`, store migration 159, `CheckpointExportPolicy::HistoryOnly`, `MetadataOnly` capture + `FreshHead`/origin resume, HTTP API, CLI `--history-only`, TUI & Web UI confirmation flow) and integration tests.
 
 ## Surprises & Discoveries
@@ -45,6 +45,12 @@ After this change, a user suspending a blocked session sees clean, structured bl
 - Observation: `SuspendConsent` has `#[serde(deny_unknown_fields)]` and is persisted as JSON in `sessions.closing_consent` (introduced in breaking schema revision 147; current `SCHEMA_VERSION` is 158).
   Evidence: `mj-store/src/database/sessions.rs:1331-1345` decodes `closing_consent` into `SuspendConsent` and returns an error on unknown fields. Adding `history_only: bool` with `#[serde(default, skip_serializing_if = "std::ops::Not::not")]` requires a breaking schema revision 159 (`minimum_compatible_version = 159`) so older daemons cannot crash during recovery on rows where `history_only` is true.
 
+- Observation (Milestone 2): Git's existing structural inspection marks external worktrees with a checked-out `.gitmodules` as non-movable, even when modules are uninitialized.
+  Evidence: The remediation integration fixture uses the pre-submodule revision for its two movable external worktrees and preserves the locked worktree.
+
+- Observation (Milestone 2): `git update-index <flag> -z --stdin` supports clearing each flag independently with NUL-delimited paths.
+  Evidence: The remediation integration test clears six flagged entries across the main checkout, an in-clone linked worktree, and an initialized submodule; this avoids ARG_MAX without imposing an arbitrary path-count limit.
+
 ## Decision Log
 
 - Decision: Keep `SuspendBlocker`'s existing JSON shape (`kind: String`, `paths: Vec<String>`, `remedy: String`) with `#[serde(deny_unknown_fields)]` intact, and replace `kind`'s value with the short `snake_case` variant name (e.g., `"hidden_tracked_edits"`, `"unrepresented_git_state"`).
@@ -66,6 +72,10 @@ After this change, a user suspending a blocked session sees clean, structured bl
 - Decision: Do not modify `go/`.
   Rationale: Repository instructions specify working on `go/` only when explicitly instructed.
   Date/Author: 2026-11-25 / Coordinator
+
+- Decision (Milestones 2–3): Share repository selection between controller preflight and remediation, and hold daemon upgrade admission plus the session foreground gate during remediation. Refresh the suspend dialog after remediation without automatically suspending.
+  Rationale: Both operations must inspect the same checkouts; mutation must exclude concurrent lifecycle work; the user should review the refreshed state before accepting suspend.
+  Date/Author: 2026-11-25 / Implementation worker
 
 ## Outcomes & Retrospective
 
@@ -387,3 +397,13 @@ core wire schema: 1; server suspend: 1; web viewer: 40. Seven affected crates
 passed dev clippy with all targets and warnings denied. Detailed logs and exact
 commands are in the implementation worker report directory. Milestones 2–4
 remain unimplemented. No commit or push was made, as requested.
+
+Milestones 2–3 implementation note (2026-11-25): Implemented target-side safe
+remediation, worker command/staged-worker fallback, daemon admission, public HTTP
+API and clients, CLI --fix-blockers, asynchronous TUI/web fix and cleanup-prompt
+actions. Validation: remediation integration 1, controller integration 1, HTTP
+integration 1, TUI action transition 1, all TUI goldens 36 and CLI goldens 10,
+changed dialog golden verification 1, web tests 41. Clippy passed across all
+eleven touched crates; the final TUI test edit also passed targeted clippy.
+Detailed commands and logs: implementation worker report m23-validation.md.
+No commit or push; Milestone 4 remains unimplemented.

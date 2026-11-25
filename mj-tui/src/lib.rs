@@ -535,6 +535,14 @@ pub enum DashboardAction {
     RemoveBundle {
         bundle_id: String,
     },
+    ResolveSuspendBlockers {
+        session_id: String,
+        request_id: u64,
+    },
+    PromptSession {
+        session_id: String,
+        text: String,
+    },
     SuspendPreflight {
         session_id: String,
         request_id: u64,

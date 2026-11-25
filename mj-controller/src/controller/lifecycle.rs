@@ -161,74 +161,21 @@ impl Controller {
         }
     }
 
-    /// Run read-only workspace inventory (and optional dry-run size estimate) off
-    /// the async worker so CLI, TUI, and Web UI can show blockers, untracked files,
-    /// in-progress operations, `.mj/keep/`, and existing checkpoint status.
-    pub fn suspend_preflight(
+    /// Preflight and remediation must inspect the same repository set.
+    fn suspend_repository_specs(
         &self,
         session_id: &str,
-        dry_run: bool,
-        without_checkpoint: bool,
         executor: &(impl CommandExecutor + Sync),
-    ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        self.checkpoint_preflight(session_id, dry_run, without_checkpoint, None, executor)
-            .map(|(preflight, _)| preflight)
-    }
-
-    pub(super) fn checkpoint_preflight(
-        &self,
-        session_id: &str,
-        dry_run: bool,
-        without_checkpoint: bool,
-        move_keep: Option<&mj_core::session_keep::MoveKeep>,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<(
-        mj_core::suspend_consent::SuspendPreflight,
-        Vec<(PathBuf, u64)>,
-    )> {
+    ) -> Result<Vec<mj_core::suspend_consent::WorkerPreflightRepo>> {
         let session = self
             .state
             .sessions
             .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .clone();
-        let existing_checkpoint = session.checkpoint.as_deref().map(|checkpoint| {
-            let verified = verify_installed_checkpoint_gate(session_id, checkpoint).is_ok();
-            let age_seconds = chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
-                .ok()
-                .map(|created| {
-                    chrono::Utc::now()
-                        .signed_duration_since(created.with_timezone(&chrono::Utc))
-                        .num_seconds()
-                        .max(0) as u64
-                });
-            mj_core::suspend_consent::ExistingCheckpointSummary {
-                verified,
-                created_at: Some(checkpoint.created_at.clone()),
-                age_seconds,
-            }
-        });
-
-        let mut preflight = mj_core::suspend_consent::SuspendPreflight {
-            session_id: session_id.to_owned(),
-            owning_children_to_suspend: self.state.suspendable_owned_child_ids(session_id).len(),
-            existing_checkpoint,
-            ..Default::default()
-        };
-
-        if without_checkpoint {
-            return Ok((preflight, Vec::new()));
-        }
-
+            .context("unknown session")?;
         let checkout = self.state.checkout(session_id)?;
         let export_policy =
             self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
-
-        let is_remote_target = session.target.as_deref().is_some_and(|locator| {
-            !matches!(locator, mj_core::state::TargetLocator::LocalBare { .. })
-        });
-
-        let repo_specs: Vec<mj_core::suspend_consent::WorkerPreflightRepo> = match export_policy {
+        let repo_specs = match export_policy {
             CheckpointExportPolicy::OriginDelta => match checkout {
                 mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
                     vec![mj_core::suspend_consent::WorkerPreflightRepo {
@@ -271,7 +218,7 @@ impl Controller {
                 _ => Vec::new(),
             },
             CheckpointExportPolicy::OriginDeltaCutoff => {
-                let cutoff = super::backend::session_history_cutoff(&session)?;
+                let cutoff = super::backend::session_history_cutoff(session)?;
                 let mut exclude_commits = Vec::new();
                 if let Some(cutoff) = cutoff {
                     exclude_commits.push(cutoff.head);
@@ -339,7 +286,7 @@ impl Controller {
                                 .target
                                 .as_deref()
                                 .and_then(|locator| {
-                                    backend_locator(locator, &session, &self.config).ok().map(
+                                    backend_locator(locator, session, &self.config).ok().map(
                                         |backend| {
                                             PathBuf::from(targets::workspace_root(&backend, None))
                                         },
@@ -378,6 +325,133 @@ impl Controller {
                 .collect(),
             _ => Vec::new(),
         };
+
+        Ok(repo_specs)
+    }
+
+    pub fn resolve_suspend_blockers(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse> {
+        let repositories = self.suspend_repository_specs(session_id, executor)?;
+        let spec = mj_core::suspend_consent::WorkerResolveBlockersSpec { repositories };
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("unknown session")?;
+        let result = if let Some(locator) = session
+            .target
+            .as_deref()
+            .filter(|locator| !matches!(locator, mj_core::state::TargetLocator::LocalBare { .. }))
+        {
+            let backend = backend_locator(locator, session, &self.config)?;
+            let bytes = serde_json::to_vec(&spec)?;
+            mj_core::runtime::off_async_worker(
+                || -> Result<mj_core::suspend_consent::WorkerResolveBlockersResult> {
+                    let command =
+                        crate::checkpoint_transfer::resolve_suspend_blockers_stdin_command(
+                            &backend, session_id,
+                        )?;
+                    let mut output =
+                        executor.execute_with_stdin(&command, &mut std::io::Cursor::new(&bytes))?;
+                    if output.status != 0
+                        && String::from_utf8_lossy(&output.stderr)
+                            .contains("unrecognized subcommand 'resolve-suspend-blockers'")
+                    {
+                        let worker =
+                            super::worker_binary::WorkerInstall::for_target(&backend, executor)?;
+                        let staging = super::worker_binary::stage_worker_binary_for_upgrade(
+                            executor, &backend, session_id, &worker,
+                        )?;
+                        let command = crate::checkpoint_transfer::resolve_suspend_blockers_stdin_command_with_binary(&backend, session_id, &staging)?;
+                        output = executor
+                            .execute_with_stdin(&command, &mut std::io::Cursor::new(&bytes))?;
+                    }
+                    ensure!(
+                        output.status == 0,
+                        "resolve suspend blockers failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    serde_json::from_slice(&output.stdout)
+                        .context("decode resolve suspend blockers result")
+                },
+            )?
+        } else {
+            let git = super::worktree::ExecutorGit::local(executor);
+            mj_core::runtime::off_async_worker(|| {
+                mj_checkpoint::snapshot::resolve_worker_suspend_blockers(&git, &spec)
+            })?
+        };
+        Ok(mj_core::suspend_consent::ResolveSuspendBlockersResponse {
+            cleared_hidden_paths: result.cleared_hidden_paths,
+            moved_worktrees: result.moved_worktrees,
+            skipped_worktrees: result.skipped_worktrees,
+            preflight: self.suspend_preflight(session_id, false, false, executor)?,
+        })
+    }
+
+    pub fn suspend_preflight(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        without_checkpoint: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
+        self.checkpoint_preflight(session_id, dry_run, without_checkpoint, None, executor)
+            .map(|(preflight, _)| preflight)
+    }
+
+    pub(super) fn checkpoint_preflight(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        without_checkpoint: bool,
+        move_keep: Option<&mj_core::session_keep::MoveKeep>,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<(
+        mj_core::suspend_consent::SuspendPreflight,
+        Vec<(PathBuf, u64)>,
+    )> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .clone();
+        let existing_checkpoint = session.checkpoint.as_deref().map(|checkpoint| {
+            let verified = verify_installed_checkpoint_gate(session_id, checkpoint).is_ok();
+            let age_seconds = chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
+                .ok()
+                .map(|created| {
+                    chrono::Utc::now()
+                        .signed_duration_since(created.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .max(0) as u64
+                });
+            mj_core::suspend_consent::ExistingCheckpointSummary {
+                verified,
+                created_at: Some(checkpoint.created_at.clone()),
+                age_seconds,
+            }
+        });
+
+        let mut preflight = mj_core::suspend_consent::SuspendPreflight {
+            session_id: session_id.to_owned(),
+            owning_children_to_suspend: self.state.suspendable_owned_child_ids(session_id).len(),
+            existing_checkpoint,
+            ..Default::default()
+        };
+
+        if without_checkpoint {
+            return Ok((preflight, Vec::new()));
+        }
+
+        let is_remote_target = session.target.as_deref().is_some_and(|locator| {
+            !matches!(locator, mj_core::state::TargetLocator::LocalBare { .. })
+        });
+        let repo_specs = self.suspend_repository_specs(session_id, executor)?;
 
         if !repo_specs.is_empty() {
             if is_remote_target {
