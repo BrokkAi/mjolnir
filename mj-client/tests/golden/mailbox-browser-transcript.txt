@@ -136,11 +136,14 @@
       "lines": [
         "Before-push review override requested by the agent. The agent declined to fix these findings:",
         "- Finding: [P2] Keep the existing mailbox ordering",
-        "  across a live update",
+        "    across a live update",
         "  Reason: The current order is intentional.",
-        "  This reason continues on another line.",
+        "    This reason continues on another line.",
+        "    - Finding: This quoted reason line is not another finding.",
+        "    Overridden synthesis (review quoted-text):",
         "- Finding: [P3] 支持 Unicode and <script>literal text</script>",
         "  Reason: This is outside the requested scope.",
+        "…[overrides truncated]…",
         "Overridden synthesis (review review-17):",
         "Review findings, including details the agent declined to change.",
         "- Finding: This quoted synthesis line is not another declined finding.",
@@ -151,16 +154,20 @@
         {
           "summary": [
             "- [P2] Keep the existing mailbox ordering across a live update",
-            "- [P3] 支持 Unicode and <script>literal text</script>"
+            "- [P3] 支持 Unicode and <script>literal text</script>",
+            "…[overrides truncated]…"
           ],
           "body": [
             "Before-push review override requested by the agent. The agent declined to fix these findings:",
             "- Finding: [P2] Keep the existing mailbox ordering",
-            "  across a live update",
+            "    across a live update",
             "  Reason: The current order is intentional.",
-            "  This reason continues on another line.",
+            "    This reason continues on another line.",
+            "    - Finding: This quoted reason line is not another finding.",
+            "    Overridden synthesis (review quoted-text):",
             "- Finding: [P3] 支持 Unicode and <script>literal text</script>",
             "  Reason: This is outside the requested scope.",
+            "…[overrides truncated]…",
             "Overridden synthesis (review review-17):",
             "Review findings, including details the agent declined to change.",
             "- Finding: This quoted synthesis line is not another declined finding.",

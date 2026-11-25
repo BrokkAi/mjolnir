@@ -1542,7 +1542,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 ╭ Conversation ────────────────────────────────────────────────────╮
 │ ▸ - [P2] Keep the existing mailbox ordering across a live update▐│
 │   - [P3] 支 持  Unicode and <script>literal text</script>         ▐│
-│                                                                 ▐│
+│   …[overrides truncated]…                                       ▐│
 │                                                                 ▐│
 │                                                                 ▐│
 │                                                                 ▐│
@@ -1568,14 +1568,18 @@ Tab pane · Ctrl-V paste │ ctrl+b then q detach · : / ? palette
 ╭ Conversation ────────────────────────────────────────────────────╮
 │ ▾ - [P2] Keep the existing mailbox ordering across a live update▐│
 │   - [P3] 支 持  Unicode and <script>literal text</script>         ▐│
+│   …[overrides truncated]…                                       ▐│
 │ │ Before-push review override requested by the agent. The agent ▐│
 │ │ declined to fix these findings:                               ▐│
 │ │ - Finding: [P2] Keep the existing mailbox ordering            ▐│
-│ │   across a live update                                        ▐│
+│ │     across a live update                                      ▐│
 │ │   Reason: The current order is intentional.                   ▐│
-│ │   This reason continues on another line.                      ▐│
+│ │     This reason continues on another line.                    ▐│
+│ │     - Finding: This quoted reason line is not another finding.▐│
+│ │     Overridden synthesis (review quoted-text):                ▐│
 │ │ - Finding: [P3] 支 持  Unicode and <script>literal text</script>▐│
 │ │   Reason: This is outside the requested scope.                ▐│
+│ │ …[overrides truncated]…                                       ▐│
 │ │ Overridden synthesis (review review-17):                      ▐│
 │ │ Review findings, including details the agent declined to      ▐│
 │ │ change.                                                       ▐│
@@ -1583,10 +1587,6 @@ Tab pane · Ctrl-V paste │ ctrl+b then q detach · : / ? palette
 │ │ finding.                                                      ▐│
 │ │ Repositories:                                                 ▐│
 │ │ /workspace/mjolnir: abc123..def456 (tree 789abc)              ▐│
-│                                                                 ▐│
-│                                                                 ▐│
-│                                                                 ▐│
-│                                                                 ▐│
 │                                                                 ▐│
 │                                                                 ▐│
 │                                                                 ▐│
@@ -1620,20 +1620,26 @@ Tab pane · Ctrl-V paste │ ctrl+b then q detach · : / ? palette
 │   ordering across a live update         ▐│
 │   - [P3] 支 持  Unicode and               ▐│
 │   <script>literal text</script>         ▐│
+│   …[overrides truncated]…               ▐│
 │ │ Before-push review override requested ▐│
 │ │ by the agent. The agent declined to   ▐│
 │ │ fix these findings:                   ▐│
 │ │ - Finding: [P2] Keep the existing     ▐│
 │ │ mailbox ordering                      ▐│
-│ │   across a live update                ▐│
+│ │     across a live update              ▐│
 │ │   Reason: The current order is        ▐│
 │ │   intentional.                        ▐│
-│ │   This reason continues on another    ▐│
-│ │   line.                               ▐│
+│ │     This reason continues on another  ▐│
+│ │     line.                             ▐│
+│ │     - Finding: This quoted reason line▐│
+│ │     is not another finding.           ▐│
+│ │     Overridden synthesis (review      ▐│
+│ │     quoted-text):                     ▐│
 │ │ - Finding: [P3] 支 持  Unicode and      ▐│
 │ │ <script>literal text</script>         ▐│
 │ │   Reason: This is outside the         ▐│
 │ │   requested scope.                    ▐│
+│ │ …[overrides truncated]…               ▐│
 │ │ Overridden synthesis (review          ▐│
 │ │ review-17):                           ▐│
 │ │ Review findings, including details the▐│
@@ -1643,12 +1649,6 @@ Tab pane · Ctrl-V paste │ ctrl+b then q detach · : / ? palette
 │ │ Repositories:                         ▐│
 │ │ /workspace/mjolnir: abc123..def456    ▐│
 │ │ (tree 789abc)                         ▐│
-│                                         ▐│
-│                                         ▐│
-│                                         ▐│
-│                                         ▐│
-│                                         ▐│
-│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1672,7 +1672,7 @@ ctrl+b then q detach · : / ? palette
 ╭ Conversation ────────────────────────────╮
 │ ▸ - [P2] Keep the existing mailbox orde…▐│
 │   - [P3] 支 持  Unicode and <script>liter…▐│
-│                                         ▐│
+│   …[overrides truncated]…               ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1700,11 +1700,14 @@ ctrl+b then q detach · : / ? palette
 │ │ Before-push review override requested by the agent. The agent ▐│
 │ │ declined to fix these findings:                               ▐│
 │ │ - Finding: [P2] Keep the existing mailbox ordering            ▐│
-│ │   across a live update                                        ▐│
+│ │     across a live update                                      ▐│
 │ │   Reason: The current order is intentional.                   ▐│
-│ │   This reason continues on another line.                      ▐│
+│ │     This reason continues on another line.                    ▐│
+│ │     - Finding: This quoted reason line is not another finding.▐│
+│ │     Overridden synthesis (review quoted-text):                ▐│
 │ │ - Finding: [P3] 支 持  Unicode and <script>literal text</script>▐│
 │ │   Reason: This is outside the requested scope.                ▐│
+│ │ …[overrides truncated]…                                       ▐│
 │ │ Overridden synthesis (review review-17):                      ▐│
 │ │ Review findings, including details the agent declined to      ▐│
 │ │ change.                                                       ▐│
@@ -1713,9 +1716,6 @@ ctrl+b then q detach · : / ? palette
 │ │ Repositories:                                                 ▐│
 │ │ /workspace/mjolnir: abc123..def456 (tree 789abc)              ▐│
 │ │                                                               ▐│
-│                                                                 ▐│
-│                                                                 ▐│
-│                                                                 ▐│
 │                                                                 ▐│
 │                                                                 ▐│
 │                                                                 ▐│

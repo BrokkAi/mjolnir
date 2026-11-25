@@ -87,7 +87,12 @@ pub fn transcript_disclosures<'a>(
         ) => {
             let mut findings: Vec<String> = Vec::new();
             let mut in_finding = false;
+            let mut truncated = false;
             for line in &lines[1..] {
+                if *line == "…[overrides truncated]…" {
+                    truncated = true;
+                    break;
+                }
                 if line.starts_with("Overridden synthesis (review ") {
                     break;
                 }
@@ -104,16 +109,20 @@ pub fn transcript_disclosures<'a>(
             if findings.is_empty() {
                 return Vec::new();
             }
+            let mut summary = findings
+                .iter()
+                .map(|finding| {
+                    format!(
+                        "- {}",
+                        finding.split_whitespace().collect::<Vec<_>>().join(" ")
+                    )
+                })
+                .collect::<Vec<_>>();
+            if truncated {
+                summary.push("…[overrides truncated]…".into());
+            }
             vec![TranscriptDisclosure {
-                summary: findings
-                    .iter()
-                    .map(|finding| {
-                        format!(
-                            "- {}",
-                            finding.split_whitespace().collect::<Vec<_>>().join(" ")
-                        )
-                    })
-                    .collect(),
+                summary,
                 body: lines.into_iter().map(str::to_owned).collect(),
             }]
         }

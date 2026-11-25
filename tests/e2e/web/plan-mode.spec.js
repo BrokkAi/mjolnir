@@ -479,7 +479,7 @@ test('golden_viewer_conversation', async ({ context, browser }) => {
       arrow: getComputedStyle(node.querySelector('summary'), '::before').content.replaceAll('"', ''),
     })));
     output.push(`mailbox events: ${JSON.stringify(folds)}`);
-    const layout = await events.locator('.disclosure-summary-line').evaluateAll(nodes => nodes.map(node => ({
+    const layout = await events.locator('.disclosure-summary-line').evaluateAll(nodes => nodes.filter(node => !node.closest('details').open).map(node => ({
       height: node.getBoundingClientRect().height,
       lineHeight: parseFloat(getComputedStyle(node).lineHeight),
     })));
@@ -509,6 +509,15 @@ test('golden_viewer_conversation', async ({ context, browser }) => {
   await expect(events.nth(12)).not.toHaveAttribute('open', '');
   await mailboxPage.setViewportSize({ width: 320, height: 568 });
   await captureMailbox('keyboard collapses mailbox detail at narrow phone width');
+  await events.first().locator('summary').tap();
+  await expect(events.first()).toHaveAttribute('open', '');
+  const titleLayout = await events.first().locator('.disclosure-summary-line').evaluate(node => ({
+    height: node.getBoundingClientRect().height,
+    lineHeight: parseFloat(getComputedStyle(node).lineHeight),
+  }));
+  expect(titleLayout.height).toBeGreaterThan(titleLayout.lineHeight);
+  await captureMailbox('touch reveals the complete mailbox title without a report');
+  await events.first().locator('summary').tap();
   await mailboxPage.setViewportSize({ width: 900, height: 900 });
   await captureMailbox('desktop mailbox events stay on one line');
 
@@ -517,6 +526,7 @@ test('golden_viewer_conversation', async ({ context, browser }) => {
   await expect(override.locator('.disclosure-summary-line')).toHaveText([
     '- [P2] Keep the existing mailbox ordering across a live update',
     '- [P3] 支持 Unicode and <script>literal text</script>',
+    '…[overrides truncated]…',
   ]);
   await expect(override.locator('.entry-body')).toBeHidden();
   await mailboxPage.setViewportSize({ width: 320, height: 568 });

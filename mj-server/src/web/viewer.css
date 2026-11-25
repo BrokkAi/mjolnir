@@ -880,6 +880,11 @@ details.transcript-disclosure[open] > summary::before {
   white-space: nowrap;
 }
 
+.transcript-disclosure[open] .disclosure-summary-line {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .transcript-disclosure .entry-time {
   flex: 0 0 auto;
 }

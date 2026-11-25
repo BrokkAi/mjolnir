@@ -12,7 +12,9 @@ Review override notices currently fill the conversation with declined findings, 
 - [x] (2026-11-25 00:28Z) Generalized the shared disclosure description and rendered override summaries through it.
 - [x] (2026-11-25 00:28Z) Extended and verified the transcript and browser goldens for expansion, collapse and updates.
 - [x] Validate the changed surfaces, Rust formatting and Clippy for all three affected crates.
-- [ ] Commit, request review and push to origin/master.
+- [x] Committed the implementation and received the first review.
+- [x] Validated all four review fixes with the focused goldens, producer-to-reader test and affected-crate Clippy.
+- [ ] Commit the review fixes, obtain a clean review and push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -21,11 +23,11 @@ Mailbox disclosure boundaries are already interpreted in `mj-client/src/transcri
 ## Decision Log
 
 - Decision: Use one disclosure per override notice, with one summary line per declined finding and the original message as the expanded body. Rationale: the user asked for the full message on expansion, including reasons and review context, without repeating that context under every finding.
-- Decision: Keep stored notices unchanged and generalize only presentation. Rationale: existing transcripts can use the new rendering immediately, with no worker or store changes.
+- Decision: Preserve the full notice text while making multiline field boundaries unambiguous. Rationale: ordinary existing transcripts can use the new rendering immediately, with no worker or store changes. Newly emitted notices indent all continuation lines so quoted field labels cannot be mistaken for real finding or section boundaries.
 
 ## Outcomes & Retrospective
 
-The TUI shows only declined findings until its arrow or any finding row is clicked. The web uses the same disclosure description with native touch and keyboard expansion. All 34 selected Rust goldens and the browser conversation golden pass without regeneration. Rust formatting and Clippy also pass; commit, review and push remain.
+The TUI shows only declined findings until its arrow or any finding row is clicked. The web uses the same disclosure description with native touch and keyboard expansion. All 34 selected Rust goldens and the browser conversation golden pass without regeneration. Rust formatting and the initial Clippy checks also passed. First review found two daemon test literals missed by the field rename, clipped expanded mailbox titles, ambiguous raw multiline reason boundaries, and a hidden whole-list truncation marker. All four fixes are implemented and their focused checks pass. The notice producer-to-reader test checks quoted field and section labels, and the browser golden checks touch expansion of a long header-only mailbox event.
 
 ## Context and Orientation
 
@@ -62,3 +64,7 @@ Plan created after inspecting the existing mailbox presentation path; no impleme
 Updated 2026-11-25 00:28Z: shared rendering and interaction goldens are complete; recorded the exact passing commands and retained review and publication as remaining work.
 
 Updated 2026-11-25 00:29Z: all local validation passed; ready for the required committed review.
+
+Updated 2026-11-25 00:33Z: implemented all four first-review findings. Expanded web summaries now wrap; notices indent multiline findings and reasons; truncated lists disclose their omission marker; daemon test literals use the generalized field. Extended the producer-to-reader integration test and the existing goldens.
+
+Updated 2026-11-25 00:35Z: the client and TUI goldens and the existing override integration test each report one passing test, without regeneration; the browser conversation golden reports one passed. Clippy passed for client, review host and daemon with all targets, including the previously missed daemon test fixtures. Ready for another committed review.
