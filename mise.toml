@@ -50,6 +50,11 @@ postinstall = "for shell in /opt/ms-playwright/chromium_headless_shell-1234/chro
 "apt:fd-find" = "*"
 "apt:file" = "*"
 "apt:git" = "*"
+# Pre-clone `gh auth git-credential` fallback for images built by older mj
+# versions, which do not populate /opt/mj-image/bin. On current images
+# /opt/mise/shims/gh and /opt/mj-image/bin/gh both precede /usr/bin/gh, so
+# gh 2.105.0 (the [tools] entry above) runs everywhere.
+"apt:gh" = "*"
 "apt:heaptrack" = "*"
 "apt:jq" = "*"
 "apt:lcov" = "*"
