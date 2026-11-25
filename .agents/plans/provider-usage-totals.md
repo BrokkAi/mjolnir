@@ -20,6 +20,7 @@ The terminal's Usage by session dialog currently shows one estimated API-dollar 
 - [x] (2026-11-25 04:51Z) Review the integrated diff, commit on the current branch, and request pre-push review.
 - [x] Address the three accepted review findings: partial quota coverage, weekly boundary readings, and tall-dialog provider height; targeted tests and affected clippy pass.
 - [ ] Complete pre-push review of the fixes.
+- [x] Address second-review quota details: weekly history bounds, stale reset readings, and the inclusive last second; affected backend tests and clippy pass.
 - [ ] Push the reviewed implementation to origin/master.
 
 ## Surprises & Discoveries
@@ -43,6 +44,10 @@ Decision: Measure quota consumption over the report interval from stored snapsho
 Decision: The daemon's `quota_usage` list owns the account membership for measurement. Include idle enabled subscription profiles and unavailable subscription readings, exclude known usage-priced API profiles, and apply the selected profile filter there. Rationale: mixing API accounts into a provider's subscription capacity would turn a measurable percentage into unavailable data; rebuilding membership from current terminal configuration could diverge from the report. Weekly means an unscoped seven-day duration, or a recognized weekly label when duration is absent. Other periods are unavailable in this feature rather than mislabeled weekly. Date/author: 2026-11-25, parent agent.
 
 Decision: Carry incomplete time coverage as `ProfileQuotaUsage.partial` and show `(partial)` on a pooled percentage if any member has incomplete coverage. Use one shared Rust weekly-reading interpretation for both interval measurement and boundary lookup. Derive provider-summary height from the actual header, chart, gaps, footer, and one reserved detail row. Rationale: independent review found that approximation alone did not distinguish a partly observed interval, short-only probes could hide weekly boundary readings, and a fixed height reserve did not account for taller charts. All three findings are accepted. Date/author: 2026-11-25, parent agent.
+
+Decision: Decline per-turn historical provider identity machinery. Provider grouping uses the current configuration of the retained profile, as existing quota pools do. Reconfiguring a profile to another provider within the displayed interval can therefore reattribute earlier turns. Rationale: retained records do not contain historical provider identity; adding it would expand this display request into a persisted accounting-format change. Record this limitation for a separate accounting feature. The second-review finding was explicitly overridden before any subsequent commit. Date/author: 2026-11-25, parent agent.
+
+Decision: Restrict weekly boundary searches and interpolation to one actual weekly allowance period, seven days, on each side of the displayed interval. Treat a probe whose known weekly reset has already elapsed as unreadable in the shared weekly-reading interpretation. Convert the report's inclusive end to an exclusive end before reducing timestamp precision. Rationale: no-weekly profiles otherwise scan their entire lifetime, observations separated by multiple weekly cycles cannot resolve intervening consumption, stale reset counters do not establish a current allowance, and flooring an inclusive hour end discards its final second. These changes need no migration, index, cache or new daemon state. Date/author: 2026-11-25, parent agent.
 
 ## Outcomes & Retrospective
 
@@ -113,3 +118,7 @@ Revised 2026-11-25 after final validation: record successful test counts, exact 
 Revised 2026-11-25 after the first pre-push review: accept partial-coverage, boundary-selection, and tall-layout findings; document shared reading interpretation and explicit coverage metadata.
 
 Revised 2026-11-25 after review-fix validation: 3 quota-history tests, 1 weekly-consumption timing test, 1 server-report test and the affected dashboard-dialog golden pass. The golden includes a 70x30 terminal with twelve long retained-profile summaries that preserves its five-row chart, footer and a visible detail row. Clippy passes over core, client, store, accounts, daemon, server and terminal with all targets and warnings denied. The decisive receipt is `.mj/agents/8568433d9a722742998daf248f1b69d8/partial-validation-receipt.md`; all checks used the earlier exact mbx commands and no broad rerun or live daemon was needed.
+
+Revised 2026-11-25 after the second review: record the declined historical-attribution expansion and the accepted bounded weekly-history and timestamp corrections. Provider grouping remains a view over retained profile names and current provider configuration.
+
+Revised 2026-11-25 after second-review validation: store quota-history tests pass (3), accounts weekly-consumption timing test passes (1), and client/store/accounts/daemon all-target clippy passes with warnings denied. The unchanged terminal interface required no golden rerun. The decisive receipt is `.mj/agents/8568433d9a722742998daf248f1b69d8/round2-validation-receipt.md`. Boundary SQL now limits searches to one documented weekly period per side, stale expired weekly readings are excluded by the shared predicate, and inclusive millisecond report ends are converted to exclusive seconds so the final second is measured.

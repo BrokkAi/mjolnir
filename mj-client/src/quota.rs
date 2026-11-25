@@ -26,6 +26,10 @@ pub fn antigravity_pool_of_window(window: &QuotaWindow) -> Option<AntigravityQuo
         .and_then(AntigravityQuotaPool::of_scope)
 }
 
+/// The length of a weekly allowance, in seconds: the longest stretch over which
+/// consumption of one weekly window is a single cycle.
+pub const WEEKLY_PERIOD_SECONDS: i64 = 7 * 24 * 60 * 60;
+
 /// A quota window reported by a harness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuotaWindow {
@@ -58,7 +62,7 @@ impl QuotaWindow {
     pub fn is_weekly_period(&self) -> bool {
         self.model_scope.is_none()
             && match self.duration_seconds {
-                Some(seconds) => seconds == 7 * 24 * 60 * 60,
+                Some(seconds) => seconds == WEEKLY_PERIOD_SECONDS,
                 None => matches!(
                     self.label.to_ascii_lowercase().as_str(),
                     "week" | "weekly" | "7d"
@@ -78,7 +82,7 @@ impl QuotaWindow {
         is_weekly_quota_window(label)
             || self
                 .duration_seconds
-                .is_some_and(|seconds| seconds >= 7 * 24 * 60 * 60)
+                .is_some_and(|seconds| seconds >= WEEKLY_PERIOD_SECONDS)
     }
 }
 
@@ -257,7 +261,7 @@ impl ProfileQuota {
         }
         self.windows.iter().find(|window| {
             window.model_scope.as_deref() == Some("fable")
-                && window.duration_seconds == Some(7 * 24 * 60 * 60)
+                && window.duration_seconds == Some(WEEKLY_PERIOD_SECONDS)
         })
     }
 

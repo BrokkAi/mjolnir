@@ -54,21 +54,24 @@ fn history_since(
         .collect()
 }
 
-/// The probes that measure consumption over `since..=until`, oldest first: the
-/// nearest probe before `since` that `readable` accepts, every probe inside the
-/// span (readable or not), and the nearest accepted probe after `until`. The
-/// caller decides what a readable probe is (a failed probe or one without the
-/// reading it needs cannot stand for the state at the span's edge), so no
-/// reading semantics live here. Each edge walks the stored probes outward from
-/// the span in `quota_history_profile_time` order and stops at the first
-/// accepted one: no lookback is assumed and no history beyond that probe is
-/// decoded. An edge with no accepted probe is absent, and the caller treats
-/// the span as not bracketed there.
+/// The probes that measure consumption over `since..until` (epoch seconds,
+/// `until` exclusive), oldest first: the nearest probe before `since` that
+/// `readable` accepts, every probe inside the span (readable or not), and the
+/// nearest accepted probe at or after `until`. The caller decides what a
+/// readable probe is (a failed probe or one without the reading it needs cannot
+/// stand for the state at the span's edge), so no reading semantics live here.
+/// Each edge is searched only within `edge_reach` seconds of the span, on
+/// `quota_history_profile_time`, walking outward and stopping at the first
+/// accepted probe; the caller states the reach its measurement is meaningful
+/// over, so nothing older or newer is read or decoded. An edge with no accepted
+/// probe in reach is absent, and the caller treats the span as not bracketed
+/// there.
 pub fn load_quota_history_bracketing(
     identity: &str,
     profile_id: &str,
     since: u64,
     until: u64,
+    edge_reach: u64,
     readable: impl Fn(&ProfileQuota) -> bool,
 ) -> Result<Vec<ProfileQuota>> {
     history_bracketing(
@@ -77,6 +80,7 @@ pub fn load_quota_history_bracketing(
         profile_id,
         since,
         until,
+        edge_reach,
         readable,
     )
 }
@@ -87,18 +91,19 @@ fn history_bracketing(
     profile_id: &str,
     since: u64,
     until: u64,
+    edge_reach: u64,
     readable: impl Fn(&ProfileQuota) -> bool,
 ) -> Result<Vec<ProfileQuota>> {
     let decode = |body: String| -> Result<ProfileQuota> {
         serde_json::from_str(&body).context("decode stored quota probe")
     };
-    let edge = |comparison: &str, order: &str, bound: u64| -> Result<Option<ProfileQuota>> {
+    let edge = |range: &str, order: &str, bounds: [u64; 2]| -> Result<Option<ProfileQuota>> {
         let mut statement = connection.prepare(&format!(
             "SELECT body FROM quota_history
-             WHERE profile_id = ?1 AND identity = ?2 AND sampled_at_epoch_seconds {comparison} ?3
+             WHERE profile_id = ?1 AND identity = ?2 AND {range}
              ORDER BY sampled_at_epoch_seconds {order}, id {order}"
         ))?;
-        let mut rows = statement.query(params![profile_id, identity, bound])?;
+        let mut rows = statement.query(params![profile_id, identity, bounds[0], bounds[1]])?;
         while let Some(row) = rows.next()? {
             let probe = decode(row.get(0)?)?;
             if readable(&probe) {
@@ -107,19 +112,27 @@ fn history_bracketing(
         }
         Ok(None)
     };
-    let before = edge("<", "DESC", since)?;
+    let before = edge(
+        "sampled_at_epoch_seconds < ?3 AND sampled_at_epoch_seconds >= ?4",
+        "DESC",
+        [since, since.saturating_sub(edge_reach)],
+    )?;
     let within = connection
         .prepare(
             "SELECT body FROM quota_history
              WHERE profile_id = ?1 AND identity = ?2
-               AND sampled_at_epoch_seconds >= ?3 AND sampled_at_epoch_seconds <= ?4
+               AND sampled_at_epoch_seconds >= ?3 AND sampled_at_epoch_seconds < ?4
              ORDER BY sampled_at_epoch_seconds ASC, id ASC",
         )?
         .query_map(params![profile_id, identity, since, until], |row| {
             row.get::<_, String>(0)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let after = edge(">", "ASC", until)?;
+    let after = edge(
+        "sampled_at_epoch_seconds >= ?3 AND sampled_at_epoch_seconds <= ?4",
+        "ASC",
+        [until, until.saturating_add(edge_reach)],
+    )?;
     before
         .into_iter()
         .map(Ok)
@@ -359,23 +372,32 @@ mod tests {
             save_report(&mut connection, identity, &probe(at, kind)).unwrap();
         }
         let weekly = |probe: &ProfileQuota| probe.windows.iter().any(|w| w.is_weekly_period());
-        let times = |since, until| {
-            history_bracketing(&connection, "a", "test", since, until, weekly)
+        let times = |since, until, reach| {
+            history_bracketing(&connection, "a", "test", since, until, reach, weekly)
                 .unwrap()
                 .iter()
                 .map(|probe| probe.refreshed_at_epoch_seconds)
                 .collect::<Vec<_>>()
         };
-        // Probes at the span's own edges are inside it, and in-range probes
-        // of every kind stay for the caller to skip.
-        assert_eq!(times(100, 200), [10, 100, 150, 200, 250]);
-        assert_eq!(times(101, 199), [100, 150, 200]);
+        // Probes at the span's start are inside it, those at its exclusive end
+        // are the after edge, and in-range probes of every kind stay for the
+        // caller to skip.
+        assert_eq!(times(100, 201, 1000), [10, 100, 150, 200, 250]);
+        assert_eq!(times(101, 200, 1000), [100, 150, 200]);
         // An edge with no readable probe beyond it is simply absent.
         assert_eq!(
-            times(5, 300),
+            times(5, 301, 1000),
             [10, 50, 90, 95, 100, 150, 200, 210, 220, 250, 260]
         );
-        assert_eq!(times(300, 400), [260]);
-        assert_eq!(times(60, 80), [10, 100]);
+        assert_eq!(times(300, 400, 1000), [260]);
+        assert_eq!(times(60, 80, 1000), [10, 100]);
+        // A readable probe beyond the reach is not used, however near the
+        // nearest readable one inside it is; within the reach it still is. The
+        // reach bounds are inclusive.
+        assert_eq!(times(100, 201, 40), [100, 150, 200]);
+        assert_eq!(times(100, 201, 49), [100, 150, 200, 250]);
+        assert_eq!(times(100, 201, 90), [10, 100, 150, 200, 250]);
+        assert_eq!(times(60, 80, 50), [10, 100]);
+        assert_eq!(times(60, 80, 49), [100]);
     }
 }

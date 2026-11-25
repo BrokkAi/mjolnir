@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use mj_client::quota::{ProfileQuota, QuotaWindow};
+use mj_client::quota::{ProfileQuota, QuotaWindow, WEEKLY_PERIOD_SECONDS};
 use mj_core::usage::pricing::normalize_model;
 
 use crate::database::{CellCostKey, CellCostObservation, canonical_observed_category};
@@ -568,8 +568,8 @@ pub fn quota_usage_profile(
     })
 }
 
-/// Each profile's unscoped weekly quota consumed over `since_ms..until_ms`,
-/// read from `quota_history`. Blocking: one bracketing read per profile. A
+/// Each profile's unscoped weekly quota consumed over `since_ms..=until_ms`
+/// (the report's inclusive span), read from `quota_history`. Blocking: one bracketing read per profile. A
 /// profile with no identity, no measurable weekly reading or an unreadable
 /// history yields `None`, never zero (a failed read is logged).
 pub fn weekly_quota_usage(
@@ -577,7 +577,7 @@ pub fn weekly_quota_usage(
     since_ms: i64,
     until_ms: i64,
 ) -> Vec<mj_core::usage::ProfileQuotaUsage> {
-    let (since, until) = (since_ms.div_euclid(1000), until_ms.div_euclid(1000));
+    let (since, until) = weekly_usage_span(since_ms, until_ms);
     profiles
         .into_iter()
         .map(|profile| {
@@ -588,6 +588,7 @@ pub fn weekly_quota_usage(
                     &profile.profile_id,
                     bounds.0,
                     bounds.1,
+                    WEEKLY_PERIOD_SECONDS as u64,
                     has_weekly_reading,
                 ) {
                     Ok(history) => weekly_consumption(&history, since, until),
@@ -611,8 +612,20 @@ pub fn weekly_quota_usage(
         .collect()
 }
 
+/// A report span in whole seconds, `since` inclusive and `until` exclusive,
+/// from the report's millisecond bounds, whose `until_ms` is inclusive: a
+/// completed hour ends at `HH:59:59.999`, and its last second must count.
+fn weekly_usage_span(since_ms: i64, until_ms: i64) -> (i64, i64) {
+    (
+        since_ms.div_euclid(1000),
+        until_ms.div_euclid(1000).saturating_add(1),
+    )
+}
+
 /// The unscoped weekly reading of a successful probe: the one interpretation
-/// both the history reader's edge search and the measurement use.
+/// both the history reader's edge search and the measurement use. A reading
+/// whose own reset time has passed describes no live weekly window (the
+/// provider has not yet reported the next one), so it is not a reading.
 fn weekly_reading(probe: &ProfileQuota) -> Option<SamplePoint> {
     if probe.error.is_some() {
         return None;
@@ -621,8 +634,15 @@ fn weekly_reading(probe: &ProfileQuota) -> Option<SamplePoint> {
         .windows
         .iter()
         .find(|window| window.is_weekly_period())?;
+    let ts = i64::try_from(probe.refreshed_at_epoch_seconds).unwrap_or(i64::MAX);
+    if window
+        .resets_at_epoch_seconds
+        .is_some_and(|reset| reset <= ts)
+    {
+        return None;
+    }
     Some(SamplePoint {
-        ts: i64::try_from(probe.refreshed_at_epoch_seconds).unwrap_or(i64::MAX),
+        ts,
         used_pct: window_used_pct(window)?,
         resets_at: window.resets_at_epoch_seconds,
     })
@@ -643,20 +663,22 @@ pub struct WeeklyConsumption {
     pub partial: bool,
 }
 
-/// Weekly quota consumed over `since..=until` (epoch seconds), estimated from
-/// the probes around and inside the span.
+/// Weekly quota consumed over `since..until` (epoch seconds, `until`
+/// exclusive), estimated from the probes around and inside the span.
 /// - Consecutive probes that both read the unscoped weekly window give the
 ///   used-percent growth between them; an interval crossing a span edge counts
 ///   in proportion to the part inside, as if use were even, which can over- or
 ///   under-count that edge.
-/// - When the weekly deadline fell inside the interval (`prev < old deadline
-///   <= cur`) and the next deadline is later, only the later reading counts,
-///   spread from the old deadline to that probe. What was used before the
-///   reset is lost, so that part of the span is not covered.
+/// - A probe whose own reset time has passed is no reading (`weekly_reading`),
+///   so a counter left standing after its deadline is never an endpoint.
+/// - When the weekly deadline fell inside the interval (the old deadline is at
+///   or before the later probe) and the next deadline is later, only the later
+///   reading counts, spread from the old deadline to that probe. What was used
+///   before the reset is lost, so that part of the span is not covered.
 /// - Intervals that cannot be read as use count for nothing and are not
-///   covered: a deadline that moved without elapsing (provider jitter), a
-///   deadline already past at the previous probe, and a fall in use with no
-///   reset.
+///   covered: a deadline that moved without elapsing (provider jitter), a fall
+///   in use with no reset, and probes more than one weekly period apart, which
+///   hide whole allowance cycles.
 /// - Nothing is extrapolated before the first reading or past the last, so a
 ///   span ending now is partial.
 ///
@@ -679,14 +701,15 @@ pub fn weekly_consumption(
     let mut consumed_pct = 0.0;
     for pair in readings.windows(2) {
         let (prev, cur) = (&pair[0], &pair[1]);
-        if cur.ts <= prev.ts {
+        if cur.ts <= prev.ts || cur.ts - prev.ts > WEEKLY_PERIOD_SECONDS {
             continue;
         }
         let (from, used) = match (prev.resets_at, cur.resets_at) {
             (Some(old), Some(new)) if (new - old).abs() > RESET_SHIFT_TOLERANCE_SECONDS => {
                 // A reset happened between the probes only if the old deadline
-                // fell inside the interval; otherwise the use cannot be split.
-                if !(prev.ts < old && old <= cur.ts) {
+                // (after the earlier probe, which `weekly_reading` ensures)
+                // fell by the later one; otherwise the use cannot be split.
+                if old > cur.ts {
                     continue;
                 }
                 (old, cur.used_pct)
@@ -1348,10 +1371,46 @@ mod tests {
         assert_eq!(measure(&crossing, 0, 4000), Some((500, true)));
         assert_eq!(measure(&crossing, 3500, 4000), Some((250, false)));
         assert_eq!(measure(&crossing, 0, 3000), None);
-        // A deadline already past at the earlier probe leaves the interval
-        // unattributable; counting the later reading would repeat old use.
+        // A counter left standing after its own deadline is no reading: it
+        // cannot end an interval, so only the use before it is measured and
+        // the elapsed part of the span is partial; with nothing before it,
+        // nothing is measurable.
         let stale = vec![week(4000, 40, reset), week(8000, 5, after_reset)];
         assert_eq!(measure(&stale, 4000, 8000), None);
+        let standing = vec![
+            week(0, 10, reset),
+            week(2000, 15, reset),
+            week(4000, 20, reset),
+        ];
+        assert_eq!(measure(&standing, 0, 4000), Some((500, true)));
+        assert_eq!(measure(&standing, 3000, 4000), None);
+        // Probes more than one weekly period apart hide whole cycles, so the
+        // interval between them is not interpolated.
+        let week_s = WEEKLY_PERIOD_SECONDS;
+        let far = Some(T + 3 * week_s);
+        let apart = vec![week(0, 10, far), week(week_s + 1, 40, far)];
+        assert_eq!(measure(&apart, 0, week_s + 1), None);
+        let exactly = vec![week(0, 10, far), week(week_s, 40, far)];
+        assert_eq!(measure(&exactly, 0, week_s), Some((3000, false)));
+        // The report's span ends at an inclusive millisecond: a completed
+        // hour's last second counts, so a probe pair across the next hour's
+        // start still measures it.
+        let hour_ms = 3_600_000;
+        let hour_start_ms = (T * 1000).div_euclid(hour_ms) * hour_ms + hour_ms;
+        let (since, until) = weekly_usage_span(hour_start_ms, hour_start_ms + hour_ms - 1);
+        assert_eq!(
+            (since, until),
+            (hour_start_ms / 1000, hour_start_ms / 1000 + 3600)
+        );
+        let last_second = vec![
+            sample_report("p1", (until - 1) as u64, None, Some((90, steady))),
+            sample_report("p1", until as u64, None, Some((80, steady))),
+        ];
+        assert_eq!(
+            weekly_consumption(&last_second, since, until)
+                .map(|consumption| (consumption.basis_points, consumption.partial)),
+            Some((1000, true))
+        );
 
         // A deadline that moved before it elapsed is provider jitter, and a
         // fall in use with the same deadline is a top-up: neither is use.
