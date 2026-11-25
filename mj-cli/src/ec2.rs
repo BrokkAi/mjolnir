@@ -1846,12 +1846,30 @@ fn cleanup_record(cloud: &Cloud, record: &Record, root: &Path) -> Result<()> {
     {
         cloud.ec2("delete-key-pair", json!({"KeyPairId":key["KeyPairId"]}))?;
     }
+    retire_host_snapshot_cache(&directory.join("id_ed25519"));
     remove_configuration(record, root, &config_path())?;
     if directory.exists() {
         fs::remove_dir_all(&directory)
             .with_context(|| format!("remove local EC2 keys {}", directory.display()))?;
     }
     Ok(())
+}
+
+/// The destroyed VM took its snapshot cache copies with it, so forget the rows
+/// that would otherwise retry its address until they expire. Never fails the
+/// destroy: the rows stay for the expiry sweep, which backs off the dead host.
+fn retire_host_snapshot_cache(key: &Path) {
+    let data_dir = mj_core::config::data_dir();
+    if mj_core::config::ensure_may_control_store(&data_dir, "retire host snapshot cache").is_err() {
+        return;
+    }
+    match mj_controller::controller::retire_host_snapshot_cache_for_ssh_identity(key) {
+        Ok(0) => {}
+        Ok(retired) => eprintln!("Forgot {retired} snapshot cache copies on the destroyed host."),
+        Err(error) => eprintln!(
+            "Warning: could not forget the destroyed host's snapshot cache copies: {error:#}"
+        ),
+    }
 }
 
 fn remove_configuration(record: &Record, root: &Path, path: &Path) -> Result<()> {
@@ -2646,6 +2664,35 @@ else:
             &root,
         )
         .unwrap();
+        // Snapshot copies cached on the host die with it; another host's stay.
+        let key = records(&root)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .directory(&root)
+            .unwrap()
+            .join("id_ed25519");
+        for (session, identity) in [
+            ("destroyed-host", key.to_string_lossy().into_owned()),
+            ("other-host", "/elsewhere/id_ed25519".to_owned()),
+        ] {
+            let host = format!(
+                "ssh:{}",
+                serde_json::to_string(&mj_core::targets::SshTarget {
+                    destination: "ubuntu@192.0.2.9".into(),
+                    ssh_args: vec!["-i".into(), identity],
+                })
+                .unwrap()
+            );
+            mj_controller::database::record_host_snapshot_cache_entry(
+                session,
+                &host,
+                "sha",
+                "/cache/archive.hel.zip",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
+        }
         destroy(
             DestroyArgs {
                 host: "builder".into(),
@@ -2654,6 +2701,12 @@ else:
             &root,
         )
         .unwrap();
+        let cached: Vec<_> = mj_controller::database::list_all_host_snapshot_cache_entries()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.session_id)
+            .collect();
+        assert_eq!(cached, ["other-host"]);
         for region in ["us-east-1", "us-east-2", "us-west-1", "us-west-2"] {
             assert!(!bin.join(region).join("key.json").exists());
             assert!(!bin.join(region).join("group.json").exists());

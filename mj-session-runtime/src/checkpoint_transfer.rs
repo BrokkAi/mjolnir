@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 ///
 /// Every wrapper this builds keeps the target's stdin attached: the container
 /// engines are invoked with `exec -i` and `ssh` forwards stdin by default.
+///
+/// The spec crosses SSH gzipped. The decompression runs in the SSH shell, so
+/// it works with any worker version.
 pub fn export_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
-    export_command(locator, session_id, EXPORT_SPEC_STDIN)
+    export_command(locator, session_id, EXPORT_SPEC_STDIN).map(CommandSpec::gzip_ssh_stdin)
 }
 
 pub fn suspend_preflight_stdin_command(
@@ -56,6 +59,8 @@ pub fn capture_stdin_command(locator: &TargetLocator, session_id: &str) -> Resul
     )
 }
 
+/// Pack a captured checkpoint by streaming `CheckpointPackSpec` (which carries
+/// `canonical_session`) over stdin, gzipped across SSH.
 pub fn pack_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     checkpoint_stdin_command(
         locator,
@@ -63,6 +68,7 @@ pub fn pack_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<C
         "pack-checkpoint",
         "pack target checkpoint",
     )
+    .map(CommandSpec::gzip_ssh_stdin)
 }
 
 fn checkpoint_stdin_command(
@@ -99,19 +105,17 @@ pub fn export_command(
     )
 }
 
-pub fn restore_command(
-    locator: &TargetLocator,
-    session_id: &str,
-    spec_path: &str,
-) -> Result<CommandSpec> {
-    validate_checkpoint_path(locator, spec_path)?;
+/// Restore by streaming the spec to the worker's standard input, gzipped over
+/// SSH. The worker must be this controller's build: an older `restore-checkpoint`
+/// would read `-` as a file name.
+pub fn restore_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     let root = worker_root(locator, session_id)?;
     let args = vec![
         format!("{root}/hel"),
         "worker".into(),
         "restore-checkpoint".into(),
         "--spec".into(),
-        spec_path.into(),
+        EXPORT_SPEC_STDIN.into(),
     ];
     crate::targets::command_on_locator(
         SshTrafficClass::Bulk,
@@ -120,6 +124,7 @@ pub fn restore_command(
         args,
         "restore target checkpoint",
     )
+    .map(CommandSpec::gzip_ssh_stdin)
 }
 
 #[derive(Debug, Clone)]

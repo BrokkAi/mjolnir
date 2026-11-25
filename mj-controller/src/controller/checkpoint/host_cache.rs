@@ -852,6 +852,30 @@ pub(crate) fn remove_host_cache_file(
     }
 }
 
+/// Forget every `host_snapshot_cache` row for the SSH host reached with
+/// `identity_file`, without touching the host: its VM is gone, so no file can
+/// be removed and a sweep could only retry the dead address. Returns the number
+/// of rows deleted. A machine with no store has none.
+pub fn retire_host_snapshot_cache_for_ssh_identity(identity_file: &Path) -> Result<usize> {
+    if !mj_store::database::database_path().exists() {
+        return Ok(0);
+    }
+    let mut retired = 0;
+    for entry in crate::database::list_all_host_snapshot_cache_entries()? {
+        let Ok(HostCacheTarget::Ssh(ssh)) = parse_host_cache_key(&entry.host) else {
+            continue;
+        };
+        if mj_core::ec2_records::ssh_identity_files(&ssh)
+            .iter()
+            .any(|identity| identity == identity_file)
+            && delete_host_snapshot_cache_entry(entry.id)?
+        {
+            retired += 1;
+        }
+    }
+    Ok(retired)
+}
+
 /// Remove all `host_snapshot_cache` copies belonging to `session_id` (including
 /// copies superseded by earlier suspends).
 ///
@@ -1288,6 +1312,82 @@ mod tests {
             .isolated_store(directory.path())
             .run();
         false
+    }
+
+    /// Destroying an EC2 host forgets exactly the cache rows reached with its
+    /// key, whichever way the key is spelled, and never creates a store.
+    #[test]
+    fn retiring_a_destroyed_hosts_cache_rows_leaves_every_other_host() {
+        if !in_isolated_store(
+            "retiring_a_destroyed_hosts_cache_rows_leaves_every_other_host",
+            "MJ_HOST_CACHE_RETIRE_CHILD",
+        ) {
+            return;
+        }
+        let destroyed = Path::new("/records/aaaa/id_ed25519");
+        assert!(!mj_store::database::database_path().exists());
+        assert_eq!(
+            retire_host_snapshot_cache_for_ssh_identity(destroyed).unwrap(),
+            0
+        );
+        assert!(
+            !mj_store::database::database_path().exists(),
+            "retiring rows on a machine with no store must not create one"
+        );
+
+        let key = |destination: &str, ssh_args: &[&str]| {
+            host_cache_key(&TargetLocator::SshBare {
+                ssh: SshTarget {
+                    destination: destination.into(),
+                    ssh_args: ssh_args.iter().map(ToString::to_string).collect(),
+                },
+                workspace: "/work".into(),
+                worker_id: None,
+            })
+        };
+        let at = Utc::now().to_rfc3339();
+        for (session, host) in [
+            (
+                "sess-spaced",
+                key("a@1.example", &["-i", "/records/aaaa/id_ed25519"]),
+            ),
+            (
+                "sess-glued",
+                key("a@1.example", &["-p", "22", "-i/records/aaaa/id_ed25519"]),
+            ),
+            (
+                "sess-other-key",
+                key("a@1.example", &["-i", "/records/bbbb/id_ed25519"]),
+            ),
+            (
+                "sess-same-name",
+                key("a@1.example", &["-i", "/records/aaaa/id_ed25519.pub"]),
+            ),
+            ("sess-no-key", key("a@1.example", &[])),
+            ("sess-local", "local".to_owned()),
+        ] {
+            record_host_snapshot_cache_entry(session, &host, "sha", "/cache/archive.hel.zip", &at)
+                .unwrap();
+        }
+
+        assert_eq!(
+            retire_host_snapshot_cache_for_ssh_identity(destroyed).unwrap(),
+            2
+        );
+        let remaining: Vec<String> = crate::database::list_all_host_snapshot_cache_entries()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.session_id)
+            .collect();
+        assert_eq!(
+            remaining,
+            [
+                "sess-other-key",
+                "sess-same-name",
+                "sess-no-key",
+                "sess-local"
+            ]
+        );
     }
 
     #[cfg(unix)]
