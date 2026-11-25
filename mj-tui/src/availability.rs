@@ -252,9 +252,8 @@ impl DashboardState {
         let Mode::New(wizard) = &self.mode else {
             return;
         };
-        let (pending, step, target_id, chosen, resolved) = (
+        let (pending, target_id, chosen, resolved) = (
             wizard.profile_selection_request.is_some(),
-            wizard.step,
             wizard.target.clone(),
             wizard.profile.clone(),
             wizard.resolved_profile.clone(),
@@ -262,31 +261,55 @@ impl DashboardState {
         if pending {
             self.invalidate_session_preflight();
         }
-        if step == WizardStep::Launching {
-            // The launch carries the choices it was submitted with.
-            return;
-        }
         let chosen_id = match &chosen {
             ProfileChoice::Profile(id) => Some(id.clone()),
             ProfileChoice::AutoPrimary => None,
         };
+        // A draft in `Launching` has skipped its review and is waiting on the
+        // checks that precede creation. While the choices it holds are still
+        // configured, a check that now calls one unavailable is left to say
+        // so itself, as for any launch under way (#1370); only a choice the
+        // configuration no longer has is reseated.
+        let launching =
+            matches!(&self.mode, Mode::New(wizard) if wizard.step == WizardStep::Launching);
         let first_target = self
             .config
             .targets
             .keys()
             .find(|id| self.target_offered(id))
+            .or_else(|| {
+                launching
+                    .then(|| self.config.targets.keys().next())
+                    .flatten()
+            })
             .cloned();
-        let no_profiles = self.offered_profiles().next().is_none();
+        let no_profiles = if launching {
+            self.config.enabled_profiles().next().is_none()
+        } else {
+            self.offered_profiles().next().is_none()
+        };
         let Some(first_target) = first_target.filter(|_| !no_profiles) else {
             self.close_wizard_without_choices(chosen_id.as_deref(), &target_id, no_profiles);
             return;
         };
-        let profile_gone = self.new_wizard_profile_row(&chosen).is_none();
+        let profile_gone = if launching {
+            match &chosen {
+                ProfileChoice::AutoPrimary => !self.new_wizard_has_auto_primary(),
+                ProfileChoice::Profile(id) => self.config.enabled_profile(id).is_none(),
+            }
+        } else {
+            self.new_wizard_profile_row(&chosen).is_none()
+        };
         // A provider's pick must still belong to the provider it was made for.
-        let resolved_stale = resolved.as_ref().is_some_and(|(id, provider)| {
-            NewWizard::provider_for_profile(self, id).as_ref() != Some(provider)
-        });
-        let target_gone = !self.target_offered(&target_id);
+        let resolved_stale = !launching
+            && resolved.as_ref().is_some_and(|(id, provider)| {
+                NewWizard::provider_for_profile(self, id).as_ref() != Some(provider)
+            });
+        let target_gone = if launching {
+            !self.config.targets.contains_key(&target_id)
+        } else {
+            !self.target_offered(&target_id)
+        };
         let replacement = if profile_gone {
             self.new_wizard_choice_at(0)
         } else {
@@ -310,11 +333,28 @@ impl DashboardState {
         if target_gone {
             wizard.target = first_target;
         }
+        let changed = profile_gone || resolved_stale || target_gone;
+        if changed {
+            // A new-session draft in `Launching` has only skipped its review:
+            // creation is submitted by closing the wizard, so no launch has
+            // been accepted yet. Any check still running described the old
+            // choices; its reply is refused by the generation bump below and
+            // the review asks again.
+            if wizard.step == WizardStep::Launching {
+                wizard.step = WizardStep::Review;
+            }
+            wizard.remote_repositories = None;
+            wizard.remote_preflight_in_flight = false;
+            wizard.remote_preflight_error = None;
+        }
         let gone = return_to_changed_step(
             &mut wizard.step,
             profile_gone || resolved_stale,
             target_gone,
         );
+        if changed {
+            self.invalidate_session_preflight();
+        }
         if let Some(gone) = gone {
             self.report_wizard_choice_gone(gone, chosen_id.unwrap_or_default(), &target_id);
         }

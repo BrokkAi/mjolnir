@@ -59,9 +59,11 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
         }
         WizardStep::Mounts => declare_mount_controls(&mut form, wizard.mounts()),
         WizardStep::Review => {
-            let can_attach = offers_attached_directories(
-                &dashboard.config.targets[&wizard.target_id(dashboard)],
-            );
+            let can_attach = dashboard
+                .config
+                .targets
+                .get(&wizard.target_id(dashboard))
+                .is_some_and(offers_attached_directories);
             let submit_enabled = wizard.declare_review_extras(dashboard, &mut form);
             declare_review_controls(&mut form, can_attach, submit_enabled);
         }
@@ -547,7 +549,11 @@ impl DashboardState {
             Ok(action) => return action,
             Err(wizard) => wizard,
         };
-        let can_attach = offers_attached_directories(&self.config.targets[&wizard.target_id(self)]);
+        let can_attach = self
+            .config
+            .targets
+            .get(&wizard.target_id(self))
+            .is_some_and(offers_attached_directories);
         match id {
             WizardControl::ReviewAttachments => {
                 wizard.note_draft_change(self, DraftChange::AttachmentOpened);
@@ -597,6 +603,9 @@ impl DashboardState {
         mut wizard: W,
     ) -> DashboardAction {
         let target_template_id = wizard.target_id(self);
+        let Some(target) = self.config.targets.get(&target_template_id) else {
+            return self.keep(wizard);
+        };
         match id {
             WizardControl::MountSource if wizard.mounts().source.is_empty() => {
                 wizard.mounts_mut().error =
@@ -606,7 +615,7 @@ impl DashboardState {
             WizardControl::MountSource => {
                 if wizard.mounts().destination.is_empty() {
                     let destination = default_resource_destination(
-                        &self.config.targets[&target_template_id],
+                        target,
                         std::path::Path::new(&wizard.mounts().source),
                         &wizard.mounts().mounts,
                     )
@@ -630,11 +639,8 @@ impl DashboardState {
                 if let Some(source) = source {
                     wizard.mounts_mut().source = source.to_string_lossy().into_owned().into();
                     if wizard.mounts().destination.is_empty() {
-                        let destination = default_resource_destination(
-                            &self.config.targets[&target_template_id],
-                            &source,
-                            &wizard.mounts().mounts,
-                        );
+                        let destination =
+                            default_resource_destination(target, &source, &wizard.mounts().mounts);
                         wizard.mounts_mut().destination =
                             destination.to_string_lossy().into_owned().into();
                     }

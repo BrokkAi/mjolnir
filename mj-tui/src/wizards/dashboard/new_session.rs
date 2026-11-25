@@ -268,7 +268,11 @@ impl DashboardState {
         mut wizard: NewWizard,
     ) -> DashboardAction {
         let target_template_id = wizard.target.clone();
-        if !is_bare_project_target(&self.config.targets[&target_template_id]) {
+        let Some(target) = self.config.targets.get(&target_template_id) else {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        };
+        if !is_bare_project_target(target) {
             if wizard.remote_repositories.is_some() && wizard.remote_preflight_error.is_none() {
                 return self.create_session_action(&wizard);
             }
@@ -397,7 +401,8 @@ impl DashboardState {
             return None;
         }
         let target_template_id = wizard.target.clone();
-        if is_bare_project_target(&self.config.targets[&target_template_id]) {
+        let target = self.config.targets.get(&target_template_id)?;
+        if is_bare_project_target(target) {
             if wizard.selected_worktree_options().is_some() {
                 return None;
             }
@@ -431,7 +436,11 @@ impl DashboardState {
         wizard: &NewWizard,
     ) -> DashboardAction {
         let target_template_id = wizard.target.clone();
-        let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
+        let raw_project = self
+            .config
+            .targets
+            .get(&target_template_id)
+            .is_some_and(is_bare_project_target);
         DashboardAction::CreateSession {
             remember_container_size: wizard.remember_container_size,
             subagents: wizard.subagents.create_selection(),

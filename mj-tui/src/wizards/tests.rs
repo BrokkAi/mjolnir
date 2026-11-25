@@ -2029,6 +2029,90 @@ fn a_provider_reply_asked_before_a_config_reload_never_advances_the_page() {
 }
 
 #[test]
+fn a_target_removed_while_the_review_is_skipped_returns_the_draft_to_its_step_or_closes_it() {
+    let launching = |config: mj_core::config::Config| {
+        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+        ready_open_new_wizard(&mut dashboard);
+        answer_target_checks(&mut dashboard, &[]);
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new");
+        };
+        // The review was skipped: creation is submitted by closing the
+        // wizard, so a draft in `Launching` has not been accepted yet.
+        wizard.step = WizardStep::Launching;
+        wizard.remote_preflight_in_flight = true;
+        dashboard.invalidate_session_preflight();
+        dashboard
+    };
+
+    // One target of several goes: the draft returns to the target page
+    // showing the replacement, and the check that described the old target
+    // is cancelled.
+    let mut dashboard = launching(standard_local_targets_config());
+    let chosen = new_wizard(&dashboard).target.clone();
+    let generation = dashboard.session_preflight_generation();
+    let mut reloaded = (*dashboard.config).clone();
+    reloaded.targets.remove(&chosen);
+    dashboard.set_config(reloaded);
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert_ne!(wizard.target, chosen);
+    assert!(!wizard.remote_preflight_in_flight);
+    assert_ne!(dashboard.session_preflight_generation(), generation);
+    assert!(
+        dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains(&format!("{chosen} is no longer available"))),
+        "{:?}",
+        dashboard.notice()
+    );
+    dashboard.take_prerequisite_check();
+    drawn(&mut dashboard, 140, 40);
+
+    // The last target goes: the wizard closes with the reason.
+    let mut dashboard = launching(standard_local_targets_config());
+    let mut reloaded = (*dashboard.config).clone();
+    reloaded.targets.clear();
+    dashboard.set_config(reloaded);
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    assert!(dashboard.notice().is_some());
+    dashboard.take_prerequisite_check();
+    drawn(&mut dashboard, 140, 40);
+}
+
+#[test]
+fn a_draft_whose_target_vanished_without_a_reconcile_never_panics_in_launching() {
+    // Nothing reconciled this draft, as when a submitted launch outlives its
+    // configuration: the screens that read the target must tolerate its
+    // absence.
+    let mut dashboard = DashboardState::new(
+        standard_local_targets_config(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    ready_open_new_wizard(&mut dashboard);
+    answer_target_checks(&mut dashboard, &[]);
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.target = "removed".into();
+    for step in [
+        WizardStep::Launching,
+        WizardStep::Review,
+        WizardStep::ProjectDirectory,
+    ] {
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new");
+        };
+        wizard.step = step;
+        drawn(&mut dashboard, 140, 40);
+        dashboard.take_prerequisite_check();
+        let wizard = new_wizard(&dashboard);
+        dashboard.create_session_action_without_closing(wizard);
+    }
+}
+
+#[test]
 fn a_profile_that_changes_provider_between_pages_is_rechecked_against_current_membership() {
     use mj_core::config::QuotaProvider;
     let mut dashboard = dashboard_with_session(stopped_session());

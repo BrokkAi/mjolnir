@@ -23,7 +23,7 @@ pub(crate) fn target_resources<'a, W: WizardDraft>(
     if wizard.target_rejection(dashboard, &id).is_some() {
         return None;
     }
-    let target = &dashboard.config.targets[&id];
+    let target = dashboard.config.targets.get(&id)?;
     if mj_core::config::is_container_target(target) {
         Some(ResourcePicker::Container {
             editor: wizard.resource_editor(),

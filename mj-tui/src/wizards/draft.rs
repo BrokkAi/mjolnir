@@ -368,8 +368,12 @@ impl WizardDraft for NewWizard {
     /// A bare project target reviews a directory; every other target reviews
     /// a bundle.
     fn review_back_step(&self, dashboard: &DashboardState) -> WizardStep {
-        let target = &dashboard.config.targets[&self.target];
-        if is_bare_project_target(target) {
+        if dashboard
+            .config
+            .targets
+            .get(&self.target)
+            .is_some_and(is_bare_project_target)
+        {
             WizardStep::ProjectDirectory
         } else {
             WizardStep::Bundle
@@ -841,10 +845,14 @@ impl WizardDraft for NewWizard {
         dashboard: &DashboardState,
         form: &mut Dialog<WizardControl>,
     ) -> bool {
-        let target = &dashboard.config.targets[&self.target];
         // Isolated targets have no worktree choice, so the control only
         // exists for a bare project directory.
-        if is_bare_project_target(target) {
+        if dashboard
+            .config
+            .targets
+            .get(&self.target)
+            .is_some_and(is_bare_project_target)
+        {
             form.declare_with_enabled(
                 WizardControl::CreateManagedWorktree,
                 ControlKind::Checkbox,
@@ -854,10 +862,11 @@ impl WizardDraft for NewWizard {
         }
         declare_sandbox_offer(dashboard, self, form);
         self.subagents.declare(form);
-        if offers_attached_directories(target) {
+        let target = dashboard.config.targets.get(&self.target);
+        if target.is_some_and(offers_attached_directories) {
             declare_review_attachments(form, &self.mounts);
         }
-        let ready = !is_bare_project_target(target)
+        let ready = !target.is_some_and(is_bare_project_target)
             || self.selected_worktree_options().is_some()
             || self.remote_preflight_error.is_some();
         ready && !self.remote_preflight_in_flight && self.subagents.error().is_none()

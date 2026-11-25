@@ -305,7 +305,11 @@ pub(crate) fn render_new_wizard(
     }
     if wizard.step == WizardStep::Review {
         let target_id = wizard.target.clone();
-        let raw_project = is_bare_project_target(&dashboard.config.targets[&target_id]);
+        let raw_project = dashboard
+            .config
+            .targets
+            .get(&target_id)
+            .is_some_and(is_bare_project_target);
         let title = format!(
             " New session · {} review ",
             step_counter(4, 4, target_hidden, wizard)
@@ -387,8 +391,8 @@ pub(crate) fn render_new_wizard(
     if wizard.step == WizardStep::ProjectDirectory {
         let target_id = wizard.target.clone();
         let local = matches!(
-            dashboard.config.targets[&target_id],
-            TargetTemplate::LocalBare
+            dashboard.config.targets.get(&target_id),
+            Some(TargetTemplate::LocalBare)
         );
         let popup = wizard_modal(frame, surfaces, area);
         let width = popup.width.saturating_sub(4);
@@ -853,8 +857,8 @@ pub(crate) fn render_review_wizard(
         conversion,
         sandbox_offer,
     } = view;
-    let target = &dashboard.config.targets[target_id];
-    let can_attach = offers_attached_directories(target);
+    let target = dashboard.config.targets.get(target_id);
+    let can_attach = target.is_some_and(offers_attached_directories);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Profile: ", theme::muted()),
@@ -878,7 +882,10 @@ pub(crate) fn render_review_wizard(
         Line::from(vec![
             Span::styled("Target: ", theme::muted()),
             Span::styled(target_id, Style::default().fg(theme::palette().accent)),
-            Span::styled(format!(" ({})", target_label(target)), theme::muted()),
+            Span::styled(
+                target.map_or_else(String::new, |target| format!(" ({})", target_label(target))),
+                theme::muted(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Compute: ", theme::muted()),
@@ -1377,7 +1384,7 @@ pub(crate) fn render_review_wizard(
             && (remote_repositories.is_some()
                 || !local_changes_excluded
                 || remote_preflight_error.is_some())
-            && (allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. })),
+            && (allocation.is_some() || !matches!(target, Some(TargetTemplate::AwsEc2 { .. }))),
     ));
     Dialog::render_actions(frame, DialogShell::layout(inner, 1).actions, &buttons, form);
     // Paint the active popup last so it overlays the remaining review fields.
