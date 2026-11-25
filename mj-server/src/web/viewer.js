@@ -6934,7 +6934,12 @@ function formatBlockerCleanupPrompt(blockers) {
   return text;
 }
 function blockerResolutionSummary(response) {
-  return `Cleared flags on ${response.cleared_hidden_paths.length} paths; moved ${response.moved_worktrees.length} worktrees; skipped ${response.skipped_worktrees.length} worktrees.`;
+  let text = `Cleared flags on ${response.cleared_hidden_paths.length} paths; moved ${response.moved_worktrees.length} worktrees; skipped ${response.skipped_worktrees.length} worktrees.`;
+  if (response.moved_worktrees?.length) {
+    const moves = response.moved_worktrees.map(m => `${m.from} -> ${m.to}`).join(', ');
+    text += ` Moved: ${moves}.`;
+  }
+  return text;
 }
 
 function confirmSessionSuspension(session, onNotice = () => {}) {

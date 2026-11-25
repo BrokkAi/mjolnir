@@ -3239,11 +3239,14 @@ pub fn resolve_safe_suspend_blockers(
                     env: vec![],
                 },
             )?;
-            ensure!(
-                output.status == 0,
-                "{}",
-                git_failure("move external worktree inside clone", &output)
-            );
+            if output.status != 0 {
+                result.skipped_worktrees.push(format!(
+                    "{} ({})",
+                    tree.path.display(),
+                    git_failure("move external worktree inside clone", &output)
+                ));
+                continue;
+            }
             result.moved_worktrees.push(MovedWorktree {
                 from: tree.path.clone(),
                 to: destination,

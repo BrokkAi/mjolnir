@@ -565,12 +565,22 @@ pub struct ResolveSuspendBlockersResponse {
 }
 impl ResolveSuspendBlockersResponse {
     pub fn summary(&self) -> String {
-        format!(
+        let mut text = format!(
             "Cleared flags on {} paths; moved {} worktrees; skipped {} worktrees.",
             self.cleared_hidden_paths.len(),
             self.moved_worktrees.len(),
             self.skipped_worktrees.len()
-        )
+        );
+        if !self.moved_worktrees.is_empty() {
+            let moves = self
+                .moved_worktrees
+                .iter()
+                .map(|m| format!("{} -> {}", m.from, m.to))
+                .collect::<Vec<_>>()
+                .join(", ");
+            text.push_str(&format!(" Moved: {moves}."));
+        }
+        text
     }
 }
 

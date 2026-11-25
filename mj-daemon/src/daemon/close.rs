@@ -70,6 +70,17 @@ impl RuntimeState {
                     error.holders.join(", ")
                 ))
             })?;
+        let current = self.runtime_publication()?;
+        if current
+            .verdicts
+            .get(&session_id)
+            .is_some_and(|verdict| verdict.active_work)
+        {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "Cannot fix suspend blockers while the session has an active turn; wait for the turn to finish or interrupt it first.",
+            )
+            .into());
+        }
         let runtime = Arc::clone(self);
         let response = super::terminal_operations::process_probe(None, move |executor| {
             let _work = work;
