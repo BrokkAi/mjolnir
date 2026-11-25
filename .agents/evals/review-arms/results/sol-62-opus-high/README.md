@@ -139,22 +139,28 @@ historical frontier and retain the original per-configuration sample caps.
 
 ![Single-model yield versus workflow cost, including historical Claude and partial DSF estimates](review-single-model-cost.png)
 
-Yield is normalized to Terra 6.1/high = 100 within each source study. Current
-measurements use filled markers; historical Claude and partial-cohort DSF
-estimates use hollow markers. These series count different source outcomes:
+The chart uses **separate panels and cost axes**: current single reviews in
+**dollars per review**, historical revision workflows in **dollars per PR**.
+Each panel has its own Terra 6.1/high = 100 yield baseline and cost-sorted key;
+there is no shared ranking of the two cost units. Current measurements use
+filled markers; historical and partial-cohort DSF estimates use hollow markers.
+These series count different source outcomes:
 
 - **Current study:** the single-reviewer rows of [pareto.csv](pareto.csv), from
   the blinded Opus `verify9` round. Yield averages one reviewer's confirmed
   group count within each diff, then sums across all 70 diffs. Its denominator
   is the Terra 6.1/high total on those same 70 diffs. Costs are estimated
   reviewer-turn API costs; Greptile uses its per-review service prices.
+  Greptile is a service reference whose repository context could not be pinned
+  to each diff's commit; the PNG legend and caption state that limitation.
 - **Claude historical estimates:** the earlier **mr-boxington PR/revision
   reviewer study**, preserved as `reviewcharts/data.json`, `native.csv` and
   `README.txt`. Yield is the mean material-root total, deduplicated within each
   PR and pass across follow-up revisions. Its denominator is Terra 6.1/high's
   material-root total from that same historical cohort. The chart includes its
   matching **historical Terra/high** reference at index 100 and **$0.103 per PR
-  workflow**, alongside current Terra/high at $0.044 per diff. The cost unit is the
+  workflow** in the historical panel. Current Terra/high at $0.044 per review
+  appears in the current panel, on its separate cost axis. The historical cost unit is the
   **full PR workflow**, including follow-up reviews. For Terra/high, Opus/high, Sonnet/high
   and Haiku/high, estimate that workflow at the observed initial-review mean
   cost times **95 revision reviews / 47 PRs**. This charges every follow-up but
