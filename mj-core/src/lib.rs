@@ -1,5 +1,6 @@
 //! Mjolnir shared contracts, formats, pure projections and reusable utilities.
 
+pub mod claude_mcp;
 pub mod clock;
 
 pub mod acp;

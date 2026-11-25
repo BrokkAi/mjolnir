@@ -2029,6 +2029,7 @@ pub(super) async fn serve_session(
             CommandRequest::ReloadLaunchConfig {
                 launch_config,
                 subagent_mcp_socket,
+                claude_mcp_socket,
                 managed_subagent,
                 environment,
                 command,
@@ -2044,6 +2045,7 @@ pub(super) async fn serve_session(
                 return Ok(Some(SessionRestart::ReloadLaunchConfig {
                     launch_config,
                     subagent_mcp_socket,
+                    claude_mcp_socket,
                     managed_subagent,
                     environment,
                     command,

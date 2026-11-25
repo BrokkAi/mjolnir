@@ -1155,6 +1155,11 @@ pub(super) async fn apply_harness_reload_transition(
             committed: staged,
             environment,
             subagent_mcp_socket: socket,
+            claude_mcp_socket: crate::acp::launch_claude_mcp_socket(
+                &root,
+                launch_config.harness,
+                registered,
+            ),
             managed_subagent: capabilities.managed_subagent,
         })
     } else {

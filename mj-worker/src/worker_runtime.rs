@@ -655,3 +655,6 @@ mod startup_record_tests {
 
 #[cfg(all(test, unix))]
 pub(crate) mod relay_tests;
+
+#[cfg(unix)]
+pub(crate) mod claude_mcp;

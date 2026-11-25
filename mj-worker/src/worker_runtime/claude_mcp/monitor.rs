@@ -1,0 +1,225 @@
+use super::*;
+use std::process::Stdio;
+use tokio::io::AsyncReadExt;
+pub(super) struct Monitor {
+    pub pgid: i32,
+    pub cancel: CancellationToken,
+    pub view: Value,
+    pub events: Arc<AtomicU64>,
+    pub done: tokio::sync::watch::Receiver<bool>,
+}
+pub(super) fn kill(pgid: i32, signal: i32) {
+    if unsafe { libc::killpg(pgid, signal) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!(%error,pgid,"signal monitor group failed");
+        }
+    }
+}
+pub(super) fn list(s: &Service) -> Value {
+    json!({"monitors":s.monitors.lock().unwrap().values().map(|m|{let mut v=m.view.clone();v["events_emitted"]=json!(m.events.load(Ordering::Relaxed));v}).collect::<Vec<_>>()})
+}
+pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
+    let description = required(&a, "description")?;
+    let command = required(&a, "command")?;
+    let timeout = if a["persistent"].as_bool().unwrap_or(false) {
+        0
+    } else {
+        a["timeout_ms"].as_u64().unwrap_or(300_000)
+    };
+    let task_id = id();
+    let mut registry = s.monitors.lock().unwrap();
+    anyhow::ensure!(!s.cancel.is_cancelled(), "service is shutting down");
+    let mut child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .current_dir(&s.cwd)
+        .env_clear()
+        .envs(&s.environment)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pgid = child.id().context("monitor PID missing")? as i32;
+    let cancel = s.cancel.child_token();
+    let events = Arc::new(AtomicU64::new(0));
+    let (done_tx, done) = tokio::sync::watch::channel(false);
+    let view = json!({"task_id":task_id,"description":description,"command":command,"started_at_ms":chrono::Utc::now().timestamp_millis(),"timeout_ms":timeout,"persistent":timeout==0});
+    registry.insert(
+        task_id.clone(),
+        Monitor {
+            pgid,
+            cancel: cancel.clone(),
+            view: view.clone(),
+            events: events.clone(),
+            done,
+        },
+    );
+    drop(registry);
+    let s = s.clone();
+    mj_core::runtime::spawn(async move {
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let out_s = s.clone();
+        let out_id = task_id.clone();
+        let output = mj_core::runtime::spawn(async move {
+            let mut buf = [0; 4096];
+            let mut batch = Vec::new();
+            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                let mut flush = false;
+                let end = tokio::select! {r=stdout.read(&mut buf)=>match r {Ok(0)=>true,Ok(n)=>{batch.extend_from_slice(&buf[..n]);false},Err(error)=>{tracing::warn!(%error,"monitor stdout failed");true}},_=tick.tick()=>{flush=true;false}};
+                if !batch.is_empty() && (end || batch.len() >= 16384 || flush) {
+                    out_s.deliver_wake(
+                        &out_id,
+                        format!(
+                            "[mj-claude monitor {out_id}: {description}]\n{}",
+                            String::from_utf8_lossy(&batch)
+                        ),
+                    );
+                    events.fetch_add(1, Ordering::Relaxed);
+                    batch.clear();
+                }
+                if end {
+                    break;
+                }
+            }
+        });
+        let errors = mj_core::runtime::spawn(async move {
+            let mut tail = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        tail.extend_from_slice(&buf[..n]);
+                        if tail.len() > 4096 {
+                            tail.drain(..tail.len() - 4096);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error,"monitor stderr failed");
+                        break;
+                    }
+                }
+            }
+            tail
+        });
+        let deadline = async {
+            if timeout == 0 {
+                std::future::pending::<()>().await
+            } else {
+                tokio::time::sleep(Duration::from_millis(timeout)).await
+            }
+        };
+        let (status, stopped, timed_out) = tokio::select! {_=cancel.cancelled()=>{kill(pgid,libc::SIGTERM);kill(pgid,libc::SIGKILL);(child.wait().await,true,false)},_=deadline=>{kill(pgid,libc::SIGTERM);kill(pgid,libc::SIGKILL);(child.wait().await,false,true)},r=child.wait()=>(r,false,false)};
+        // The shell may exit before descendants close inherited pipes.
+        kill(pgid, libc::SIGKILL);
+        if let Err(error) = output.await {
+            tracing::error!(%error,"monitor output task failed");
+        }
+        let tail = match errors.await {
+            Ok(t) => t,
+            Err(error) => {
+                tracing::error!(%error,"monitor stderr task failed");
+                Vec::new()
+            }
+        };
+        s.monitors.lock().unwrap().remove(&task_id);
+        if !stopped && !cancel.is_cancelled() {
+            s.deliver_wake(
+                &task_id,
+                format!(
+                    "[mj-claude monitor {task_id}] {}{}",
+                    if timed_out {
+                        "timed out".into()
+                    } else {
+                        format!("exited: {status:?}")
+                    },
+                    if status.as_ref().is_ok_and(|v| v.success()) {
+                        String::new()
+                    } else {
+                        format!("\n{}", String::from_utf8_lossy(&tail))
+                    }
+                ),
+            );
+        }
+        let _ = done_tx.send(true);
+    });
+    Ok(view)
+}
+pub(super) async fn stop(s: &Service, id: &str) -> Result<Value> {
+    let mut done = {
+        let mut map = s.monitors.lock().unwrap();
+        let m = map.remove(id).context("unknown monitor")?;
+        m.cancel.cancel();
+        kill(m.pgid, libc::SIGTERM);
+        kill(m.pgid, libc::SIGKILL);
+        m.done
+    };
+    if !*done.borrow() {
+        let _ = done.changed().await;
+    }
+    Ok(json!({"task_id":id,"stopped":true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn claude_mcp_monitor_stop_and_drop_kill_descendants() {
+        for explicit in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let relay = Arc::new(RelayCell::new(
+                crate::relay::DurableRelay::open(root.path(), "test-session", "test").unwrap(),
+            ));
+            let (tx, _rx) = mpsc::channel(100);
+            let guard = start_claude_mcp_service(
+                root.path(),
+                root.path().into(),
+                std::env::vars().collect(),
+                HarnessKind::Codex,
+                relay,
+                tx,
+                &tokio::runtime::Handle::current(),
+            )
+            .unwrap();
+            let result=start(&guard.service,json!({"description":"descendant","command":"sleep 30 & echo $! > descendant.pid; wait","persistent":true})).unwrap();
+            let file = root.path().join("descendant.pid");
+            let pid = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(s) = tokio::fs::read_to_string(&file).await
+                        && let Ok(pid) = s.trim().parse::<i32>()
+                    {
+                        break pid;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if explicit {
+                stop(&guard.service, result["task_id"].as_str().unwrap())
+                    .await
+                    .unwrap();
+            }
+            drop(guard);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let dead = unsafe { libc::kill(pid, 0) } < 0;
+                    // Linux may retain an orphan zombie until PID 1 reaps it: it is no longer running.
+                    let zombie = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
+                        .await
+                        .is_ok_and(|s| s.split_whitespace().nth(2) == Some("Z"));
+                    if dead || zombie {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+}

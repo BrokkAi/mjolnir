@@ -152,6 +152,7 @@ struct RunningHarness {
     commands: mpsc::Sender<CommandRequest>,
     _reviewer: Arc<ReviewCapture>,
     subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
+    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpShutdownGuard>,
     _subagents: Option<super::subagents::SubagentEndpoint>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     shell_cleanup: tokio_util::task::TaskTracker,
@@ -184,6 +185,7 @@ enum PreparationStop {
 }
 
 struct HarnessPreparationSetup {
+    dispatch_wake: mpsc::Sender<()>,
     shared_subagents: SharedSubagents,
     antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     root: PathBuf,
@@ -232,6 +234,7 @@ impl PreparationStepBudget {
 }
 
 struct AcpPreparationSetup {
+    dispatch_wake: mpsc::Sender<()>,
     shared_subagents: SharedSubagents,
     root: PathBuf,
     config: WorkerLaunchConfig,
@@ -259,6 +262,7 @@ struct PreparedAcpSetup {
     reviewer: Arc<ReviewCapture>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
+    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpShutdownGuard>,
     acp_spec: LaunchSpec,
     shell_cleanup: tokio_util::task::TaskTracker,
     managed_cache_root: Option<PathBuf>,
@@ -273,6 +277,7 @@ struct StartedBridgeTasks {
     commands: Option<mpsc::Sender<CommandRequest>>,
     reviewer: Option<Arc<ReviewCapture>>,
     subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
+    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpShutdownGuard>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     shell_cleanup: Option<tokio_util::task::TaskTracker>,
 }
@@ -293,6 +298,7 @@ impl StartedBridgeTasks {
                 .expect("ACP command sender was prepared"),
             _reviewer: self.reviewer.take().expect("reviewer was prepared"),
             subagent_socket_guard: self.subagent_socket_guard.take(),
+            claude_mcp_guard: self.claude_mcp_guard.take(),
             _subagents: self.subagents.take(),
             shell_cleanup: self
                 .shell_cleanup
@@ -324,6 +330,7 @@ impl Drop for StartedBridgeTasks {
 
 fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     let AcpPreparationSetup {
+        dispatch_wake,
         shared_subagents,
         root,
         config,
@@ -362,6 +369,20 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         primary_relay: relay.clone(),
         operation: tokio::sync::Mutex::new(()),
     });
+    let claude_mcp_guard =
+        if mj_core::claude_mcp::ClaudeMcpCapabilities::for_harness(config.harness).is_empty() {
+            None
+        } else {
+            Some(super::claude_mcp::start_claude_mcp_service(
+                &root,
+                config.cwd.clone(),
+                session_environment.clone(),
+                config.harness,
+                relay.clone(),
+                dispatch_wake,
+                &runtime,
+            )?)
+        };
     let subagent_socket_guard = Some(SharedSubagentsShutdownGuard(shared_subagents.clone()));
     let subagents = if subagent_role.is_some() {
         Some(shared_subagents.ensure_serving(
@@ -455,6 +476,11 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         subagent_policy: crate::acp::launch_subagent_policy(&config),
         managed_subagent,
         instruction_role,
+        claude_mcp_socket: crate::acp::launch_claude_mcp_socket(
+            &root,
+            config.harness,
+            profile_registration,
+        ),
         subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
             &root,
             &config,
@@ -487,6 +513,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         reviewer,
         subagents,
         subagent_socket_guard,
+        claude_mcp_guard,
         acp_spec,
         shell_cleanup,
         managed_cache_root,
@@ -561,6 +588,7 @@ fn start_bridge(
         reviewer,
         subagents,
         subagent_socket_guard,
+        claude_mcp_guard,
         acp_spec,
         shell_cleanup,
         managed_cache_root,
@@ -587,6 +615,7 @@ fn start_bridge(
         commands: Some(commands_tx.clone()),
         reviewer: Some(reviewer),
         subagent_socket_guard,
+        claude_mcp_guard,
         subagents,
         shell_cleanup: Some(shell_cleanup),
     };
@@ -854,6 +883,7 @@ pub struct AppliedReloadRuntime {
     pub committed: bool,
     pub environment: BTreeMap<String, String>,
     pub subagent_mcp_socket: Option<crate::acp::SubagentMcpSocket>,
+    pub claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
     pub managed_subagent: bool,
 }
 
@@ -1223,6 +1253,11 @@ async fn restart_harness_in_place_response(
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
+            claude_mcp_socket: crate::acp::launch_claude_mcp_socket(
+                relay_root,
+                launch_config.harness,
+                profile_registration,
+            ),
             subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
                 relay_root,
                 &launch_config,
@@ -2098,6 +2133,7 @@ pub async fn run_daemon_owned(
     let _abort_clients_on_drop = AbortTaskOnDrop(client_task.abort_handle());
 
     let preparation_setup = HarnessPreparationSetup {
+        dispatch_wake: dispatch_wake_tx.clone(),
         shared_subagents: shared_subagents.clone(),
         antigravity_refresh: antigravity_refresh_rx,
         root: root.clone(),
@@ -2226,6 +2262,7 @@ pub async fn run_daemon_owned(
         acp_shutdown,
         commands: acp_commands_tx,
         subagent_socket_guard,
+        claude_mcp_guard,
         harness_gc,
         shell_cleanup,
         _managed_harness,
@@ -2345,6 +2382,7 @@ pub async fn run_daemon_owned(
     shell_cleanup.close();
     shell_cleanup.wait().await;
     drop(subagent_socket_guard);
+    drop(claude_mcp_guard);
     if let Some(task) = harness_gc {
         task.abort();
     }
@@ -3112,7 +3150,7 @@ async fn apply_profile_configuration(
                 .await?;
             false // OpenCode receives its MCP servers through ACP.
         }
-        HarnessKind::Kimi if subagent_role.is_some() => {
+        HarnessKind::Kimi => {
             let budget = preparation_step(
                 root,
                 status,
@@ -3126,23 +3164,27 @@ async fn apply_profile_configuration(
                 .map_err(|message| anyhow::anyhow!("{message}"))?
                 .home
                 .clone();
-            let root = root.to_owned();
-            let session_id = config.session_id.clone();
-            let role = subagent_role.context("Kimi session has no MCP role")?;
-            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-                if step_cancel.is_cancelled() {
-                    bail!("preparation cancelled before configuring the Kimi profile");
-                }
-                super::subagents::configure_kimi_subagent_mcp(
-                    &root,
-                    &session_id,
-                    &home,
-                    role,
-                    review_tools,
-                )
-            })
-            .await?;
-            true
+            if super::subagents::private_staged_home(root, &config.session_id, &home) {
+                let root = root.to_owned();
+                let session_id = config.session_id.clone();
+                let role = subagent_role;
+                bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                    if step_cancel.is_cancelled() {
+                        bail!("preparation cancelled before configuring the Kimi profile");
+                    }
+                    super::subagents::configure_kimi_subagent_mcp(
+                        &root,
+                        &session_id,
+                        &home,
+                        role,
+                        review_tools,
+                    )
+                })
+                .await?;
+                true
+            } else {
+                false
+            }
         }
         _ => false,
     };
@@ -3490,6 +3532,7 @@ async fn prepare_and_start_harness(
     cancel: &CancellationToken,
 ) -> Result<RunningHarness> {
     let HarnessPreparationSetup {
+        dispatch_wake,
         shared_subagents,
         antigravity_refresh,
         root: root_path,
@@ -3537,6 +3580,7 @@ async fn prepare_and_start_harness(
     )
     .await?;
     let acp_setup = AcpPreparationSetup {
+        dispatch_wake,
         shared_subagents,
         root: root.to_owned(),
         config,
@@ -3614,6 +3658,7 @@ async fn shutdown_running_harness(mut running: RunningHarness) {
     running.shell_cleanup.close();
     running.shell_cleanup.wait().await;
     drop(running.subagent_socket_guard);
+    drop(running.claude_mcp_guard);
     if let Some(task) = running.harness_gc {
         task.abort();
     }
@@ -6488,6 +6533,7 @@ mod preparation_tests {
         let acceptor = mj_core::runtime::spawn(async move {
             let Some(CommandRequest::ReloadLaunchConfig {
                 subagent_mcp_socket,
+                claude_mcp_socket: _,
                 managed_subagent,
                 resolved,
                 ..

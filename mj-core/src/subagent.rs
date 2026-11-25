@@ -1201,6 +1201,7 @@ pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 /// The name of the separate MCP server that offers the before-push review
 /// tools, so they reach the model as `mcp__mj-review__<tool>`. Claude loads
 /// its tools on demand because they are needed only when a push is near.
+pub use crate::claude_mcp::CLAUDE_MCP_SERVER;
 pub const REVIEW_MCP_SERVER: &str = "mj-review";
 
 /// The tools the review server lists, in the order it lists them.

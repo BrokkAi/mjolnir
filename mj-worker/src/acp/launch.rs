@@ -147,6 +147,27 @@ pub(crate) fn launch_extra_mcp_servers(
 }
 
 #[cfg(unix)]
+pub(crate) fn launch_claude_mcp_socket(
+    root: &Path,
+    harness: HarnessKind,
+    profile_registration: bool,
+) -> Option<ClaudeMcpSocket> {
+    if mj_core::claude_mcp::ClaudeMcpCapabilities::for_harness(harness).is_empty() {
+        return None;
+    }
+    Some(ClaudeMcpSocket {
+        path: root.join(crate::worker_runtime::claude_mcp::CLAUDE_MCP_SOCKET),
+        profile_registration,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeMcpSocket {
+    pub path: PathBuf,
+    pub profile_registration: bool,
+}
+
+#[cfg(unix)]
 pub(crate) fn launch_subagent_mcp_socket(
     root: &std::path::Path,
     config: &mj_core::worker_launch::WorkerLaunchConfig,
@@ -202,6 +223,7 @@ pub struct LaunchSpec {
     pub instruction_role: Option<InstructionRole>,
     /// Private Mjolnir socket: parent delegation or child handback.
     pub subagent_mcp_socket: Option<SubagentMcpSocket>,
+    pub claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
     /// The supervisor spec the bridge command reads, when this launch has
     /// one. It is rewritten from `accepted_config` before every bridge start,
     /// so a harness that can only take a selector before it opens a session
@@ -426,6 +448,21 @@ pub(super) fn session_request_meta(
     )]))
 }
 
+fn claude_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
+    let socket = spec.claude_mcp_socket.as_ref()?;
+    let capabilities = mj_core::claude_mcp::ClaudeMcpCapabilities::for_harness(spec.harness);
+    if socket.profile_registration || capabilities.is_empty() {
+        return None;
+    }
+    let worker = std::env::current_exe().expect("locate worker for Claude MCP");
+    Some(McpServer::Stdio(approve_owned_mcp(
+        spec,
+        McpServerStdio::new(mj_core::claude_mcp::CLAUDE_MCP_SERVER, worker).args(
+            mj_core::claude_mcp::ClaudeMcpCapabilities::server_args(&socket.path, spec.harness),
+        ),
+    )))
+}
+
 /// The reviewer's configured MCP servers, for harnesses that accept a server
 /// over ACP. Claude and Kimi read their staged profile instead, which the
 /// controller writes while staging the reviewer.
@@ -447,6 +484,7 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     };
     servers.extend(subagent_acp_mcp(spec));
     servers.extend(review_acp_mcp(spec));
+    servers.extend(claude_acp_mcp(spec));
     servers
 }
 
@@ -537,6 +575,14 @@ pub(super) fn owned_acp_mcp_tools(spec: &LaunchSpec) -> Vec<(String, Vec<String>
     if let Some(McpServer::Stdio(server)) = review_acp_mcp(spec) {
         owned.push((server.name, names(mj_core::subagent::REVIEW_MCP_TOOLS)));
     }
+    if let Some(McpServer::Stdio(server)) = claude_acp_mcp(spec) {
+        owned.push((
+            server.name,
+            names(
+                &mj_core::claude_mcp::ClaudeMcpCapabilities::for_harness(spec.harness).tool_names(),
+            ),
+        ));
+    }
     owned
 }
 
@@ -562,8 +608,9 @@ const ANTIGRAVITY_PROJECT_ID: &str = "default-cli-project";
 
 /// Every server name Mjolnir may register, so a grant left by an earlier
 /// launch for a server this launch no longer registers is removed.
-const OWNED_MCP_SERVERS: [&str; 3] = [
+const OWNED_MCP_SERVERS: [&str; 4] = [
     MEMORY_MCP_SERVER,
+    mj_core::claude_mcp::CLAUDE_MCP_SERVER,
     mj_core::subagent::SUBAGENT_MCP_SERVER,
     mj_core::subagent::REVIEW_MCP_SERVER,
 ];
