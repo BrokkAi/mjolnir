@@ -124,7 +124,9 @@ impl RuntimeState {
         let runtime = self.runtime_publication()?;
         if matches!(
             target,
-            NotificationDismissal::Question(_) | NotificationDismissal::Failure(_)
+            NotificationDismissal::Question(_)
+                | NotificationDismissal::Failure(_)
+                | NotificationDismissal::Stack { .. }
         ) && runtime.metadata.notification_dismissals.get(&session_id) != Some(&target)
         {
             return Err(mj_core::refusal::Refusal::precondition(
@@ -155,18 +157,13 @@ impl RuntimeState {
             }
             NotificationDismissal::ReadThrough(through) => (Some(through), None),
             NotificationDismissal::Stack { revision } => {
-                let card = runtime
-                    .metadata
-                    .notification_cards
-                    .as_ref()
-                    .and_then(|cards| cards.get(&session_id))
-                    .filter(|card| card.dismissal.as_ref() == Some(&target))
-                    .ok_or_else(|| {
-                        mj_core::refusal::Refusal::precondition(
-                            "notification stack is no longer current",
-                        )
-                    })?;
-                let through = card
+                let stack = &runtime
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|view| view.operational.as_deref())
+                    .context("notification stack session missing")?
+                    .notification_stack;
+                let through = stack
                     .entries
                     .iter()
                     .filter(|entry| entry.kind == NotificationKind::Important)
