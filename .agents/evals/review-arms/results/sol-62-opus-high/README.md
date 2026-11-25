@@ -1,5 +1,9 @@
 # Sol 6.2 reviewer repeats with Opus 5.5 high verification
 
+The [updated combination charts](../sol-62-high/combo-pricing/README.md) use
+verify10, add Sol 6.2/high and the newly verified Hydrogen/Kimi/Ember prices.
+The charts and tables below preserve the earlier verify9 result.
+
 On the same 70 diffs, one Sol 6.2 medium reviewer found **213.67** distinct
 Opus-confirmed issues in expectation. One Sol 6.2 low reviewer found
 **134.67**, and three independent low reviewers found **179.00** together.
