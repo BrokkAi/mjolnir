@@ -119,9 +119,10 @@ pub use mj_session_runtime::host_git_config::{
     controller_git_identity, set_controller_git_identity,
 };
 pub use worker_binary::{
-    ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
-    profile_upload_generation, recorded_exit_reason, refresh_target_worker_binary_if_stale,
-    run_control_command, shared_content_ssh, worker_source_problem,
+    ControlWorker, image_worker_label, prepare_recovery_worker_binary,
+    prestage_host_container_worker, prewarm_profile_content, profile_upload_generation,
+    recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
+    shared_content_ssh, worker_source_problem,
 };
 
 pub use checkpoint::{

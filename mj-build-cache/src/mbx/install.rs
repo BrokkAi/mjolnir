@@ -223,6 +223,7 @@ struct PreparedMbx {
     program: PathBuf,
     kind: MbxInstallKind,
     staged: Option<PathBuf>,
+    ssh_shim_dir: Option<PathBuf>,
 }
 
 impl Drop for PreparedMbx {
@@ -270,18 +271,104 @@ fn prepare_mbx_with(
 ) -> Result<PreparedMbx> {
     let host = CacheHost::for_machine(machine)
         .context("this machine has no persistent container host where mbx can be installed")?;
-    ensure!(
-        host.platform(executor)? == HostPlatform::Linux,
-        "mbx can only be installed on a Linux container host"
-    );
-    let triple = host_architecture(&host, executor)?;
-    let home = match home_override {
-        Some(home) => home.to_path_buf(),
-        None => canonical_home(&host, executor)?,
-    };
+    let (triple, home, existing, ssh_shim_dir) = if host.ssh().is_some() {
+        let script = format!(
+            r#"{}
+probe platform uname -sm
+probe arch uname -m
+probe home sh -c 'set -e; cd -- "$HOME" && pwd -P; data_home=${{XDG_DATA_HOME:-$HOME/.local/share}}; case "$data_home" in /*) ;; *) data_home=$HOME/.local/share ;; esac; data_home=${{data_home%/}}; [ -n "$data_home" ] || data_home=/; printf "%s/mbx/bin\n" "$data_home"'
+probe native sh -c {}
+exit 0"#,
+            mj_targets::targets::PROBE_HELPER_SH,
+            shell_quote(super::NATIVE_VERSION_SCRIPT)
+        );
+        let command = host.shell_command(
+            &script,
+            "hel-mbx-discover",
+            [],
+            "discover the mbx installation host",
+        );
+        let output = checked(executor.execute(&command)?, &command)?;
+        let probes = mj_targets::targets::parse_framed_probes(
+            &output.stdout,
+            mj_targets::targets::DEFAULT_PROBE_FRAMES,
+        );
+        let get = |key: &str| -> Result<&CommandOutput> {
+            probes
+                .get(key)
+                .with_context(|| format!("missing mbx discovery probe {key}"))
+        };
+        let platform = get("platform")?;
+        ensure!(
+            platform.status == 0,
+            "detect mbx host platform failed with status {}: {}",
+            platform.status,
+            String::from_utf8_lossy(&platform.stderr).trim()
+        );
+        ensure!(
+            String::from_utf8_lossy(&platform.stdout).starts_with("Linux "),
+            "mbx can only be installed on a Linux container host"
+        );
+        let arch = get("arch")?;
+        ensure!(
+            arch.status == 0,
+            "detect mbx host architecture failed with status {}: {}",
+            arch.status,
+            String::from_utf8_lossy(&arch.stderr).trim()
+        );
+        let triple = match std::str::from_utf8(&arch.stdout)?.trim() {
+            "x86_64" => "x86_64",
+            "aarch64" => "aarch64",
+            architecture => {
+                bail!("no pinned static mbx release for Linux architecture {architecture:?}")
+            }
+        };
+        let home_probe = get("home")?;
+        ensure!(
+            home_probe.status == 0,
+            "resolve container host home failed with status {}: {}",
+            home_probe.status,
+            String::from_utf8_lossy(&home_probe.stderr).trim()
+        );
+        let home_stdout = std::str::from_utf8(&home_probe.stdout)?;
+        let home = home_override
+            .map(Path::to_path_buf)
+            .unwrap_or(PathBuf::from(
+                home_stdout
+                    .lines()
+                    .next()
+                    .context("host home directory is empty")?,
+            ));
+        ensure!(
+            home.is_absolute(),
+            "container host home is not an absolute path"
+        );
+        (
+            triple,
+            home,
+            super::native_from_probe(get("native")?)?,
+            Some(PathBuf::from(
+                home_stdout
+                    .lines()
+                    .nth(1)
+                    .context("host shim directory is empty")?,
+            )),
+        )
+    } else {
+        ensure!(
+            host.platform(executor)? == HostPlatform::Linux,
+            "mbx can only be installed on a Linux container host"
+        );
+        let triple = host_architecture(&host, executor)?;
+        let home = match home_override {
+            Some(home) => home.to_path_buf(),
+            None => canonical_home(&host, executor)?,
+        };
 
-    check_cancelled(executor)?;
-    let existing = probe_native_version(&host, executor)?;
+        check_cancelled(executor)?;
+        let existing = probe_native_version(&host, executor)?;
+        (triple, home, existing, None)
+    };
     let (program, kind) = match destination(&home, existing.as_ref())? {
         InstallDestination::Supported { program, kind } => (program, kind),
         InstallDestination::Unsupported { program } => bail!(
@@ -308,6 +395,7 @@ fn prepare_mbx_with(
         program,
         kind,
         staged: Some(staged),
+        ssh_shim_dir,
     })
 }
 
@@ -321,6 +409,97 @@ impl PreparedMbx {
             .staged
             .as_ref()
             .context("mbx install has no staged binary")?;
+        if let Some(shim_dir) = self.ssh_shim_dir.take() {
+            let binary_dir = program
+                .parent()
+                .context("the selected mbx path has no parent directory")?;
+            let script = format!(
+                r#"{}
+probe publish sh -c 'chmod 755 -- "$1" && mv -f -- "$1" "$2"' hel-mbx-publish {} {} || exit 0
+probe setup {} setup --yes || exit 0
+probe profile sh -c {} hel-mbx-profile update {} {} {} {} || exit 0
+probe native sh -c {}
+exit 0"#,
+                mj_targets::targets::PROBE_HELPER_SH,
+                shell_quote(&staged.to_string_lossy()),
+                shell_quote(&program.to_string_lossy()),
+                shell_quote(&program.to_string_lossy()),
+                shell_quote(PROFILE_SCRIPT),
+                shell_quote(&binary_dir.to_string_lossy()),
+                shell_quote(&posix_profile_block(binary_dir, &shim_dir)),
+                shell_quote(&fish_profile_block(binary_dir, &shim_dir)),
+                shell_quote(&self.home.join(".mbx.lock").to_string_lossy()),
+                shell_quote(super::NATIVE_VERSION_SCRIPT)
+            );
+            let command = host.shell_command(
+                &script,
+                "hel-mbx-install",
+                [],
+                "publish and configure the pinned mbx binary",
+            );
+            let output = checked(executor.execute(&command)?, &command)?;
+            let probes = mj_targets::targets::parse_framed_probes(
+                &output.stdout,
+                mj_targets::targets::DEFAULT_PROBE_FRAMES,
+            );
+            let published = probes
+                .get("publish")
+                .context("mbx publish step returned no result")?;
+            checked(published.clone(), &command)?;
+            self.staged = None;
+            for (key, purpose) in [
+                ("setup", "run mbx setup"),
+                (
+                    "profile",
+                    "add the mbx PATH block to the container host login profile",
+                ),
+            ] {
+                let step = probes
+                    .get(key)
+                    .with_context(|| format!("{purpose} returned no result"))?;
+                ensure!(
+                    step.status == 0,
+                    "{purpose} failed with status {}: {}",
+                    step.status,
+                    String::from_utf8_lossy(&step.stderr)
+                );
+            }
+            let profile = &probes["profile"];
+            let text = std::str::from_utf8(&profile.stdout)?;
+            let mut lines = text.lines().map(str::to_owned);
+            let status = lines.next().context("profile update returned no result")?;
+            ensure!(
+                matches!(status.as_str(), "changed" | "unchanged"),
+                "profile update returned an unexpected result: {status:?}"
+            );
+            let profile = profile_details(&selection_from_lines(&mut lines)?, binary_dir);
+            let verified = super::native_from_probe(
+                probes
+                    .get("native")
+                    .context("mbx verification returned no result")?,
+            )?
+            .context("mbx was not found after installation")?;
+            ensure!(
+                verified.program == program,
+                "mbx verification found {} instead of the installed path {}",
+                verified.program.display(),
+                program.display()
+            );
+            ensure!(
+                verified.version == MBX_VERSION,
+                "installed mbx reported version {}, expected {MBX_VERSION}",
+                verified.version
+            );
+            return Ok(MbxInstallResult {
+                program,
+                version: verified.version,
+                profile_changed: status == "changed",
+                profile_file: profile.file,
+                profile_warning: profile.warning,
+                manual_path_line: profile.manual_path_line,
+                kind,
+            });
+        }
         let command = host.shell_command(
             r#"chmod 755 -- "$1" && mv -f -- "$1" "$2""#,
             "hel-mbx-install-publish",
@@ -456,32 +635,32 @@ fn stage_binary(
             .context("retain staged mbx binary");
     }
 
-    let command = host.command(
-        vec![
-            "mkdir".into(),
-            "-p".into(),
-            "--".into(),
-            parent.to_string_lossy().into_owned(),
-        ],
-        "create the mbx install directory",
-    );
-    checked(executor.execute(&command)?, &command)?;
-
     let sequence = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(
         ".mbx.mjolnir-{}-{sequence}.tmp",
         std::process::id()
     ));
-    let remote_relative = temporary
+    temporary
         .strip_prefix(home)
-        .context("mbx install directory is outside the SSH host home")?
-        .to_string_lossy()
-        .into_owned();
+        .context("mbx install directory is outside the SSH host home")?;
     let ssh = host.ssh().expect("the SSH host was checked");
-    let upload = targets::scp_upload(ssh, binary, &remote_relative, false)
-        .purpose("upload the pinned mbx binary to the SSH host");
+    let upload = targets::ssh_command_owned(
+        mj_core::targets::SshTrafficClass::Bulk,
+        ssh,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "mkdir -p -- \"$1\" && cat > \"$2\"".into(),
+            "hel-mbx-stage".into(),
+            parent.to_string_lossy().into_owned(),
+            temporary.to_string_lossy().into_owned(),
+        ],
+    )
+    .purpose("upload the pinned mbx binary to the SSH host")
+    .gzip_ssh_stdin();
+    let mut file = std::fs::File::open(binary)?;
     if let Err(error) = executor
-        .execute(&upload)
+        .execute_with_stdin(&upload, &mut file)
         .and_then(|output| checked(output, &upload))
     {
         cleanup_remote_staging(host, &temporary);
@@ -1199,50 +1378,90 @@ mod tests {
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn ssh_install_uses_scp_to_a_home_relative_sibling_then_renames_atomically() {
+    fn ssh_install_batches_discovery_compressed_staging_and_publication() {
+        struct ShellSsh {
+            home: PathBuf,
+            commands: std::sync::Mutex<Vec<CommandSpec>>,
+        }
+        impl CommandExecutor for ShellSsh {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn execute_without_deadline(&self, c: &CommandSpec) -> Result<CommandOutput> {
+                self.execute(c)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                c: &CommandSpec,
+                input: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute_with_stdin(c, input)
+            }
+            fn execute(&self, c: &CommandSpec) -> Result<CommandOutput> {
+                self.execute_with_stdin(c, &mut std::io::empty())
+            }
+            fn execute_with_stdin(
+                &self,
+                c: &CommandSpec,
+                input: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                self.commands.lock().unwrap().push(c.clone());
+                let mut local = c.clone();
+                local.ssh_session = None;
+                local.program = "/bin/sh".into();
+                local.args = vec!["-c".into(), c.args.last().unwrap().clone()];
+                local
+                    .env
+                    .insert("HOME".into(), self.home.to_string_lossy().into_owned());
+                local.env.insert("PATH".into(), "/usr/bin:/bin".into());
+                local.env.insert(
+                    "XDG_DATA_HOME".into(),
+                    self.home.join("data").to_string_lossy().into_owned(),
+                );
+                if c.ssh_gzip_stdin {
+                    use std::io::Write;
+                    let mut compressed =
+                        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                    std::io::copy(input, &mut compressed)?;
+                    compressed.flush()?;
+                    let bytes = compressed.finish()?;
+                    local.ssh_gzip_stdin = false;
+                    local.args[1] = format!("gzip -dc | {}", c.args.last().unwrap());
+                    targets::ProcessExecutor
+                        .execute_with_stdin(&local, &mut std::io::Cursor::new(bytes))
+                } else {
+                    targets::ProcessExecutor.execute_with_stdin(&local, input)
+                }
+            }
+        }
         let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("remote home with quotes '");
+        std::fs::create_dir_all(&home).unwrap();
         let binary = temp.path().join("downloaded-mbx");
-        std::fs::write(&binary, b"recorded mbx executable").unwrap();
-        let home = PathBuf::from("/remote home/O'Neil");
-        let program = home.join(".local/bin/mbx");
-        let executor = FakeExecutor::with_probes(absent_then(&program, MBX_VERSION));
-
-        let result =
-            install_mbx_with(&ssh_machine(), &executor, Some(&home), |_| Ok(binary)).unwrap();
-
-        assert_eq!(result.program, program);
-        let commands = executor.commands();
-        let upload = commands
-            .iter()
-            .find(|command| command.purpose == "upload the pinned mbx binary to the SSH host")
-            .unwrap();
-        assert_eq!(upload.program, "scp");
-        assert!(upload.ssh_session.is_some());
-        assert!(upload.args.iter().any(|arg| {
-            arg.starts_with("build@builder.example.test:.local/bin/.mbx.mjolnir-")
-                && arg.ends_with(".tmp")
-        }));
-        let publish = commands
-            .iter()
-            .find(|command| command.purpose == "publish the mbx binary atomically on the SSH host")
-            .unwrap();
-        assert!(publish.args.last().unwrap().contains("chmod 755"));
-        assert!(publish.args.last().unwrap().contains("mv -f"));
-        assert!(
-            publish
-                .args
-                .last()
-                .unwrap()
-                .contains("'/remote home/O'\\''Neil/.local/bin/mbx'")
-        );
-        assert!(commands.iter().any(|command| {
-            command.purpose == "run mbx setup on the container host"
-                && command
-                    .args
-                    .last()
-                    .unwrap()
-                    .contains("'/remote home/O'\\''Neil/.local/bin/mbx'")
-        }));
+        let mut bytes = format!("#!/bin/sh\ncase $1 in --version) echo 'mbx {MBX_VERSION}';; setup) touch \"$HOME/setup-ran\";; esac\n").into_bytes();
+        bytes.extend_from_slice(format!("#{}\n", "padding".repeat(20000)).as_bytes());
+        std::fs::write(&binary, &bytes).unwrap();
+        set_executable(&binary).unwrap();
+        let executor = ShellSsh {
+            home: home.clone(),
+            commands: Default::default(),
+        };
+        for expected_changed in [true, false] {
+            executor.commands.lock().unwrap().clear();
+            let result =
+                install_mbx_with(&ssh_machine(), &executor, None, |_| Ok(binary.clone())).unwrap();
+            assert_eq!(result.profile_changed, expected_changed);
+            assert_eq!(std::fs::read(&result.program).unwrap(), bytes);
+            assert!(home.join("setup-ran").exists());
+            let commands = executor.commands.lock().unwrap();
+            assert_eq!(commands.len(), 3);
+            assert!(commands[1].ssh_gzip_stdin);
+            assert!(commands[2].args.last().unwrap().contains("mv -f"));
+            assert!(commands[2].args.last().unwrap().contains("setup"));
+        }
     }
 
     #[test]
