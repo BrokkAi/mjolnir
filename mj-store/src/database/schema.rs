@@ -3688,15 +3688,24 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     // probes; no large blob table is scanned. Existing `sessions.project_directory` values stay: a
     // legacy sub-agent whose parent is gone has no other record of its path.
     if version < 157 {
+        // The rewrite below frees pages that held resolved secrets: zero them,
+        // and drop the log frames that still hold the earlier page images.
+        // Both cost in proportion to the rows rewritten, unlike a `VACUUM` of
+        // a store that is gigabytes of transcripts. A reader holding the log
+        // leaves the truncation to the repair that follows this upgrade.
+        let _secure_delete = super::target_secrets::SecureDelete::enable(connection)?;
         let transaction =
             Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
         // Reviewer launches recorded the profile's resolved environment, which
         // the launch now takes from the live profile.
-        transaction.execute_batch(
+        let scrubbed = transaction.execute(
             "UPDATE subagent_sessions
                 SET record_json = json_remove(record_json, '$.reviewer_launch.environment')
-              WHERE json_type(record_json, '$.reviewer_launch.environment') IS NOT NULL;
-             CREATE TABLE IF NOT EXISTS target_secret_scrub_pending (
+              WHERE json_type(record_json, '$.reviewer_launch.environment') IS NOT NULL",
+            [],
+        )?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS target_secret_scrub_pending (
                  singleton INTEGER PRIMARY KEY CHECK(singleton = 1)
              ) STRICT;
              INSERT OR IGNORE INTO target_secret_scrub_pending(singleton)
@@ -3727,6 +3736,9 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              PRAGMA user_version=157;",
         )?;
         transaction.commit()?;
+        if scrubbed > 0 {
+            super::target_secrets::truncate_wal(connection, "migration 157")?;
+        }
     }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
@@ -6311,6 +6323,18 @@ mod reader_tests {
             )
             .unwrap();
         assert_eq!((environment, profile.as_str()), (None, "reviewer"));
+        // The secret is gone from the files too, not only from the row: the
+        // page that held it is zeroed and the log frames with its earlier
+        // image are truncated.
+        for suffix in ["", "-wal"] {
+            let bytes = std::fs::read(format!("{}{suffix}", path.display())).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(b"sk-secret-value".len())
+                    .any(|window| window == b"sk-secret-value"),
+                "the reviewer secret survives in the {suffix:?} file"
+            );
+        }
         // The store held sessions, so the daemon repairs its recorded runtimes
         // once; a store created at this revision has nothing to repair.
         let pending = |connection: &Connection| -> i64 {

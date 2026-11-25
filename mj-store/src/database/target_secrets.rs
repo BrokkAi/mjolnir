@@ -218,29 +218,102 @@ pub fn scrub_resolved_target_secrets(config: &mj_core::config::Config) -> Result
     })
 }
 
+/// Overwrites what an update or delete frees instead of leaving it in the
+/// page, for as long as it lives. The setting belongs to the connection, so the
+/// previous one is restored on drop.
+pub(super) struct SecureDelete<'a> {
+    connection: &'a Connection,
+    previous: i64,
+}
+
+impl<'a> SecureDelete<'a> {
+    pub(super) fn enable(connection: &'a Connection) -> Result<Self> {
+        let previous = connection.pragma_query_value(None, "secure_delete", |row| row.get(0))?;
+        connection.execute_batch("PRAGMA secure_delete = ON;")?;
+        Ok(Self {
+            connection,
+            previous,
+        })
+    }
+}
+
+impl Drop for SecureDelete<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self
+            .connection
+            .execute_batch(&format!("PRAGMA secure_delete = {};", self.previous))
+        {
+            tracing::warn!(%error, "could not restore the secure_delete setting");
+        }
+    }
+}
+
+/// Fold the write-ahead log into the database file and truncate it, so frames
+/// that held a page's earlier content are gone. Returns whether every frame
+/// was written back; a reader that still holds the log leaves it in place.
+pub(super) fn truncate_wal(connection: &Connection, purpose: &str) -> Result<bool> {
+    let (busy, log, checkpointed): (i64, i64, i64) =
+        connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    if busy != 0 {
+        tracing::warn!(
+            log_frames = log,
+            checkpointed_frames = checkpointed,
+            "could not truncate the write-ahead log after {purpose}: a reader holds it"
+        );
+    }
+    Ok(busy == 0)
+}
+
+/// The repair runs in two steps so that no secret outlives it on disk. The
+/// rewrite commits with `secure_delete` on, which zeroes the bytes it frees,
+/// and the log is then truncated, which drops the frames that still held the
+/// earlier page images. Only a completed truncation clears the mark; a store
+/// whose log could not be truncated is finished by the next start. Unlike a
+/// `VACUUM`, the cost is proportional to the rows rewritten.
 fn scrub_resolved_target_secrets_in(
-    connection: &mut Connection,
+    connection: &Connection,
     references: &TargetEnvironmentReferences,
 ) -> Result<usize> {
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let pending: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM target_secret_scrub_pending WHERE singleton=1)",
-        [],
-        |row| row.get(0),
-    )?;
-    if !pending {
+    let pending = |connection: &Connection| -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM target_secret_scrub_pending WHERE singleton=1)",
+            [],
+            |row| row.get(0),
+        )?)
+    };
+    if !pending(connection)? {
         return Ok(0);
     }
-    if references.by_target.is_empty() {
-        // Nothing is configured as a reference, so no recorded value can be
-        // one; the repair is complete and must not run against later config.
-        tx.execute(
+    let _secure_delete = SecureDelete::enable(connection)?;
+    let changed = {
+        let tx = Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        // The mark was read outside the transaction; it is only ever cleared
+        // by this function, which the writer runs one at a time.
+        let changed = if references.by_target.is_empty() {
+            // Nothing is configured as a reference, so no recorded value can
+            // be one.
+            0
+        } else {
+            rewrite_runtimes(&tx, references)?
+        };
+        tx.commit()?;
+        changed
+    };
+    if truncate_wal(connection, "removing resolved target secrets")? {
+        connection.execute(
             "DELETE FROM target_secret_scrub_pending WHERE singleton=1",
             [],
         )?;
-        tx.commit()?;
-        return Ok(0);
     }
+    Ok(changed)
+}
+
+fn rewrite_runtimes(
+    tx: &Transaction<'_>,
+    references: &TargetEnvironmentReferences,
+) -> Result<usize> {
     let without_a_target = references.without_a_target();
     let mut changed = 0;
     let sessions = tx
@@ -309,11 +382,6 @@ fn scrub_resolved_target_secrets_in(
             }
         }
     }
-    tx.execute(
-        "DELETE FROM target_secret_scrub_pending WHERE singleton=1",
-        [],
-    )?;
-    tx.commit()?;
     Ok(changed)
 }
 
@@ -355,7 +423,7 @@ mod tests {
         other.target_runtime = Some(std::sync::Arc::new(runtime(&[("API_KEY", "literal-here")])));
         save_session_to(&path, &session).unwrap();
         save_session_to(&path, &other).unwrap();
-        let mut connection = open(&path).unwrap();
+        let connection = open(&path).unwrap();
         // Saving a session records its physical environment, with a copy of
         // the runtime, and a Move in flight records a prepared destination
         // whose target is not named beside it.
@@ -400,11 +468,8 @@ mod tests {
         };
         assert_eq!(pending(&connection), 0);
         assert_eq!(
-            scrub_resolved_target_secrets_in(
-                &mut connection,
-                &TargetEnvironmentReferences::default()
-            )
-            .unwrap(),
+            scrub_resolved_target_secrets_in(&connection, &TargetEnvironmentReferences::default())
+                .unwrap(),
             0
         );
         connection
@@ -423,7 +488,7 @@ mod tests {
             )]),
             literal_keys: BTreeSet::new(),
         };
-        let changed = scrub_resolved_target_secrets_in(&mut connection, &templates).unwrap();
+        let changed = scrub_resolved_target_secrets_in(&connection, &templates).unwrap();
         // The session row, its environment, and its worker lease.
         assert_eq!(changed, 3);
         assert_eq!(pending(&connection), 0, "the repair runs once");
@@ -488,7 +553,7 @@ mod tests {
             "{leases}"
         );
         assert_eq!(
-            scrub_resolved_target_secrets_in(&mut connection, &templates).unwrap(),
+            scrub_resolved_target_secrets_in(&connection, &templates).unwrap(),
             0
         );
         // A literal recorded after the upgrade stays a literal when its
@@ -498,7 +563,7 @@ mod tests {
         later.target_runtime = Some(std::sync::Arc::new(runtime(&[("API_KEY", "plain")])));
         save_session_to(&path, &later).unwrap();
         assert_eq!(
-            scrub_resolved_target_secrets_in(&mut connection, &templates).unwrap(),
+            scrub_resolved_target_secrets_in(&connection, &templates).unwrap(),
             0
         );
         let kept = state_io::load_session_with(&connection, "later")
@@ -512,5 +577,127 @@ mod tests {
         // runtime that does not name its target.
         templates.literal_keys.insert("API_KEY".into());
         assert!(templates.without_a_target().is_empty());
+    }
+
+    const SENTINEL: &str = "sk-super-secret-legacy-sentinel-987654321";
+
+    /// A store upgraded from before revision 157: one session whose recorded
+    /// runtime holds the sentinel as a resolved secret, and the mark the
+    /// upgrade leaves.
+    fn legacy_store(path: &Path) -> TargetEnvironmentReferences {
+        // Several rows share a page, as a real store's do, so a rewritten row
+        // leaves its earlier bytes in the page's free space.
+        for index in 0..6 {
+            let mut session = super::super::tests::session(&format!("legacy-{index}"), "project");
+            session.target_template_id = "sandbox".into();
+            session.target_runtime = Some(std::sync::Arc::new(runtime(&[("API_KEY", SENTINEL)])));
+            save_session_to(path, &session).unwrap();
+        }
+        let connection = open(path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO target_secret_scrub_pending(singleton) VALUES (1)",
+                [],
+            )
+            .unwrap();
+        TargetEnvironmentReferences {
+            by_target: BTreeMap::from([(
+                "sandbox".to_owned(),
+                BTreeMap::from([(
+                    "API_KEY".to_owned(),
+                    EnvironmentValue::FromSecret("stored".into()),
+                )]),
+            )]),
+            literal_keys: BTreeSet::new(),
+        }
+    }
+
+    /// Whether the sentinel survives in the database file or its log.
+    fn sentinel_on_disk(path: &Path) -> Vec<&'static str> {
+        let contains = |suffix: &str| {
+            let bytes = std::fs::read(format!("{}{suffix}", path.display())).unwrap_or_default();
+            bytes
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL.as_bytes())
+        };
+        [("", "database"), ("-wal", "log")]
+            .into_iter()
+            .filter(|(suffix, _)| contains(suffix))
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    // The scrub frees pages that held a secret. They must be zeroed and the log
+    // frames that still carry their earlier images dropped, or the secret is
+    // still readable from the files.
+    #[test]
+    fn scrubbing_leaves_no_secret_in_the_database_file_or_its_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let templates = legacy_store(&path);
+        assert_eq!(
+            sentinel_on_disk(&path),
+            ["database"],
+            "the fixture holds it"
+        );
+
+        let connection = open(&path).unwrap();
+        assert_eq!(
+            scrub_resolved_target_secrets_in(&connection, &templates).unwrap(),
+            18
+        );
+        assert_eq!(sentinel_on_disk(&path), Vec::<&str>::new());
+        let secure_delete: i64 = connection
+            .pragma_query_value(None, "secure_delete", |row| row.get(0))
+            .unwrap();
+        assert_eq!(secure_delete, 0, "the previous setting is restored");
+        drop(connection);
+        assert_eq!(sentinel_on_disk(&path), Vec::<&str>::new());
+    }
+
+    // A reader that holds the log keeps the earlier page images alive. The
+    // repair then stays marked, and the next start finishes it.
+    #[test]
+    fn a_reader_holding_the_log_leaves_the_repair_marked_until_it_lets_go() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let templates = legacy_store(&path);
+        let connection = open(&path).unwrap();
+        connection.busy_timeout(Duration::ZERO).unwrap();
+        let reader = open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        reader
+            .query_row("SELECT count(*) FROM sessions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        let pending = |connection: &Connection| -> i64 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM target_secret_scrub_pending",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+
+        assert_eq!(
+            scrub_resolved_target_secrets_in(&connection, &templates).unwrap(),
+            18
+        );
+        assert_eq!(pending(&connection), 1, "the log could not be truncated");
+        reader.execute_batch("COMMIT").unwrap();
+
+        assert_eq!(
+            scrub_resolved_target_secrets_in(&connection, &templates).unwrap(),
+            0,
+            "nothing is left to rewrite"
+        );
+        assert_eq!(pending(&connection), 0);
+        assert_eq!(sentinel_on_disk(&path), Vec::<&str>::new());
+        assert_eq!(
+            scrub_resolved_target_secrets_in(&connection, &templates).unwrap(),
+            0
+        );
     }
 }
