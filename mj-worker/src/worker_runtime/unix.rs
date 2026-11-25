@@ -2829,6 +2829,9 @@ pub(super) fn harness_sandbox(
         directories: super::acp_session_directories(config, launch_environment),
         git_roots: std::iter::once(config.cwd.clone())
             .chain(config.additional_directories.iter().cloned())
+            .collect(),
+        approved_roots: std::iter::once(config.cwd.clone())
+            .chain(config.additional_directories.iter().cloned())
             .chain(config.writable_directories.iter().cloned())
             .collect(),
     }

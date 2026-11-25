@@ -27,8 +27,13 @@ pub(super) struct HarnessSandbox {
     /// Every directory the ACP session may write, tool caches included.
     pub directories: Vec<PathBuf>,
     /// The session's working directory and workspace roots; the Git
-    /// directories enclosing them are the ones granted.
+    /// directories enclosing them are the ones granted. A borrowed child's
+    /// preserved owner roots are not here: a child in one of its owner's
+    /// linked worktrees works in that worktree, not in the owner's clone.
     pub git_roots: Vec<PathBuf>,
+    /// Every root the session may write, the owner roots included. Git
+    /// directories inside them need no proof of ownership.
+    pub approved_roots: Vec<PathBuf>,
 }
 
 /// The Git directories of one working tree.
@@ -44,46 +49,132 @@ pub(super) struct GitSandboxTarget {
     pub is_worktree: bool,
 }
 
-impl GitSandboxTarget {
-    /// Paths that must stay read-only: hooks and configuration run or steer
-    /// code outside the sandbox.
-    pub(super) fn protected_paths(&self) -> Vec<PathBuf> {
-        vec![
-            self.common_dir.join("hooks"),
-            self.common_dir.join("config"),
-            self.common_dir.join("config.lock"),
-            self.git_dir.join("config.worktree"),
-            self.git_dir.join("commondir"),
-        ]
+/// The linked worktrees of `common_dir` other than the session's own.
+fn sibling_worktrees(common_dir: &Path, own: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(common_dir.join("worktrees")) else {
+        return Vec::new();
+    };
+    let mut siblings = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| canonical(&entry.path()))
+        .filter(|path| path.is_dir() && !own.contains(path))
+        .collect::<Vec<_>>();
+    siblings.sort();
+    siblings
+}
+
+/// The Git directories a session's working trees share, split by what the
+/// session may do to them.
+struct GitAccess<'a> {
+    targets: &'a [GitSandboxTarget],
+    /// The session's own administrative directories.
+    own: BTreeSet<PathBuf>,
+    /// Common directories of clones, where the session may `git worktree add`.
+    clones: BTreeSet<PathBuf>,
+}
+
+impl<'a> GitAccess<'a> {
+    fn new(targets: &'a [GitSandboxTarget]) -> Self {
+        Self {
+            targets,
+            own: targets
+                .iter()
+                .map(|target| target.git_dir.clone())
+                .collect(),
+            clones: targets
+                .iter()
+                .filter(|target| !target.is_worktree)
+                .map(|target| target.common_dir.clone())
+                .collect(),
+        }
     }
 
-    /// The read-only entries of a Codex profile. Hooks, configuration and a
-    /// worktree's `config.worktree` are listed even when absent, so the
-    /// sandbox cannot create one that later runs outside it. `commondir`
-    /// (read by Git, so an empty mount breaks it) and `config.lock` are listed
-    /// only when present.
-    fn codex_read_only_paths(&self) -> Vec<PathBuf> {
-        let config_worktree = self.git_dir.join("config.worktree");
-        let mut paths = vec![
-            self.common_dir.join("hooks"),
-            self.common_dir.join("config"),
-        ];
-        if self.is_worktree || config_worktree.exists() {
-            paths.push(config_worktree);
+    fn common_dirs(&self) -> BTreeSet<&Path> {
+        self.targets
+            .iter()
+            .map(|target| target.common_dir.as_path())
+            .collect()
+    }
+
+    /// Codex profile entries, path to `write` or `read`. Hooks, configuration
+    /// and every `config.worktree` are listed even when absent, so the sandbox
+    /// cannot create one that later runs outside it (`core.hooksPath`).
+    /// `commondir` (read by Git, so an empty mount breaks it) and `config.lock`
+    /// are listed only when present. A session that only has linked worktrees
+    /// of a repository gets the `worktrees` directory read-only with its own
+    /// administrative directory writable inside it; a clone's session may add
+    /// worktrees, so each existing sibling's configuration and backlinks are
+    /// protected instead.
+    fn codex(&self) -> std::collections::BTreeMap<PathBuf, &'static str> {
+        let mut access = std::collections::BTreeMap::new();
+        for target in self.targets {
+            access.insert(target.common_dir.clone(), "write");
+            access.insert(target.git_dir.clone(), "write");
         }
-        paths.extend(
-            [
-                self.common_dir.join("config.lock"),
-                self.git_dir.join("commondir"),
-            ]
-            .into_iter()
-            .filter(|path| path.exists()),
-        );
-        paths
+        let present = |path: PathBuf| path.exists().then_some(path);
+        let mut read = Vec::new();
+        for common_dir in self.common_dirs() {
+            // The common directory's `config.worktree` configures the
+            // primary working tree.
+            read.extend([
+                common_dir.join("hooks"),
+                common_dir.join("config"),
+                common_dir.join("config.worktree"),
+            ]);
+            read.extend(present(common_dir.join("config.lock")));
+            if self.clones.contains(common_dir) {
+                for other in sibling_worktrees(common_dir, &self.own) {
+                    read.push(other.join("config.worktree"));
+                    read.extend(present(other.join("commondir")));
+                    read.extend(present(other.join("gitdir")));
+                }
+            } else if common_dir.join("worktrees").is_dir() {
+                read.push(common_dir.join("worktrees"));
+            }
+        }
+        for target in self.targets {
+            read.push(target.git_dir.join("config.worktree"));
+            if target.is_worktree {
+                read.extend(present(target.git_dir.join("commondir")));
+            }
+        }
+        for path in read {
+            access.insert(path, "read");
+        }
+        access
+    }
+
+    /// Claude `denyWrite` entries: hooks and configuration everywhere, and
+    /// the siblings of a worktree-only session whole (Claude grants the
+    /// common directory, so its own children are carved back out).
+    fn claude_denials(&self) -> BTreeSet<PathBuf> {
+        let mut deny = BTreeSet::new();
+        for common_dir in self.common_dirs() {
+            for name in ["hooks", "config", "config.lock", "config.worktree"] {
+                deny.insert(common_dir.join(name));
+            }
+            for other in sibling_worktrees(common_dir, &self.own) {
+                if self.clones.contains(common_dir) {
+                    for name in ["config.worktree", "commondir", "gitdir"] {
+                        deny.insert(other.join(name));
+                    }
+                } else {
+                    deny.insert(other);
+                }
+            }
+        }
+        for target in self.targets {
+            deny.insert(target.git_dir.join("config.worktree"));
+            if target.is_worktree {
+                deny.insert(target.git_dir.join("commondir"));
+            }
+        }
+        deny
     }
 }
 
-/// Resolve the Git directories enclosing `roots`. A root that does not exist,
+/// Resolve the Git directories enclosing `roots`; those named by a `.git` file
+/// outside `approved_roots` need proof of ownership. A root that does not exist,
 /// lies in no repository, or names Git directories the workspace has no claim
 /// to contributes nothing.
 ///
@@ -93,8 +184,14 @@ impl GitSandboxTarget {
 /// administrative directory its own repository made for this working tree
 /// (`<common>/worktrees/<name>`, whose `gitdir` file points back at the
 /// `.git` file that names it).
-pub(super) fn resolve_git_sandbox_targets(roots: &[PathBuf]) -> Vec<GitSandboxTarget> {
-    let approved = roots.iter().map(|root| canonical(root)).collect::<Vec<_>>();
+pub(super) fn resolve_git_sandbox_targets(
+    roots: &[PathBuf],
+    approved_roots: &[PathBuf],
+) -> Vec<GitSandboxTarget> {
+    let approved = approved_roots
+        .iter()
+        .map(|root| canonical(root))
+        .collect::<Vec<_>>();
     let mut targets = BTreeSet::new();
     for root in roots {
         if !root.is_absolute() || !root.is_dir() {
@@ -121,6 +218,18 @@ pub(super) fn resolve_git_sandbox_targets(roots: &[PathBuf]) -> Vec<GitSandboxTa
         }
     }
     targets.into_iter().collect()
+}
+
+/// Read a Git pointer file (`.git`, `commondir`, `gitdir`). A FIFO or device
+/// would block the preparation thread on open, and a huge file is no pointer.
+fn read_pointer(path: &Path) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= 64 * 1024,
+        "{} is not a regular pointer file",
+        path.display()
+    );
+    std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
 }
 
 fn is_git_directory(directory: &Path) -> bool {
@@ -163,8 +272,7 @@ fn resolve_dotgit(
     }
     // A gitfile is never a writable directory: Codex's sandbox cannot mount
     // over a file, so only the directory it names is granted.
-    let text = std::fs::read_to_string(dotgit)
-        .with_context(|| format!("read gitfile {}", dotgit.display()))?;
+    let text = read_pointer(dotgit)?;
     let Some(pointer) = text
         .lines()
         .find_map(|line| line.strip_prefix("gitdir:"))
@@ -177,14 +285,14 @@ fn resolve_dotgit(
     let Ok(git_dir) = std::fs::canonicalize(&git_dir) else {
         return Ok(None);
     };
-    let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
-        Ok(text) => {
-            let Ok(common) = std::fs::canonicalize(git_dir.join(text.trim())) else {
-                bail!("commondir of {} names no directory", git_dir.display());
-            };
-            common
-        }
-        Err(_) => git_dir.clone(),
+    let common_dir = if std::fs::symlink_metadata(git_dir.join("commondir")).is_ok() {
+        let text = read_pointer(&git_dir.join("commondir"))?;
+        let Ok(common) = std::fs::canonicalize(git_dir.join(text.trim())) else {
+            bail!("commondir of {} names no directory", git_dir.display());
+        };
+        common
+    } else {
+        git_dir.clone()
     };
     ensure!(
         is_git_directory(&git_dir) && is_common_directory(&common_dir),
@@ -194,7 +302,7 @@ fn resolve_dotgit(
     let inside = |directory: &Path| approved.iter().any(|root| directory.starts_with(root));
     if !(inside(&git_dir) && inside(&common_dir)) {
         let administrative = git_dir.parent() == Some(common_dir.join("worktrees").as_path());
-        let backlink = std::fs::read_to_string(git_dir.join("gitdir"))
+        let backlink = read_pointer(&git_dir.join("gitdir"))
             .ok()
             .and_then(|text| std::fs::canonicalize(git_dir.join(text.trim())).ok());
         ensure!(
@@ -265,20 +373,17 @@ pub(super) fn configure_codex_permissions(
         .filter_map(toml::Value::as_str)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let targets = resolve_git_sandbox_targets(&sandbox.git_roots);
-    let writable = sandbox.directories.iter().chain(&inherited).cloned().chain(
-        targets
-            .iter()
-            .flat_map(|target| [target.common_dir.clone(), target.git_dir.clone()]),
-    );
-    for directory in writable.filter(|directory| directory.is_absolute()) {
+    let targets = resolve_git_sandbox_targets(&sandbox.git_roots, &sandbox.approved_roots);
+    for directory in sandbox
+        .directories
+        .iter()
+        .chain(&inherited)
+        .filter(|directory| directory.is_absolute())
+    {
         grants.insert(directory.to_string_lossy().into_owned(), "write");
     }
-    for protected in targets
-        .iter()
-        .flat_map(GitSandboxTarget::codex_read_only_paths)
-    {
-        grants.insert(protected.to_string_lossy().into_owned(), "read");
+    for (path, access) in GitAccess::new(&targets).codex() {
+        grants.insert(path.to_string_lossy().into_owned(), access);
     }
     // Codex's `workspace-write` sandbox has no network unless the person
     // asked for it; keeping their explicit `network_access = false` is theirs.
@@ -396,19 +501,19 @@ pub(super) fn configure_claude_git_sandbox(
     };
     let mut desired = ClaudeGrants::default();
     if policy == ExecutionPolicy::ConfiguredApprovals {
-        for target in resolve_git_sandbox_targets(&sandbox.git_roots) {
-            if target.is_worktree {
-                desired
-                    .allow_write
-                    .insert(target.common_dir.to_string_lossy().into_owned());
-            }
-            desired.deny_write.extend(
-                target
-                    .protected_paths()
-                    .into_iter()
-                    .map(|path| path.to_string_lossy().into_owned()),
-            );
-        }
+        let targets = resolve_git_sandbox_targets(&sandbox.git_roots, &sandbox.approved_roots);
+        desired.allow_write.extend(
+            targets
+                .iter()
+                .filter(|target| target.is_worktree)
+                .map(|target| target.common_dir.to_string_lossy().into_owned()),
+        );
+        desired.deny_write.extend(
+            GitAccess::new(&targets)
+                .claude_denials()
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
     }
     if previous.is_empty() && desired.is_empty() {
         return Ok(());
@@ -601,6 +706,7 @@ mod tests {
     fn sandbox(git_roots: Vec<PathBuf>, directories: Vec<PathBuf>) -> HarnessSandbox {
         HarnessSandbox {
             directories,
+            approved_roots: git_roots.clone(),
             git_roots,
         }
     }
@@ -613,7 +719,7 @@ mod tests {
         let git_dir = repositories.clone.join(".git");
         let worktree_dir = git_dir.join("worktrees/linked");
 
-        let mut targets = resolve_git_sandbox_targets(&[
+        let roots = [
             repositories.clone.join("crates/foo"),
             repositories.clone.clone(),
             repositories.worktree.clone(),
@@ -621,7 +727,8 @@ mod tests {
             plain,
             repositories.base.join("missing"),
             PathBuf::from("relative"),
-        ]);
+        ];
+        let mut targets = resolve_git_sandbox_targets(&roots, &roots);
         // The scratch directory may itself sit inside a repository; the
         // plain directory resolves to that one, which is not under test.
         targets.retain(|target| target.git_dir.starts_with(&repositories.clone));
@@ -705,9 +812,12 @@ mod tests {
         // and a worktree its (here absent) `config.worktree`. Other missing
         // paths (`config.lock`) are not listed: Codex mounts an empty file
         // there, and an empty `commondir` breaks Git.
+        // The worktrees directory is read-only around the session's own.
         for protected in [
             git_dir.join("hooks"),
             git_dir.join("config"),
+            git_dir.join("config.worktree"),
+            git_dir.join("worktrees"),
             worktree_dir.join("config.worktree"),
             worktree_dir.join("commondir"),
         ] {
@@ -756,16 +866,197 @@ mod tests {
             BTreeSet::from([
                 path(git_dir.join("hooks")),
                 path(git_dir.join("config")),
+                path(git_dir.join("config.worktree")),
+                path(git_dir.join("worktrees")),
                 path(worktree_dir.join("config.worktree")),
                 path(worktree_dir.join("commondir")),
             ])
         );
-        // A clone has no `commondir`, and an empty one breaks Git; its
-        // optional files are listed only when they exist.
+        // A clone has no `commondir` (an empty one breaks Git) but may name a
+        // `config.worktree` into being; its existing worktree is protected.
         assert_eq!(
             profile(vec![repositories.clone.clone()]),
-            BTreeSet::from([path(git_dir.join("hooks")), path(git_dir.join("config"))])
+            BTreeSet::from([
+                path(git_dir.join("hooks")),
+                path(git_dir.join("config")),
+                path(git_dir.join("config.worktree")),
+                path(worktree_dir.join("config.worktree")),
+                path(worktree_dir.join("commondir")),
+                path(worktree_dir.join("gitdir")),
+            ])
         );
+    }
+
+    fn sibling_fixture() -> (Repositories, PathBuf) {
+        let repositories = repositories();
+        let sibling = repositories.base.join("sibling");
+        git(
+            &repositories.clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "sibling",
+                sibling.to_str().unwrap(),
+            ],
+        );
+        (repositories, sibling)
+    }
+
+    #[test]
+    fn a_worktree_session_cannot_reach_its_siblings_in_codex_or_claude() {
+        let (repositories, _sibling) = sibling_fixture();
+        let git_dir = repositories.clone.join(".git");
+        let mine = git_dir.join("worktrees/linked");
+        let theirs = git_dir.join("worktrees/sibling");
+        let path = |path: &Path| path.to_str().unwrap().to_owned();
+        // The worktree alone, and a borrowed child whose owner clone is an
+        // approved root but not a place it works in.
+        for approved in [
+            vec![repositories.worktree.clone()],
+            vec![repositories.worktree.clone(), repositories.clone.clone()],
+        ] {
+            let sandbox = HarnessSandbox {
+                directories: Vec::new(),
+                git_roots: vec![repositories.worktree.clone()],
+                approved_roots: approved,
+            };
+            let mut config = toml::Table::new();
+            configure_codex_permissions(
+                &mut config,
+                Path::new("config.toml"),
+                ExecutionPolicy::ConfiguredApprovals,
+                &sandbox,
+            )
+            .unwrap();
+            let filesystem = config["permissions"][CODEX_PROFILE]["filesystem"]
+                .as_table()
+                .unwrap();
+            let access = |p: &Path| filesystem.get(&path(p)).and_then(toml::Value::as_str);
+            // Codex lets the child entry beat the read-only directory above.
+            assert_eq!(access(&git_dir.join("worktrees")), Some("read"));
+            assert_eq!(access(&mine), Some("write"));
+            assert_eq!(access(&mine.join("config.worktree")), Some("read"));
+            assert_eq!(access(&theirs), None);
+            assert_eq!(access(&git_dir.join("config.worktree")), Some("read"));
+
+            let root = repositories.base.join("worker");
+            let home = claude_home(&root);
+            configure_claude_git_sandbox(
+                &root,
+                "session",
+                &home,
+                ExecutionPolicy::ConfiguredApprovals,
+                &sandbox,
+            )
+            .unwrap();
+            let settings = claude_settings(&home);
+            let deny = settings["sandbox"]["filesystem"]["denyWrite"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.as_str().unwrap().to_owned())
+                .collect::<BTreeSet<_>>();
+            for denied in [
+                theirs.clone(),
+                mine.join("config.worktree"),
+                mine.join("commondir"),
+                git_dir.join("hooks"),
+                git_dir.join("config.worktree"),
+            ] {
+                assert!(deny.contains(&path(&denied)), "{}", denied.display());
+            }
+            assert!(!deny.contains(&path(&mine)));
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_clone_session_protects_the_configuration_and_backlinks_of_existing_worktrees() {
+        let (repositories, _sibling) = sibling_fixture();
+        let git_dir = repositories.clone.join(".git");
+        let sandbox = sandbox(vec![repositories.clone.clone()], Vec::new());
+        let path = |path: PathBuf| path.to_str().unwrap().to_owned();
+
+        let mut config = toml::Table::new();
+        configure_codex_permissions(
+            &mut config,
+            Path::new("config.toml"),
+            ExecutionPolicy::ConfiguredApprovals,
+            &sandbox,
+        )
+        .unwrap();
+        let filesystem = config["permissions"][CODEX_PROFILE]["filesystem"]
+            .as_table()
+            .unwrap();
+        for name in ["linked", "sibling"] {
+            for file in ["config.worktree", "commondir", "gitdir"] {
+                let protected = path(git_dir.join("worktrees").join(name).join(file));
+                assert_eq!(filesystem[&protected].as_str(), Some("read"), "{protected}");
+            }
+        }
+        // The clone may add worktrees, so their directory stays writable.
+        assert!(!filesystem.contains_key(&path(git_dir.join("worktrees"))));
+
+        let root = repositories.base.join("worker");
+        let home = claude_home(&root);
+        configure_claude_git_sandbox(
+            &root,
+            "session",
+            &home,
+            ExecutionPolicy::ConfiguredApprovals,
+            &sandbox,
+        )
+        .unwrap();
+        let settings = claude_settings(&home);
+        let deny = settings["sandbox"]["filesystem"]["denyWrite"]
+            .as_array()
+            .unwrap();
+        assert!(
+            deny.iter()
+                .any(|entry| *entry == path(git_dir.join("worktrees/sibling/gitdir")).as_str())
+        );
+    }
+
+    #[test]
+    fn a_pointer_file_that_is_not_a_regular_file_is_skipped_without_blocking() {
+        let (repositories, _sibling) = sibling_fixture();
+        let workspace = repositories.base.join("workspace");
+        let fifo = |path: &Path| {
+            let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            // SAFETY: `name` is a terminated path and mkfifo keeps no pointer.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        };
+        let resolve = |roots: Vec<PathBuf>| {
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done.send(resolve_git_sandbox_targets(&roots, &roots));
+            });
+            result
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("a FIFO pointer file blocked the resolver")
+        };
+
+        // `.git` itself.
+        std::fs::create_dir_all(workspace.join("a")).unwrap();
+        fifo(&workspace.join("a/.git"));
+        assert!(resolve(vec![workspace.join("a")]).is_empty());
+
+        // `commondir` of a Git directory the workspace made.
+        let forged = workspace.join("b");
+        std::fs::create_dir_all(forged.join("fake/objects")).unwrap();
+        std::fs::create_dir_all(forged.join("fake/refs")).unwrap();
+        std::fs::write(forged.join("fake/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(forged.join(".git"), "gitdir: fake\n").unwrap();
+        fifo(&forged.join("fake/commondir"));
+        assert!(resolve(vec![forged]).is_empty());
+
+        // `gitdir` of an external worktree's administrative directory.
+        let backlink = repositories.clone.join(".git/worktrees/linked/gitdir");
+        std::fs::remove_file(&backlink).unwrap();
+        fifo(&backlink);
+        assert!(resolve(vec![repositories.worktree.clone()]).is_empty());
     }
 
     #[test]
@@ -815,7 +1106,8 @@ mod tests {
             std::fs::write(root.join(".git"), gitfile).unwrap();
             root
         };
-        let resolve = |root: &Path| resolve_git_sandbox_targets(&[root.to_owned()]);
+        let resolve =
+            |root: &Path| resolve_git_sandbox_targets(&[root.to_owned()], &[root.to_owned()]);
         let pointing_at = |directory: &Path| format!("gitdir: {}\n", directory.display());
 
         // A directory that is no repository (an `.ssh`).
@@ -868,7 +1160,10 @@ mod tests {
         let moved = repositories.base.join("moved");
         std::fs::rename(&other, &moved).unwrap();
         assert!(resolve(&moved).is_empty(), "the backlink no longer matches");
-        let trusted = resolve_git_sandbox_targets(&[moved.clone(), repositories.clone.clone()]);
+        let trusted = resolve_git_sandbox_targets(
+            std::slice::from_ref(&moved),
+            &[moved.clone(), repositories.clone.clone()],
+        );
         assert!(trusted.iter().any(|target| target.is_worktree
             && target.git_dir == repositories.clone.join(".git/worktrees/other")));
     }
