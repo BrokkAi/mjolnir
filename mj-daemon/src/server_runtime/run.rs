@@ -532,6 +532,7 @@ pub(crate) async fn start_api(
                                         abort_operations,
                                         without_checkpoint,
                                         confirm_no_checkpoint,
+            history_only,
                                     } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(
                                         session_id.clone(),
                                         mj_core::suspend_consent::SuspendConsent {
@@ -539,6 +540,7 @@ pub(crate) async fn start_api(
                                             abort_operations: abort_operations.clone(),
                                             without_checkpoint: *without_checkpoint,
                                             confirm_no_checkpoint: *confirm_no_checkpoint,
+            history_only: *history_only,
                                         },
                                         control.lifecycle.clone().expect("Suspend has a lifecycle control"),
                                     ))??),

@@ -58,6 +58,7 @@ impl RuntimeState {
                 abort_operations,
                 without_checkpoint,
                 confirm_no_checkpoint,
+                history_only,
             } => {
                 self.start_suspend_session(
                     session_id,
@@ -66,6 +67,7 @@ impl RuntimeState {
                         abort_operations,
                         without_checkpoint,
                         confirm_no_checkpoint,
+                        history_only,
                     },
                 )
                 .await?

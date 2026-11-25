@@ -3403,7 +3403,7 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, true, false, &ProcessExecutor)
+        .suspend_preflight(session_id, true, false, false, &ProcessExecutor)
         .unwrap();
     assert_eq!(
         preflight.untracked.len(),
@@ -3435,6 +3435,25 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
             .as_deref()
             .is_some_and(|r| r.contains("merge"))
     );
+    git(&["update-index", "--skip-worktree", "--", "tracked.txt"]);
+    let history = controller
+        .suspend_preflight(session_id, true, false, true, &ProcessExecutor)
+        .unwrap();
+    assert!(!history.has_blockers());
+    assert!(history.operations.is_empty());
+    assert_eq!(history.untracked_count(), 0);
+    let fixed = controller
+        .resolve_suspend_blockers(session_id, &ProcessExecutor)
+        .unwrap();
+    assert_eq!(fixed.cleared_hidden_paths.len(), 1);
+    assert!(
+        !fixed
+            .preflight
+            .blockers
+            .iter()
+            .any(|b| b.kind == "hidden_tracked_edits")
+    );
+    assert!(git(&["ls-files", "-v"]).starts_with("H "));
 }
 
 #[test]
@@ -3533,7 +3552,7 @@ fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_i
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, false, false, &ProcessExecutor)
+        .suspend_preflight(session_id, false, false, false, &ProcessExecutor)
         .unwrap();
     let layout = controller
         .session_export_layout(session_id, &ProcessExecutor)
@@ -3688,6 +3707,7 @@ async fn suspend_without_checkpoint_runs_before_close_before_parent_teardown() {
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: true,
+        history_only: false,
         ..Default::default()
     };
     controller
@@ -3745,7 +3765,7 @@ fn suspend_preflight_without_checkpoint_skips_unreachable_target() {
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, false, true, &FailingExecutor)
+        .suspend_preflight(session_id, false, true, false, &FailingExecutor)
         .expect("without_checkpoint preflight must not contact unreachable target");
     let existing = preflight
         .existing_checkpoint
@@ -3803,6 +3823,7 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: false,
+        history_only: false,
         ..Default::default()
     };
     let err = controller
@@ -3919,7 +3940,7 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     persist_controller_fixture(&mut controller);
 
     let preflight = controller
-        .suspend_preflight(session_id, false, false, &ProcessExecutor)
+        .suspend_preflight(session_id, false, false, false, &ProcessExecutor)
         .unwrap();
     let keep_paths: Vec<&std::path::Path> = preflight
         .keep_dir_entries
@@ -4089,7 +4110,7 @@ fn move_keep_preflight_and_capture_share_source_selection() {
         )
     };
     let (blocked, _) = controller
-        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .checkpoint_preflight(name, true, false, false, Some(&keep), &ProcessExecutor)
         .unwrap();
     let blocker = &blocked.blockers[0].remedy;
     assert!(blocker.contains("unrepresented worktree"), "{blocker}");
@@ -4107,7 +4128,7 @@ fn move_keep_preflight_and_capture_share_source_selection() {
     git(&["worktree", "remove", outside.to_str().unwrap()]);
 
     let (preflight, skips) = controller
-        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .checkpoint_preflight(name, true, false, false, Some(&keep), &ProcessExecutor)
         .unwrap();
     assert_eq!(skips, [(PathBuf::from("excluded"), 10)]);
     let lost = preflight.untracked_display_paths();
@@ -4159,6 +4180,71 @@ fn move_keep_preflight_and_capture_share_source_selection() {
         .check_origin_delta_preflight(name, &shown, Some(&keep), &ProcessExecutor)
         .unwrap();
     capture(current_worker).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
+    let name = "suspend_refusal_includes_paths_for_grouped_external_worktrees";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    let worktrees = [
+        directory.path().join("outside/first"),
+        directory.path().join("outside/second"),
+    ];
+    for worktree in &worktrees {
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["worktree", "add", "--detach"])
+            .arg(worktree)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Running;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(name),
+    }));
+    attach_local_managed_clone(&mut session, repo, origin);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+
+    let refusal = controller
+        .preflight_origin_delta_suspension(
+            name,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    let message = format!("{refusal:#}");
+    for worktree in &worktrees {
+        assert!(
+            message.contains(&worktree.display().to_string()),
+            "refusal omitted {}: {message}",
+            worktree.display()
+        );
+    }
+    assert!(
+        message.contains("worktree remove --force <path>"),
+        "refusal omitted grouped removal command: {message}"
+    );
 }
 
 #[cfg(unix)]
@@ -7257,7 +7343,7 @@ fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_su
 
     let fake = RemotePreflightStageFake::default();
     let preflight = controller
-        .suspend_preflight(session_id, false, false, &fake)
+        .suspend_preflight(session_id, false, false, false, &fake)
         .expect("preflight must succeed by staging current worker when installed worker lacks subcommand");
     assert_eq!(*fake.old_preflight_calls.lock().unwrap(), 1);
     let staged = fake.staged_preflight_binaries.lock().unwrap();

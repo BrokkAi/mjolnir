@@ -578,6 +578,17 @@ pub(super) struct SuspendPreflightQuery {
     dry_run: bool,
     #[serde(default)]
     without_checkpoint: bool,
+    #[serde(default)]
+    history_only: bool,
+}
+
+pub(super) async fn resolve_suspend_blockers(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<mj_core::suspend_consent::ResolveSuspendBlockersResponse>, ApiFailure> {
+    Ok(Json(
+        crate::server::handlers::ask_resolve_suspend_blockers(&state, session_id).await?,
+    ))
 }
 
 pub(super) async fn suspend_preflight(
@@ -591,6 +602,7 @@ pub(super) async fn suspend_preflight(
         session_id,
         query.dry_run,
         query.without_checkpoint,
+        query.history_only,
     )
     .await?;
     Ok(Json(preflight))
@@ -601,6 +613,20 @@ pub(super) async fn suspend(
     Path(session_id): Path<String>,
     request: Option<Json<SuspendRequest>>,
 ) -> Result<(StatusCode, Json<SuspendSessionResponse>), ApiFailure> {
+    let body = request.map(|Json(body)| body).unwrap_or_default();
+    let mut consent = body
+        .suspend_consent
+        .unwrap_or(mj_core::suspend_consent::SuspendConsent {
+            discard_untracked: body.discard_untracked,
+            abort_operations: body.abort_operations,
+            ..Default::default()
+        });
+    consent.without_checkpoint |= body.without_checkpoint;
+    consent.history_only |= body.history_only;
+    consent.confirm_no_checkpoint |= body.confirm_no_checkpoint;
+    consent
+        .validate()
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?;
     let (active_children, owning_children_to_suspend) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
@@ -638,15 +664,15 @@ pub(super) async fn suspend(
         }
     }
     backend.cancel_start(session_id.clone()).await?;
-    let body = request.map(|Json(body)| body).unwrap_or_default();
     let status = send_action(
         &state,
         ControllerAction::Suspend {
             session_id: session_id.clone(),
-            discard_untracked: body.discard_untracked,
-            abort_operations: body.abort_operations,
-            without_checkpoint: body.without_checkpoint,
-            confirm_no_checkpoint: body.confirm_no_checkpoint,
+            discard_untracked: consent.discard_untracked,
+            abort_operations: consent.abort_operations,
+            without_checkpoint: consent.without_checkpoint,
+            confirm_no_checkpoint: consent.confirm_no_checkpoint,
+            history_only: consent.history_only,
         },
     )
     .await?;
@@ -681,6 +707,10 @@ pub(super) struct SuspendRequest {
     pub(super) abort_operations: mj_core::suspend_consent::OperationConsent,
     #[serde(default)]
     pub(super) without_checkpoint: bool,
+    #[serde(default)]
+    pub(super) history_only: bool,
+    #[serde(default)]
+    pub(super) suspend_consent: Option<mj_core::suspend_consent::SuspendConsent>,
     #[serde(default)]
     pub(super) confirm_no_checkpoint: bool,
 }

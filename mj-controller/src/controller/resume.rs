@@ -2175,6 +2175,13 @@ impl Controller {
         let is_history_cutoff_origin_delta =
             super::network_git::manifest_has_history_cutoff_origin_delta(archive_manifest)
                 && super::backend::session_history_cutoff(&previous)?.is_some();
+        let history_only_archive = archive_manifest
+            .repositories
+            .iter()
+            .any(|repository| repository.metadata.review_refs_metadata_only)
+            && archive_manifest.repositories.iter().all(|repository| {
+                repository.metadata.review_refs_metadata_only || repository.metadata.plain_directory
+            });
         let origin_delta = manifest_uses_origin_delta(archive_manifest);
         if origin_delta && plan != ResumePlan::InPlace {
             let originless = archive_manifest.repositories.iter().any(|repository| {
@@ -2206,6 +2213,7 @@ impl Controller {
             }
         }
         if !origin_delta
+            && !history_only_archive
             && !transferring_workspace
             && plan == ResumePlan::RawToWorkspace
             && let Some(worktree) = previous_managed_worktree.as_ref()
@@ -2318,6 +2326,9 @@ impl Controller {
         let history_host = mount_history_host(&target_template);
         let history_mounts = additional_mounts.clone();
         let mut resume_notices = Vec::new();
+        if history_only_archive && !is_attached_checkout {
+            resume_notices.push("Resumed from a history-only checkpoint into a fresh workspace checkout; prior workspace Git changes were not saved.".to_owned());
+        }
         // The raw-to-workspace notice is written where the conversion snapshot
         // is taken, because it reports the branch the container arrives on.
         if let Some(conversion) = conversion
@@ -2589,13 +2600,22 @@ impl Controller {
                     // restore_into_target applies the origin-delta snapshot.
                 }
             } else if let Some(upgraded_clone) = upgraded_legacy_worktree.as_ref() {
-                resume_notices.extend(restore_legacy_worktree_as_managed_clone(
-                    executor,
-                    upgraded_clone,
-                    &archive_path,
-                    archive_manifest,
-                    None,
-                )?);
+                if history_only_archive {
+                    if let Some(fresh_head) =
+                        super::worktree::restore_managed_clone_fresh_head(executor, upgraded_clone)?
+                    {
+                        self.record_fresh_managed_clone_head(session_id, fresh_head)?;
+                        recreated_managed_worktree = true;
+                    }
+                } else {
+                    resume_notices.extend(restore_legacy_worktree_as_managed_clone(
+                        executor,
+                        upgraded_clone,
+                        &archive_path,
+                        archive_manifest,
+                        None,
+                    )?);
+                }
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 if !transferring_workspace
                     && plan == ResumePlan::RawToWorkspace
@@ -2607,7 +2627,20 @@ impl Controller {
                     // restore_into_target applies the original legacy archive
                     // directly (preserving archived untracked files & stashes).
                 } else {
-                    recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
+                    recreated_managed_worktree = if history_only_archive
+                        && worktree.kind == mj_core::state::ManagedCheckoutKind::Clone
+                    {
+                        if let Some(fresh_head) =
+                            super::worktree::restore_managed_clone_fresh_head(executor, worktree)?
+                        {
+                            self.record_fresh_managed_clone_head(session_id, fresh_head)?;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        restore_managed_worktree(executor, worktree)?
+                    };
                     if !transferring_workspace
                         && recreated_managed_worktree
                         && plan == ResumePlan::RawToWorkspace
@@ -2979,6 +3012,30 @@ impl Controller {
         Ok(record.state == SessionState::Running
             || crate::database::load_worker_restart(session_id)?
                 .is_some_and(|intent| record.target.as_deref() == Some(&intent.target)))
+    }
+
+    pub(in crate::controller) fn record_fresh_managed_clone_head(
+        &mut self,
+        session_id: &str,
+        fresh_head: String,
+    ) -> Result<()> {
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let worktree = record
+            .managed_worktree
+            .as_mut()
+            .context("fresh managed clone has no worktree record")?;
+        ensure!(
+            worktree.kind == mj_core::state::ManagedCheckoutKind::Clone,
+            "fresh managed clone head belongs to a non-clone checkout"
+        );
+        worktree.base_commit = Some(fresh_head);
+        // accept_resumed_session persisted the old checkout before the clone
+        // was recreated; publish the new baseline in the same durable record.
+        crate::database::save_resumed_session(record, None)
     }
 
     fn keep_started_resume_after_failure(

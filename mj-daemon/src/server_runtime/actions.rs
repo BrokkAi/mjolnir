@@ -315,6 +315,7 @@ pub(super) async fn apply_phone_action(
             abort_operations,
             without_checkpoint,
             confirm_no_checkpoint,
+            history_only,
         } => {
             services
                 .daemon_runtime
@@ -325,6 +326,7 @@ pub(super) async fn apply_phone_action(
                         abort_operations,
                         without_checkpoint,
                         confirm_no_checkpoint,
+                        history_only,
                     },
                 )
                 .await
