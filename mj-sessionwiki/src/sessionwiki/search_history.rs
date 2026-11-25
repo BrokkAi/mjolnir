@@ -128,7 +128,8 @@ fn matching(
         Some("user") => " AND m.role = 'user'",
         Some("assistant") => " AND m.role = 'assistant'",
         Some("tool") => " AND m.role NOT IN ('user', 'assistant')",
-        _ => bail!("role must be user, assistant, or tool"),
+        Some("dialogue") => " AND m.role IN ('user', 'assistant')",
+        _ => bail!("role must be user, assistant, tool, or dialogue"),
     };
     let base = "SELECT m.id, m.session_id FROM msgs CROSS JOIN messages m ON m.id = msgs.rowid WHERE msgs MATCH ?1";
     if let Some(scope) = scope {
@@ -226,11 +227,7 @@ pub(super) fn execute(
         if !seen_inputs.insert(input) {
             continue;
         }
-        let target = if input == "self" {
-            caller_session_id
-        } else {
-            Some(input.as_str())
-        };
+        let target = super::history::substitute_self(input, caller_session_id);
         let lookup = match target {
             Some(target) => resolve_lookup(connection, target, visibility)?,
             None => SessionLookup::NotFound {
@@ -1033,6 +1030,9 @@ mod tests {
                     role: None,
                     limit: 1,
                     max_chars: 250,
+                    tail: false,
+                    before: None,
+                    max_message_chars: None,
                 },
             };
             let read =
@@ -1099,5 +1099,40 @@ mod tests {
         .unwrap();
         assert_eq!(v["sessions"].as_array().unwrap().len(), 1);
         assert_eq!(v["sessions"][0]["hits"][0]["role"], "tool");
+    }
+
+    #[test]
+    fn search_history_dialogue_role_matches_user_and_assistant_but_not_tools() {
+        let _held = testing::lock();
+        let (_dir, db) = testing::isolated_index();
+        add(&db, "talk", &["quokka user".into()]);
+        for (role, text) in [("assistant", "quokka assistant"), ("tool", "quokka tool")] {
+            db.execute(
+                "INSERT INTO messages(session_id,role,text) VALUES ('talk',?1,?2)",
+                [role, text],
+            )
+            .unwrap();
+        }
+        db.execute("INSERT INTO msgs(msgs) VALUES ('rebuild')", [])
+            .unwrap();
+        let mut p = SearchHistoryParams {
+            query: "quokka".into(),
+            session_ids: vec!["talk".into()],
+            order: Some("oldest".into()),
+            role: Some("dialogue".into()),
+            ..Default::default()
+        };
+        let found = run(&db, &p, None);
+        let roles: Vec<_> = found["sessions"][0]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["role"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        // The global (unscoped) path applies the same filter.
+        p.session_ids.clear();
+        let found = run(&db, &p, None);
+        assert_eq!(found["sessions"][0]["hits"].as_array().unwrap().len(), 2);
     }
 }

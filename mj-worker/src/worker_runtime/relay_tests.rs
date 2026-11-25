@@ -6616,10 +6616,9 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
                 replaced_unused_native_session_id: None,
             })
             .unwrap();
-        assert_eq!(
-            relay.native_session_may_have_history(),
-            !native_session_unused,
-            "the replacement opened here and has not been used"
+        assert!(
+            !relay.native_session_may_have_history(),
+            "the replacement opened here and has not been used (unused={native_session_unused})"
         );
     }
 }

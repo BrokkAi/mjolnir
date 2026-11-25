@@ -863,7 +863,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         ("mcp  mj-review  set baseline", offers_review),
                         ("mcp  mj-review_  request review", false),
                         ("mcp  mj-agents  handback", offers("handback")),
-                        ("mcp  mj-memory  trace file src/lib.rs", true),
+                        ("mcp  mj-memory  read session abc123", true),
                         // A configured reviewer server is not Mjolnir's,
                         // whatever its name.
                         ("mcp  mj-tools  run", false),
@@ -896,7 +896,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         None
                     );
                     assert_eq!(
-                        dsh_answer(&approvals, "mcp  mj-memory  search sessions").is_some(),
+                        dsh_answer(&approvals, "mcp  mj-memory  search history").is_some(),
                         guardian
                     );
                 }

@@ -35,33 +35,35 @@ impl HistoryEndpoint {
     }
 
     /// Pending requests a controller speaking `protocol_version` can parse.
-    /// A controller older than `search_history` would fail to deserialize the
-    /// whole `HistoryRequests` reply, so such requests are failed here and
-    /// never listed.
+    /// A controller older than a request's feature would fail to deserialize the
+    /// whole `HistoryRequests` reply or answer with a misleading error, so such
+    /// requests are failed here and never listed.
     pub fn requests_for_protocol(&self, protocol_version: u32) -> Vec<HistoryRequest> {
         let mut pending = self.pending.lock().expect("history queue lock poisoned");
         pending.retain(|_, entry| entry.expires > Instant::now() && !entry.reply.is_closed());
-        if protocol_version < mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL {
-            let unsupported: Vec<String> = pending
-                .iter()
-                .filter(|(_, entry)| {
-                    matches!(entry.request.query, HistoryQuery::SearchHistory { .. })
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in unsupported {
-                if let Some(entry) = pending.remove(&id) {
-                    let result = HistoryResult::failed(
-                        id,
-                        format!(
-                            "search_history requires controller relay protocol {} (connected controller uses {}); upgrade or restart the daemon",
-                            mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL,
-                            protocol_version
-                        ),
+        let unsupported: Vec<(String, u32, &'static str)> = pending
+            .iter()
+            .filter_map(|(id, entry)| {
+                let (required, feature) = entry.request.query.protocol_requirement();
+                (protocol_version < required).then(|| (id.clone(), required, feature))
+            })
+            .collect();
+        for (id, required, feature) in unsupported {
+            if let Some(entry) = pending.remove(&id) {
+                let mut message = format!(
+                    "{feature} requires controller relay protocol {required} (connected controller uses {protocol_version}); upgrade or restart the daemon"
+                );
+                if required == mj_core::relay::RELAY_READ_SESSION_V2_PROTOCOL {
+                    message.push_str(
+                        ", or retry without tail, before, max_message_chars, role=\"dialogue\", or \"self\"",
                     );
-                    if entry.reply.send(result).is_err() {
-                        tracing::debug!("history caller disconnected before its response");
-                    }
+                }
+                if entry
+                    .reply
+                    .send(HistoryResult::failed(id, message))
+                    .is_err()
+                {
+                    tracing::debug!("history caller disconnected before its response");
                 }
             }
         }
@@ -282,5 +284,61 @@ mod tests {
         });
         assert!(!legacy.await.unwrap().unwrap().is_error);
         assert!(endpoint.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn protocol_92_controllers_get_plain_reads_but_fail_protocol_94_reads_with_a_retry_hint()
+    {
+        let endpoint = HistoryEndpoint::default();
+        let read = |tail: bool| {
+            let endpoint = endpoint.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .query(HistoryQuery::ReadSession {
+                        session_id: "session".into(),
+                        start: 0,
+                        offset: 0,
+                        role: None,
+                        limit: 20,
+                        max_chars: 16_000,
+                        tail,
+                        before: None,
+                        max_message_chars: None,
+                    })
+                    .await
+            })
+        };
+        let plain = read(false);
+        let tailed = read(true);
+        while endpoint.requests().len() != 2 {
+            tokio::task::yield_now().await;
+        }
+        let listed = endpoint.requests_for_protocol(mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL);
+        assert_eq!(listed.len(), 1);
+        // Plain reads serialize without the protocol-94 keys an older controller rejects.
+        let wire = serde_json::to_string(&listed).unwrap();
+        assert!(
+            !wire.contains("tail") && !wire.contains("max_message_chars"),
+            "{wire}"
+        );
+        let failed = tailed.await.unwrap().unwrap();
+        assert!(failed.is_error);
+        let error = failed.value["error"].as_str().unwrap();
+        assert!(
+            error.contains("requires controller relay protocol 94"),
+            "{error}"
+        );
+        assert!(error.contains("connected controller uses 92"), "{error}");
+        assert!(
+            error.contains("retry without tail, before, max_message_chars"),
+            "{error}"
+        );
+        assert!(!plain.is_finished());
+        endpoint.complete(HistoryResult {
+            request_id: listed[0].request_id.clone(),
+            value: serde_json::json!({"ok": true}),
+            is_error: false,
+        });
+        assert!(!plain.await.unwrap().unwrap().is_error);
     }
 }

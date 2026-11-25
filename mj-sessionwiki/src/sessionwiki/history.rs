@@ -207,6 +207,25 @@ fn child_not_indexed(input: &str, pointer: &super::top_level::ChildPointer) -> S
     }
 }
 
+/// `sessionwiki::index::resolve` does not select `files.ended`, leaving
+/// `SessionRow.last_active` as `None`. Fill it by primary key when absent so
+/// session headers and ambiguous-prefix diagnostics show real end times.
+fn fill_ended(connection: &rusqlite::Connection, row: &mut index::SessionRow) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    if row.last_active.is_none() {
+        row.last_active = connection
+            .query_row(
+                "SELECT ended FROM files WHERE path = ?1",
+                [&row.path],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .context("read session end time")?
+            .flatten();
+    }
+    Ok(())
+}
+
 /// Resolve `id` (a Mjolnir id or prefix, or a native UUID) to one visible
 /// indexed session. A sub-agent never resolves, and a child id never hides a
 /// top-level session: children are consulted only when no visible row matched.
@@ -234,7 +253,9 @@ pub(super) fn resolve_lookup(
         .filter(|row| !visibility.is_child_lenient(row) && seen.insert(row.session_id.clone()))
         .collect();
     if let Some(position) = visible.iter().position(|row| row.session_id == id) {
-        return Ok(SessionLookup::Resolved(visible.remove(position)));
+        let mut row = visible.remove(position);
+        fill_ended(connection, &mut row)?;
+        return Ok(SessionLookup::Resolved(row));
     }
     // An exact native UUID outranks other rows that merely share its prefix.
     let wanted = Some(id.to_ascii_lowercase());
@@ -260,13 +281,22 @@ pub(super) fn resolve_lookup(
             .map(|(i, _)| i)
             .collect();
         if preferred.len() == 1 {
-            return Ok(SessionLookup::Resolved(visible.remove(preferred[0])));
+            let mut row = visible.remove(preferred[0]);
+            fill_ended(connection, &mut row)?;
+            return Ok(SessionLookup::Resolved(row));
         }
     }
     match visible.len() {
         0 => {}
-        1 => return Ok(SessionLookup::Resolved(visible.remove(0))),
+        1 => {
+            let mut row = visible.remove(0);
+            fill_ended(connection, &mut row)?;
+            return Ok(SessionLookup::Resolved(row));
+        }
         _ => {
+            for row in &mut visible {
+                fill_ended(connection, row)?;
+            }
             return Ok(SessionLookup::Ambiguous {
                 input: id.to_owned(),
                 candidates: visible.iter().map(AmbiguousSession::of).collect(),
@@ -339,7 +369,23 @@ fn resolve(
                 listed.join("; ")
             )
         }
-        SessionLookup::NotFound { input } => bail!("session {input:?} was not found in the index"),
+        SessionLookup::NotFound { input } => bail!(
+            "session {input:?} was not found in the index (sub-agent and reviewer transcripts are never indexed; \
+             if this is a child id, check its parent session or report directory)"
+        ),
+    }
+}
+
+/// Replace the `"self"` alias with the calling session's id. `None` means the
+/// alias was used with no calling session to stand for.
+pub(super) fn substitute_self<'a>(
+    input: &'a str,
+    caller_session_id: Option<&'a str>,
+) -> Option<&'a str> {
+    if mj_core::history::is_self_alias(input) {
+        caller_session_id
+    } else {
+        Some(input)
     }
 }
 
@@ -362,9 +408,12 @@ fn query(
     let ownership = super::top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
     let value = query_in_for(&connection, request, &ownership, &cache, caller_session_id)?;
-    // The constant source and coverage prose lives in the `search_history` tool
-    // description, so its responses omit it.
-    if matches!(request.query, HistoryQuery::SearchHistory { .. }) {
+    // The constant source and coverage prose lives in the `search_history` and
+    // `read_session` tool descriptions, so their responses omit it.
+    if matches!(
+        request.query,
+        HistoryQuery::SearchHistory { .. } | HistoryQuery::ReadSession { .. }
+    ) {
         return Ok(json!({"data": value, "index_state": super::index_state()}));
     }
     Ok(json!({
@@ -507,17 +556,27 @@ fn run_query(
             role,
             limit: count,
             max_chars,
+            tail,
+            before,
+            max_message_chars,
         } => {
-            let row = resolve(connection, session_id, visibility)?;
+            let target = substitute_self(session_id, caller_session_id)
+                .ok_or_else(|| anyhow!("session \"self\" requires a calling session"))?;
+            let row = resolve(connection, target, visibility)?;
             let messages = indexed_messages::load(connection, &row.session_id)?;
             Ok(read_page(
-                &row.session_id,
+                &row,
                 &messages,
-                *start,
-                *offset,
-                role.as_deref(),
-                limit(*count),
-                budget(*max_chars),
+                &PageRequest {
+                    start: *start,
+                    offset: *offset,
+                    role: role.as_deref(),
+                    count: limit(*count),
+                    chars: budget(*max_chars),
+                    backward: *tail || before.is_some(),
+                    before: *before,
+                    per_message: max_message_chars.filter(|&n| n > 0).map(budget),
+                },
             ))
         }
         SearchSession {
@@ -576,37 +635,188 @@ fn run_query(
     }
 }
 
-fn read_page(
-    session_id: &str,
-    messages: &[indexed_messages::IndexedMessage],
+/// What one `read_session` page asks for, after validation and clamping.
+struct PageRequest<'a> {
     start: usize,
     offset: usize,
-    role: Option<&str>,
+    role: Option<&'a str>,
     count: usize,
     chars: usize,
+    /// `tail`, or `before` was given: page backward from `before` (or the end).
+    backward: bool,
+    before: Option<usize>,
+    per_message: Option<usize>,
+}
+
+/// The single owner of what a role filter admits; `dialogue` is user plus assistant.
+fn matches_role(filter: Option<&str>, message_role: &str) -> bool {
+    match filter {
+        None => true,
+        Some("dialogue") => matches!(message_role, "user" | "assistant"),
+        Some(wanted) => wanted == message_role,
+    }
+}
+
+/// Slice one message and describe it. `next_offset` appears only when cut.
+fn take_message(
+    message: &indexed_messages::IndexedMessage,
+    skip: usize,
+    take: usize,
+) -> (Value, indexed_messages::Excerpt) {
+    let part = indexed_messages::excerpt(&message.text, skip, take);
+    let mut value = json!({
+        "i": message.i,
+        "role": message.role,
+        "text": &part.text,
+        "offset": part.offset,
+        "text_chars": part.text_chars,
+        "truncated": part.next_offset.is_some(),
+    });
+    if let Some(next_offset) = part.next_offset {
+        value["next_offset"] = json!(next_offset);
+    }
+    (value, part)
+}
+
+/// The page envelope: a redacted session header plus the page and its cursors.
+fn session_response(
+    row: &index::SessionRow,
+    total_messages: usize,
+    messages: Vec<Value>,
+    next: Option<Value>,
+    earlier: Option<Value>,
 ) -> Value {
-    let mut remaining = chars;
-    let mut page = Vec::new();
+    use sessionwiki::redact::redact;
+    let mut value = json!({
+        "session_id": row.session_id,
+        "title": redact(&row.title),
+        "tool": redact(&row.tool),
+    });
+    if !row.project.trim().is_empty() {
+        value["project"] = json!(redact(&row.project));
+    }
+    if let Some(started) = &row.started {
+        value["started"] = json!(started);
+    }
+    if let Some(ended) = &row.last_active {
+        value["ended"] = json!(ended);
+    }
+    value["total_messages"] = json!(total_messages);
+    value["messages"] = json!(messages);
+    value["next"] = json!(next);
+    value["earlier"] = json!(earlier);
+    value
+}
+
+fn read_page(
+    row: &index::SessionRow,
+    messages: &[indexed_messages::IndexedMessage],
+    request: &PageRequest<'_>,
+) -> Value {
+    let matching: Vec<&indexed_messages::IndexedMessage> = messages
+        .iter()
+        .filter(|message| matches_role(request.role, message.role))
+        .collect();
+    // The first message of a skim page always fits in `chars`.
+    let cap = request.per_message.map(|cap| cap.min(request.chars));
+    let (page, next, earlier) = if request.backward {
+        backward_page(&matching, request, cap)
+    } else {
+        forward_page(&matching, request, cap)
+    };
+    session_response(row, messages.len(), page, next, earlier)
+}
+
+type PageParts = (Vec<Value>, Option<Value>, Option<Value>);
+
+/// The newest matching messages before `before` (or the end), in order.
+fn backward_page(
+    matching: &[&indexed_messages::IndexedMessage],
+    request: &PageRequest<'_>,
+    cap: Option<usize>,
+) -> PageParts {
+    let end = matching.partition_point(|message| message.i < request.before.unwrap_or(usize::MAX));
+    let Some(last_pos) = end.checked_sub(1) else {
+        return (Vec::new(), None, None);
+    };
+    let mut remaining = request.chars;
     let mut next = None;
-    for message in messages.iter().skip(start) {
-        if role.is_some_and(|role| role != message.role) {
-            continue;
+    let last = matching[last_pos];
+    let (value, part) = take_message(last, 0, cap.unwrap_or(remaining));
+    remaining -= part.text.chars().count();
+    let mut selected = vec![value];
+    let mut first_pos = last_pos;
+    match part.next_offset {
+        // An oversized backward message is continued with `limit: 1` so
+        // following `next` after `before` never spills into already-read messages.
+        Some(next_offset) if cap.is_none() => {
+            next = Some(json!({"start": last.i, "offset": next_offset, "limit": 1}));
         }
-        if remaining == 0 || page.len() == count {
-            next = Some(json!({"start":message.i,"offset":0}));
-            break;
-        }
-        let skip = if message.i == start { offset } else { 0 };
-        let part = indexed_messages::excerpt(&message.text, skip, remaining);
-        remaining -= part.text.chars().count();
-        let truncated = part.next_offset.is_some();
-        page.push(json!({"i":message.i,"role":message.role,"ts":Value::Null,"text":part.text,"offset":part.offset,"truncated":truncated}));
-        if let Some(next_offset) = part.next_offset {
-            next = Some(json!({"start":message.i,"offset":next_offset}));
-            break;
+        _ => {
+            for pos in (0..last_pos).rev() {
+                if selected.len() == request.count {
+                    break;
+                }
+                let message = matching[pos];
+                let text_chars = message.text.chars().count();
+                let wanted = cap.map_or(text_chars, |cap| text_chars.min(cap));
+                if wanted > remaining {
+                    break;
+                }
+                let (value, part) = take_message(message, 0, wanted);
+                remaining -= part.text.chars().count();
+                selected.push(value);
+                first_pos = pos;
+            }
         }
     }
-    json!({"session_id":session_id,"messages":page,"next":next,"total_messages":messages.len()})
+    selected.reverse();
+    let earlier = (first_pos > 0).then(|| json!({"before": matching[first_pos].i}));
+    (selected, next, earlier)
+}
+
+/// Matching messages from `start`, stopping on whole-message boundaries when
+/// skimming and inside the first oversized message otherwise.
+fn forward_page(
+    matching: &[&indexed_messages::IndexedMessage],
+    request: &PageRequest<'_>,
+    cap: Option<usize>,
+) -> PageParts {
+    let pos0 = matching.partition_point(|message| message.i < request.start);
+    let mut remaining = request.chars;
+    let mut page = Vec::new();
+    let mut next = None;
+    for message in &matching[pos0..] {
+        if page.len() == request.count || (!page.is_empty() && remaining == 0) {
+            next = Some(json!({"start": message.i, "offset": 0}));
+            break;
+        }
+        let skip = if message.i == request.start {
+            request.offset
+        } else {
+            0
+        };
+        if let Some(cap) = cap {
+            let wanted = message.text.chars().count().saturating_sub(skip).min(cap);
+            if !page.is_empty() && wanted > remaining {
+                next = Some(json!({"start": message.i, "offset": 0}));
+                break;
+            }
+            let (value, part) = take_message(message, skip, wanted);
+            remaining -= part.text.chars().count();
+            page.push(value);
+        } else {
+            let (value, part) = take_message(message, skip, remaining);
+            remaining -= part.text.chars().count();
+            page.push(value);
+            if let Some(next_offset) = part.next_offset {
+                next = Some(json!({"start": message.i, "offset": next_offset}));
+                break;
+            }
+        }
+    }
+    let earlier = (!page.is_empty() && pos0 > 0).then(|| json!({"before": matching[pos0].i}));
+    (page, next, earlier)
 }
 
 #[cfg(test)]
@@ -657,6 +867,9 @@ mod tests {
                 role: None,
                 limit: 20,
                 max_chars: 64_000,
+                tail: false,
+                before: None,
+                max_message_chars: None,
             }),
         )
         .unwrap();
@@ -712,22 +925,6 @@ mod tests {
             "session \"fresh\" exists but is not in the index"
         );
     }
-    #[test]
-    fn transcript_pages_preserve_unicode_indices_and_continue_inside_large_messages() {
-        let messages = [indexed_messages::IndexedMessage {
-            id: 1,
-            i: 0,
-            role: "user",
-            text: "é🙂abcdef".into(),
-        }];
-        let first = read_page("id", &messages, 0, 0, None, 20, 3);
-        assert_eq!(first["messages"][0]["text"], "é🙂a");
-        assert_eq!(first["next"], json!({"start":0,"offset":3}));
-        let second = read_page("id", &messages, 0, 3, Some("user"), 20, 20);
-        assert_eq!(second["messages"][0]["text"], "bcdef");
-        assert!(second["next"].is_null());
-    }
-
     fn add_messages(connection: &rusqlite::Connection, id: &str, texts: &[&str]) {
         for text in texts {
             connection
@@ -747,7 +944,424 @@ mod tests {
             role: None,
             limit: 20,
             max_chars: 1000,
+            tail: false,
+            before: None,
+            max_message_chars: None,
         })
+    }
+
+    fn add_roled(connection: &rusqlite::Connection, id: &str, messages: &[(&str, &str)]) {
+        for (role, text) in messages {
+            connection
+                .execute(
+                    "INSERT INTO messages(session_id, role, text) VALUES (?1, ?2, ?3)",
+                    [id, role, text],
+                )
+                .unwrap();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read(
+        connection: &rusqlite::Connection,
+        id: &str,
+        role: Option<&str>,
+        tail: bool,
+        before: Option<usize>,
+        start: usize,
+        offset: usize,
+        max_chars: usize,
+        max_message_chars: Option<usize>,
+        limit: usize,
+    ) -> Value {
+        query_in(
+            connection,
+            &request(HistoryQuery::ReadSession {
+                session_id: id.into(),
+                start,
+                offset,
+                role: role.map(str::to_owned),
+                limit,
+                max_chars,
+                tail,
+                before,
+                max_message_chars,
+            }),
+        )
+        .unwrap()
+    }
+
+    fn indices(page: &Value) -> Vec<u64> {
+        page["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["i"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn transcript_pages_preserve_unicode_indices_and_continue_inside_large_messages() {
+        let _held = super::super::tags::testing::lock();
+        let (_directory, connection) = super::super::tags::testing::isolated_index();
+        super::super::tags::testing::index_row(&connection, "unicode", "mjolnir");
+        add_messages(&connection, "unicode", &["é🙂abcdef"]);
+        let first = read(&connection, "unicode", None, false, None, 0, 0, 3, None, 20);
+        assert_eq!(first["messages"][0]["text"], "é🙂a");
+        assert_eq!(first["messages"][0]["text_chars"], 8);
+        assert_eq!(first["messages"][0]["next_offset"], 3);
+        assert_eq!(first["next"], json!({"start":0,"offset":3}));
+        let second = read(
+            &connection,
+            "unicode",
+            Some("user"),
+            false,
+            None,
+            0,
+            3,
+            20,
+            None,
+            20,
+        );
+        assert_eq!(second["messages"][0]["text"], "bcdef");
+        assert!(second["next"].is_null());
+        assert!(second["messages"][0].get("next_offset").is_none());
+    }
+
+    #[test]
+    fn read_session_walks_backward_through_dialogue_with_earlier_cursors_to_the_start() {
+        let _held = super::super::tags::testing::lock();
+        let (_directory, connection) = super::super::tags::testing::isolated_index();
+        super::super::tags::testing::index_row(&connection, "walk", "mjolnir");
+        // 0 user, 1 tool, 2 assistant, 3 tool, 4 user, 5 tool, 6 assistant
+        add_roled(
+            &connection,
+            "walk",
+            &[
+                ("user", "u0"),
+                ("tool", "t1"),
+                ("assistant", "a2"),
+                ("tool", "t3"),
+                ("user", "u4"),
+                ("tool", "t5"),
+                ("assistant", "a6"),
+            ],
+        );
+        let dialogue = Some("dialogue");
+        let page = read(
+            &connection,
+            "walk",
+            dialogue,
+            true,
+            None,
+            0,
+            0,
+            1000,
+            None,
+            2,
+        );
+        assert_eq!(indices(&page), [4, 6]);
+        assert_eq!(page["earlier"], json!({"before": 4}));
+        assert!(page["next"].is_null());
+        let page = read(
+            &connection,
+            "walk",
+            dialogue,
+            false,
+            Some(4),
+            0,
+            0,
+            1000,
+            None,
+            2,
+        );
+        assert_eq!(indices(&page), [0, 2]);
+        assert!(page["earlier"].is_null(), "index 0 is the start");
+        // Without a role filter, `before` still counts every message.
+        let page = read(
+            &connection,
+            "walk",
+            None,
+            false,
+            Some(2),
+            0,
+            0,
+            1000,
+            None,
+            20,
+        );
+        assert_eq!(indices(&page), [0, 1]);
+        assert_eq!(page["total_messages"], 7);
+        // Nothing precedes the first message.
+        let page = read(
+            &connection,
+            "walk",
+            dialogue,
+            false,
+            Some(0),
+            0,
+            0,
+            1000,
+            None,
+            20,
+        );
+        assert!(page["messages"].as_array().unwrap().is_empty());
+        assert!(page["earlier"].is_null() && page["next"].is_null());
+        // A page budget that cannot fit the earlier message stops before it.
+        let page = read(&connection, "walk", dialogue, true, None, 0, 0, 3, None, 20);
+        assert_eq!(indices(&page), [6]);
+        assert_eq!(page["earlier"], json!({"before": 6}));
+    }
+
+    #[test]
+    fn an_oversized_final_message_is_cut_with_a_forward_cursor_and_an_earlier_cursor() {
+        let _held = super::super::tags::testing::lock();
+        let (_directory, connection) = super::super::tags::testing::isolated_index();
+        super::super::tags::testing::index_row(&connection, "big", "mjolnir");
+        let long = "é🙂".repeat(50);
+        add_roled(
+            &connection,
+            "big",
+            &[("user", "ask"), ("assistant", &long), ("user", "later")],
+        );
+        // Oversized message selected by `before` emits `limit: 1` so continuing
+        // it finishes message 1 without revisiting message 2.
+        let page = read(&connection, "big", None, false, Some(2), 0, 0, 10, None, 20);
+        assert_eq!(indices(&page), [1]);
+        assert_eq!(page["messages"][0]["text_chars"], 100);
+        assert_eq!(page["next"], json!({"start": 1, "offset": 10, "limit": 1}));
+        assert_eq!(page["earlier"], json!({"before": 1}));
+        let more = read(&connection, "big", None, false, None, 1, 10, 1000, None, 1);
+        assert_eq!(indices(&more), [1]);
+        assert_eq!(more["messages"][0]["offset"], 10);
+        assert_eq!(more["messages"][0]["truncated"], false);
+        assert_eq!(
+            more["messages"][0]["text"],
+            long.chars().skip(10).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn skimming_pages_on_whole_messages_and_treats_zero_as_uncapped() {
+        let _held = super::super::tags::testing::lock();
+        let (_directory, connection) = super::super::tags::testing::isolated_index();
+        super::super::tags::testing::index_row(&connection, "skim", "mjolnir");
+        let long = "x".repeat(500);
+        add_roled(
+            &connection,
+            "skim",
+            &[
+                ("user", &long),
+                ("assistant", &long),
+                ("user", "short"),
+                ("assistant", &long),
+            ],
+        );
+        // 120-char cap: the first message is shown cut, and its continuation is advertised.
+        let page = read(
+            &connection,
+            "skim",
+            None,
+            false,
+            None,
+            0,
+            0,
+            1000,
+            Some(120),
+            20,
+        );
+        assert_eq!(indices(&page), [0, 1, 2, 3]);
+        assert_eq!(page["messages"][0]["text"].as_str().unwrap().len(), 120);
+        assert_eq!(page["messages"][0]["text_chars"], 500);
+        assert_eq!(page["messages"][0]["next_offset"], 120);
+        assert_eq!(page["messages"][2]["text"], "short");
+        assert!(page["next"].is_null());
+        // A budget of 241 fits two capped messages; the 5-char third no longer fits and starts a whole next page.
+        let page = read(
+            &connection,
+            "skim",
+            None,
+            false,
+            None,
+            0,
+            0,
+            241,
+            Some(120),
+            20,
+        );
+        assert_eq!(indices(&page), [0, 1]);
+        assert_eq!(page["next"], json!({"start": 2, "offset": 0}));
+        // A cap above the page budget is clamped, so the first message still fits.
+        let page = read(
+            &connection,
+            "skim",
+            None,
+            false,
+            None,
+            0,
+            0,
+            100,
+            Some(5000),
+            20,
+        );
+        assert_eq!(indices(&page), [0]);
+        assert_eq!(page["messages"][0]["text"].as_str().unwrap().len(), 100);
+        assert_eq!(page["next"], json!({"start": 1, "offset": 0}));
+        // Zero is "no cap", exactly like omitting it.
+        let zero = read(
+            &connection,
+            "skim",
+            None,
+            false,
+            None,
+            0,
+            0,
+            600,
+            Some(0),
+            20,
+        );
+        let none = read(&connection, "skim", None, false, None, 0, 0, 600, None, 20);
+        assert_eq!(zero, none);
+        assert_eq!(zero["next"], json!({"start": 1, "offset": 100}));
+        // Backward skim stops before a message that no longer fits.
+        let page = read(
+            &connection,
+            "skim",
+            None,
+            true,
+            None,
+            0,
+            0,
+            200,
+            Some(120),
+            20,
+        );
+        assert_eq!(indices(&page), [2, 3]);
+        assert_eq!(page["earlier"], json!({"before": 2}));
+    }
+
+    #[test]
+    fn read_session_header_is_redacted_resolves_self_and_omits_constant_prose() {
+        let _held = super::super::tags::testing::lock();
+        let (_directory, connection) = super::super::tags::testing::isolated_index();
+        super::super::tags::testing::index_row(&connection, "caller1", "mjolnir");
+        connection
+            .execute(
+                "UPDATE files SET title = 'deploy AKIAIOSFODNN7EXAMPLE', project = '',
+                 started = '2026-11-01T00:00:00Z', ended = '2026-11-01T01:00:00Z'
+                 WHERE session_id = 'caller1'",
+                [],
+            )
+            .unwrap();
+        add_roled(
+            &connection,
+            "caller1",
+            &[("user", "hello"), ("assistant", "hi")],
+        );
+        let ownership = super::super::top_level::Snapshot::default();
+        let cache = crate::import::NativeScanCache::new();
+        let page = run_query(
+            &connection,
+            &request(HistoryQuery::ReadSession {
+                session_id: "self".into(),
+                start: 0,
+                offset: 0,
+                role: None,
+                limit: 20,
+                max_chars: 1000,
+                tail: true,
+                before: None,
+                max_message_chars: None,
+            }),
+            &mut QueryVisibility::new(&ownership, &cache),
+            Some("caller1"),
+        )
+        .unwrap();
+        assert_eq!(page["session_id"], "caller1");
+        assert_eq!(page["tool"], "mjolnir");
+        assert!(
+            page["title"].as_str().unwrap().contains("[redacted"),
+            "{page}"
+        );
+        assert!(page.get("project").is_none(), "an empty project is omitted");
+        assert_eq!(page["started"], "2026-11-01T00:00:00Z");
+        assert_eq!(page["ended"], "2026-11-01T01:00:00Z");
+        assert_eq!(page["total_messages"], 2);
+        assert!(page["messages"][0].get("ts").is_none());
+        // "self" with no calling session is an error, not a lookup for the word.
+        let error = run_query(
+            &connection,
+            &request(HistoryQuery::ReadSession {
+                session_id: "self".into(),
+                start: 0,
+                offset: 0,
+                role: None,
+                limit: 20,
+                max_chars: 1000,
+                tail: false,
+                before: None,
+                max_message_chars: None,
+            }),
+            &mut QueryVisibility::new(&ownership, &cache),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("calling session"), "{error:#}");
+        // A sub-agent reading "self" is pointed at its parent.
+        let child = super::super::top_level::Snapshot::for_test_child("caller9", "caller1");
+        let error = run_query(
+            &connection,
+            &request(HistoryQuery::ReadSession {
+                session_id: "self".into(),
+                start: 0,
+                offset: 0,
+                role: None,
+                limit: 20,
+                max_chars: 1000,
+                tail: false,
+                before: None,
+                max_message_chars: None,
+            }),
+            &mut QueryVisibility::new(&child, &cache),
+            Some("caller9"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("sub-agent caller9") && message.contains("parent session caller1"),
+            "{message}"
+        );
+        // An unknown id explains why child and reviewer transcripts are missing.
+        let error = run_query(
+            &connection,
+            &read_request("absent"),
+            &mut QueryVisibility::new(&ownership, &cache),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("never indexed")
+                && error.to_string().contains("report directory"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_retired_session_brief_still_executes_for_older_workers() {
+        let _held = super::super::tags::testing::lock();
+        let (_directory, connection) = super::super::tags::testing::isolated_index();
+        super::super::tags::testing::index_row(&connection, "old1", "mjolnir");
+        add_roled(&connection, "old1", &[("user", "hello brief")]);
+        let brief = query_in(
+            &connection,
+            &request(HistoryQuery::GetSessionBrief {
+                session_id: "old1".into(),
+                max_chars: 4000,
+            }),
+        )
+        .unwrap();
+        assert_eq!(brief["session_id"], "old1");
+        assert!(brief["text"].as_str().unwrap().contains("hello brief"));
     }
 
     // Hard-won: live-audit: a native UUID matched only through files.path was discarded for not prefixing the Mjolnir id.

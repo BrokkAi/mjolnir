@@ -1555,6 +1555,9 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
                 role: None,
                 limit: 20,
                 max_chars: 64000,
+                tail: false,
+                before: None,
+                max_message_chars: None,
             },
         })
         .unwrap(),
