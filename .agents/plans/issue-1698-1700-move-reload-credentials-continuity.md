@@ -28,6 +28,9 @@ After this change, the worker's post-reap reload boundary is the single safe own
 - [x] Follow-up: removed Unix/test cfg guards from public retired-login readers/acknowledgers because the cross-platform stand-in calls them in non-test builds. Remaining added Unix-only tests/helpers are gated.
 - [x] Follow-up: merged-head validation passed (credentials 40, relay 14, reload_commit 16, in_place_move 12, reload_launch_config 5, acp::session 23, credential_sync 3, controller Move 59, parking 11, daemon Move 11). Format and six-crate strict Clippy passed. The merge and cfg fix are committed together without pushing; full ledger is `merge-validation.md` in the assigned report directory.
 
+- [x] Round-1 review: restore absent same-profile copied logins (preserving Claude stripping and shared links), skip corrupt source documents, retain distinct equal-freshness grants, page/base64-encode retirement responses, and serialize acknowledgement deletion against listing with the shared credential write guard.
+- [x] Round-1 review: requested filters passed: core credentials 40, core relay 14, worker reload_commit 19, in_place_move 13, reload_launch_config 5, acp::session 23, credential_sync 4, controller Move 59, parking 11, daemon Move 11. Format and six-crate strict Clippy passed, plus final worker Clippy. Five fixes committed without amend/push; detailed evidence is review1-validation.md in the assigned report directory.
+
 ## Surprises & Discoveries
 
 - Observation: Relay protocol 92 was recently claimed on `master` by `1096adabc` (`RELAY_SEARCH_HISTORY_PROTOCOL = 92`), so the new combined capability for this plan takes protocol 93.
@@ -67,7 +70,10 @@ After this change, the worker's post-reap reload boundary is the single safe own
 - Decision: source ownership comes from `ownership.json`, source harness/home from the source `launch.json`, and operation/store identity from the accepted reload. Persist an empty receipt if no copied grant exists so replay never recaptures destination bytes. Only nonempty receipts need daemon acknowledgement; empty receipts are removed after WAL completion.
 - Decision: canonical adoption goes through credential sync's `LoginAccess::install_if_newer`, the same file/native-lock and macOS Keychain path used by `ProfileLogin::adopt`. Retired snapshots resolve their immutable source profile afresh, independently of the worker's current destination profile.
 - Decision: make the WAL durable before capturing the write-once receipt, while still capturing before any clear or overlay. Otherwise a pre-WAL preparation failure could leave an uncommitted receipt, let the source run and rotate again, and pin an old grant on a retry of the same operation. Once the WAL exists, every subsequent restart must roll forward before a source writer can run. Both normal promotion and legacy WAL recovery preserve before clearing; a dedicated retry-failure test covers the ordering.
-- Decision: a canonical install returning `installed=false` does not alone authorize acknowledgement. Unequal grants with unknown freshness have no safe discard ordering, so retirement adoption retains the snapshot and reports the ambiguity. Only an installation, an identical fingerprint, or the existing comparator confirming a known canonical login is equal/newer permits acknowledgement. The recorded-peer test exercises this condition for every supported copied grant.
+- Decision: a canonical install returning `installed=false` does not alone authorize acknowledgement. Unequal grants with unknown freshness have no safe discard ordering, so retirement adoption retains the snapshot and reports the ambiguity. Only an installation, an identical fingerprint, or the existing comparator confirming the canonical login strictly supersedes the retired grant permits acknowledgement. The recorded-peer test exercises this condition for every supported copied grant.
+
+- Round-1 review decision: protocol 93 is unshipped, so retirement snapshot bytes use base64 and reads carry an optional after cursor plus has_more. The raw-byte budget is one quarter of the documented relay frame limit, also accounting for JSON metadata; at least one record always advances. Failed adoption never stops cursor advancement to later pages.
+- Round-1 review decision: an unequal grant is discardable only when the existing comparator returns Push (strict canonical supersession); equal timestamps remain pending. A corrupt source document produces a write-once empty receipt with a secret-free warning, allowing reload/recovery to proceed.
 
 ## Outcomes & Retrospective
 
@@ -76,6 +82,8 @@ Implementation now includes the combined protocol-93 contract. Required candidat
 The full command/count ledger and text logs live in the assigned report directory under `validation/`. The first attempted optional `reload_candidate` filter matched zero tests; the corrected `stage_candidate` filter passed one test and is the evidence used. Failed intermediate runs remain in that ledger with the exact fixes and successful targeted reruns. Linux strict Clippy includes the requested five crates and the daemon consumer. macOS/Windows native execution remains for platform CI; Unix-only tests and RPC helpers are gated appropriately.
 
 Canonical grants can still rotate independently in running copies between lifecycle boundaries; this change preserves the final retired copy rather than changing harness refresh ownership. Pre-destroy adoption is best effort for reachable workers, as planned. Legacy WALs whose source bytes were already destroyed by an older worker cannot retroactively recover those bytes; otherwise legacy WAL replay now captures before clearing. No candidate/WAL or MoveOperation schema was extended.
+
+Round-1 pre-push review fixed all five accepted findings. Missing destination copies now receive private, policy-correct retired credentials; source corruption no longer bricks promotion/recovery; distinct equal-freshness grants remain pending; base64 cursor pages stay within the frame budget and continue after adoption failures; and an exclusive acknowledgement guard prevents unlink/list races. New regression coverage passed, including >2 MiB backlogs, prefix-ID ordering and deterministic two-connection lock ordering. The full round-1 command/count ledger is `review1-validation.md` in the assigned report directory.
 
 ## Context and Orientation
 
@@ -107,7 +115,7 @@ Third, integrate retired-login preservation into `mj-worker/src/worker_runtime/r
 ### Part 3: Protocol 93 + daemon adoption via existing `credential_sync` + generic stopped-home harvest
 
 In `mj-core/src/relay.rs` and `mj-core/src/relay/protocol.rs`, add `pub const RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL: u32 = 93;` and advance `RELAY_PROTOCOL_VERSION` to 93 (keeping `RELAY_MIN_PROTOCOL_VERSION = 1`). Add two narrow connection-only / non-journaled relay requests (never stored in relay journal events or checkpoint exports):
-- `ReadRetiredLogins` (returns any pending `RetiredLoginSnapshot` entries from `<worker_root>/retired-logins/`, with `id`, `profile_id`, `harness`, and raw credential bytes).
+- `ReadRetiredLogins { after: Option<String> }` (returns a base64-encoded page with `has_more` of pending `RetiredLoginSnapshot` entries from `<worker_root>/retired-logins/`, with `id`, `profile_id`, `harness`, and raw credential bytes).
 - `AckRetiredLogin { id: String }` (removes the acknowledged retired-login file from `<worker_root>/retired-logins/` and fsyncs the directory; idempotent if already removed).
 
 In `mj-session-runtime/src/worker_client/credential_sync.rs`, wire retired-login draining into the existing daemon `ProfileLogin` / `LoginAccess` owner:

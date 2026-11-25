@@ -441,7 +441,10 @@ pub enum RelayRequest {
     /// Read this session's harness credential file as base64. The payload is
     /// connection-only and must never enter relay state or observations.
     ReadCredentials,
-    ReadRetiredLogins,
+    ReadRetiredLogins {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
     AckRetiredLogin {
         id: String,
     },
@@ -715,7 +718,7 @@ impl RelayRequest {
             Self::CpuUsage => "cpu_usage",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
-            Self::ReadRetiredLogins => "read_retired_logins",
+            Self::ReadRetiredLogins { .. } => "read_retired_logins",
             Self::AckRetiredLogin { .. } => "ack_retired_login",
             Self::InstallCredentials { .. } => "install_credentials",
             Self::SkillsState => "skills_state",
@@ -754,7 +757,7 @@ impl RelayRequest {
     /// protocol 31.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
-            Self::ReadRetiredLogins | Self::AckRetiredLogin { .. } => {
+            Self::ReadRetiredLogins { .. } | Self::AckRetiredLogin { .. } => {
                 super::RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL
             }
             Self::AntigravityStop { .. } => super::RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL,
@@ -1198,6 +1201,8 @@ pub enum RelayResponsePayload {
     },
     RetiredLogins {
         logins: Vec<crate::credentials::RetiredLoginSnapshot>,
+        #[serde(default)]
+        has_more: bool,
     },
     RetiredLoginAcknowledged,
     /// Fingerprint of a session's synced skills trees. Not secret.

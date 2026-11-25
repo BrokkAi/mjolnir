@@ -446,20 +446,22 @@ pub fn serve_latch_relay() {
             }
         } else if matches!(
             &request.request,
-            mj_core::relay::RelayRequest::ReadRetiredLogins
+            mj_core::relay::RelayRequest::ReadRetiredLogins { .. }
                 | mj_core::relay::RelayRequest::AckRetiredLogin { .. }
         ) {
             let worker_root = std::fs::read_to_string(Path::new(&root).join("staged-worker-root"))
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(&root));
             let payload = match &request.request {
-                mj_core::relay::RelayRequest::ReadRetiredLogins => {
-                    mj_core::relay::RelayResponsePayload::RetiredLogins {
-                        logins: crate::worker_runtime::reload_commit::read_retired_logins(
+                mj_core::relay::RelayRequest::ReadRetiredLogins { after } => {
+                    let (logins, has_more) =
+                        crate::worker_runtime::reload_commit::read_retired_logins_page(
                             &worker_root,
+                            after.as_deref(),
+                            mj_core::credentials::RETIRED_LOGIN_PAGE_RAW_BYTES,
                         )
-                        .unwrap(),
-                    }
+                        .unwrap();
+                    mj_core::relay::RelayResponsePayload::RetiredLogins { logins, has_more }
                 }
                 mj_core::relay::RelayRequest::AckRetiredLogin { id } => {
                     crate::worker_runtime::reload_commit::ack_retired_login(&worker_root, id)

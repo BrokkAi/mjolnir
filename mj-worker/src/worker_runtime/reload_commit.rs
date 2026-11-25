@@ -292,7 +292,7 @@ pub fn apply_committed_reload(
             anyhow::bail!("shared reload login requires Unix symlinks");
         }
     }
-    reconcile_retired_login(&candidate, home, &retired)?;
+    reconcile_retired_login(&candidate, home, &retired, &manifest)?;
     for name in ["ownership.json", "launch.json"] {
         atomic_private_write(&root.join(name), &std::fs::read(candidate.join(name))?)?;
     }
@@ -390,11 +390,22 @@ fn preserve_retired_login(
         Ok(bytes) => {
             let ownership: WorkerOwnership = serde_json::from_slice(&bytes)?;
             let launch = WorkerLaunchConfig::read(&root.join("launch.json"))?;
-            mj_core::credentials::read_harvestable_copied_login(
-                launch.harness,
-                &launch.harness_home,
-            )?
-            .map(|bytes| mj_core::credentials::RetiredLoginSnapshot {
+            let copied =
+                mj_core::credentials::read_copied_login(launch.harness, &launch.harness_home)?;
+            let copied = match copied {
+                Some(bytes) => {
+                    match mj_core::credentials::harvestable_login_bytes(launch.harness, &bytes) {
+                        Ok(true) => Some(bytes),
+                        Ok(false) => None,
+                        Err(error) => {
+                            tracing::warn!(harness = ?launch.harness, %error, "ignoring corrupt retired source login");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            copied.map(|bytes| mj_core::credentials::RetiredLoginSnapshot {
                 id: pending.operation_id.clone(),
                 profile_id: ownership.profile_id,
                 harness: launch.harness,
@@ -424,16 +435,26 @@ fn preserve_retired_login(
 
 /// Connection-only reads; a WAL in flight cannot be acknowledged before replay.
 pub fn read_retired_logins(root: &Path) -> Result<Vec<mj_core::credentials::RetiredLoginSnapshot>> {
+    Ok(read_retired_logins_page(root, None, usize::MAX)?.0)
+}
+
+pub fn read_retired_logins_page(
+    root: &Path,
+    after: Option<&str>,
+    max_raw_bytes: usize,
+) -> Result<(Vec<mj_core::credentials::RetiredLoginSnapshot>, bool)> {
     if root.join(PENDING_RELOAD_FILE).try_exists()? {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     mj_core::confined_path::reject_symlinks(root, Path::new(RETIRED_LOGINS), true)?;
     let entries = match std::fs::read_dir(root.join(RETIRED_LOGINS)) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), false));
+        }
         Err(error) => return Err(error.into()),
     };
-    let mut logins = Vec::new();
+    let mut paths = Vec::new();
     for entry in entries {
         let entry = entry?;
         if entry.path().extension().is_none_or(|ext| ext != "json") {
@@ -443,17 +464,41 @@ pub fn read_retired_logins(root: &Path) -> Result<Vec<mj_core::credentials::Reti
             entry.file_type()?.is_file(),
             "retired login is not a regular file"
         );
-        let record: RetiredLoginRecord = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+        paths.push(entry.path());
+    }
+    paths.sort_by(|a, b| a.file_stem().cmp(&b.file_stem()));
+    let mut logins = Vec::new();
+    let mut raw_bytes = 0_usize;
+    for path in paths {
+        let id = path
+            .file_stem()
+            .and_then(|id| id.to_str())
+            .context("retired login filename")?;
+        if after.is_some_and(|after| id <= after) {
+            continue;
+        }
+        let record: RetiredLoginRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
         ensure!(
-            entry.path() == retired_path(root, &record.operation_id)?,
+            path == retired_path(root, &record.operation_id)?,
             "retired login filename mismatch"
         );
         if let Some(login) = record.login {
+            ensure!(
+                login.id == record.operation_id,
+                "retired login cursor identity mismatch"
+            );
+            // Charge raw credential bytes AND JSON metadata so many small
+            // grants cannot overflow the frame through metadata expansion.
+            let charge = serde_json::to_vec(&login)?.len() - login.bytes.len().div_ceil(3) * 4
+                + login.bytes.len();
+            if !logins.is_empty() && charge > max_raw_bytes.saturating_sub(raw_bytes) {
+                return Ok((logins, true));
+            }
+            raw_bytes = raw_bytes.saturating_add(charge);
             logins.push(login);
         }
     }
-    logins.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(logins)
+    Ok((logins, false))
 }
 
 pub fn ack_retired_login(root: &Path, id: &str) -> Result<()> {
@@ -473,11 +518,15 @@ fn reconcile_retired_login(
     candidate: &Path,
     home: &Path,
     record: &RetiredLoginRecord,
+    manifest: &ReloadCandidateManifest,
 ) -> Result<()> {
     use mj_core::{
         credentials::{CredentialSnapshot, SyncAction},
         worker_launch::WorkerOwnership,
     };
+    if manifest.shared_login.is_some() {
+        return Ok(());
+    }
     let Some(login) = &record.login else {
         return Ok(());
     };
@@ -487,18 +536,49 @@ fn reconcile_retired_login(
     if ownership.profile_id != login.profile_id || launch.harness != login.harness {
         return Ok(());
     }
-    let Some(bytes) = mj_core::credentials::read_copied_login(login.harness, home)? else {
-        return Ok(());
+    let mut inspected = home.to_owned();
+    let mut absent = false;
+    for component in std::iter::once(None).chain(login.login_relative_path.components().map(Some)) {
+        if let Some(component) = component {
+            inspected.push(component);
+        }
+        match std::fs::symlink_metadata(&inspected) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(()),
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                absent = true;
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let replace = if absent {
+        true
+    } else {
+        let Some(bytes) = mj_core::credentials::read_copied_login(login.harness, home)? else {
+            return Ok(());
+        };
+        matches!(
+            mj_core::credentials::reconcile(
+                &CredentialSnapshot::of(login.harness, &bytes),
+                &CredentialSnapshot::of(login.harness, &login.bytes)
+            ),
+            SyncAction::Pull
+        )
     };
-    if matches!(
-        mj_core::credentials::reconcile(
-            &CredentialSnapshot::of(login.harness, &bytes),
-            &CredentialSnapshot::of(login.harness, &login.bytes)
-        ),
-        SyncAction::Pull
-    ) {
+    if replace {
         let path = home.join(&login.login_relative_path);
-        mj_core::confined_path::reject_symlinks(home, &login.login_relative_path, false)?;
+        let mut parent = home.to_owned();
+        for component in login
+            .login_relative_path
+            .parent()
+            .context("login parent")?
+            .components()
+        {
+            parent.push(component);
+            directory(&parent)?;
+        }
+        mj_core::confined_path::reject_symlinks(home, &login.login_relative_path, true)?;
         let copy = mj_core::credentials::credential_copy_for_harness(login.harness, &login.bytes);
         atomic_private_write(&path, &copy)?;
     }
@@ -773,6 +853,222 @@ mod tests {
                 assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), stale);
             }
         }
+    }
+
+    fn copied_fixture(
+        root: &Path,
+        kind: mj_core::config::HarnessKind,
+        source: &[u8],
+        destination: Option<&[u8]>,
+    ) -> PendingInPlaceReload {
+        let pending = fixture(root);
+        let candidate = root.join("reload-candidates/candidate");
+        let home = root.join("home");
+        let relative = mj_core::credentials::copied_login_relative_path(kind).unwrap();
+        let ownership = serde_json::to_vec(&serde_json::json!({"version":3,"session_id":"session","profile_id":"source","bundle_id":"bundle","target_template_id":"target"})).unwrap();
+        std::fs::write(root.join("ownership.json"), &ownership).unwrap();
+        std::fs::write(candidate.join("ownership.json"), ownership).unwrap();
+        let mut launch = crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap());
+        launch.harness = kind;
+        launch.write(&root.join("launch.json")).unwrap();
+        launch.write(&candidate.join("launch.json")).unwrap();
+        std::fs::create_dir_all(home.join(relative).parent().unwrap()).unwrap();
+        std::fs::write(home.join(relative), source).unwrap();
+        if let Some(bytes) = destination {
+            std::fs::create_dir_all(candidate.join("profile").join(relative).parent().unwrap())
+                .unwrap();
+            std::fs::write(candidate.join("profile").join(relative), bytes).unwrap();
+        }
+        let mut manifest: ReloadCandidateManifest =
+            serde_json::from_slice(&std::fs::read(candidate.join("manifest.json")).unwrap())
+                .unwrap();
+        manifest.harness = kind;
+        manifest.shared_login = None;
+        manifest.clear_paths.push(
+            relative
+                .components()
+                .next()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap()
+                .into(),
+        );
+        std::fs::write(
+            candidate.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        pending
+    }
+
+    #[test]
+    fn reload_commit_restores_missing_copies_but_never_shared_logins() {
+        use mj_core::config::HarnessKind;
+        use std::os::unix::fs::PermissionsExt;
+        for kind in [HarnessKind::Codex, HarnessKind::Kimi, HarnessKind::Claude] {
+            for shared in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let bytes = match kind {
+                    HarnessKind::Claude => {
+                        br#"{"claudeAiOauth":{"refreshToken":"retired","expiresAt":1795564800000}}"#
+                            .as_slice()
+                    }
+                    _ => br#"{"last_refresh":"2026-11-25T00:00:00Z","refresh_token":"retired"}"#
+                        .as_slice(),
+                };
+                let pending = copied_fixture(root.path(), kind, bytes, None);
+                let relative = mj_core::credentials::copied_login_relative_path(kind).unwrap();
+                if shared {
+                    let manifest_path = root
+                        .path()
+                        .join("reload-candidates/candidate/manifest.json");
+                    let mut manifest: ReloadCandidateManifest =
+                        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+                    manifest.shared_login = Some(ReloadSharedLogin {
+                        relative_marker: relative.to_string_lossy().into_owned(),
+                        source_path: root
+                            .path()
+                            .join("shared-auth")
+                            .to_string_lossy()
+                            .into_owned(),
+                    });
+                    std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+                }
+                commit_pending_reload(root.path(), &pending).unwrap();
+                apply_committed_reload(root.path(), &pending).unwrap();
+                let path = root.path().join("home").join(relative);
+                if shared {
+                    assert!(
+                        std::fs::symlink_metadata(&path)
+                            .unwrap()
+                            .file_type()
+                            .is_symlink()
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), b"shared login");
+                } else {
+                    assert_eq!(
+                        std::fs::read(&path).unwrap(),
+                        mj_core::credentials::credential_copy_for_harness(kind, bytes).as_ref()
+                    );
+                    assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+                    assert_eq!(
+                        path.parent()
+                            .unwrap()
+                            .metadata()
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o700
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reload_commit_corrupt_source_login_never_blocks_live_or_wal_promotion() {
+        for corrupt in [b"".as_slice(), b"{".as_slice()] {
+            for replay in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let valid = br#"{"last_refresh":"2026-11-25T00:00:00Z","tokens":{"refresh_token":"valid"}}"#;
+                let pending = copied_fixture(
+                    root.path(),
+                    mj_core::config::HarnessKind::Codex,
+                    corrupt,
+                    Some(valid),
+                );
+                if replay {
+                    atomic_private_write(
+                        &root.path().join(PENDING_RELOAD_FILE),
+                        &serde_json::to_vec(&pending).unwrap(),
+                    )
+                    .unwrap();
+                    roll_forward_pending_reload_if_any(root.path()).unwrap();
+                } else {
+                    commit_pending_reload(root.path(), &pending).unwrap();
+                    assert!(
+                        preserve_retired_login(root.path(), &pending)
+                            .unwrap()
+                            .login
+                            .is_none()
+                    );
+                    apply_committed_reload(root.path(), &pending).unwrap();
+                }
+                assert!(read_retired_logins(root.path()).unwrap().is_empty());
+                assert_eq!(
+                    std::fs::read(root.path().join("home/auth.json")).unwrap(),
+                    valid
+                );
+                assert!(!root.path().join(PENDING_RELOAD_FILE).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn reload_commit_retired_pages_fit_frames_and_advance_even_with_a_tiny_budget() {
+        use mj_core::credentials::RetiredLoginSnapshot;
+        let root = tempfile::tempdir().unwrap();
+        directory(&root.path().join(RETIRED_LOGINS)).unwrap();
+        for id in ["a", "a-1", "a-1-1", "b"] {
+            let login = RetiredLoginSnapshot {
+                id: id.into(),
+                profile_id: "source".into(),
+                harness: mj_core::config::HarnessKind::Codex,
+                store_id: "store".into(),
+                login_relative_path: "auth.json".into(),
+                bytes: serde_json::to_vec(&serde_json::json!({"padding":"x".repeat(800000)}))
+                    .unwrap(),
+            };
+            atomic_private_write(
+                &retired_path(root.path(), id).unwrap(),
+                &serde_json::to_vec(&RetiredLoginRecord {
+                    operation_id: id.into(),
+                    store_id: "store".into(),
+                    login: Some(login),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let (tiny, has_more) = read_retired_logins_page(root.path(), None, 0).unwrap();
+        assert_eq!(tiny.len(), 1);
+        assert!(has_more);
+        let mut after = None;
+        let mut ids = Vec::new();
+        let mut pages = 0;
+        loop {
+            let (logins, has_more) = read_retired_logins_page(
+                root.path(),
+                after.as_deref(),
+                mj_core::credentials::RETIRED_LOGIN_PAGE_RAW_BYTES,
+            )
+            .unwrap();
+            after = logins.last().map(|login| login.id.clone());
+            ids.extend(logins.iter().map(|login| login.id.clone()));
+            let response = mj_core::relay::RelayResponseEnvelope {
+                request_id: "page".into(),
+                protocol_version: 93,
+                body: mj_core::relay::RelayResponseBody::Ok {
+                    payload: mj_core::relay::RelayResponsePayload::RetiredLogins {
+                        logins,
+                        has_more,
+                    },
+                },
+            };
+            let encoded = serde_json::to_vec(&response).unwrap();
+            assert!(encoded.len() < mj_core::relay::MAX_FRAME_BYTES);
+            let round_trip: mj_core::relay::RelayResponseEnvelope =
+                serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(round_trip, response);
+            pages += 1;
+            if !has_more {
+                break;
+            }
+        }
+        assert_eq!(pages, 2);
+        assert_eq!(ids, ["a", "a-1", "a-1-1", "b"]);
     }
 
     fn fixture(root: &Path) -> PendingInPlaceReload {

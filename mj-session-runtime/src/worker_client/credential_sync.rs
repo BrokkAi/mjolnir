@@ -2953,8 +2953,7 @@ pub async fn adopt_copied_login(
     anyhow::ensure!(
         installed.installed
             || installed.snapshot.fingerprint == incoming.fingerprint
-            || (installed.snapshot.freshness_epoch_ms.is_some()
-                && reconcile(&installed.snapshot, &incoming) != SyncAction::Pull),
+            || reconcile(&installed.snapshot, &incoming) == SyncAction::Push,
         "canonical login cannot be ordered against the retired grant; retaining the source copy"
     );
     Ok(installed.installed)
@@ -2968,8 +2967,21 @@ pub async fn drain_retired_logins(
     profile: impl Fn(&str) -> Option<mj_core::config::HarnessProfile>,
 ) -> Result<()> {
     let mut failure = None;
-    for login in client.read_retired_logins().await? {
-        let result = async {
+    let mut cursor: Option<String> = None;
+    loop {
+        let (logins, has_more) = client.read_retired_logins_after(cursor.as_deref()).await?;
+        if has_more {
+            let last = logins
+                .last()
+                .context("retired login page has_more without a cursor")?;
+            anyhow::ensure!(
+                cursor.as_ref().is_none_or(|cursor| last.id > *cursor),
+                "retired login cursor did not advance"
+            );
+        }
+        cursor = logins.last().map(|login| login.id.clone());
+        for login in logins {
+            let result = async {
             if let Some(profile) = profile(&login.profile_id) {
                 anyhow::ensure!(profile.kind == login.harness, "retired login harness differs from source profile");
                 adopt_copied_login(&profile, &login.bytes).await?;
@@ -2978,9 +2990,13 @@ pub async fn drain_retired_logins(
             }
             client.ack_retired_login(&login.id).await
         }.await;
-        if let Err(error) = result {
-            tracing::warn!(profile_id = %login.profile_id, operation_id = %login.id, %error, "retired login retained for retry");
-            failure = Some(error);
+            if let Err(error) = result {
+                tracing::warn!(profile_id = %login.profile_id, operation_id = %login.id, %error, "retired login retained for retry");
+                failure = Some(error);
+            }
+        }
+        if !has_more {
+            break;
         }
     }
     match failure {
@@ -3430,7 +3446,15 @@ for line in sys.stdin:
         payload = {'type':'hello','data':{'negotiated':protocol,'relay_version':'retired-login-fixture','session_id':'retired-test'}}
     elif method == 'read_retired_logins':
         with open(path) as f: logins = json.load(f)
-        payload = {'type':'retired_logins','data':{'logins':logins}}
+        after = req['request'].get('params', {}).get('after')
+        logins = sorted([login for login in logins if after is None or login['id'] > after], key=lambda login:login['id'])
+        page, charged = [], 0
+        for login in logins:
+            size = len(__import__('base64').b64decode(login['bytes']))
+            if page and charged + size > 2 * 1024 * 1024: break
+            page.append(login)
+            charged += size
+        payload = {'type':'retired_logins','data':{'logins':page,'has_more':len(page) < len(logins)}}
     elif method == 'ack_retired_login':
         with open(path) as f: logins = json.load(f)
         logins = [login for login in logins if login['id'] != req['request']['params']['id']]
@@ -3438,8 +3462,68 @@ for line in sys.stdin:
         payload = {'type':'retired_login_acknowledged'}
     else:
         raise AssertionError(method)
-    print(json.dumps({'request_id':req['request_id'],'protocol_version':protocol,'result':'ok','payload':payload}), flush=True)
+    response = json.dumps({'request_id':req['request_id'],'protocol_version':protocol,'result':'ok','payload':payload})
+    assert len(response.encode()) < 8 * 1024 * 1024
+    print(response, flush=True)
 "#;
+
+    #[tokio::test]
+    async fn credential_sync_retired_backlog_adopts_later_pages_despite_an_earlier_failure() {
+        use mj_core::credentials::RetiredLoginSnapshot;
+        let root = tempfile::tempdir().unwrap();
+        let bad_home = root.path().join("bad");
+        let good_home = root.path().join("good");
+        std::fs::create_dir_all(bad_home.join("auth.json")).unwrap();
+        std::fs::create_dir_all(&good_home).unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({"last_refresh":"2026-11-25T00:00:00Z","padding":"x".repeat(800000)})).unwrap();
+        let logins: Vec<_> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|id| RetiredLoginSnapshot {
+                id: id.into(),
+                profile_id: if id == "a" { "bad" } else { "good" }.into(),
+                harness: HarnessKind::Codex,
+                store_id: "store".into(),
+                login_relative_path: "auth.json".into(),
+                bytes: bytes.clone(),
+            })
+            .collect();
+        let receipts = root.path().join("receipts.json");
+        std::fs::write(&receipts, serde_json::to_vec(&logins).unwrap()).unwrap();
+        let spec = CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                PEER.to_owned(),
+                receipts.to_string_lossy().into_owned(),
+                "93".into(),
+            ],
+        );
+        let mut client = RelayClient::connect(&spec, "retired-test").await.unwrap();
+        let (first, more) = client.read_retired_logins_after(None).await.unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(more);
+        let (second, more) = client.read_retired_logins_after(Some("b")).await.unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(!more);
+        assert!(
+            drain_retired_logins(&mut client, |id| Some(HarnessProfile::new(
+                HarnessKind::Codex,
+                if id == "bad" {
+                    bad_home.clone()
+                } else {
+                    good_home.clone()
+                }
+            )))
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(good_home.join("auth.json")).unwrap(), bytes);
+        assert_eq!(
+            client.read_retired_logins_after(None).await.unwrap().0,
+            vec![logins[0].clone()]
+        );
+        client.detach().await.unwrap();
+    }
 
     #[tokio::test]
     async fn credential_sync_retired_grants_retry_failed_adoption_and_ack_only_after_install() {
@@ -3507,7 +3591,7 @@ for line in sys.stdin:
                     .is_err()
             );
             assert_eq!(
-                client.read_retired_logins().await.unwrap(),
+                client.read_retired_logins_after(None).await.unwrap().0,
                 vec![login.clone()]
             );
             std::fs::remove_dir(&marker).unwrap();
@@ -3515,12 +3599,51 @@ for line in sys.stdin:
                 .await
                 .unwrap();
             assert_eq!(std::fs::read(&marker).unwrap(), bytes);
-            assert!(client.read_retired_logins().await.unwrap().is_empty());
+            assert!(
+                client
+                    .read_retired_logins_after(None)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
             // A lost ack can replay installation without changing canonical bytes.
             std::fs::write(&receipts, serde_json::to_vec(&vec![login.clone()]).unwrap()).unwrap();
             drain_retired_logins(&mut client, |_| Some(profile.clone()))
                 .await
                 .unwrap();
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+            // Equal timestamps do not order distinct rotating grants either.
+            let mut tied = login.clone();
+            let mut rotated = json.clone();
+            match kind {
+                HarnessKind::Codex => {
+                    rotated["tokens"] = serde_json::json!({"refresh_token":"rotated"})
+                }
+                HarnessKind::Kimi => rotated["refresh_token"] = "rotated".into(),
+                HarnessKind::Grok => rotated["issuer::id"]["refresh_token"] = "rotated".into(),
+                HarnessKind::Muse => {
+                    rotated["providers"]["meta"]["refresh_token"] = "rotated".into()
+                }
+                HarnessKind::Antigravity => rotated["token"]["refresh_token"] = "rotated".into(),
+                HarnessKind::Claude => rotated["claudeAiOauth"]["refreshToken"] = "rotated".into(),
+                _ => unreachable!(),
+            }
+            tied.bytes = serde_json::to_vec(&rotated).unwrap();
+            assert_eq!(
+                CredentialSnapshot::of(kind, &tied.bytes).freshness_epoch_ms,
+                CredentialSnapshot::of(kind, &bytes).freshness_epoch_ms
+            );
+            std::fs::write(&receipts, serde_json::to_vec(&vec![tied.clone()]).unwrap()).unwrap();
+            assert!(
+                drain_retired_logins(&mut client, |_| Some(profile.clone()))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                client.read_retired_logins_after(None).await.unwrap().0,
+                vec![tied]
+            );
             assert_eq!(std::fs::read(&marker).unwrap(), bytes);
             // Unknown, unequal grants have no safe discard ordering.
             let mut ambiguous = login.clone();
@@ -3545,12 +3668,22 @@ for line in sys.stdin:
                     .await
                     .is_err()
             );
-            assert_eq!(client.read_retired_logins().await.unwrap(), vec![ambiguous]);
+            assert_eq!(
+                client.read_retired_logins_after(None).await.unwrap().0,
+                vec![ambiguous]
+            );
             assert_eq!(std::fs::read(&marker).unwrap(), unknown_canonical);
             std::fs::write(&marker, &bytes).unwrap();
             std::fs::write(&receipts, serde_json::to_vec(&vec![login]).unwrap()).unwrap();
             drain_retired_logins(&mut client, |_| None).await.unwrap();
-            assert!(client.read_retired_logins().await.unwrap().is_empty());
+            assert!(
+                client
+                    .read_retired_logins_after(None)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
             assert_eq!(std::fs::read(&marker).unwrap(), bytes);
             client.detach().await.unwrap();
             // Pre-93 workers must never receive an unknown retired-login RPC.

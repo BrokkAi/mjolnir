@@ -1832,6 +1832,7 @@ pub struct RetiredLoginSnapshot {
     pub harness: HarnessKind,
     pub store_id: String,
     pub login_relative_path: PathBuf,
+    #[serde(with = "retired_login_base64")]
     pub bytes: Vec<u8>,
 }
 
@@ -1842,5 +1843,22 @@ impl std::fmt::Debug for RetiredLoginSnapshot {
             .field("profile_id", &self.profile_id)
             .field("harness", &self.harness)
             .finish_non_exhaustive()
+    }
+}
+
+// Two MiB raw plus JSON metadata expands to at most about 2.7 MiB in
+// base64, leaving ample envelope room under the documented 8 MiB relay frame.
+pub const RETIRED_LOGIN_PAGE_RAW_BYTES: usize = crate::relay::MAX_FRAME_BYTES / 4;
+
+mod retired_login_base64 {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        STANDARD
+            .decode(String::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
     }
 }
