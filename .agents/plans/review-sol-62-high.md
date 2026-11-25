@@ -13,9 +13,10 @@ Add one GPT 6.2 Sol/high review on each of the original 70 historical mjolnir di
 - [x] (2026-11-25 01:03Z) Two original canaries passed profile/model, exact native high-effort turn binding, original image/harness, unchanged checkout and output/clock audit; durations119.3/122.4s, four raw findings each.
 - [x] (2026-11-25 01:30Z) All70 reviews completed and passed audit, 35/profile, no failures or extra reviewer samples. Observed simultaneous reviewer turns peaked at12 on codex3 and13 on codex4.
 - [x] Fresh verify10 pool audit passed:1,796 sessions,3,550 raw findings,409 empty sessions,69 nonempty diffs in35batches; all70 diffs retained via session membership.
-- [ ] Run Opus/high canaries on claude4 and claude7, attest actual provider/model/effort, then finish all batches using only those judge profiles.
-- [ ] Score all/low/medium/high and medium+high; compare high with low and medium on the same 70 diffs and publish costs/latencies and confidence intervals.
-- [ ] Update and deliver the combined PNG, excluding historical Terra, then complete repository review and push.
+- [x] Run Opus/high canaries on claude4 and claude7, attest actual provider/model/effort, then finish all batches using only those judge profiles.
+- [x] Score all/low/medium/high and medium+high; compare high with low and medium on the same 70 diffs and publish costs/latencies and confidence intervals.
+- [x] Updated and checksum-verified the combined PNG in Minastirith Downloads, excluding historical Terra.
+- [ ] Complete repository review and push the final readout.
 
 ## Surprises & Discoveries
 
@@ -33,8 +34,9 @@ Retain all verify9 sessions in fresh Opus judging so high, medium and low share 
 
 All70 high-effort samples passed capture and immutable-input audits. The pool has246 additional raw findings beyond verify9 and exactly70 new session IDs. Initial judge creation was rejected before session registration because the saved verifier workspace ID no longer existed in the main store. The trace references3053122-144/145 show the unknown-workspace trigger; neither canary accepted a model prompt. The original blinded pool is preserved, and the study workspace reference was repaired. verify_driver.py now consults the daemon workspace list before trusting its cached ID.
 
-Two of70 high-effort reviews are accepted, one per requested profile. Each returned four raw findings; none is a confirmed finding until the fresh blinded Opus round. Native effort was proven from captured rollout prompt/turn_context despite the API usage effort field being null. The original Codex0.170/ACP1.15.1 and image were observed. Full cohort is running; setup/capture recoveries reused the same two sessions and did not sample either review again.
+All35 judge commands passed actual provider/effort/profile audits (18 claude4,17 claude7, Opus5.5/high throughout). Fresh scoring covers1,796sessions/70diffs and554groups:353confirmed,70plausible,131rejected. Solo low/medium/high yield is130.33/209/180 all-confirmed and13/18.33/19 high-impact. High-minus-medium is−29 all-confirmed (paired95%−49.33…−10) and+0.67 high-impact (−0.67…+2.33). High adds no high-impact group absent from all three medium samples. Its mean reviewer price is about$0.288 versus$0.241 for medium and simulated median123.8s versus109.7s. Thus this cohort does not extend the low-to-medium trend. Source collection differs as recorded above; do not claim a controlled effort-only causal effect.
 
+The new chart has15points: combined frontier and Greptile names, nine numbered other points, no displayed historical Terra. Only its PNG was copied to Minastirith Downloads; SHA-256ab417c45b2faf65f2dc04a7599d2a1fbedf59c41f5fa7c6efb421520be3c8dbc matched remotely. The old verify9 report and figure bundle remain unchanged. Exact solo counts were independently matched to canonical compare.py outputs in all15effort/severity cells; full canonical Pareto analysis completed.
 ## Context and Orientation
 
 Scripts are in `.agents/evals/review-arms`. Raw data is `/mnt/optane/review-arms-20261113` (R). New operational receipts are R/sol-62-high (C). Original jobs are R/arm-O-jobs.json; original low/medium arms are P/Q/S and O/R/T. Arm U is a single `gpt-6.2-sol:high` sample per diff. A diff is one original commit and its base; a reviewer session is one independent model attempt. Distinct confirmed issues are counted once per sampled combination, not once per duplicate report.
