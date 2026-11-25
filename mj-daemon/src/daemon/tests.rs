@@ -17566,7 +17566,7 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
     assert_eq!(from_terminal, from_public);
     assert_eq!(
         from_terminal.children_not_handed_back,
-        [idle_child_with_descendant, active_child]
+        [active_descendant, active_child]
     );
     assert!(from_terminal.interrupting);
     assert_eq!(from_terminal.owning_children_to_suspend, 1);

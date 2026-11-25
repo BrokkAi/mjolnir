@@ -8,7 +8,7 @@ pub(crate) struct SandboxOffer {
 
 impl DashboardState {
     pub(crate) fn sandbox_offer<W: WizardDraft>(&self, wizard: &W) -> Option<SandboxOffer> {
-        let (_, target) = self.config.targets.iter().nth(wizard.target())?;
+        let (_, target) = self.config.targets.iter().nth(wizard.target(self))?;
         if target.permission_mode() != Some(PermissionMode::Guardian) {
             return None;
         }
@@ -43,9 +43,9 @@ impl DashboardState {
         mut wizard: W,
         index: usize,
     ) -> DashboardAction {
-        if wizard.target() != index {
+        if wizard.target(self) != index {
             wizard.note_draft_change(self, DraftChange::TargetSelected);
-            wizard.set_target(index);
+            wizard.set_target(self, index);
             if wizard.prepares_target_on_select(self) {
                 let action = self.prepare_wizard_target(&mut wizard);
                 self.mode = wizard.into_mode();
@@ -243,9 +243,9 @@ impl DashboardState {
             wizard.set_target_step_skipped(false);
             return false;
         };
-        if wizard.target() != index {
+        if wizard.target(self) != index {
             wizard.note_draft_change(self, DraftChange::TargetSelected);
-            wizard.set_target(index);
+            wizard.set_target(self, index);
         }
         // A bare target has no size, so this only clears a size left from the
         // target selected before, and never asks for EC2 sizes.
@@ -258,8 +258,14 @@ impl DashboardState {
     /// replace typed values with a silently clamped allocation.
     pub(crate) fn refresh_wizard_resource_limits(&mut self, affected: &[String]) {
         let (index, initialized) = match &self.mode {
-            Mode::New(wizard) => (wizard.target, wizard.resource_editor.target_id.is_some()),
-            Mode::Resume(wizard) => (wizard.target, wizard.resource_editor.target_id.is_some()),
+            Mode::New(wizard) => (
+                wizard.target(self),
+                wizard.resource_editor.target_id.is_some(),
+            ),
+            Mode::Resume(wizard) => (
+                wizard.target(self),
+                wizard.resource_editor.target_id.is_some(),
+            ),
             _ => return,
         };
         let id = nth_key(&self.config.targets, index);
@@ -298,7 +304,7 @@ impl DashboardState {
         &self,
         wizard: &mut W,
     ) -> DashboardAction {
-        let target_id = nth_key(&self.config.targets, wizard.target());
+        let target_id = wizard.target_id(self);
         if wizard.resource_editor().target_id.as_deref() == Some(&target_id) {
             return DashboardAction::None;
         }
@@ -321,7 +327,7 @@ impl DashboardState {
 
     pub(super) fn prepare_wizard_target<W: WizardDraft>(&self, wizard: &mut W) -> DashboardAction {
         let previous = wizard.previous_allocation(self);
-        let target_index = wizard.target();
+        let target_index = wizard.target(self);
         let (allocation, sizing_error) = wizard.sizing_mut();
         let action = self.prepare_target(target_index, allocation, sizing_error, previous);
         let allocation = wizard.resource_allocation().cloned();
@@ -437,7 +443,7 @@ impl DashboardState {
     }
 
     pub(super) fn validate_wizard_resources<W: WizardDraft>(&self, wizard: &mut W) {
-        let target_id = nth_key(&self.config.targets, wizard.target());
+        let target_id = wizard.target_id(self);
         let uses_remaining = wizard.remember_container_size().is_some();
         let capacity = self.host_container_capacity(&target_id);
         // Remaining capacity is advisory except where RAM has a hard limit.

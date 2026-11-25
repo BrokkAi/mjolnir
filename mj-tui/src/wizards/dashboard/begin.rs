@@ -23,42 +23,55 @@ impl DashboardState {
         self.config.subagents.primary_configured()
     }
 
+    /// The profile page's choices in row order: Auto first when a primary
+    /// list is configured, then each offered profile.
+    pub(crate) fn new_wizard_profile_choices(&self) -> Vec<ProfileChoice> {
+        self.new_wizard_has_auto_primary()
+            .then_some(ProfileChoice::AutoPrimary)
+            .into_iter()
+            .chain(
+                self.offered_profiles()
+                    .map(|(id, _)| ProfileChoice::Profile(id.to_owned())),
+            )
+            .collect()
+    }
+
     pub(crate) fn new_wizard_profile_count(&self) -> usize {
         self.offered_profiles().count() + usize::from(self.new_wizard_has_auto_primary())
     }
 
-    pub(crate) fn new_wizard_profile_id(&self, index: usize) -> Option<String> {
-        if self.new_wizard_has_auto_primary() {
-            if index == 0 {
-                Some(String::new())
-            } else {
-                self.nth_offered_profile(index - 1)
-            }
-        } else {
-            self.nth_offered_profile(index)
-        }
+    pub(crate) fn new_wizard_choice_at(&self, row: usize) -> Option<ProfileChoice> {
+        self.new_wizard_profile_choices().into_iter().nth(row)
     }
 
-    pub(crate) fn new_wizard_profile_label(&self, index: usize) -> String {
-        if self.new_wizard_has_auto_primary() && index == 0 {
-            "Auto (Primary)".to_owned()
-        } else {
-            self.new_wizard_profile_id(index).unwrap_or_default()
-        }
+    /// Where a choice sits in the current row order; `None` once it is gone.
+    pub(crate) fn new_wizard_profile_row(&self, choice: &ProfileChoice) -> Option<usize> {
+        self.new_wizard_profile_choices()
+            .iter()
+            .position(|offered| offered == choice)
     }
 
-    /// The index among the offered profiles the wizard opens on. A launch
-    /// that copies another session's settings uses it too when that session's
-    /// profile cannot be used.
-    pub(crate) fn default_new_profile_index(&self) -> usize {
-        let offset = usize::from(self.new_wizard_has_auto_primary());
+    /// The profile of the launch the wizard seeds from, if still offered.
+    fn recent_offered_profile_id(&self) -> Option<String> {
         self.recent_launch_choice()
-            .and_then(|session| {
-                self.offered_profiles()
-                    .position(|(id, _)| id == session.last_profile)
-                    .map(|index| index + offset)
-            })
-            .unwrap_or(0)
+            .map(|session| session.last_profile)
+            .filter(|id| self.profile_offered(id))
+    }
+
+    /// The profile a launch that cannot use its own starts from: the most
+    /// recent launch's profile if still offered, else the first offered one.
+    pub(crate) fn default_offered_profile_id(&self) -> Option<String> {
+        self.recent_offered_profile_id()
+            .or_else(|| self.nth_offered_profile(0))
+    }
+
+    /// The choice the wizard opens on: the most recent launch's profile, else
+    /// the first row (Auto when a primary list is configured).
+    pub(crate) fn default_new_profile_choice(&self) -> ProfileChoice {
+        self.recent_offered_profile_id()
+            .map(ProfileChoice::Profile)
+            .or_else(|| self.new_wizard_choice_at(0))
+            .expect("an offered profile was checked above")
     }
 
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
@@ -106,7 +119,7 @@ impl DashboardState {
         }
         let recent = self.recent_launch_choice();
         let recent = recent.as_ref();
-        let profile = self.default_new_profile_index();
+        let profile = self.default_new_profile_choice();
         let bundle = recent
             .and_then(|session| {
                 bundle_ids_by_recent_creation(&self.config, &self.launch_recency)
@@ -114,13 +127,16 @@ impl DashboardState {
                     .position(|id| *id == session.bundle_id)
             })
             .unwrap_or(0);
-        let target = self.offered_target_index_or_first(
-            recent.map_or("localhost", |session| session.target_template_id.as_str()),
+        let target = nth_key(
+            &self.config.targets,
+            self.offered_target_index_or_first(
+                recent.map_or("localhost", |session| session.target_template_id.as_str()),
+            ),
         );
-        let profile_id = self
-            .new_wizard_profile_id(profile)
-            .expect("an offered profile was checked above");
-        let profile_id = profile_id.as_str();
+        let profile_id = match &profile {
+            ProfileChoice::AutoPrimary => "",
+            ProfileChoice::Profile(id) => id.as_str(),
+        };
         let remembered = self.state.remembered_subagent_policy_for(profile_id);
         let mut delegation = subagents::SubagentDraft::default();
         delegation.refresh_create(
@@ -498,7 +514,7 @@ impl DashboardState {
         match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::New(mut wizard) => {
                 wizard.set_profile_step_skipped(true);
-                wizard.set_profile(0);
+                wizard.set_profile(self, 0);
                 self.advance_new_wizard(wizard)
             }
             Mode::Resume(mut wizard) => {
@@ -545,9 +561,7 @@ impl DashboardState {
                 let host = self
                     .config
                     .targets
-                    .keys()
-                    .nth(wizard.target)
-                    .and_then(|id| self.config.targets.get(id))
+                    .get(&wizard.target)
                     .and_then(project_history_host);
                 wizard.project_history = host
                     .map(|host| self.state.project_directories(host).to_vec())

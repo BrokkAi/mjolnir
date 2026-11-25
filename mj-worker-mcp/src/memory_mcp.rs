@@ -1,4 +1,4 @@
-//! MCP server for project history search and code provenance.
+//! MCP server for project history search and transcript reading.
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::io;
@@ -104,14 +104,7 @@ mod tests {
         }
         assert_eq!(
             names,
-            [
-                "search_history",
-                "get_session_brief",
-                "read_session",
-                "trace_file",
-                "session_files",
-                "blame_file",
-            ]
+            ["search_history", "get_session_brief", "read_session",]
         );
         let search = &tools[0]["inputSchema"]["properties"];
         assert!(
@@ -202,5 +195,19 @@ mod tests {
             forwarded_query(json!({"session_id": "s", "query": "x"}), "search_session"),
             HistoryQuery::SearchSession { .. }
         ));
+        let client = history::Client::new(None);
+        for (name, arguments) in [
+            ("trace_file", json!({"path": "src/lib.rs"})),
+            ("session_files", json!({"session_id": "s"})),
+            (
+                "blame_file",
+                json!({"path": "src/lib.rs", "start_line": 1, "end_line": 1}),
+            ),
+        ] {
+            let error = client
+                .call(&json!({"name": name, "arguments": arguments}))
+                .unwrap_err();
+            assert!(error.to_string().contains("unknown variant"), "{error}");
+        }
     }
 }

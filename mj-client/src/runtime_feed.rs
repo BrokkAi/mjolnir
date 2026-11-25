@@ -8,7 +8,7 @@ use mj_core::config::Config;
 use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::{SharedSnapshot, SnapshotMap};
 use mj_core::state::{MaterializedSession, MoveOperation, ProjectionWindow, SessionRecord};
-use mj_core::subagent::{SubagentMetadata, SubagentPolicy};
+use mj_core::subagent::SubagentMetadata;
 use mj_core::transcript::TranscriptItem;
 use serde::{Deserialize, Serialize};
 
@@ -633,19 +633,15 @@ pub struct RuntimeMetadata {
     /// target looking user-written.
     #[serde(default)]
     pub default_targets: std::collections::BTreeSet<String>,
-    #[serde(
-        default,
-        alias = "last_subagent_policy",
-        deserialize_with = "mj_core::subagent::deserialize_policy_map"
-    )]
-    pub last_subagent_policies: BTreeMap<String, SubagentPolicy>,
+    /// The remembered new-session choices; flattened so the wire keeps its
+    /// per-preference keys.
+    #[serde(flatten)]
+    pub launch_preferences: mj_core::state::LaunchPreferences,
     pub workspace_names: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub container_sizes: SnapshotMap<String, mj_core::state::HostContainerSize>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub last_oracle_choices: BTreeMap<String, bool>,
     /// The browser reads this directly from the capture. Native paths may
     /// contain bytes JSON cannot represent.
     #[serde(skip)]
@@ -1531,12 +1527,15 @@ mod tests {
             .remove("last_subagent_policies");
         old_value["last_subagent_policy"] = serde_json::json!({"mode": "mjolnir"});
         let old: RuntimeMetadata = serde_json::from_value(old_value).unwrap();
-        assert!(old.last_subagent_policies[""].uses_mjolnir());
+        assert!(old.launch_preferences.last_subagent_policies[""].uses_mjolnir());
 
         let mut new_value = serde_json::to_value(RuntimeMetadata::default()).unwrap();
         new_value["last_subagent_policies"] = serde_json::json!({"mode": {"mode": "none"}});
         let new: RuntimeMetadata = serde_json::from_value(new_value).unwrap();
-        assert_eq!(new.last_subagent_policies["mode"], SubagentPolicy::None);
+        assert_eq!(
+            new.launch_preferences.last_subagent_policies["mode"],
+            mj_core::subagent::SubagentPolicy::None
+        );
     }
 
     #[test]

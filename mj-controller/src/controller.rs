@@ -129,7 +129,8 @@ pub use checkpoint::{
     CheckpointPatch, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease, SessionExportLayout,
     checkpoint_bundle, checkpoint_patch, checkpoint_was_deferred, export_reads_checkpoint,
     host_snapshot_cache_wakeup, reconcile_managed_checkpoint_archives,
-    sweep_expired_host_snapshot_cache, sweep_local_checkpoint_leftovers,
+    retire_host_snapshot_cache_for_ssh_identity, sweep_expired_host_snapshot_cache,
+    sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,

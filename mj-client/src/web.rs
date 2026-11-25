@@ -50,10 +50,10 @@ pub struct BrowserTranscriptEntry {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
     pub lines: Vec<String>,
-    /// Mailbox events split into a header and report continuation lines, from
-    /// the same bounded text as `lines`. Each event is a separate disclosure.
+    /// Collapsed summaries and complete expanded bodies, interpreted before
+    /// line clipping by the same presentation rules the terminal uses.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mailbox_events: Vec<Vec<String>>,
+    pub disclosures: Vec<crate::transcript::TranscriptDisclosure>,
     /// The glyph the terminal draws for this role, so both surfaces read alike
     /// without the browser keeping a second copy of the mapping. Taken from
     /// the same `entry_visual` the terminal renders from.

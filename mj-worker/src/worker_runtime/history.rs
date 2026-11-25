@@ -1,6 +1,5 @@
 //! Transient history requests. No history payload is written to worker state.
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -84,7 +83,7 @@ impl HistoryEndpoint {
         }
     }
 
-    pub async fn query(&self, query: HistoryQuery, cwd: &Path) -> Result<HistoryResult> {
+    pub async fn query(&self, query: HistoryQuery) -> Result<HistoryResult> {
         query.validate()?;
         let _permit = self
             .permits
@@ -92,20 +91,6 @@ impl HistoryEndpoint {
             .context("too many pending history queries; retry shortly")?;
         let id = mj_core::state::new_session_id()?;
         let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
-        let blame = if let HistoryQuery::BlameFile {
-            path,
-            start_line,
-            end_line,
-        } = &query
-        {
-            Some(
-                tokio::time::timeout_at(deadline, capture_blame(cwd, path, *start_line, *end_line))
-                    .await
-                    .context("target Git blame timed out")??,
-            )
-        } else {
-            None
-        };
         let (reply, received) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("history queue lock poisoned");
@@ -120,7 +105,6 @@ impl HistoryEndpoint {
                     request: HistoryRequest {
                         request_id: id.clone(),
                         query,
-                        blame,
                     },
                     expires: deadline.into_std(),
                     reply,
@@ -145,104 +129,9 @@ impl HistoryEndpoint {
     }
 }
 
-async fn git(cwd: &Path, args: &[std::ffi::OsString]) -> Result<String> {
-    let mut command = tokio::process::Command::new("git");
-    command.current_dir(cwd).args([
-        "--no-pager",
-        "-c",
-        "core.fsmonitor=",
-        "-c",
-        "core.hooksPath=",
-    ]);
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            command.env_remove(key);
-        }
-    }
-    command
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_PAGER", "cat")
-        .args(args);
-    let output = mj_core::subprocess::run_bounded(
-        &mut command,
-        MAX_BLAME_BYTES,
-        std::time::Duration::from_secs(20),
-    )
-    .await?;
-    ensure!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).context("Git output is not UTF-8")
-}
-
-async fn capture_blame(cwd: &Path, path: &Path, start: usize, end: usize) -> Result<BlameEvidence> {
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    let path = tokio::fs::canonicalize(path)
-        .await
-        .context("resolve target file for blame")?;
-    let parent = path.parent().context("file has no parent")?;
-    let root = git(parent, &["rev-parse".into(), "--show-toplevel".into()]).await?;
-    let repository = PathBuf::from(root.trim());
-    let relative_path = path
-        .strip_prefix(&repository)
-        .context("file is outside Git repository")?
-        .to_path_buf();
-    let porcelain = git(
-        &repository,
-        &[
-            "blame".into(),
-            "--line-porcelain".into(),
-            "-M".into(),
-            "-C".into(),
-            format!("-L{start},{end}").into(),
-            "--".into(),
-            relative_path.as_os_str().to_owned(),
-        ],
-    )
-    .await?;
-    Ok(BlameEvidence {
-        repository,
-        relative_path,
-        porcelain,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn blame_reads_the_target_checkout_including_uncommitted_lines_and_reports_errors() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path();
-        crate::test_support::git(repo, &["init", "-q"]);
-        crate::test_support::git(repo, &["config", "user.name", "Test"]);
-        crate::test_support::git(repo, &["config", "user.email", "test@example.test"]);
-        std::fs::write(repo.join("a.rs"), "committed\nold\n").unwrap();
-        crate::test_support::git(repo, &["add", "a.rs"]);
-        crate::test_support::git(repo, &["commit", "-qm", "initial"]);
-        std::fs::write(repo.join("a.rs"), "committed\nuncommitted\n").unwrap();
-        let evidence = capture_blame(repo, Path::new("a.rs"), 1, 2).await.unwrap();
-        assert_eq!(evidence.relative_path, Path::new("a.rs"));
-        assert!(evidence.porcelain.contains("\tcommitted"));
-        assert!(
-            evidence
-                .porcelain
-                .contains("0000000000000000000000000000000000000000")
-        );
-        assert!(
-            capture_blame(repo, Path::new("missing.rs"), 1, 1)
-                .await
-                .is_err()
-        );
-        assert!(capture_blame(repo, Path::new("a.rs"), 9, 10).await.is_err());
-    }
 
     #[tokio::test(start_paused = true)]
     async fn disconnected_controller_queries_expire_and_release_capacity() {
@@ -252,13 +141,10 @@ mod tests {
             let endpoint = endpoint.clone();
             tasks.push(mj_core::runtime::spawn(async move {
                 endpoint
-                    .query(
-                        HistoryQuery::TraceFile {
-                            path: "a.rs".into(),
-                            limit: 20,
-                        },
-                        Path::new("/"),
-                    )
+                    .query(HistoryQuery::GetSessionBrief {
+                        session_id: "session".into(),
+                        max_chars: 16_000,
+                    })
                     .await
             }));
         }
@@ -267,13 +153,10 @@ mod tests {
         }
         assert!(
             endpoint
-                .query(
-                    HistoryQuery::TraceFile {
-                        path: "a.rs".into(),
-                        limit: 20
-                    },
-                    Path::new("/")
-                )
+                .query(HistoryQuery::GetSessionBrief {
+                    session_id: "session".into(),
+                    max_chars: 16_000,
+                },)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -300,8 +183,7 @@ mod tests {
             limit: 20,
         };
         let cloned = endpoint.clone();
-        let pending =
-            mj_core::runtime::spawn(async move { cloned.query(request, Path::new("/")).await });
+        let pending = mj_core::runtime::spawn(async move { cloned.query(request).await });
         let requests = loop {
             let requests = endpoint.requests();
             if !requests.is_empty() {
@@ -325,13 +207,10 @@ mod tests {
         let cloned = endpoint.clone();
         let pending = mj_core::runtime::spawn(async move {
             cloned
-                .query(
-                    HistoryQuery::TraceFile {
-                        path: "a.rs".into(),
-                        limit: 20,
-                    },
-                    Path::new("/"),
-                )
+                .query(HistoryQuery::GetSessionBrief {
+                    session_id: "session".into(),
+                    max_chars: 16_000,
+                })
                 .await
         });
         while endpoint.requests().is_empty() {
@@ -349,20 +228,17 @@ mod tests {
             let endpoint = endpoint.clone();
             mj_core::runtime::spawn(async move {
                 endpoint
-                    .query(
-                        HistoryQuery::SearchHistory {
-                            query: "needle".into(),
-                            session_ids: None,
-                            session_id: None,
-                            role: None,
-                            order: None,
-                            limit: 20,
-                            context_messages: 0,
-                            max_chars: 16_000,
-                            cursor: None,
-                        },
-                        Path::new("/"),
-                    )
+                    .query(HistoryQuery::SearchHistory {
+                        query: "needle".into(),
+                        session_ids: None,
+                        session_id: None,
+                        role: None,
+                        order: None,
+                        limit: 20,
+                        context_messages: 0,
+                        max_chars: 16_000,
+                        cursor: None,
+                    })
                     .await
             })
         };
@@ -370,13 +246,10 @@ mod tests {
             let endpoint = endpoint.clone();
             mj_core::runtime::spawn(async move {
                 endpoint
-                    .query(
-                        HistoryQuery::TraceFile {
-                            path: "a.rs".into(),
-                            limit: 20,
-                        },
-                        Path::new("/"),
-                    )
+                    .query(HistoryQuery::SearchSessions {
+                        query: "needle".into(),
+                        limit: 20,
+                    })
                     .await
             })
         };
@@ -386,7 +259,10 @@ mod tests {
         let older = mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL - 1;
         let listed = endpoint.requests_for_protocol(older);
         assert_eq!(listed.len(), 1);
-        assert!(matches!(listed[0].query, HistoryQuery::TraceFile { .. }));
+        assert!(matches!(
+            listed[0].query,
+            HistoryQuery::SearchSessions { .. }
+        ));
         // The reply serializes with only variants an older controller knows.
         let wire = serde_json::to_string(&listed).unwrap();
         assert!(!wire.contains("search_history"));

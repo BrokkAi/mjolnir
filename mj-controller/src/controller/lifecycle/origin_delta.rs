@@ -6,6 +6,12 @@ use std::path::Path;
 
 const MISSING_WIRE_EXIT_STATUS: i32 = 44;
 
+/// One poll of the original worker during a stop.
+enum WorkerPoll {
+    Exited,
+    Alive(Option<wire::SuspendProgress>),
+}
+
 pub(super) struct OriginDeltaSuspend {
     session_id: String,
     backend: targets::TargetLocator,
@@ -17,46 +23,98 @@ pub(super) struct OriginDeltaSuspend {
     accepted: bool,
 }
 
-fn read_wire_bytes(
+/// Shell function the batched wire reads probe through: print the file, or
+/// exit [`MISSING_WIRE_EXIT_STATUS`] when it does not exist.
+const READ_FILE_SH: &str =
+    "read_file() { if [ -e \"$1\" ]; then exec cat -- \"$1\"; fi; exit 44; }\n";
+
+/// Read `names` under `root` at the worker's target, one `Option` per name:
+/// `None` when the file does not exist. Everything one decision needs is read
+/// in one command (a local worker reads the files directly), so callers read
+/// a fresh batch at each decision point and consume it at once; a batch kept
+/// across a worker upgrade, a delivery readback, a wait, or a start would be
+/// stale.
+pub(super) fn read_wire_batch(
     backend: &targets::TargetLocator,
     session_id: &str,
     root: &str,
-    name: &str,
+    names: &[&str],
+    purpose: &str,
     executor: &(impl CommandExecutor + Sync),
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Vec<Option<Vec<u8>>>> {
     if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
-        let path = Path::new(root).join(name);
-        return match std::fs::read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-        };
+        return names
+            .iter()
+            .map(|name| {
+                let path = Path::new(root).join(name);
+                match std::fs::read(&path) {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+                }
+            })
+            .collect();
     }
-    let path = format!("{root}/{name}");
     let script = format!(
-        "path={}; if [ -e \"$path\" ]; then exec cat -- \"$path\"; fi; exit {MISSING_WIRE_EXIT_STATUS}",
-        targets::posix_quote(&path),
+        "{}{READ_FILE_SH}root=$1; shift\nfor file in \"$@\"; do probe \"$file\" read_file \"$root/$file\"; done\nexit 0\n",
+        targets::PROBE_HELPER_SH
     );
+    let mut args = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        script,
+        "mj-read-suspend-records".to_owned(),
+        root.to_owned(),
+    ];
+    args.extend(names.iter().map(|name| (*name).to_owned()));
     let command = targets::command_on_locator(
         targets::SshTrafficClass::Control,
         backend,
         session_id,
-        vec!["sh".into(), "-c".into(), script],
-        format!("read suspend record {name}"),
+        args,
+        purpose,
     )?;
     let output = mj_core::runtime::off_async_worker(|| executor.execute(&command))?;
-    if output.status == 0 {
-        Ok(Some(output.stdout))
-    } else if output.status == MISSING_WIRE_EXIT_STATUS {
-        Ok(None)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "read suspend record {name} failed (status {}): {}",
-            output.status,
-            stderr.trim()
-        );
+    ensure!(
+        output.status == 0,
+        "{purpose} failed (status {}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut probes = targets::parse_framed_probes(&output.stdout, targets::DEFAULT_PROBE_FRAMES);
+    names
+        .iter()
+        .map(|name| wire_frame(&mut probes, name))
+        .collect()
+}
+
+fn wire_frame(
+    probes: &mut std::collections::BTreeMap<String, targets::CommandOutput>,
+    name: &str,
+) -> Result<Option<Vec<u8>>> {
+    let frame = probes
+        .remove(name)
+        .with_context(|| format!("the suspend record probe returned no answer for {name}"))?;
+    match frame.status {
+        0 => Ok(Some(frame.stdout)),
+        MISSING_WIRE_EXIT_STATUS => Ok(None),
+        status => anyhow::bail!(
+            "read suspend record {name} failed (status {status}): {}",
+            String::from_utf8_lossy(&frame.stderr).trim()
+        ),
     }
+}
+
+fn decode_wire<T: serde::de::DeserializeOwned>(
+    root: &str,
+    name: &str,
+    bytes: Option<Vec<u8>>,
+) -> Result<Option<T>> {
+    bytes
+        .map(|bytes| {
+            serde_json::from_slice(&bytes).with_context(|| format!("decode {root}/{name}"))
+        })
+        .transpose()
 }
 
 pub(in crate::controller) fn read_wire<T: serde::de::DeserializeOwned>(
@@ -66,12 +124,17 @@ pub(in crate::controller) fn read_wire<T: serde::de::DeserializeOwned>(
     name: &str,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<Option<T>> {
-    let Some(bytes) = read_wire_bytes(backend, session_id, root, name, executor)? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        serde_json::from_slice(&bytes).with_context(|| format!("decode {root}/{name}"))?,
-    ))
+    let [bytes] = read_wire_batch(
+        backend,
+        session_id,
+        root,
+        &[name],
+        &format!("read suspend record {name}"),
+        executor,
+    )?
+    .try_into()
+    .map_err(|_| anyhow::anyhow!("read suspend record {name}: unexpected answer count"))?;
+    decode_wire(root, name, bytes)
 }
 
 fn write_wire<T: serde::Serialize>(
@@ -280,6 +343,143 @@ pub(in crate::controller) fn clear_suspend_records_at_target(
     remove_wire_files(backend, session_id, &root, ALL_SUSPEND_WIRE_FILES, executor)
 }
 
+/// The checkouts whose `origin` remote decides whether a new suspend captures
+/// OriginDelta.
+enum OriginPlan<'a> {
+    NotApplicable,
+    Worktree {
+        worktree: &'a mj_core::state::ManagedWorktree,
+        repositories: [PathBuf; 1],
+    },
+    Workspace {
+        repositories: Vec<PathBuf>,
+    },
+}
+
+impl<'a> OriginPlan<'a> {
+    fn for_session(
+        controller: &'a Controller,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+    ) -> Result<Self> {
+        match controller.state.checkout(session_id)? {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                if !worktree.uses_origin_delta_suspend() {
+                    return Ok(Self::NotApplicable);
+                }
+                Ok(Self::Worktree {
+                    worktree,
+                    repositories: [worktree.worktree_root.clone()],
+                })
+            }
+            mj_core::state::Checkout::ManagedWorkspace => {
+                let session = controller
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?;
+                let Some(bundle) = session.project_bundle(&controller.config) else {
+                    return Ok(Self::NotApplicable);
+                };
+                if bundle.repositories.is_empty() {
+                    return Ok(Self::NotApplicable);
+                }
+                let workspace_root = PathBuf::from(crate::controller::network_git::workspace_root(
+                    backend,
+                    session.container_workspace.as_deref(),
+                ));
+                Ok(Self::Workspace {
+                    repositories: bundle
+                        .repositories
+                        .iter()
+                        .map(|repository| workspace_root.join(&repository.destination))
+                        .collect(),
+                })
+            }
+            mj_core::state::Checkout::Attached { .. }
+            | mj_core::state::Checkout::Borrowed { .. } => Ok(Self::NotApplicable),
+        }
+    }
+
+    fn repositories(&self) -> &[PathBuf] {
+        match self {
+            Self::NotApplicable => &[],
+            Self::Worktree { repositories, .. } => repositories,
+            Self::Workspace { repositories } => repositories,
+        }
+    }
+
+    /// `origins` answers, in order, whether each repository has an `origin`
+    /// remote; it may stop after the first repository that has none.
+    fn decide(&self, origins: &[bool]) -> Result<bool> {
+        match self {
+            Self::NotApplicable => Ok(false),
+            Self::Worktree { worktree, .. } => {
+                Ok(origins.first() == Some(&true) || managed_origin_override(worktree).is_some())
+            }
+            Self::Workspace { repositories } => {
+                Ok(origins.len() == repositories.len() && origins.iter().all(|origin| *origin))
+            }
+        }
+    }
+}
+
+/// Read whether a suspend was accepted and, if not, which `repositories` have
+/// an `origin` remote, in one command. `None` means it was accepted.
+fn read_accepted_and_origins(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+    repositories: &[PathBuf],
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<Option<Vec<bool>>> {
+    const PURPOSE: &str = "read suspend acceptance and checkout origins";
+    let script = format!(
+        "{}{READ_FILE_SH}root=$1; shift\nprobe accepted read_file \"$root/{}\" && exit 0\ni=0\nfor repository in \"$@\"; do probe \"origin$i\" git -C \"$repository\" config --get remote.origin.url; i=$((i + 1)); done\nexit 0\n",
+        targets::PROBE_HELPER_SH,
+        wire::ACCEPTED
+    );
+    let mut args = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        script,
+        "mj-read-suspend-origins".to_owned(),
+        root.to_owned(),
+    ];
+    args.extend(
+        repositories
+            .iter()
+            .map(|repository| repository.to_string_lossy().into_owned()),
+    );
+    let command = targets::command_on_locator(
+        targets::SshTrafficClass::Control,
+        backend,
+        session_id,
+        args,
+        PURPOSE,
+    )?;
+    let output = mj_core::runtime::off_async_worker(|| executor.execute(&command))?;
+    ensure!(
+        output.status == 0,
+        "{PURPOSE} failed (status {}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut probes = targets::parse_framed_probes(&output.stdout, targets::DEFAULT_PROBE_FRAMES);
+    if wire_frame(&mut probes, "accepted")?.is_some() {
+        return Ok(None);
+    }
+    (0..repositories.len())
+        .map(|index| {
+            let origin = probes.remove(&format!("origin{index}")).with_context(|| {
+                format!("the origin probe returned no answer for repository {index}")
+            })?;
+            Ok(origin.status == 0 && !origin.stdout.trim_ascii().is_empty())
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
 impl OriginDeltaSuspend {
     /// Whether this suspend captures OriginDelta. An accepted suspend keeps
     /// the capture it started with, even after its worker has exited. A new
@@ -293,53 +493,37 @@ impl OriginDeltaSuspend {
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<bool> {
         let (backend, root) = controller.worker_placement(session_id)?;
-        if read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?.is_some() {
-            return Ok(true);
-        }
-        let checkout = controller.state.checkout(session_id)?;
-        let git = ExecutorGit::for_session(executor, &backend, session_id);
-        match checkout {
-            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
-                if !worktree.uses_origin_delta_suspend() {
-                    return Ok(false);
-                }
+        // The checkout lookup can fail; an accepted suspend still applies.
+        let plan = OriginPlan::for_session(controller, session_id, &backend);
+        if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+            if read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?.is_some()
+            {
+                return Ok(true);
+            }
+            let plan = plan?;
+            let git = ExecutorGit::for_session(executor, &backend, session_id);
+            let mut origins = Vec::new();
+            for repository in plan.repositories() {
                 let has_origin = mj_core::runtime::off_async_worker(|| {
-                    checkout_has_origin_remote(&git, &worktree.worktree_root)
+                    checkout_has_origin_remote(&git, repository)
                 })?;
-                if has_origin {
-                    return Ok(true);
+                origins.push(has_origin);
+                if !has_origin {
+                    break;
                 }
-                Ok(managed_origin_override(worktree).is_some())
             }
-            mj_core::state::Checkout::ManagedWorkspace => {
-                let session = controller
-                    .state
-                    .sessions
-                    .get(session_id)
-                    .with_context(|| format!("unknown session {session_id}"))?;
-                let Some(bundle) = session.project_bundle(&controller.config) else {
-                    return Ok(false);
-                };
-                if bundle.repositories.is_empty() {
-                    return Ok(false);
-                }
-                let workspace_root = PathBuf::from(crate::controller::network_git::workspace_root(
-                    &backend,
-                    session.container_workspace.as_deref(),
-                ));
-                mj_core::runtime::off_async_worker(|| {
-                    for repository in &bundle.repositories {
-                        let repo_path = workspace_root.join(&repository.destination);
-                        if !checkout_has_origin_remote(&git, &repo_path)? {
-                            return Ok(false);
-                        }
-                    }
-                    Ok(true)
-                })
-            }
-            mj_core::state::Checkout::Attached { .. }
-            | mj_core::state::Checkout::Borrowed { .. } => Ok(false),
+            return plan.decide(&origins);
         }
+        let repositories = plan
+            .as_ref()
+            .map(|plan| plan.repositories().to_vec())
+            .unwrap_or_default();
+        let Some(origins) =
+            read_accepted_and_origins(&backend, session_id, &root, &repositories, executor)?
+        else {
+            return Ok(true);
+        };
+        plan?.decide(&origins)
     }
 
     /// Whether the session's live worker advertises origin-delta quiescence
@@ -390,10 +574,19 @@ impl OriginDeltaSuspend {
             mj_core::state::Checkout::Attached { path } => path.to_path_buf(),
             _ => bail!("managed checkout is missing"),
         };
-        let accepted = read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?;
-        let request =
-            read_wire::<SuspendRequest>(&backend, session_id, &root, wire::REQUEST, executor)?
-                .filter(|request| accepted.as_ref() == Some(&request.operation));
+        let [accepted, request] = read_wire_batch(
+            &backend,
+            session_id,
+            &root,
+            &[wire::ACCEPTED, wire::REQUEST],
+            "read suspend acceptance and request",
+            executor,
+        )?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("suspend record batch returned an unexpected count"))?;
+        let accepted = decode_wire::<String>(&root, wire::ACCEPTED, accepted)?;
+        let request = decode_wire::<SuspendRequest>(&root, wire::REQUEST, request)?
+            .filter(|request| accepted.as_ref() == Some(&request.operation));
         let request_recorded = request.is_some();
         let child_sessions = if let Some(request) = request {
             ensure!(
@@ -477,6 +670,40 @@ impl OriginDeltaSuspend {
         )?
         .filter(|receipt| receipt.operation == self.operation)
         .and_then(|receipt| receipt.error))
+    }
+
+    /// The restart reason (when `want_restart`) and this operation's receipt,
+    /// read together at the one decision that needs both.
+    pub(super) fn restart_and_receipt(
+        &self,
+        executor: &(impl CommandExecutor + Sync),
+        want_restart: bool,
+    ) -> Result<(Option<String>, Option<SuspendReceipt>)> {
+        let names: &[&str] = if want_restart {
+            &[wire::RESTART, wire::RECEIPT]
+        } else {
+            &[wire::RECEIPT]
+        };
+        let mut records = read_wire_batch(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            names,
+            "read suspend restart and receipt",
+            executor,
+        )?
+        .into_iter();
+        let restart = if want_restart {
+            decode_wire::<SuspendReceipt>(&self.root, wire::RESTART, records.next().flatten())?
+                .filter(|receipt| receipt.operation == self.operation)
+                .and_then(|receipt| receipt.error)
+        } else {
+            None
+        };
+        let receipt =
+            decode_wire::<SuspendReceipt>(&self.root, wire::RECEIPT, records.next().flatten())?
+                .filter(|receipt| receipt.operation == self.operation);
+        Ok((restart, receipt))
     }
 
     pub(super) fn record_restart(
@@ -575,6 +802,117 @@ impl OriginDeltaSuspend {
         Ok(())
     }
 
+    /// The accepted request and the restart record, read together.
+    fn request_and_restart(
+        &self,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<(Option<SuspendRequest>, bool)> {
+        let [request, restart] = read_wire_batch(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            &[wire::REQUEST, wire::RESTART],
+            "read suspend request and restart",
+            executor,
+        )?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("suspend record batch returned an unexpected count"))?;
+        let restart = decode_wire::<SuspendReceipt>(&self.root, wire::RESTART, restart)?
+            .filter(|receipt| receipt.operation == self.operation)
+            .and_then(|receipt| receipt.error)
+            .is_some();
+        Ok((
+            decode_wire::<SuspendRequest>(&self.root, wire::REQUEST, request)?,
+            restart,
+        ))
+    }
+
+    /// Wait for the original worker to exit, or for the next progress report.
+    /// A target in another namespace answers from one bounded remote loop
+    /// instead of one round trip per poll.
+    fn poll_worker(
+        &self,
+        worker: wire::WorkerIdentity,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<WorkerPoll> {
+        if matches!(self.backend, targets::TargetLocator::LocalBare { .. }) {
+            if !worker_identity_is_alive(
+                &self.backend,
+                &self.session_id,
+                &self.root,
+                worker,
+                executor,
+                false,
+            )? {
+                return Ok(WorkerPoll::Exited);
+            }
+            return Ok(WorkerPoll::Alive(read_wire::<wire::SuspendProgress>(
+                &self.backend,
+                &self.session_id,
+                &self.root,
+                wire::PROGRESS,
+                executor,
+            )?));
+        }
+        const PURPOSE: &str = "wait for suspend worker exit";
+        // Each pass polls at the worker's old 100 ms cadence, so one command
+        // holds the connection about two seconds. A worker that is still alive
+        // then reports its progress and the caller asks again.
+        let script = format!(
+            "{}{READ_FILE_SH}root=$1; pid=$2; start=$3\nn=0\nwhile [ \"$n\" -lt 20 ]; do\n    probe alive \"$root/hel\" worker identity-alive --pid \"$pid\" --start \"$start\" || exit 0\n    [ \"$out\" = alive ] || exit 0\n    n=$((n + 1))\n    sleep 0.1 2>/dev/null || sleep 1\ndone\nprobe progress read_file \"$root/{}\"\nexit 0\n",
+            targets::PROBE_HELPER_SH,
+            wire::PROGRESS
+        );
+        let command = targets::command_on_locator(
+            targets::SshTrafficClass::Control,
+            &self.backend,
+            &self.session_id,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                script,
+                "mj-wait-suspend-worker".into(),
+                self.root.clone(),
+                worker.pid.to_string(),
+                worker.start.to_string(),
+            ],
+            PURPOSE,
+        )?;
+        let output = mj_core::runtime::off_async_worker(|| executor.execute(&command))?;
+        ensure!(
+            output.status == 0,
+            "{PURPOSE} failed (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let mut probes =
+            targets::parse_framed_probes(&output.stdout, targets::DEFAULT_PROBE_FRAMES);
+        let alive = probes
+            .remove("alive")
+            .context("the suspend worker probe returned no liveness answer")?;
+        if alive.status != 0 {
+            anyhow::bail!(
+                "check suspend worker liveness failed (status {}): {}",
+                alive.status,
+                String::from_utf8_lossy(&alive.stderr).trim()
+            );
+        }
+        match alive.stdout.as_slice() {
+            b"dead" => return Ok(WorkerPoll::Exited),
+            b"alive" => {}
+            other => anyhow::bail!(
+                "unexpected worker identity-alive output: {:?}",
+                String::from_utf8_lossy(other)
+            ),
+        }
+        let progress = wire_frame(&mut probes, "progress")?;
+        Ok(WorkerPoll::Alive(decode_wire(
+            &self.root,
+            wire::PROGRESS,
+            progress,
+        )?))
+    }
+
     /// Wait for the original worker to finish the accepted stop. After a
     /// person cancels, the wait still has to read and write the stop's
     /// records, so it runs on the shutdown-only view: only daemon shutdown
@@ -588,30 +926,15 @@ impl OriginDeltaSuspend {
         let outcome = async {
             let initial_cancelled =
                 executor.cancellation_requested() && !executor.shutdown_interrupted();
-            let worker = if initial_cancelled {
-                read_wire::<SuspendRequest>(
-                    &self.backend,
-                    &self.session_id,
-                    &self.root,
-                    wire::REQUEST,
-                    &cleanup,
-                )?
+            let (request, restart_recorded) = if initial_cancelled {
+                self.request_and_restart(&cleanup)?
             } else {
-                read_wire::<SuspendRequest>(
-                    &self.backend,
-                    &self.session_id,
-                    &self.root,
-                    wire::REQUEST,
-                    executor,
-                )?
-            }
-            .context("worker did not record the suspend request")?
-            .worker;
-            let mut cancellation_recorded = if initial_cancelled {
-                self.restart_reason(&cleanup)?.is_some()
-            } else {
-                self.restart_reason(executor)?.is_some()
+                self.request_and_restart(executor)?
             };
+            let worker = request
+                .context("worker did not record the suspend request")?
+                .worker;
+            let mut cancellation_recorded = restart_recorded;
             let mut displayed_notice = String::new();
             loop {
                 ensure!(
@@ -624,49 +947,30 @@ impl OriginDeltaSuspend {
                 }
                 let after_cancellation = cancellation_recorded || executor.cancellation_requested();
                 // A receipt can precede the worker's last cleanup tasks.
-                let poll_executor_alive = if after_cancellation {
-                    worker_identity_is_alive(
-                        &self.backend,
-                        &self.session_id,
-                        &self.root,
-                        worker,
-                        &cleanup,
-                        false,
-                    )?
+                let polled = if after_cancellation {
+                    self.poll_worker(worker, &cleanup)
                 } else {
-                    worker_identity_is_alive(
-                        &self.backend,
-                        &self.session_id,
-                        &self.root,
-                        worker,
-                        executor,
-                        false,
-                    )?
+                    self.poll_worker(worker, executor)
                 };
-                if !poll_executor_alive {
-                    return Ok(());
-                }
+                let progress = match polled {
+                    Ok(WorkerPoll::Exited) => return Ok(()),
+                    Ok(WorkerPoll::Alive(progress)) => progress,
+                    // A cancellation or handoff kills the in-flight wait. Go
+                    // back to the top to record the restart or report the
+                    // handoff; the next poll no longer uses this executor.
+                    Err(_)
+                        if !after_cancellation
+                            && (executor.shutdown_interrupted()
+                                || executor.cancellation_requested()) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let mut notice = if cancellation_recorded {
                     "Restarting after the previous agent exits".to_owned()
                 } else {
                     "Waiting for the session's processes to stop".to_owned()
-                };
-                let progress = if after_cancellation {
-                    read_wire::<wire::SuspendProgress>(
-                        &self.backend,
-                        &self.session_id,
-                        &self.root,
-                        wire::PROGRESS,
-                        &cleanup,
-                    )?
-                } else {
-                    read_wire::<wire::SuspendProgress>(
-                        &self.backend,
-                        &self.session_id,
-                        &self.root,
-                        wire::PROGRESS,
-                        executor,
-                    )?
                 };
                 if let Some(progress) = progress
                     && progress.operation == self.operation
@@ -811,5 +1115,317 @@ impl OriginDeltaSuspend {
             };
             adopt_restarted_checkpoint_relay(admission, session_id, manager, connection).await
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use mj_core::targets::{CommandOutput, CommandSpec, SshTarget};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    const OPERATION: &str = "origin-delta-suspend-test";
+
+    /// A target's shell: runs the remote command line an SSH command carries in
+    /// a local `sh`, as the SSH daemon would, and records each command's
+    /// purpose.
+    #[derive(Default)]
+    struct RemoteShell {
+        purposes: Mutex<Vec<String>>,
+        notices: Mutex<Vec<String>>,
+        /// Reported as the operation's cancellation.
+        cancelled: AtomicBool,
+        /// A cancellation kills the first wait, as it kills its SSH process.
+        cancel_during_first_wait: bool,
+        after_wait: Option<Box<dyn Fn() + Send + Sync>>,
+    }
+
+    impl RemoteShell {
+        fn count(&self, purpose: &str) -> usize {
+            self.purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| seen.as_str() == purpose)
+                .count()
+        }
+    }
+
+    impl CommandExecutor for RemoteShell {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            if self.cancelled.load(Ordering::SeqCst) && !command.is_shutdown_only() {
+                anyhow::bail!("a cancelled operation must run on the shutdown-only view");
+            }
+            let waiting = command.purpose == "wait for suspend worker exit";
+            if waiting
+                && self.cancel_during_first_wait
+                && !self.cancelled.swap(true, Ordering::SeqCst)
+            {
+                anyhow::bail!("ssh was killed by the cancellation");
+            }
+            let mut local = CommandSpec::new("sh", ["-c", command.args.last().unwrap().as_str()]);
+            if let Some(input) = command.sensitive_stdin() {
+                local = local.with_sensitive_stdin(input.to_vec());
+            }
+            let output = ProcessExecutor.execute(&local)?;
+            if waiting && let Some(hook) = &self.after_wait {
+                hook();
+            }
+            Ok(output)
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn notify_notice(&self, notice: &str) {
+            self.notices.lock().unwrap().push(notice.to_owned());
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    fn backend() -> targets::TargetLocator {
+        targets::TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "user@remote.example".into(),
+                ssh_args: Vec::new(),
+            },
+            workspace: "/remote/clone".into(),
+            worker_id: Some(SESSION.into()),
+        }
+    }
+
+    /// A worker root with spaces in its path, holding a `hel` that reports the
+    /// worker alive until it has been asked `dead_after` times.
+    fn worker_root(dead_after: u32) -> (tempfile::TempDir, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("worker root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dead_after"), dead_after.to_string()).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &root,
+            "hel",
+            r#"#!/bin/sh
+root=$(dirname "$0")
+[ "$1 $2" = "worker identity-alive" ] || { echo "unrecognized subcommand '$1'" >&2; exit 2; }
+[ ! -e "$root/unsupported" ] || { echo "error: unrecognized subcommand 'identity-alive'" >&2; exit 2; }
+asked=$(( $(cat "$root/asked" 2>/dev/null || echo 0) + 1 ))
+echo "$asked" > "$root/asked"
+if [ "$asked" -ge "$(cat "$root/dead_after")" ]; then echo dead; else echo alive; fi
+"#,
+        );
+        let root = root.to_string_lossy().into_owned();
+        (directory, root)
+    }
+
+    fn attempt(root: &str) -> OriginDeltaSuspend {
+        OriginDeltaSuspend {
+            session_id: SESSION.into(),
+            backend: backend(),
+            root: root.to_owned(),
+            checkout: PathBuf::from("/remote/clone"),
+            child_sessions: Vec::new(),
+            operation: OPERATION.into(),
+            request_recorded: true,
+            accepted: true,
+        }
+    }
+
+    fn record_request(root: &str) {
+        std::fs::write(
+            Path::new(root).join(wire::REQUEST),
+            serde_json::to_vec(&SuspendRequest {
+                operation: OPERATION.into(),
+                worker: wire::WorkerIdentity {
+                    pid: 4242,
+                    start: 99,
+                },
+                checkout: PathBuf::from("/remote/clone"),
+                child_sessions: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn asked(root: &str) -> u32 {
+        std::fs::read_to_string(Path::new(root).join("asked"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_batch_of_wire_reads_tells_present_missing_and_failing_files_apart_in_one_command() {
+        let (_directory, root) = worker_root(1);
+        std::fs::write(Path::new(&root).join(wire::ACCEPTED), "\"op\"\n").unwrap();
+        // A file that exists but cannot be read is an error, not a missing file.
+        std::fs::create_dir(Path::new(&root).join(wire::PROGRESS)).unwrap();
+        let shell = RemoteShell::default();
+
+        let read = |names: &[&str]| {
+            read_wire_batch(
+                &backend(),
+                SESSION,
+                &root,
+                names,
+                "read test records",
+                &shell,
+            )
+        };
+        let answers = read(&[wire::REQUEST, wire::ACCEPTED]).unwrap();
+        assert_eq!(answers, [None, Some(b"\"op\"".to_vec())]);
+        assert_eq!(shell.count("read test records"), 1);
+
+        let error = format!("{:#}", read(&[wire::ACCEPTED, wire::PROGRESS]).unwrap_err());
+        assert!(
+            error.contains("read suspend record suspend-progress.json failed (status 1)"),
+            "{error}"
+        );
+        assert_eq!(shell.count("read test records"), 2);
+    }
+
+    #[test]
+    fn the_acceptance_and_origin_checks_share_one_command_and_stop_at_an_accepted_suspend() {
+        let (_directory, root) = worker_root(1);
+        let git = |repository: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let repositories: Vec<PathBuf> = ["with origin", "without origin"]
+            .into_iter()
+            .map(|name| {
+                let path = Path::new(&root).join(name);
+                std::fs::create_dir_all(&path).unwrap();
+                git(&path, &["init", "--quiet"]);
+                path
+            })
+            .collect();
+        git(
+            &repositories[0],
+            &["remote", "add", "origin", "https://example.com/app.git"],
+        );
+        let shell = RemoteShell::default();
+
+        let origins =
+            read_accepted_and_origins(&backend(), SESSION, &root, &repositories, &shell).unwrap();
+        assert_eq!(origins, Some(vec![true, false]));
+        assert_eq!(shell.purposes.lock().unwrap().len(), 1);
+
+        std::fs::write(Path::new(&root).join(wire::ACCEPTED), "\"op\"").unwrap();
+        let origins =
+            read_accepted_and_origins(&backend(), SESSION, &root, &repositories, &shell).unwrap();
+        assert_eq!(origins, None, "an accepted suspend applies without origins");
+        assert_eq!(shell.purposes.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn one_bounded_remote_wait_covers_many_liveness_checks_until_the_worker_exits() {
+        let (_directory, root) = worker_root(4);
+        record_request(&root);
+        let shell = RemoteShell::default();
+        attempt(&root).wait_for_stop(&shell).await.unwrap();
+        // Four checks of the worker, one command on the connection.
+        assert_eq!(asked(&root), 4);
+        assert_eq!(shell.count("wait for suspend worker exit"), 1);
+        assert_eq!(
+            shell.purposes.lock().unwrap().len(),
+            2,
+            "request read, wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_worker_still_alive_after_the_bounded_wait_reports_progress_and_is_awaited_again() {
+        let (_directory, root) = worker_root(1_000);
+        record_request(&root);
+        std::fs::write(
+            Path::new(&root).join(wire::PROGRESS),
+            serde_json::to_vec(&wire::SuspendProgress {
+                operation: OPERATION.into(),
+                remaining_pids: vec![9002, 9003],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let release = root.clone();
+        let shell = RemoteShell {
+            // The worker exits while the controller is between waits.
+            after_wait: Some(Box::new(move || {
+                std::fs::write(Path::new(&release).join("dead_after"), "1").unwrap()
+            })),
+            ..Default::default()
+        };
+        attempt(&root).wait_for_stop(&shell).await.unwrap();
+        assert_eq!(shell.count("wait for suspend worker exit"), 2);
+        assert!(asked(&root) > 20, "the first wait polled until its bound");
+        assert_eq!(
+            *shell.notices.lock().unwrap(),
+            ["Waiting for the session's processes to stop (PIDs 9002, 9003)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancellation_that_kills_the_remote_wait_is_recorded_and_the_wait_continues_uncancelled()
+     {
+        let (_directory, root) = worker_root(2);
+        record_request(&root);
+        let cancellable = RemoteShell {
+            cancel_during_first_wait: true,
+            ..Default::default()
+        };
+        attempt(&root).wait_for_stop(&cancellable).await.unwrap();
+        // The killed wait, then the wait that continues on the shutdown-only
+        // view (the shell refuses any other command once cancelled).
+        assert_eq!(cancellable.count("wait for suspend worker exit"), 2);
+        let restart: SuspendReceipt =
+            serde_json::from_slice(&std::fs::read(Path::new(&root).join(wire::RESTART)).unwrap())
+                .unwrap();
+        assert_eq!(restart.operation, OPERATION);
+        assert_eq!(restart.error.as_deref(), Some("suspend was cancelled"));
+    }
+
+    #[tokio::test]
+    async fn a_worker_without_identity_alive_fails_the_wait_with_its_own_refusal() {
+        let (_directory, root) = worker_root(1);
+        record_request(&root);
+        std::fs::write(Path::new(&root).join("unsupported"), "").unwrap();
+        let shell = RemoteShell::default();
+        let error = attempt(&root).wait_for_stop(&shell).await.unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("check suspend worker liveness failed (status 2)")
+                && error.contains("unrecognized subcommand 'identity-alive'"),
+            "{error}"
+        );
+        assert_eq!(shell.count("wait for suspend worker exit"), 1);
     }
 }

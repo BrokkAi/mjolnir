@@ -1929,8 +1929,10 @@ pub struct RelaySnapshot {
     /// outside this journal. Codex writes a thread's rollout only at its first user
     /// message, so an unused thread can be missing on disk and safely
     /// replaced; a used one cannot. Older snapshots omit the field and read as
-    /// `false`, and it is written only once true so an older worker keeps
-    /// reading the snapshots of sessions that never used their thread.
+    /// `false`. It resets on `ContextCleared` and on a non-resumed
+    /// `SessionOpened` that records a new native session id. It is omitted
+    /// while false so an older worker keeps reading the snapshots of sessions
+    /// that never used their thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_session_used: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -14,9 +14,15 @@ fn slow_operation_warning_after(request: &RelayRequest) -> Duration {
 impl RelayClient {
     pub async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
         // Memory RPCs include filesystem work and worker-side queueing. Neither
-        // has a measured deadline.
+        // has a measured deadline. An in-place reload is answered only after
+        // the replacement harness opens its session, which first launches take
+        // minutes on a remote target (a 15 s deadline abandoned a reload the
+        // worker then committed). The worker owns that expiry
+        // (`NATIVE_SESSION_STARTUP_TIMEOUT`) and reports its failure or exits,
+        // which ends the wait.
         let timeout = match &request {
-            RelayRequest::ProjectMemoryTransfer { .. }
+            RelayRequest::RestartHarnessInPlace { .. }
+            | RelayRequest::ProjectMemoryTransfer { .. }
             | RelayRequest::ProjectMemorySnapshot
             | RelayRequest::InstallProjectMemorySnapshot { .. }
             | RelayRequest::ReplaceProjectMemoryTree { .. }
@@ -30,6 +36,39 @@ impl RelayClient {
             _ => Some(self.request_timeout),
         };
         self.call_with_deadline(request, timeout).await
+    }
+
+    /// Run `call` unless `interrupted` completes first, for a request the
+    /// caller must be able to leave while the worker is still answering it.
+    ///
+    /// Leaving an exchange abandons the connection, as a timeout does: the
+    /// worker may still send the reply, and it would be read as the next
+    /// call's response. Later calls on this client fail with that cause, so
+    /// the caller reconnects deliberately. The request itself is not
+    /// cancelled; whatever the worker already did stays durable on its side.
+    /// Returns `None` when interrupted.
+    pub async fn call_until<T>(
+        &mut self,
+        interrupted: impl std::future::Future<Output = ()>,
+        call: impl AsyncFnOnce(&mut Self) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let outcome = {
+            let call = std::pin::pin!(call(&mut *self));
+            tokio::select! {
+                result = call => Some(result),
+                () = interrupted => None,
+            }
+        };
+        match outcome {
+            Some(result) => result.map(Some),
+            None => {
+                self.abandoned = Some(
+                    "relay connection abandoned after its operation was interrupted while a request was in flight"
+                        .into(),
+                );
+                Ok(None)
+            }
+        }
     }
 
     pub async fn call_with_timeout(

@@ -1575,7 +1575,14 @@ impl DashboardState {
                 self.state
                     .sessions
                     .get(id)
-                    .map_or(id.as_str(), |session| session.listed_title())
+                    .map(|session| session.listed_title())
+                    .or_else(|| {
+                        self.native_agents
+                            .get(id)
+                            .map(|pane| pane.agent.name.as_str())
+                            .filter(|name| !name.is_empty())
+                    })
+                    .unwrap_or(id.as_str())
                     .to_owned()
             })
             .collect();

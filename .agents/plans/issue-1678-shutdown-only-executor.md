@@ -17,6 +17,7 @@ After this change, every cancellation-cleanup and rollback command runs through 
 - [x] Added `ShutdownOnly` (and `CommandExecutor::shutdown_only()`) in `mj-core/src/targets.rs`; `CancellableProcessExecutor` gained `with_shutdown_cancellation`; wrappers forward `shutdown_interrupted()`.
 - [x] Replaced every cancellation-cleanup substitution in `lifecycle.rs`, `origin_delta.rs` (single `wait_for_stop`), `move_session.rs` and `move_session/transport.rs` (`ProcessStreamPipe::new(executor)`); lifecycle admission closures now receive the `LifecycleControl`.
 - [x] Review follow-up: `LifecycleControl` publishes shutdown before the `cancelled` flag; added `CommandExecutor::with_cleanup_timeout` (`CleanupTimeout` view) and restored the 15 s bound at `move_session.rs` (retained-source stop keeps a person's cancel; `recover_move_source_stop` runs on `shutdown_only().with_cleanup_timeout`).
+- [x] Merged master 45bc071e0: `4b09deda8` batched the stop observation (`request_and_restart`, `poll_worker`, `restart_and_receipt`), and its cancelled-path reads and the remote wait now run on the shutdown-only view; its two-executor `wait_for_stop_with_uncancelled` tests use one executor. `3fe00362e` added no cancellation-cleanup executor substitutions.
 - [x] Added tests (see Outcomes) and ran fmt, strict Clippy and the targeted suites.
 
 ## Surprises & Discoveries

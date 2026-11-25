@@ -1026,7 +1026,6 @@ mod tests {
         ] {
             let request = HistoryRequest {
                 request_id: "roundtrip".into(),
-                blame: None,
                 query: HistoryQuery::ReadSession {
                     session_id: "roundtrip".into(),
                     start: 0,

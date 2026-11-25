@@ -308,7 +308,7 @@ mod tests {
         let position = point(&draw(&mut dashboard), "codex-2");
         click(&mut dashboard, position);
         assert!(
-            matches!(&dashboard.mode, Mode::New(wizard) if wizard.profile == 2),
+            matches!(&dashboard.mode, Mode::New(wizard) if wizard.profile == crate::wizards::ProfileChoice::Profile("codex-2".into())),
             "the click did not select the third profile"
         );
     }

@@ -46,13 +46,19 @@ pub(crate) enum DraftChange {
 pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn step(&self) -> WizardStep;
     fn set_step(&mut self, step: WizardStep);
-    fn profile(&self) -> usize;
-    fn set_profile(&mut self, index: usize);
+    /// The profile row the draft has chosen, in the picker's current order.
+    fn profile(&self, dashboard: &DashboardState) -> usize;
+    fn set_profile(&mut self, dashboard: &DashboardState, index: usize);
     fn selection_pending(&self) -> bool {
         false
     }
-    fn target(&self) -> usize;
-    fn set_target(&mut self, index: usize);
+    /// The index in `config.targets` of the chosen target.
+    fn target(&self, dashboard: &DashboardState) -> usize;
+    fn set_target(&mut self, dashboard: &DashboardState, index: usize);
+    /// The chosen target template's id.
+    fn target_id(&self, dashboard: &DashboardState) -> String {
+        nth_key(&dashboard.config.targets, self.target(dashboard))
+    }
     fn launch_error(&self) -> Option<&str>;
     fn profile_step_skipped(&self) -> bool;
     fn set_profile_step_skipped(&mut self, skipped: bool);
@@ -142,19 +148,19 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn profile_list_len(&self, dashboard: &DashboardState) -> usize {
         self.profile_count(dashboard)
     }
-    fn profile_list_selected(&self, _dashboard: &DashboardState) -> usize {
-        self.profile()
+    fn profile_list_selected(&self, dashboard: &DashboardState) -> usize {
+        self.profile(dashboard)
     }
     fn profile_advance_enabled(&self, _dashboard: &DashboardState) -> bool {
         true
     }
     fn select_profile_row(
         &mut self,
-        _dashboard: &DashboardState,
+        dashboard: &DashboardState,
         row: usize,
         _toggle_provider: bool,
     ) {
-        self.set_profile(row);
+        self.set_profile(dashboard, row);
     }
     /// Why this draft cannot use `target_id`, or `None` when it can.
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String>;
@@ -224,7 +230,7 @@ pub(crate) fn target_advance_enabled<W: WizardDraft>(
     dashboard: &DashboardState,
     wizard: &W,
 ) -> bool {
-    let target_id = nth_key(&dashboard.config.targets, wizard.target());
+    let target_id = wizard.target_id(dashboard);
     !wizard.selection_pending()
         && wizard.target_rejection(dashboard, &target_id).is_none()
         && (wizard.resource_allocation().is_some()
@@ -244,27 +250,35 @@ impl WizardDraft for NewWizard {
         self.step = step;
     }
 
-    fn profile(&self) -> usize {
-        self.profile
+    fn profile(&self, dashboard: &DashboardState) -> usize {
+        dashboard.new_wizard_profile_row(&self.profile).unwrap_or(0)
     }
 
-    fn set_profile(&mut self, index: usize) {
-        self.profile = index;
-        self.focused_provider = None;
-        self.profile_selection_request = None;
-        self.resolved_profile = None;
+    fn set_profile(&mut self, dashboard: &DashboardState, index: usize) {
+        if let Some(choice) = dashboard.new_wizard_choice_at(index) {
+            self.set_profile_choice(choice);
+        }
     }
 
     fn selection_pending(&self) -> bool {
         self.profile_selection_request.is_some()
     }
 
-    fn target(&self) -> usize {
-        self.target
+    fn target(&self, dashboard: &DashboardState) -> usize {
+        dashboard
+            .config
+            .targets
+            .keys()
+            .position(|id| *id == self.target)
+            .unwrap_or(0)
     }
 
-    fn set_target(&mut self, index: usize) {
-        self.target = index;
+    fn set_target(&mut self, dashboard: &DashboardState, index: usize) {
+        self.target = nth_key(&dashboard.config.targets, index);
+    }
+
+    fn target_id(&self, _dashboard: &DashboardState) -> String {
+        self.target.clone()
     }
 
     fn launch_error(&self) -> Option<&str> {
@@ -354,8 +368,12 @@ impl WizardDraft for NewWizard {
     /// A bare project target reviews a directory; every other target reviews
     /// a bundle.
     fn review_back_step(&self, dashboard: &DashboardState) -> WizardStep {
-        let target = &dashboard.config.targets[&nth_key(&dashboard.config.targets, self.target)];
-        if is_bare_project_target(target) {
+        if dashboard
+            .config
+            .targets
+            .get(&self.target)
+            .is_some_and(is_bare_project_target)
+        {
             WizardStep::ProjectDirectory
         } else {
             WizardStep::Bundle
@@ -532,7 +550,7 @@ impl WizardDraft for NewWizard {
         match interaction {
             Interaction::Toggle(WizardControl::ProfileList) => {
                 if let Some(provider) = self.focused_provider.clone().or_else(|| {
-                    Self::provider_for_profile(dashboard, self.profile)
+                    self.provider_of_choice(dashboard)
                         .filter(|provider| !self.expanded_providers.contains(provider))
                 }) {
                     self.toggle_provider(provider);
@@ -577,7 +595,7 @@ impl WizardDraft for NewWizard {
             }
             Interaction::Toggle(WizardControl::CreateManagedWorktree)
                 if self
-                    .selected_worktree_options(&dashboard.config)
+                    .selected_worktree_options()
                     .is_some_and(|options| options.available) =>
             {
                 self.create_managed_worktree = !self.create_managed_worktree;
@@ -596,7 +614,7 @@ impl WizardDraft for NewWizard {
         match key.code {
             KeyCode::Right | KeyCode::Char('l') => {
                 if let Some(provider) = self.focused_provider.clone().or_else(|| {
-                    Self::provider_for_profile(dashboard, self.profile)
+                    self.provider_of_choice(dashboard)
                         .filter(|provider| !self.expanded_providers.contains(provider))
                 }) {
                     if !self.expanded_providers.contains(&provider) {
@@ -605,10 +623,9 @@ impl WizardDraft for NewWizard {
                         let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
                         if let Some(pos) = items.iter().position(
                             |item| matches!(item, ProfilePickerItem::Provider(p) if p == &provider),
-                        ) && let Some(ProfilePickerItem::Profile { profile_index, .. }) =
-                            items.get(pos + 1)
+                        ) && let Some(ProfilePickerItem::Profile { id }) = items.get(pos + 1)
                         {
-                            self.set_profile(*profile_index);
+                            self.set_profile_choice(ProfileChoice::Profile(id.clone()));
                         }
                     }
                 }
@@ -616,7 +633,7 @@ impl WizardDraft for NewWizard {
             KeyCode::Left | KeyCode::Char('h') => {
                 if let Some(provider) = self.focused_provider.clone() {
                     self.expanded_providers.remove(&provider);
-                } else if let Some(provider) = Self::provider_for_profile(dashboard, self.profile) {
+                } else if let Some(provider) = self.provider_of_choice(dashboard) {
                     self.expanded_providers.remove(&provider);
                     self.focused_provider = Some(provider);
                 }
@@ -652,20 +669,18 @@ impl WizardDraft for NewWizard {
         {
             return pos;
         }
-        let has_auto = dashboard.new_wizard_has_auto_primary();
-        if has_auto && self.profile == 0 {
-            if let Some(pos) = items
+        let chosen = match &self.profile {
+            ProfileChoice::AutoPrimary => items
                 .iter()
-                .position(|item| matches!(item, ProfilePickerItem::Auto))
-            {
-                return pos;
-            }
-        } else if let Some(pos) = items.iter().position(|item| {
-            matches!(item, ProfilePickerItem::Profile { profile_index, .. } if *profile_index == self.profile)
-        }) {
+                .position(|item| matches!(item, ProfilePickerItem::Auto)),
+            ProfileChoice::Profile(id) => items.iter().position(
+                |item| matches!(item, ProfilePickerItem::Profile { id: row } if row == id),
+            ),
+        };
+        if let Some(pos) = chosen {
             return pos;
         }
-        if let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
+        if let Some(provider) = self.provider_of_choice(dashboard)
             && let Some(pos) = items
                 .iter()
                 .position(|item| matches!(item, ProfilePickerItem::Provider(p) if p == &provider))
@@ -694,11 +709,11 @@ impl WizardDraft for NewWizard {
         match items.get(row) {
             Some(ProfilePickerItem::Auto) => {
                 self.focused_provider = None;
-                self.profile = 0;
+                self.profile = ProfileChoice::AutoPrimary;
             }
-            Some(ProfilePickerItem::Profile { profile_index, .. }) => {
+            Some(ProfilePickerItem::Profile { id }) => {
                 self.focused_provider = None;
-                self.profile = *profile_index;
+                self.profile = ProfileChoice::Profile(id.clone());
             }
             Some(ProfilePickerItem::Provider(provider)) => {
                 self.focused_provider = Some(provider.clone());
@@ -733,7 +748,7 @@ impl WizardDraft for NewWizard {
     /// is a controller path only when it is a path at all.
     fn focused_extra_path_input(
         &mut self,
-        dashboard: &DashboardState,
+        _dashboard: &DashboardState,
     ) -> Option<(
         &mut PathInput,
         mj_core::path_completion::CompletionHost,
@@ -743,7 +758,7 @@ impl WizardDraft for NewWizard {
         let focused = self.form.borrow().focused()?;
         match focused {
             WizardControl::ProjectDirectory => {
-                let host = CompletionHost::Target(nth_key(&dashboard.config.targets, self.target));
+                let host = CompletionHost::Target(self.target.clone());
                 Some((
                     &mut self.project_directory,
                     host,
@@ -830,24 +845,29 @@ impl WizardDraft for NewWizard {
         dashboard: &DashboardState,
         form: &mut Dialog<WizardControl>,
     ) -> bool {
-        let target = &dashboard.config.targets[&nth_key(&dashboard.config.targets, self.target)];
         // Isolated targets have no worktree choice, so the control only
         // exists for a bare project directory.
-        if is_bare_project_target(target) {
+        if dashboard
+            .config
+            .targets
+            .get(&self.target)
+            .is_some_and(is_bare_project_target)
+        {
             form.declare_with_enabled(
                 WizardControl::CreateManagedWorktree,
                 ControlKind::Checkbox,
-                self.selected_worktree_options(&dashboard.config)
+                self.selected_worktree_options()
                     .is_some_and(|options| options.available),
             );
         }
         declare_sandbox_offer(dashboard, self, form);
         self.subagents.declare(form);
-        if offers_attached_directories(target) {
+        let target = dashboard.config.targets.get(&self.target);
+        if target.is_some_and(offers_attached_directories) {
             declare_review_attachments(form, &self.mounts);
         }
-        let ready = !is_bare_project_target(target)
-            || self.selected_worktree_options(&dashboard.config).is_some()
+        let ready = !target.is_some_and(is_bare_project_target)
+            || self.selected_worktree_options().is_some()
             || self.remote_preflight_error.is_some();
         ready && !self.remote_preflight_in_flight && self.subagents.error().is_none()
     }
@@ -862,19 +882,19 @@ impl WizardDraft for ResumeWizard {
         self.step = step;
     }
 
-    fn profile(&self) -> usize {
+    fn profile(&self, _dashboard: &DashboardState) -> usize {
         self.profile
     }
 
-    fn set_profile(&mut self, index: usize) {
+    fn set_profile(&mut self, _dashboard: &DashboardState, index: usize) {
         self.profile = index;
     }
 
-    fn target(&self) -> usize {
+    fn target(&self, _dashboard: &DashboardState) -> usize {
         self.target
     }
 
-    fn set_target(&mut self, index: usize) {
+    fn set_target(&mut self, _dashboard: &DashboardState, index: usize) {
         self.target = index;
     }
 

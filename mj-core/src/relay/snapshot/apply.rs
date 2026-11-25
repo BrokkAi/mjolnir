@@ -507,6 +507,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.continuation.quota_suppressed = true;
                 snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
             }
+            // Read this before the id is overwritten. A same-id reopen with no
+            // version-1 evidence still uses the legacy sticky flag.
+            let same_id = snapshot.native_session_id.as_deref() == Some(native_session_id.as_str());
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
             snapshot.restored_native_session_unused = false;
@@ -516,12 +519,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .replaced_unused_native_session_id
                 .clone_from(replaced_unused_native_session_id);
             // A resumed thread was not created here, so this journal cannot
-            // show everything the thread contains. Once true this never
-            // clears: replacing such a thread would discard native history.
-            if *resumed {
-                snapshot.native_session_used = true;
-            }
+            // show everything the thread contains. Replacing it would discard
+            // native history. `native_session_used` resets on ContextCleared
+            // and on a non-resumed open of a new native session id.
             let usage = if *resumed {
+                snapshot.native_session_used = true;
                 NativeSessionUse::Used
             } else if let Some(evidence) =
                 snapshot.native_use_evidence.as_ref().filter(|evidence| {
@@ -529,9 +531,14 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 })
             {
                 evidence.usage
-            } else if snapshot.native_session_used {
+            } else if same_id && snapshot.native_session_used {
+                // Legacy journals proved this same id was used before evidence
+                // existed. Keep that protection.
                 NativeSessionUse::Unknown
             } else {
+                // session/new created an empty identity (cross-harness Move,
+                // or the native_continuity_lost replacement).
+                snapshot.native_session_used = false;
                 NativeSessionUse::Unused
             };
             snapshot.record_native_use(usage);
