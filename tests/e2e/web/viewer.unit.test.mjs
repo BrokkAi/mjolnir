@@ -1716,6 +1716,7 @@ test('suspend safe fix refreshes preflight and ask sends the cleanup prompt', as
   assert.ok(history);
   history.onclick();
   assert.ok(nodes.some(n => n.textContent.includes('Discard workspace Git changes')));
+  assert.ok(nodes.some(n => n.textContent === 'Removing the clone removes its shared .git directory, invalidating linked worktrees outside the clone (including locked ones) and discarding their unpushed commits and staged changes.'));
   nodes.filter(n => n.textContent === 'Back').at(-1).onclick();
   nodes.filter(n => n.textContent === 'Suspend (history only)…').at(-1).onclick();
   nodes.filter(n => n.textContent === 'Suspend with history only').at(-1).onclick();

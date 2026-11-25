@@ -3140,6 +3140,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn suspend_fix_blockers_conflicts_with_dry_run() {
+        let error =
+            Cli::try_parse_from(["mj", "suspend", "--fix-blockers", "--dry-run"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
     /// F-16: `--session`, `--json`, and other flags had no description in
     /// `--help`. Every visible argument of every command now says what it is.
     // Hard-won: 820ba5c7eb: Finding F-16 found dozens of visible flags without help text; the recursive command-tree check rejects every undescribed argument.

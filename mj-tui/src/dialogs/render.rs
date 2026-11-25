@@ -1612,6 +1612,7 @@ pub(crate) fn confirmation_body(
                     "Discard workspace Git changes and save session history only?",
                 ));
                 lines.push(Line::raw("Resuming will start from a fresh checkout with your conversation history intact."));
+                lines.push(Line::raw("Removing the clone removes its shared .git directory, invalidating linked worktrees outside the clone (including locked ones) and discarding their unpushed commits and staged changes."));
             }
             if let Some(preflight) = preflight {
                 if preflight.has_blockers() && !confirming_history_only {

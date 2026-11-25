@@ -179,6 +179,36 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰───────────                                                                            ───────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
+=== history-only external worktree warning (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│hel ───────  │Session: session-1                                                    │  on.        │
+│› · ACP pre  │Discard workspace Git changes and save session history only?          │             │
+│  Idle  pod  │Resuming will start from a fresh checkout with your conversation      │             │
+│  │ No mess  │history intact.                                                       │             │
+│  │          │Removing the clone removes its shared .git directory, invalidating    │             │
+│             │linked worktrees outside the clone (including locked ones) and        │  ───────────╯
+│             │discarding their unpushed commits and staged changes.                 │  ───────────╮
+│             │                                                                      │             │
+│             │b Back  ·  s Suspend with history only                                │  o open.    │
+╰───────────  │                                                                      │  ───────────╯
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │                                                                      │             │
+│OPENAI       │  Back     Suspend with history only                                  │             │
+│ + 2 refres  ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
 === suspend dialog with backend-only warnings (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │

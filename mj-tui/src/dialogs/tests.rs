@@ -962,6 +962,27 @@ fn golden_dashboard_dialogs() {
             dashboard.handle_key(key(KeyCode::Char('v')));
             let lines = drawn(&mut dashboard, 100, 28);
             append_dialog_render(&mut output, "suspend blockers expanded", 100, 28, &lines);
+            let Mode::Confirm(dialog) = &dashboard.mode else {
+                panic!("confirmation")
+            };
+            let confirmation = dialog.confirmation.clone();
+            let history = confirmation_buttons(&confirmation)
+                .iter()
+                .position(|label| label == "Suspend (history only)…")
+                .unwrap();
+            dashboard.activate_confirmation_button(confirmation, history);
+            append_dialog_render(
+                &mut output,
+                "history-only external worktree warning",
+                100,
+                28,
+                &drawn(&mut dashboard, 100, 28),
+            );
+            let Mode::Confirm(dialog) = &dashboard.mode else {
+                panic!("confirmation")
+            };
+            let confirmation = dialog.confirmation.clone();
+            dashboard.activate_confirmation_button(confirmation, 0);
             let prompt = dashboard.handle_key(key(KeyCode::Char('a')));
             assert!(
                 matches!(prompt, DashboardAction::PromptSession { ref text, .. } if text.contains("linked/file-7.txt") && text.contains("Clear index flags"))

@@ -7009,7 +7009,8 @@ function confirmSessionSuspension(session, onNotice = () => {}) {
           history.onclick = () => {
             body.replaceChildren(
               el('p', 'danger', 'Discard workspace Git changes and save session history only?'),
-              el('p', '', 'Resuming will start from a fresh checkout with your conversation history intact.'));
+              el('p', '', 'Resuming will start from a fresh checkout with your conversation history intact.'),
+              el('p', 'danger', 'Removing the clone removes its shared .git directory, invalidating linked worktrees outside the clone (including locked ones) and discarding their unpushed commits and staged changes.'));
             if (preflight.interrupting) body.append(el('p', '', 'The current turn will be interrupted.'));
             const unfinished = preflight.children_not_handed_back?.length || 0;
             if (unfinished) body.append(el('p', '', `${unfinished} sub-agents have not handed back; suspending stops them.`));

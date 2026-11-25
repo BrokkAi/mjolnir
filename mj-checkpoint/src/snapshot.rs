@@ -3065,6 +3065,27 @@ pub struct SafeBlockerResolution {
     pub moved_worktrees: Vec<MovedWorktree>,
     pub skipped_worktrees: Vec<String>,
 }
+fn sparse_checkout_enabled(runner: &dyn GitCommandRunner, index: &Path) -> Result<bool> {
+    let output = runner.run(
+        index,
+        &GitCommand {
+            arguments: ["config", "--bool", "--get", "core.sparseCheckout"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            stdin: vec![],
+            env: vec![],
+        },
+    )?;
+    match output.status {
+        0 => Ok(String::from_utf8_lossy(&output.stdout).trim() == "true"),
+        1 => Ok(false),
+        _ => anyhow::bail!(
+            "{}",
+            git_failure("read sparse checkout configuration", &output)
+        ),
+    }
+}
 pub fn resolve_safe_suspend_blockers(
     runner: &dyn GitCommandRunner,
     repositories: &[RepositoryInput],
@@ -3095,10 +3116,21 @@ pub fn resolve_safe_suspend_blockers(
                     .map(|module| checkout.join(&module.path)),
             );
             for index in indexes {
-                let paths = crate::archive::git::hidden_tracked_paths(runner, &index)?;
+                if sparse_checkout_enabled(runner, &index)? {
+                    continue;
+                }
+                let paths: Vec<_> = crate::archive::git::hidden_tracked_paths(runner, &index)?
+                    .into_iter()
+                    .filter(|path| fs::symlink_metadata(index.join(path)).is_ok())
+                    .collect();
                 // NUL stdin avoids command-line size limits and preserves arbitrary Git paths.
                 let mut stdin = Vec::new();
                 for path in &paths {
+                    #[cfg(unix)]
+                    stdin.extend_from_slice(std::os::unix::ffi::OsStrExt::as_bytes(
+                        path.as_os_str(),
+                    ));
+                    #[cfg(not(unix))]
                     stdin.extend_from_slice(crate::archive::slash_path(path)?.as_bytes());
                     stdin.push(0);
                 }
@@ -4661,6 +4693,97 @@ mod tests {
             worktree_git_invocation(Path::new("/bare.git")),
             "git --git-dir '/bare.git'"
         );
+    }
+
+    #[test]
+    fn safe_suspend_remediation_preserves_sparse_and_missing_paths() {
+        for sparse in [true, false] {
+            let repo = Repo::new();
+            fs::write(repo.checkout.join("present"), "content").unwrap();
+            git(&repo.checkout, &["add", "present"]);
+            git(&repo.checkout, &["commit", "-m", "present"]);
+            git(
+                &repo.checkout,
+                &[
+                    "config",
+                    "core.sparseCheckout",
+                    if sparse { "true" } else { "false" },
+                ],
+            );
+            git(
+                &repo.checkout,
+                &["update-index", "--skip-worktree", "--", "file", "present"],
+            );
+            fs::remove_file(repo.checkout.join("file")).unwrap();
+            let input = crate::checkpoint::managed_clone_snapshot_input(
+                "project",
+                &repo.checkout,
+                None,
+                PathBuf::new(),
+                None,
+            )
+            .unwrap();
+            let fixed = resolve_safe_suspend_blockers(&FileGit, &[input]).unwrap();
+            assert_eq!(fixed.cleared_hidden_paths.len(), usize::from(!sparse));
+            let flags = git(&repo.checkout, &["ls-files", "-v"]);
+            assert!(flags.contains("S file"), "{flags}");
+            if !sparse {
+                assert!(flags.contains("H present"), "{flags}");
+            }
+            assert!(git(&repo.checkout, &["status", "--porcelain"]).is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_suspend_remediation_preserves_non_utf8_path_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let repo = Repo::new();
+        let name = std::ffi::OsStr::from_bytes(b"non-utf8-\xff");
+        fs::write(repo.checkout.join(name), "content").unwrap();
+        let run = |args: Vec<OsString>| {
+            let output = FileGit
+                .run(
+                    &repo.checkout,
+                    &GitCommand {
+                        arguments: args,
+                        stdin: vec![],
+                        env: vec![],
+                    },
+                )
+                .unwrap();
+            assert_eq!(output.status, 0);
+        };
+        run(vec!["add".into(), name.into()]);
+        git(&repo.checkout, &["commit", "-m", "non utf8"]);
+        run(vec![
+            "update-index".into(),
+            "--skip-worktree".into(),
+            "--".into(),
+            name.into(),
+        ]);
+        run(vec![
+            "update-index".into(),
+            "--assume-unchanged".into(),
+            "--".into(),
+            name.into(),
+        ]);
+        let input = crate::checkpoint::managed_clone_snapshot_input(
+            "project",
+            &repo.checkout,
+            None,
+            PathBuf::new(),
+            None,
+        )
+        .unwrap();
+        let fixed = resolve_safe_suspend_blockers(&FileGit, &[input]).unwrap();
+        assert_eq!(fixed.cleared_hidden_paths.len(), 1);
+        assert!(
+            crate::archive::git::hidden_tracked_paths(&FileGit, &repo.checkout)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(git(&repo.checkout, &["status", "--porcelain"]).is_empty());
     }
 
     #[test]
