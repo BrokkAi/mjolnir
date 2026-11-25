@@ -55,18 +55,21 @@ fn history_since(
 }
 
 /// The probes that measure consumption over `since..=until`, oldest first: the
-/// nearest usable probe before `since`, every probe inside the span (failed
-/// ones included), and the nearest usable probe after `until`. A usable probe
-/// has no error and at least one window; a failed probe carries no reading, so
-/// it cannot stand for the state at the span's edge. Each edge is one
-/// `LIMIT 1` walk of `quota_history_profile_time`, so no lookback is assumed
-/// and no history outside the span is loaded. An edge with no usable probe is
-/// absent, and the caller treats the span as not bracketed there.
+/// nearest probe before `since` that `readable` accepts, every probe inside the
+/// span (readable or not), and the nearest accepted probe after `until`. The
+/// caller decides what a readable probe is (a failed probe or one without the
+/// reading it needs cannot stand for the state at the span's edge), so no
+/// reading semantics live here. Each edge walks the stored probes outward from
+/// the span in `quota_history_profile_time` order and stops at the first
+/// accepted one: no lookback is assumed and no history beyond that probe is
+/// decoded. An edge with no accepted probe is absent, and the caller treats
+/// the span as not bracketed there.
 pub fn load_quota_history_bracketing(
     identity: &str,
     profile_id: &str,
     since: u64,
     until: u64,
+    readable: impl Fn(&ProfileQuota) -> bool,
 ) -> Result<Vec<ProfileQuota>> {
     history_bracketing(
         &*open_reader(&database_path())?,
@@ -74,6 +77,7 @@ pub fn load_quota_history_bracketing(
         profile_id,
         since,
         until,
+        readable,
     )
 }
 
@@ -83,46 +87,44 @@ fn history_bracketing(
     profile_id: &str,
     since: u64,
     until: u64,
+    readable: impl Fn(&ProfileQuota) -> bool,
 ) -> Result<Vec<ProfileQuota>> {
-    const USABLE: &str = "json_extract(body, '$.error') IS NULL
-         AND json_array_length(body, '$.windows') > 0";
-    let query = |filter: &str, order: &str, limit: &str, bounds: &[u64]| -> Result<Vec<String>> {
-        let sql = format!(
-            "SELECT body FROM quota_history
-             WHERE profile_id = ?1 AND identity = ?2 AND {filter}
-             ORDER BY sampled_at_epoch_seconds {order}, id {order} {limit}"
-        );
-        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&profile_id, &identity];
-        values.extend(bounds.iter().map(|bound| bound as &dyn rusqlite::ToSql));
-        connection
-            .prepare(&sql)?
-            .query_map(values.as_slice(), |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(anyhow::Error::from)
+    let decode = |body: String| -> Result<ProfileQuota> {
+        serde_json::from_str(&body).context("decode stored quota probe")
     };
-    let before = query(
-        &format!("sampled_at_epoch_seconds < ?3 AND {USABLE}"),
-        "DESC",
-        "LIMIT 1",
-        &[since],
-    )?;
-    let within = query(
-        "sampled_at_epoch_seconds >= ?3 AND sampled_at_epoch_seconds <= ?4",
-        "ASC",
-        "",
-        &[since, until],
-    )?;
-    let after = query(
-        &format!("sampled_at_epoch_seconds > ?3 AND {USABLE}"),
-        "ASC",
-        "LIMIT 1",
-        &[until],
-    )?;
+    let edge = |comparison: &str, order: &str, bound: u64| -> Result<Option<ProfileQuota>> {
+        let mut statement = connection.prepare(&format!(
+            "SELECT body FROM quota_history
+             WHERE profile_id = ?1 AND identity = ?2 AND sampled_at_epoch_seconds {comparison} ?3
+             ORDER BY sampled_at_epoch_seconds {order}, id {order}"
+        ))?;
+        let mut rows = statement.query(params![profile_id, identity, bound])?;
+        while let Some(row) = rows.next()? {
+            let probe = decode(row.get(0)?)?;
+            if readable(&probe) {
+                return Ok(Some(probe));
+            }
+        }
+        Ok(None)
+    };
+    let before = edge("<", "DESC", since)?;
+    let within = connection
+        .prepare(
+            "SELECT body FROM quota_history
+             WHERE profile_id = ?1 AND identity = ?2
+               AND sampled_at_epoch_seconds >= ?3 AND sampled_at_epoch_seconds <= ?4
+             ORDER BY sampled_at_epoch_seconds ASC, id ASC",
+        )?
+        .query_map(params![profile_id, identity, since, until], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let after = edge(">", "ASC", until)?;
     before
-        .iter()
-        .chain(&within)
-        .chain(&after)
-        .map(|body| serde_json::from_str(body).context("decode stored quota probe"))
+        .into_iter()
+        .map(Ok)
+        .chain(within.into_iter().map(decode))
+        .chain(after.into_iter().map(Ok))
         .collect()
 }
 
@@ -304,76 +306,76 @@ mod tests {
     }
 
     #[test]
-    fn quota_history_bracketing_brackets_a_span_with_usable_probes_only() {
+    fn quota_history_bracketing_brackets_a_span_with_readable_probes_only() {
         let dir = tempfile::tempdir().unwrap();
         let mut connection = open(&dir.path().join("quota.sqlite3")).unwrap();
-        let probe = |at: u64, failed: bool| ProfileQuota {
+        let window = |label: &str, scope: Option<&str>| mj_client::quota::QuotaWindow {
+            label: label.into(),
+            remaining_percent: Some(50),
+            duration_seconds: None,
+            model_scope: scope.map(str::to_owned),
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: Some(1_000_000),
+        };
+        // `w` weekly, `h` a 5-hour window only, `s` a model-scoped weekly only,
+        // `f` a failed probe.
+        let probe = |at: u64, kind: char| ProfileQuota {
             paid_credits: None,
             monthly_price_usd: None,
             banked_resets: None,
             profile_id: "test".into(),
             harness: mj_core::config::HarnessKind::Claude,
-            windows: if failed {
-                Vec::new()
-            } else {
-                vec![mj_client::quota::QuotaWindow {
-                    label: "Weekly".into(),
-                    remaining_percent: Some(50),
-                    duration_seconds: None,
-                    model_scope: None,
-                    used: None,
-                    limit: None,
-                    resets: None,
-                    resets_at_epoch_seconds: Some(1_000_000),
-                }]
+            windows: match kind {
+                'w' => vec![window("5H", None), window("Weekly", None)],
+                'h' => vec![window("5H", None)],
+                's' => vec![window("Weekly", Some("fable"))],
+                _ => Vec::new(),
             },
             extra: None,
-            error: failed.then(|| "provider down".into()),
+            error: (kind == 'f').then(|| "provider down".into()),
             refreshed_at_epoch_seconds: at,
             rate_limited_until_epoch_seconds: None,
             next_check_at_epoch_seconds: None,
         };
-        // Failed probes sit right outside both edges; another login's probe
-        // sits closer to the span than any usable one of this login.
-        for (identity, at, failed) in [
-            ("a", 10, false),
-            ("a", 50, true),
-            ("a", 90, true),
-            ("a", 100, false),
-            ("a", 150, true),
-            ("a", 200, false),
-            ("a", 210, true),
-            ("a", 250, false),
-            ("a", 260, false),
-            ("b", 95, false),
-            ("b", 205, false),
+        // Short-only, scoped-only and failed probes sit between each edge and
+        // the nearest weekly reading; another login's probe sits closest.
+        for (identity, at, kind) in [
+            ("a", 10, 'w'),
+            ("a", 50, 'h'),
+            ("a", 90, 's'),
+            ("a", 95, 'f'),
+            ("a", 100, 'w'),
+            ("a", 150, 'f'),
+            ("a", 200, 'w'),
+            ("a", 210, 'h'),
+            ("a", 220, 's'),
+            ("a", 250, 'w'),
+            ("a", 260, 'w'),
+            ("b", 99, 'w'),
+            ("b", 205, 'w'),
         ] {
-            save_report(&mut connection, identity, &probe(at, failed)).unwrap();
+            save_report(&mut connection, identity, &probe(at, kind)).unwrap();
         }
-        let times = |history: Vec<ProfileQuota>| {
-            history
+        let weekly = |probe: &ProfileQuota| probe.windows.iter().any(|w| w.is_weekly_period());
+        let times = |since, until| {
+            history_bracketing(&connection, "a", "test", since, until, weekly)
+                .unwrap()
                 .iter()
                 .map(|probe| probe.refreshed_at_epoch_seconds)
                 .collect::<Vec<_>>()
         };
-        // Probes at the span's own edges are inside it; the failed ones inside
-        // stay for the caller to skip.
+        // Probes at the span's own edges are inside it, and in-range probes
+        // of every kind stay for the caller to skip.
+        assert_eq!(times(100, 200), [10, 100, 150, 200, 250]);
+        assert_eq!(times(101, 199), [100, 150, 200]);
+        // An edge with no readable probe beyond it is simply absent.
         assert_eq!(
-            times(history_bracketing(&connection, "a", "test", 100, 200).unwrap()),
-            [10, 100, 150, 200, 250]
+            times(5, 300),
+            [10, 50, 90, 95, 100, 150, 200, 210, 220, 250, 260]
         );
-        assert_eq!(
-            times(history_bracketing(&connection, "a", "test", 101, 199).unwrap()),
-            [100, 150, 200]
-        );
-        // An edge with no usable probe beyond it is simply absent.
-        assert_eq!(
-            times(history_bracketing(&connection, "a", "test", 5, 300).unwrap()),
-            [10, 50, 90, 100, 150, 200, 210, 250, 260]
-        );
-        assert_eq!(
-            times(history_bracketing(&connection, "a", "test", 300, 400).unwrap()),
-            [260]
-        );
+        assert_eq!(times(300, 400), [260]);
+        assert_eq!(times(60, 80), [10, 100]);
     }
 }

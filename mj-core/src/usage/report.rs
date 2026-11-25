@@ -189,10 +189,14 @@ impl Default for ProfileUsageEstimate {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileQuotaUsage {
     pub profile: String,
-    /// 10,000 is all of one weekly allowance. An approximate reading: a reset
-    /// or a gap in the history makes it a lower bound. None when the history
-    /// has no measurable weekly reading.
+    /// 10,000 is all of one weekly allowance. An estimate from the probes the
+    /// history holds. None when no part of the span could be measured.
     pub consumed_basis_points: Option<u64>,
+    /// The probes did not cover the whole span (no reading before the start or
+    /// after the end, a reset whose earlier use was lost, or an interval that
+    /// could not be read), so the figure covers only part of it.
+    #[serde(default)]
+    pub partial: bool,
     /// The profile's plan price, which weights profiles of one provider.
     pub monthly_price_usd: Option<u32>,
 }

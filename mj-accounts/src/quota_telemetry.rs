@@ -570,8 +570,8 @@ pub fn quota_usage_profile(
 
 /// Each profile's unscoped weekly quota consumed over `since_ms..until_ms`,
 /// read from `quota_history`. Blocking: one bracketing read per profile. A
-/// profile with no identity, no weekly reading or an unreadable history yields
-/// `None`, never zero (a failed read is logged).
+/// profile with no identity, no measurable weekly reading or an unreadable
+/// history yields `None`, never zero (a failed read is logged).
 pub fn weekly_quota_usage(
     profiles: Vec<QuotaUsageProfile>,
     since_ms: i64,
@@ -581,15 +581,16 @@ pub fn weekly_quota_usage(
     profiles
         .into_iter()
         .map(|profile| {
-            let consumed_basis_points = profile.cache_identity.as_deref().and_then(|identity| {
+            let consumption = profile.cache_identity.as_deref().and_then(|identity| {
                 let bounds = u64::try_from(since).ok().zip(u64::try_from(until).ok())?;
                 match crate::database::load_quota_history_bracketing(
                     identity,
                     &profile.profile_id,
                     bounds.0,
                     bounds.1,
+                    has_weekly_reading,
                 ) {
-                    Ok(history) => weekly_consumed_basis_points(&history, since, until),
+                    Ok(history) => weekly_consumption(&history, since, until),
                     Err(error) => {
                         tracing::warn!(
                             profile_id = %profile.profile_id,
@@ -602,55 +603,79 @@ pub fn weekly_quota_usage(
             });
             mj_core::usage::ProfileQuotaUsage {
                 profile: profile.profile_id,
-                consumed_basis_points,
+                consumed_basis_points: consumption.map(|consumption| consumption.basis_points),
+                partial: consumption.is_some_and(|consumption| consumption.partial),
                 monthly_price_usd: profile.monthly_price_usd,
             }
         })
         .collect()
 }
 
-/// Weekly quota consumed over `since..=until` (epoch seconds), in basis points
-/// of one weekly allowance (10,000 is all of it), estimated from the probes
-/// around and inside the span; a partly covered span measures its covered part.
-/// - Consecutive usable probes that both read the unscoped weekly window give
-///   the used-percent growth between them; an interval crossing a span edge
-///   counts in proportion to the part inside, as if use were even, which can
-///   over- or under-count that edge.
+/// The unscoped weekly reading of a successful probe: the one interpretation
+/// both the history reader's edge search and the measurement use.
+fn weekly_reading(probe: &ProfileQuota) -> Option<SamplePoint> {
+    if probe.error.is_some() {
+        return None;
+    }
+    let window = probe
+        .windows
+        .iter()
+        .find(|window| window.is_weekly_period())?;
+    Some(SamplePoint {
+        ts: i64::try_from(probe.refreshed_at_epoch_seconds).unwrap_or(i64::MAX),
+        used_pct: window_used_pct(window)?,
+        resets_at: window.resets_at_epoch_seconds,
+    })
+}
+
+/// Whether the probe carries a weekly reading the measurement can use.
+pub fn has_weekly_reading(probe: &ProfileQuota) -> bool {
+    weekly_reading(probe).is_some()
+}
+
+/// Weekly quota consumed over a span and whether the probes covered all of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeeklyConsumption {
+    /// 10,000 is all of one weekly allowance.
+    pub basis_points: u64,
+    /// Some of the span could not be measured: it lies before the first
+    /// reading or after the last, or it is an interval that could not be read.
+    pub partial: bool,
+}
+
+/// Weekly quota consumed over `since..=until` (epoch seconds), estimated from
+/// the probes around and inside the span.
+/// - Consecutive probes that both read the unscoped weekly window give the
+///   used-percent growth between them; an interval crossing a span edge counts
+///   in proportion to the part inside, as if use were even, which can over- or
+///   under-count that edge.
 /// - When the weekly deadline fell inside the interval (`prev < old deadline
 ///   <= cur`) and the next deadline is later, only the later reading counts,
 ///   spread from the old deadline to that probe. What was used before the
-///   reset is lost, so a reset makes the result a lower bound.
+///   reset is lost, so that part of the span is not covered.
 /// - Intervals that cannot be read as use count for nothing and are not
-///   measured: a deadline that moved without elapsing (provider jitter), a
+///   covered: a deadline that moved without elapsing (provider jitter), a
 ///   deadline already past at the previous probe, and a fall in use with no
 ///   reset.
-/// - Nothing is extrapolated past the last probe or before the first, so a gap
-///   or a span ending now under-counts.
+/// - Nothing is extrapolated before the first reading or past the last, so a
+///   span ending now is partial.
 ///
-/// `None` when no interval overlapping the span could be measured, which is
-/// not the same as measuring zero use.
-pub fn weekly_consumed_basis_points(
+/// `partial` is true unless every second of the span lies in a measured
+/// interval. `None` when no interval overlapping the span could be measured,
+/// which is not the same as measuring zero use.
+pub fn weekly_consumption(
     history: &[ProfileQuota],
     since: i64,
     until: i64,
-) -> Option<u64> {
+) -> Option<WeeklyConsumption> {
     if until <= since {
         return None;
     }
-    let readings: Vec<SamplePoint> = clean_history(history)
-        .into_iter()
-        .filter_map(|row| {
-            let window = row.windows.iter().find(|window| window.is_weekly_period())?;
-            Some(SamplePoint {
-                ts: i64::try_from(row.refreshed_at_epoch_seconds).unwrap_or(i64::MAX),
-                used_pct: window_used_pct(window)?,
-                resets_at: window.resets_at_epoch_seconds,
-            })
-        })
-        .collect();
+    let mut readings: Vec<SamplePoint> = history.iter().filter_map(weekly_reading).collect();
+    readings.sort_by_key(|reading| reading.ts);
     // Seconds of `from..to` inside the span.
-    let inside = |from: i64, to: i64| (to.min(until) - from.max(since)).max(0) as f64;
-    let mut measured = false;
+    let inside = |from: i64, to: i64| (to.min(until) - from.max(since)).max(0);
+    let mut covered = 0i64;
     let mut consumed_pct = 0.0;
     for pair in readings.windows(2) {
         let (prev, cur) = (&pair[0], &pair[1]);
@@ -672,13 +697,14 @@ pub fn weekly_consumed_basis_points(
         if cur.ts <= from {
             continue;
         }
-        let covered = inside(from, cur.ts);
-        if covered > 0.0 {
-            measured = true;
-            consumed_pct += used * covered / (cur.ts - from) as f64;
-        }
+        let overlap = inside(from, cur.ts);
+        covered += overlap;
+        consumed_pct += used * overlap as f64 / (cur.ts - from) as f64;
     }
-    measured.then(|| (consumed_pct * 100.0).round() as u64)
+    (covered > 0).then(|| WeeklyConsumption {
+        basis_points: (consumed_pct * 100.0).round() as u64,
+        partial: covered < until - since,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1288,32 +1314,39 @@ mod tests {
             week(7200, 20, steady),
             week(10_800, 30, steady),
         ];
+        // (basis points, partial)
         let measure = |history: &[ProfileQuota], since: i64, until: i64| {
-            weekly_consumed_basis_points(history, T + since, T + until)
+            weekly_consumption(history, T + since, T + until)
+                .map(|consumption| (consumption.basis_points, consumption.partial))
         };
-        // Half of the first 10-point step and half of the last: 10%.
-        assert_eq!(measure(&history, 1800, 9000), Some(1000));
+        // Half of the first 10-point step and half of the last: 10%, with every
+        // second of the span inside a measured interval.
+        assert_eq!(measure(&history, 1800, 9000), Some((1000, false)));
         // A selected hour inside an idle interval measured no growth, not an
         // unknown.
-        assert_eq!(measure(&history, 3600, 7200), Some(0));
+        assert_eq!(measure(&history, 3600, 7200), Some((0, false)));
         // Spans no probe pair covers are unknown, whichever side they fall on.
         assert_eq!(measure(&history, -10_000, -5_000), None);
         assert_eq!(measure(&history, 20_000, 30_000), None);
+        // A span running past either end of the readings measures what they
+        // cover and says it is partial: here the first and the last interval.
+        assert_eq!(measure(&history, -1800, 3600), Some((1000, true)));
+        assert_eq!(measure(&history, 9000, 20_000), Some((500, true)));
         // A failed probe inside an interval carries no reading, so the
         // interval spans it.
         let mut failed = sample_report("p1", (T + 1800) as u64, None, None);
         failed.error = Some("provider down".into());
         failed.windows.clear();
         let bridged = vec![week(0, 10, steady), failed, week(3600, 20, steady)];
-        assert_eq!(measure(&bridged, 0, 3600), Some(1000));
+        assert_eq!(measure(&bridged, 0, 3600), Some((1000, false)));
 
         // The weekly window reset at T+3000: the 5-point reading at T+4000 was
         // used after it, and the 90 before it is not attributable to any span.
         let reset = Some(T + 3000);
         let after_reset = Some(T + 3000 + 604_800);
         let crossing = vec![week(0, 90, reset), week(4000, 5, after_reset)];
-        assert_eq!(measure(&crossing, 0, 4000), Some(500));
-        assert_eq!(measure(&crossing, 3500, 4000), Some(250));
+        assert_eq!(measure(&crossing, 0, 4000), Some((500, true)));
+        assert_eq!(measure(&crossing, 3500, 4000), Some((250, false)));
         assert_eq!(measure(&crossing, 0, 3000), None);
         // A deadline already past at the earlier probe leaves the interval
         // unattributable; counting the later reading would repeat old use.
@@ -1326,20 +1359,35 @@ mod tests {
         assert_eq!(measure(&jitter, 0, 3600), None);
         let top_up = vec![week(0, 20, steady), week(3600, 10, steady)];
         assert_eq!(measure(&top_up, 0, 3600), None);
+        // An unreadable interval beside a readable one leaves the span
+        // partial and keeps the readable part's use.
+        let mixed = vec![
+            week(0, 10, steady),
+            week(3600, 20, Some(T + 500_900)),
+            week(7200, 25, Some(T + 500_900)),
+        ];
+        assert_eq!(measure(&mixed, 0, 7200), Some((500, true)));
 
-        // Only the unscoped weekly allowance counts: a 5-hour window or a
-        // month window is another allowance.
+        // Only the unscoped weekly allowance counts: a 5-hour window, a
+        // model-scoped weekly window or a month window is another allowance,
+        // and a probe carrying only those is no reading at the span's edge.
         let five_hour = vec![
             sample_report("p1", T as u64, Some((90, steady)), None),
             sample_report("p1", (T + 3600) as u64, Some((80, steady)), None),
         ];
         assert_eq!(measure(&five_hour, 0, 3600), None);
+        assert!(!five_hour.iter().any(has_weekly_reading));
+        let mut scoped = week(0, 10, steady);
+        scoped.windows[0].model_scope = Some("fable".into());
+        assert!(!has_weekly_reading(&scoped));
+        assert_eq!(measure(&[scoped, week(3600, 20, steady)], 0, 3600), None);
         let mut monthly = vec![week(0, 10, steady), week(3600, 20, steady)];
         for probe in &mut monthly {
             probe.windows[0].label = "Month".into();
             probe.windows[0].duration_seconds = None;
         }
         assert_eq!(measure(&monthly, 0, 3600), None);
+        assert!(has_weekly_reading(&week(0, 10, steady)));
     }
 
     #[test]

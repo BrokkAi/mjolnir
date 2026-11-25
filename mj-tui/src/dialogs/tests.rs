@@ -1299,16 +1299,19 @@ fn golden_dashboard_dialogs() {
         ProfileQuotaUsage {
             profile: "claude".into(),
             consumed_basis_points: Some(1000),
+            partial: false,
             monthly_price_usd: Some(200),
         },
         ProfileQuotaUsage {
             profile: "claude-idle".into(),
             consumed_basis_points: Some(0),
+            partial: false,
             monthly_price_usd: Some(100),
         },
         ProfileQuotaUsage {
             profile: "codex".into(),
             consumed_basis_points: Some(2000),
+            partial: false,
             monthly_price_usd: Some(200),
         },
     ];
@@ -1329,6 +1332,8 @@ fn golden_dashboard_dialogs() {
     let mut known = report.clone();
     known.profile_usage[1].cost_usd_ticks = Ok(30_000_000_000);
     known.cost_usd_ticks = Ok(112_000_000_000);
+    // The idle member still makes the provider's quota coverage incomplete.
+    known.quota_usage[1].partial = true;
     usage.apply_session_usage_result(first, Ok(known));
     append_dialog_render(
         &mut output,
@@ -1349,6 +1354,7 @@ fn golden_dashboard_dialogs() {
     );
     let mut missing = report.clone();
     missing.quota_usage[1].consumed_basis_points = None;
+    missing.quota_usage[1].partial = true;
     usage.apply_session_usage_result(first, Ok(missing));
     append_dialog_render(
         &mut output,
@@ -1356,6 +1362,22 @@ fn golden_dashboard_dialogs() {
         70,
         17,
         &drawn(&mut usage, 70, 17),
+    );
+    let mut many_providers = report.clone();
+    many_providers
+        .profile_usage
+        .extend((0..12).map(|n| ProfileUsageEstimate {
+            profile: Some(format!("retired-account-with-long-profile-name-{n:02}")),
+            cost_usd_ticks: Ok(5_000_000_000),
+            ..Default::default()
+        }));
+    usage.apply_session_usage_result(first, Ok(many_providers));
+    append_dialog_render(
+        &mut output,
+        "Usage many providers preserves details and chart footer",
+        70,
+        30,
+        &drawn(&mut usage, 70, 30),
     );
     let mut retained = report.clone();
     retained.profile_usage.extend([
@@ -1504,10 +1526,10 @@ fn golden_dashboard_dialogs() {
     let (hour_request, query) = usage.session_usage_request().unwrap();
     assert_eq!(query.hour_start_ms, Some((490_000 + 2) * HOUR_MS));
     let mut hour_report = codex_report.clone();
-    hour_report
-        .quota_usage
-        .iter_mut()
-        .for_each(|q| q.consumed_basis_points = Some(125));
+    hour_report.quota_usage.iter_mut().for_each(|q| {
+        q.consumed_basis_points = Some(125);
+        q.partial = true;
+    });
     usage.apply_session_usage_result(hour_request, Ok(hour_report));
     append_dialog_render(
         &mut output,

@@ -248,6 +248,7 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
         quota_usage: vec![mj_core::usage::ProfileQuotaUsage {
             profile: "codex".into(),
             consumed_basis_points: Some(125),
+            partial: true,
             monthly_price_usd: Some(200),
         }],
         cost_usd_ticks: Ok(10_000_000_000),

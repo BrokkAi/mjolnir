@@ -734,7 +734,7 @@ Ent
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total $11.200+ · last 24 clock hours · estimated API USD                                                    │    │
-│    │Anthropic $8.200+ · ~6.7% · OpenAI $3.000 · ~20.0%                                                          │    │
+│    │Anthropic $8.200+ · ~6.7% (partial) · OpenAI $3.000 · ~20.0%                                                │    │
 │    │Weekly quota consumed in window · all account use                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
@@ -805,6 +805,38 @@ Ent
    ╰──────────────────────────────────────────────────────────────╯
 
 
+
+=== Usage many providers preserves details and chart footer (70x30) ===
+╭                                                                    ╮
+│                                                                    │
+╰  ╭ × Usage by session ──────────────────────────────────────────╮  ╯
+╭  │Profile All ▾                                                 │  ╮
+│  │                                                              │  │
+│  │☐ Include suspended sessions                                  │  │
+│  │                                                              │  │
+│  │Total ? · last 24 clock hours · estimated API USD             │  │
+╰  │Anthropic $8.200+ · ~6.7%                                     │  ╯
+╭  │retired-account-with-long-profile-name-00… $0.500 · quota n/a │  ╮
+│  │retired-account-with-long-profile-name-01… $0.500 · quota n/a │  │
+│  │retired-account-with-long-profile-name-02… $0.500 · quota n/a │  │
+╰  │retired-account-with-long-profile-name-03… $0.500 · quota n/a │  ╯
+╭  │retired-account-with-long-profile-name-04… $0.500 · quota n/a │  ╮
+│  │… 8 more provider rows (enlarge terminal)                     │  │
+│  │Weekly quota consumed in window · all account use             │  │
+╰  │$50                                       ░                   │  ╯
+╭  │                                          ░ ▄                 │  ╮
+│  │$25                 █ ▂                 ▅ ░ █                 │  │
+╰  │                  ▂ █ █ ▆             ▃ █ ░ █ █ ▁             │  ╯
+╭  │ $0     ▂ ▆ ▄     █ █ █ █ ▇ ▃ ░     ▅ █ █ ░ █ █ █ ▆           │  ╮
+│  │    16  18  20  22  00  02  04  06  08  10  12  14            │  │
+│  │                                                              │  │
+│  │Primary agents  $7.200+                                       │  │
+│  │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │  │
+╰  │Sub-agents included · profile filters turns · + partial · base│  ╯
+╭  │  Refresh     Close                                           │  ╮
+│  ╰──────────────────────────────────────────────────────────────╯  │
+╰                                                                    ╯
+E
 
 === Usage unresolved and retained provider labels (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -1072,7 +1104,7 @@ Ent
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · Mon Nov 24 18:00–19:00 · estimated API USD                                                        │    │
-│    │OpenAI ? · ~1.2%                                                                                            │    │
+│    │OpenAI ? · ~1.2% (partial)                                                                                  │    │
 │    │Weekly quota consumed in window · all account use                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
