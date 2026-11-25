@@ -135,6 +135,17 @@ historical frontier and retain the original per-configuration sample caps.
 [High](pareto-sev-high.csv) · [Medium](pareto-sev-medium.csv) ·
 [Low](pareto-sev-low.csv)
 
+### Single-reviewer performance versus cost
+
+![Single-reviewer yield versus cost, including historical Claude and partial DSF estimates](review-single-model-cost.png)
+
+Yield is normalized to Terra 6.1/high = 100 within each source study. Current
+measurements use filled markers; historical Claude and partial-cohort DSF
+estimates use hollow markers. The historical points are approximate context,
+with different corpora, grading and workload. They are not new Claude results
+on the current 70 diffs. Detailed inputs and numeric exports remain in the
+local campaign analysis bundle.
+
 ### Budget maps
 
 ![Best expected confirmed findings within a latency and cost budget, all confirmed findings](review-opus-high-budget-all.png)
