@@ -2690,7 +2690,9 @@ proxy)
     {binary} --exact {child} --nocapture | grep --line-buffered '^{{'
     ;;
 restore-checkpoint)
-    cp "$4" {restore_spec}
+    # The spec arrives on standard input (`--spec -`), never as an uploaded file.
+    [ "$4" = - ] || exit 64
+    cat >{restore_spec}
     cat >{seed} <<'SEED'
 {{"event_frontier":2,"event_frontier_digest":"{digest}","queued_prompts":[],"native_session_unused":true}}
 SEED
@@ -2816,6 +2818,7 @@ exit 0
     // its session storage by that text, trailing separator included.
     let restored_spec: mj_checkpoint::checkpoint::CheckpointRestoreSpec =
         serde_json::from_slice(&std::fs::read(&restore_spec).unwrap()).unwrap();
+    assert!(!worker_root.join("restore-spec.json").exists());
     let launch: mj_core::worker_launch::WorkerLaunchConfig =
         serde_json::from_slice(&std::fs::read(worker_root.join("launch.json")).unwrap()).unwrap();
     assert_eq!(launch.cwd.as_os_str(), checkout.as_os_str());

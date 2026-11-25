@@ -70,7 +70,7 @@ pub fn lookup_ec2_host_for_locator_in(
         }),
         TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshNitro { ssh, .. }
-        | TargetLocator::SshBare { ssh, .. } => identity_files(ssh)
+        | TargetLocator::SshBare { ssh, .. } => ssh_identity_files(ssh)
             .into_iter()
             .find_map(|identity| record_for_identity(&identity, records_root)),
         _ => None,
@@ -78,7 +78,7 @@ pub fn lookup_ec2_host_for_locator_in(
 }
 
 /// Identity files named by `-i <path>` or `-i<path>` in `ssh.ssh_args`.
-fn identity_files(ssh: &SshTarget) -> Vec<PathBuf> {
+pub fn ssh_identity_files(ssh: &SshTarget) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut args = ssh.ssh_args.iter();
     while let Some(arg) = args.next() {
