@@ -1798,21 +1798,41 @@ pub fn read_copied_login(kind: HarnessKind, home: &Path) -> Result<Option<Vec<u8
         return Ok(None);
     };
     let mut path = home.to_owned();
-    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+    let mut components = std::iter::once(None)
+        .chain(relative.components().map(Some))
+        .peekable();
+    while let Some(component) = components.next() {
         if let Some(component) = component {
             path.push(component);
         }
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(None),
+            Ok(metadata) if components.peek().is_some() && !metadata.is_dir() => return Ok(None),
+            Ok(metadata) if components.peek().is_none() && !metadata.is_file() => return Ok(None),
             Ok(_) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(error.into()),
         }
     }
-    if !std::fs::symlink_metadata(&path)?.is_file() {
-        return Ok(None);
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
     }
-    Ok(Some(std::fs::read(path)?))
 }
 
 /// A retired source must still hold a refresh grant when its harness strips

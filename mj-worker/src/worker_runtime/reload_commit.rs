@@ -131,16 +131,13 @@ pub fn commit_pending_reload(root: &Path, pending: &PendingInPlaceReload) -> Res
         sync_tree(&root.join(name))?;
     }
     mj_core::config::sync_directory(root)?;
-    atomic_private_write_nosync_dir(
+    // The receipt can be refreshed until the WAL freezes this retirement.
+    // Replay only consumes that receipt, never the partially overlaid home.
+    capture_retired_login(root, pending)?;
+    atomic_private_write(
         &root.join(PENDING_RELOAD_FILE),
         &serde_json::to_vec(pending)?,
-    )?;
-    // Commit before capture: after any later failure, startup must roll forward
-    // before a source writer can run again. A pre-commit preparation failure
-    // must not leave a write-once receipt that a retry could reuse after rotation.
-    mj_core::config::sync_directory(root)?;
-    preserve_retired_login(root, pending)?;
-    Ok(())
+    )
 }
 
 pub fn sync_pending_reload_dir(root: &Path) -> Result<()> {
@@ -212,7 +209,7 @@ pub fn apply_committed_reload(
         &pending.operation_id,
         &pending.expected_store_id,
     )?;
-    let retired = preserve_retired_login(root, pending)?;
+    let retired = read_retired_login_record(root, pending)?;
     let candidate = root.join(RELOAD_CANDIDATES_DIR).join(&pending.candidate_id);
     let home = Path::new(&manifest.target_profile_home);
     let home = if home.is_absolute() {
@@ -292,7 +289,9 @@ pub fn apply_committed_reload(
             anyhow::bail!("shared reload login requires Unix symlinks");
         }
     }
-    reconcile_retired_login(&candidate, home, &retired, &manifest)?;
+    if let Some(retired) = &retired {
+        reconcile_retired_login(&candidate, home, retired, &manifest)?;
+    }
     for name in ["ownership.json", "launch.json"] {
         atomic_private_write(&root.join(name), &std::fs::read(candidate.join(name))?)?;
     }
@@ -316,10 +315,6 @@ pub fn apply_committed_reload(
     std::fs::remove_file(root.join(PENDING_RELOAD_FILE))?;
     mj_core::config::sync_directory(root)?;
     std::fs::remove_dir_all(candidate)?;
-    if retired.login.is_none() {
-        std::fs::remove_file(retired_path(root, &pending.operation_id)?)?;
-        mj_core::config::sync_directory(&root.join(RETIRED_LOGINS))?;
-    }
     Ok(manifest)
 }
 
@@ -356,7 +351,7 @@ const RETIRED_LOGINS: &str = "retired-logins";
 struct RetiredLoginRecord {
     operation_id: String,
     store_id: String,
-    // Persist an empty receipt too: replay must never capture destination bytes.
+    // Tolerate empty receipts written before capture moved exclusively pre-WAL.
     login: Option<mj_core::credentials::RetiredLoginSnapshot>,
 }
 
@@ -367,13 +362,11 @@ fn retired_path(root: &Path, id: &str) -> Result<std::path::PathBuf> {
     Ok(root.join(relative))
 }
 
-fn preserve_retired_login(
+fn read_retired_login_record(
     root: &Path,
     pending: &PendingInPlaceReload,
-) -> Result<RetiredLoginRecord> {
-    use mj_core::worker_launch::{WorkerLaunchConfig, WorkerOwnership};
-    let path = retired_path(root, &pending.operation_id)?;
-    match std::fs::read(&path) {
+) -> Result<Option<RetiredLoginRecord>> {
+    match std::fs::read(retired_path(root, &pending.operation_id)?) {
         Ok(bytes) => {
             let record: RetiredLoginRecord = serde_json::from_slice(&bytes)?;
             ensure!(
@@ -381,11 +374,16 @@ fn preserve_retired_login(
                     && record.store_id == pending.expected_store_id,
                 "retired login receipt identity mismatch"
             );
-            return Ok(record);
+            Ok(Some(record))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => return Err(error.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
+}
+
+fn capture_retired_login(root: &Path, pending: &PendingInPlaceReload) -> Result<()> {
+    use mj_core::worker_launch::{WorkerLaunchConfig, WorkerOwnership};
+    let path = retired_path(root, &pending.operation_id)?;
     let login = match std::fs::read(root.join("ownership.json")) {
         Ok(bytes) => {
             let ownership: WorkerOwnership = serde_json::from_slice(&bytes)?;
@@ -422,15 +420,23 @@ fn preserve_retired_login(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let record = RetiredLoginRecord {
-        operation_id: pending.operation_id.clone(),
-        store_id: pending.expected_store_id.clone(),
-        login,
-    };
-    directory(&root.join(RETIRED_LOGINS))?;
-    atomic_private_write(&path, &serde_json::to_vec(&record)?)?;
-    mj_core::config::sync_directory(root)?;
-    Ok(record)
+    if let Some(login) = login {
+        let record = RetiredLoginRecord {
+            operation_id: pending.operation_id.clone(),
+            store_id: pending.expected_store_id.clone(),
+            login: Some(login),
+        };
+        directory(&root.join(RETIRED_LOGINS))?;
+        atomic_private_write(&path, &serde_json::to_vec(&record)?)?;
+        mj_core::config::sync_directory(root)?;
+    } else {
+        match std::fs::remove_file(path) {
+            Ok(()) => mj_core::config::sync_directory(&root.join(RETIRED_LOGINS))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Connection-only reads; a WAL in flight cannot be acknowledged before replay.
@@ -552,19 +558,21 @@ fn reconcile_retired_login(
             Err(error) => return Err(error.into()),
         }
     }
+    let copy = mj_core::credentials::credential_copy_for_harness(login.harness, &login.bytes);
     let replace = if absent {
         true
     } else {
         let Some(bytes) = mj_core::credentials::read_copied_login(login.harness, home)? else {
             return Ok(());
         };
-        matches!(
-            mj_core::credentials::reconcile(
-                &CredentialSnapshot::of(login.harness, &bytes),
-                &CredentialSnapshot::of(login.harness, &login.bytes)
-            ),
-            SyncAction::Pull
-        )
+        copy.as_ref() != bytes
+            && !matches!(
+                mj_core::credentials::reconcile(
+                    &CredentialSnapshot::of(login.harness, &bytes),
+                    &CredentialSnapshot::of(login.harness, &login.bytes)
+                ),
+                SyncAction::Push
+            )
     };
     if replace {
         let path = home.join(&login.login_relative_path);
@@ -579,7 +587,6 @@ fn reconcile_retired_login(
             directory(&parent)?;
         }
         mj_core::confined_path::reject_symlinks(home, &login.login_relative_path, true)?;
-        let copy = mj_core::credentials::credential_copy_for_harness(login.harness, &login.bytes);
         atomic_private_write(&path, &copy)?;
     }
     Ok(())
@@ -676,16 +683,7 @@ mod tests {
                 .unwrap();
                 // The source spends/rotates its grant after candidate preparation.
                 std::fs::write(&live, bytes(true)).unwrap();
-                if cut == 0 {
-                    // Shipped pre-93 WALs have no retirement receipt yet.
-                    atomic_private_write(
-                        &root.join(PENDING_RELOAD_FILE),
-                        &serde_json::to_vec(&pending).unwrap(),
-                    )
-                    .unwrap();
-                } else {
-                    commit_pending_reload(root, &pending).unwrap();
-                }
+                commit_pending_reload(root, &pending).unwrap();
                 assert!(read_retired_logins(root).unwrap().is_empty());
                 assert!(ack_retired_login(root, "move").is_err());
                 if cut >= 1 {
@@ -789,7 +787,7 @@ mod tests {
         let refreshed = br#"{"last_refresh":"2026-11-25T00:00:00Z"}"#;
         std::fs::write(home.join("auth.json"), refreshed).unwrap();
         commit_pending_reload(root, &pending).unwrap();
-        let record = preserve_retired_login(root, &pending).unwrap();
+        let record = read_retired_login_record(root, &pending).unwrap().unwrap();
         assert_eq!(record.login.unwrap().bytes, refreshed);
     }
 
@@ -851,6 +849,110 @@ mod tests {
                 );
             } else {
                 assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), stale);
+            }
+        }
+    }
+
+    #[test]
+    fn reload_commit_retired_rotations_win_ties_but_a_strictly_newer_candidate_wins() {
+        let equal_retired =
+            br#"{"last_refresh":"2026-11-25T00:00:00Z","tokens":{"refresh_token":"retired"}}"#
+                .as_slice();
+        let equal_candidate =
+            br#"{"last_refresh":"2026-11-25T00:00:00Z","tokens":{"refresh_token":"candidate"}}"#
+                .as_slice();
+        let older =
+            br#"{"last_refresh":"2026-11-24T00:00:00Z","tokens":{"refresh_token":"retired"}}"#
+                .as_slice();
+        let unknown_retired = br#"{"tokens":{"refresh_token":"retired"}}"#.as_slice();
+        let unknown_candidate = br#"{"tokens":{"refresh_token":"candidate"}}"#.as_slice();
+        for (retired, candidate, expected) in [
+            (equal_retired, equal_candidate, equal_retired),
+            (unknown_retired, unknown_candidate, unknown_retired),
+            (older, equal_candidate, equal_candidate),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let pending = copied_fixture(
+                root.path(),
+                mj_core::config::HarnessKind::Codex,
+                retired,
+                Some(candidate),
+            );
+            commit_pending_reload(root.path(), &pending).unwrap();
+            apply_committed_reload(root.path(), &pending).unwrap();
+            assert_eq!(
+                std::fs::read(root.path().join("home/auth.json")).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn reload_commit_legacy_wal_never_captures_a_partially_promoted_destination_as_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source_a = br#"{"last_refresh":"2026-11-24T00:00:00Z","tokens":{"account_id":"A"}}"#;
+        let destination_b =
+            br#"{"last_refresh":"2026-11-25T00:00:00Z","tokens":{"account_id":"B"}}"#;
+        let pending = copied_fixture(
+            root.path(),
+            mj_core::config::HarnessKind::Codex,
+            source_a,
+            Some(destination_b),
+        );
+        let ownership_path = root
+            .path()
+            .join("reload-candidates/candidate/ownership.json");
+        let mut destination: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&ownership_path).unwrap()).unwrap();
+        destination["profile_id"] = "destination-B".into();
+        std::fs::write(ownership_path, serde_json::to_vec(&destination).unwrap()).unwrap();
+        // Old workers could clear/overlay the home before publishing ownership.
+        std::fs::write(root.path().join("home/auth.json"), destination_b).unwrap();
+        atomic_private_write(
+            &root.path().join(PENDING_RELOAD_FILE),
+            &serde_json::to_vec(&pending).unwrap(),
+        )
+        .unwrap();
+        assert!(!root.path().join(RETIRED_LOGINS).exists());
+        roll_forward_pending_reload_if_any(root.path()).unwrap();
+        assert!(read_retired_logins(root.path()).unwrap().is_empty());
+        assert!(!root.path().join(RETIRED_LOGINS).exists());
+        assert_eq!(
+            std::fs::read(root.path().join("home/auth.json")).unwrap(),
+            destination_b
+        );
+    }
+
+    #[test]
+    fn reload_commit_pre_wal_recapture_replaces_or_removes_stale_receipts() {
+        for remove_login in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let old = br#"{"last_refresh":"2026-11-24T00:00:00Z"}"#;
+            let fresh = br#"{"last_refresh":"2026-11-25T00:00:00Z"}"#;
+            let pending = copied_fixture(
+                root.path(),
+                mj_core::config::HarnessKind::Codex,
+                old,
+                Some(fresh),
+            );
+            capture_retired_login(root.path(), &pending).unwrap();
+            assert!(
+                read_retired_login_record(root.path(), &pending)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(!root.path().join(PENDING_RELOAD_FILE).exists());
+            if remove_login {
+                std::fs::remove_file(root.path().join("home/auth.json")).unwrap();
+            } else {
+                std::fs::write(root.path().join("home/auth.json"), fresh).unwrap();
+            }
+            commit_pending_reload(root.path(), &pending).unwrap();
+            let record = read_retired_login_record(root.path(), &pending).unwrap();
+            if remove_login {
+                assert!(record.is_none());
+            } else {
+                assert_eq!(record.unwrap().login.unwrap().bytes, fresh);
             }
         }
     }
@@ -989,9 +1091,8 @@ mod tests {
                 } else {
                     commit_pending_reload(root.path(), &pending).unwrap();
                     assert!(
-                        preserve_retired_login(root.path(), &pending)
+                        read_retired_login_record(root.path(), &pending)
                             .unwrap()
-                            .login
                             .is_none()
                     );
                     apply_committed_reload(root.path(), &pending).unwrap();
