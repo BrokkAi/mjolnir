@@ -39,6 +39,11 @@ struct PreparedPair {
     cutoff_ms: i64,
 }
 
+struct ClassificationTarget {
+    id: String,
+    clear_ordinal: u64,
+}
+
 type ClassifyFuture<'a> = Pin<Box<dyn Future<Output = Result<GithubItemVerdict>> + Send + 'a>>;
 
 #[derive(Clone)]
@@ -557,6 +562,13 @@ async fn classify_recorded_items(
     })
     .await?;
     let now = mj_core::clock::epoch_millis();
+    let mut boundaries = BTreeMap::new();
+    for session in sessions.iter().filter(|session| !session.no_github_events) {
+        let id = session.id.clone();
+        let boundary =
+            blocking_db(move || database::load_github_classification_boundary(&id)).await?;
+        boundaries.insert(session.id.clone(), boundary);
+    }
     let mut pending = Vec::new();
     for item in items {
         if stop.is_cancelled() {
@@ -578,6 +590,9 @@ async fn classify_recorded_items(
                 || timestamp_precedes(&item.created_at, &session.created_at)
                 || classified.contains(&session.id)
             {
+                continue;
+            }
+            if !boundaries[&session.id].accepts_created_at(&item.created_at)? {
                 continue;
             }
             let failure = failures.get(&(item.number, session.id.clone()));
@@ -619,6 +634,7 @@ async fn classify_recorded_items(
             return Ok(());
         }
         api.control.check_enabled()?;
+        let boundary = boundaries[&session_id];
         // One pass over the session's stored transcript feeds every item of
         // the session; no transcript text is held beyond a row at a time.
         let digest = session_digest_for_evidence(session_id.clone())
@@ -653,7 +669,16 @@ async fn classify_recorded_items(
                 Ok(None) => Some(Ok(None)),
                 Err(error) => Some(Err(error)),
             };
-            slots.push((index, item, session, attempts, evidence));
+            slots.push((
+                index,
+                item,
+                ClassificationTarget {
+                    id: session.id,
+                    clear_ordinal: boundary.clear_ordinal,
+                },
+                attempts,
+                evidence,
+            ));
         }
         // Dropping this future must also stop the blocking scan and release its snapshot.
         let scan_stop = stop.child_token();
@@ -818,7 +843,7 @@ async fn classify_for_session(
     owner: &str,
     repo: &str,
     item: database::GithubSeenItem,
-    session: SessionRecord,
+    session: ClassificationTarget,
     evidence: Option<GithubItemEvidence>,
     classifier: Arc<dyn GithubClassifier>,
     control: PollControl,
@@ -860,6 +885,7 @@ async fn classify_for_session(
         repo: repo.to_owned(),
         number: item.number,
         session_id: session.id,
+        clear_ordinal: session.clear_ordinal,
         kind: item.kind,
         title: item.title,
         url: item.url,
@@ -2107,6 +2133,7 @@ mod tests {
             repo: "repo".into(),
             number,
             session_id: "creator".into(),
+            clear_ordinal: 0,
             kind: "pull_request".into(),
             title: "synthetic PR".into(),
             url: "https://github.com/acme/repo/pull/1".into(),
@@ -3591,6 +3618,157 @@ mod tests {
         );
     }
 
+    struct ClearingClassifier {
+        clear_next: AtomicBool,
+        calls: AtomicUsize,
+    }
+
+    impl GithubClassifier for ClearingClassifier {
+        fn classify<'a>(&'a self, _: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.clear_next.swap(false, Ordering::SeqCst) {
+                    blocking_db(|| {
+                        use mj_core::relay::{
+                            RelayCommandKind, RelayCommandOutcome, RelayEvent, RelayObservation,
+                        };
+                        let current = database::load_materialized_session("cleared")?.unwrap();
+                        let mut event = RelayEvent {
+                            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+                            ordinal: current.applied_event_ordinal + 1,
+                            previous_digest: current.applied_event_digest.clone(),
+                            digest: String::new(),
+                            recorded_at_ms: mj_core::clock::epoch_millis(),
+                            command_id: Some("clear".into()),
+                            observation: RelayObservation::CommandCompleted {
+                                command_id: "clear".into(),
+                                command: Some(RelayCommandKind::ClearContext),
+                                barrier_command_id: None,
+                                outcome: RelayCommandOutcome::ContextCleared {
+                                    native_session_id: "fresh".into(),
+                                    memory: None,
+                                },
+                            },
+                        };
+                        event.digest = mj_core::relay::relay_event_digest(&event)?;
+                        let mutation =
+                            mj_transcript::projection::project_relay_event(&current, &event)?
+                                .mutation;
+                        database::apply_projection_page("cleared", move |page| {
+                            page.apply(
+                                event.ordinal,
+                                &event.previous_digest,
+                                &event.digest,
+                                &mutation,
+                            )
+                        })?;
+                        Ok(())
+                    })
+                    .await?;
+                }
+                Ok(GithubItemVerdict { interested: true })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_fences_classification_and_skips_old_pending_items_without_starving_new_ones() {
+        if !run_isolated_child(
+            "clear_fences_classification_and_skips_old_pending_items_without_starving_new_ones",
+        ) {
+            return;
+        }
+        let _writer = database::install_isolated_test_writer();
+        let now = Utc::now();
+        let at = |seconds| (now + chrono::Duration::seconds(seconds)).to_rfc3339();
+        let mut session = database::test_session("cleared", "project");
+        session.created_at = at(-120);
+        database::save_session(&session).unwrap();
+        let record_items = |numbers: std::ops::RangeInclusive<u64>, created: String| {
+            database::record_github_page(
+                "acme".into(),
+                "repo".into(),
+                numbers
+                    .map(|number| {
+                        parse_github_item(&github_item(
+                            number,
+                            number,
+                            "interesting item",
+                            created.clone(),
+                            true,
+                        ))
+                        .unwrap()
+                    })
+                    .collect(),
+                database::GithubFeedProgress::Main(created),
+            )
+            .unwrap();
+        };
+        record_items(1..=2, at(-60));
+        database::record_github_classification_failure(
+            "acme".into(),
+            "repo".into(),
+            2,
+            "cleared".into(),
+        )
+        .unwrap();
+        database::seed_github_retry_due("acme", "repo", 2, "cleared").unwrap();
+        let classifier = Arc::new(ClearingClassifier {
+            clear_next: AtomicBool::new(true),
+            calls: AtomicUsize::new(0),
+        });
+        let api = GithubApi::new("http://127.0.0.1:1", None).unwrap();
+        classify_recorded_items(
+            "acme",
+            "repo",
+            std::slice::from_ref(&session),
+            classifier.clone(),
+            &at(-120),
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(classifier.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            database::load_github_watches("acme", "repo")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(database::pending_mailbox_events(100).unwrap().is_empty());
+
+        // Generation fencing also rejects an old verdict for an item whose
+        // timestamp is later than the clear (clock skew cannot bypass it).
+        let mut stale = watch_classification(100, &at(60));
+        stale.session_id = "cleared".into();
+        assert!(!database::commit_github_item_classification(stale, None).unwrap());
+
+        // More old pairs than the per-poll batch must not crowd out new work.
+        let fresh = MAX_CLASSIFICATIONS_PER_POLL as u64 + 4;
+        record_items(3..=fresh - 1, at(-60));
+        record_items(fresh..=fresh, at(60));
+        classify_recorded_items(
+            "acme",
+            "repo",
+            &[session],
+            classifier.clone(),
+            &at(-120),
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(classifier.calls.load(Ordering::SeqCst), 3);
+        let watches = database::load_github_watches("acme", "repo").unwrap();
+        assert_eq!(
+            watches.iter().map(|watch| watch.number).collect::<Vec<_>>(),
+            [fresh as i64]
+        );
+        let mail = database::pending_mailbox_events(100).unwrap();
+        assert_eq!(mail.len(), 1);
+        assert!(mail[0].event_key.contains(&format!("#{fresh}:interest:")));
+    }
+
     // Hard-won: review 7fb8c222b: queued creator watches bypassed the enablement recheck.
     #[tokio::test]
     async fn prepared_creator_watch_rechecks_enablement_before_commit() {
@@ -3612,7 +3790,10 @@ mod tests {
             "acme",
             "repo",
             item,
-            session,
+            ClassificationTarget {
+                id: session.id,
+                clear_ordinal: 0,
+            },
             None,
             fake_classifier(),
             PollControl::new(|| false),

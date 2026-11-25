@@ -50,6 +50,57 @@ pub(super) fn clear_github_subscriptions_with(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GithubClassificationBoundary {
+    pub clear_ordinal: u64,
+    started_at_ms: Option<i64>,
+}
+
+impl GithubClassificationBoundary {
+    pub fn accepts_created_at(&self, created_at: &str) -> Result<bool> {
+        let Some(started_at_ms) = self.started_at_ms else {
+            return Ok(true);
+        };
+        Ok(chrono::DateTime::parse_from_rfc3339(created_at)
+            .context("invalid GitHub item creation time")?
+            .timestamp_millis()
+            > started_at_ms)
+    }
+}
+
+/// Capture before reading classification evidence. The writer checks this
+/// generation again in the transaction that creates subscriptions and mail.
+pub fn load_github_classification_boundary(
+    session_id: &str,
+) -> Result<GithubClassificationBoundary> {
+    let mut connection = open_reader(&database_path())?;
+    let tx = connection.transaction()?;
+    github_classification_boundary_with(&tx, session_id)
+}
+
+fn github_classification_boundary_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<GithubClassificationBoundary> {
+    let (clear_ordinal, applied_ordinal): (u64, u64) = connection.query_row(
+        "SELECT COALESCE((SELECT through_ordinal FROM mailbox_reset_frontiers WHERE session_id=?1), 0),
+                COALESCE((SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?1), 0)",
+        [session_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    ensure!(
+        applied_ordinal >= clear_ordinal,
+        "GitHub session projection is rebuilding after /clear"
+    );
+    Ok(GithubClassificationBoundary {
+        clear_ordinal,
+        started_at_ms: materialized::last_materialized_context_boundary_with_time(
+            connection, session_id,
+        )?
+        .map(|(_, at_ms)| at_ms),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubRepoCursor {
     pub updated_at: String,
@@ -75,6 +126,7 @@ pub struct GithubItemClassification {
     pub repo: String,
     pub number: i64,
     pub session_id: String,
+    pub clear_ordinal: u64,
     pub kind: String,
     pub title: String,
     pub url: String,
@@ -294,6 +346,14 @@ pub fn commit_github_item_classification(
     let has_event = event.is_some();
     let inserted = submit_database_write("commit_github_item_classification", move |connection| {
         let tx = connection.transaction()?;
+        let boundary = github_classification_boundary_with(&tx, &classification.session_id)?;
+        // SQLite serializes this decision with /clear. Neither evidence from
+        // an older conversation nor an older pending item can restore a watch.
+        if boundary.clear_ordinal != classification.clear_ordinal
+            || !boundary.accepts_created_at(&classification.created_at)?
+        {
+            return Ok((false, false));
+        }
         let mut enqueued_lifecycle = false;
         let inserted = tx.execute(
             "INSERT INTO github_watch_classifications(owner, repo, number, session_id,

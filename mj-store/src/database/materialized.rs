@@ -279,15 +279,27 @@ fn last_materialized_context_boundary(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<u64>> {
-    Ok(connection.query_row(
-        "SELECT MAX(position) FROM materialized_transcript_items
-         WHERE session_id = ?1 AND stable_id GLOB ?2",
-        params![
-            session_id,
-            format!("{}*", mj_core::archive::CONTEXT_BOUNDARY_PREFIX)
-        ],
-        |row| row.get::<_, Option<u64>>(0),
-    )?)
+    Ok(
+        last_materialized_context_boundary_with_time(connection, session_id)?
+            .map(|(position, _)| position),
+    )
+}
+
+pub(super) fn last_materialized_context_boundary_with_time(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<(u64, i64)>> {
+    Ok(connection
+        .query_row(
+            "SELECT position, created_at_ms FROM materialized_transcript_items
+             WHERE session_id = ?1 AND stable_id GLOB ?2 ORDER BY position DESC LIMIT 1",
+            params![
+                session_id,
+                format!("{}*", mj_core::archive::CONTEXT_BOUNDARY_PREFIX)
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
 }
 
 /// SQL form of `TranscriptItem::is_turn_start`: a user prompt (a user item
