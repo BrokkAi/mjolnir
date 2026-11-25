@@ -139,12 +139,12 @@ historical frontier and retain the original per-configuration sample caps.
 
 ![Single-model yield versus workflow cost, including historical Claude and partial DSF estimates](review-single-model-cost.png)
 
-The chart uses **separate panels and cost axes**: current single reviews in
-**dollars per review**, historical revision workflows in **dollars per PR**.
-Each panel has its own Terra 6.1/high = 100 yield baseline and cost-sorted key;
-there is no shared ranking of the two cost units. Current measurements use
-filled markers; historical and partial-cohort DSF estimates use hollow markers.
-These series count different source outcomes:
+Both panels now price **single reviews**: current costs per review and historical
+costs per initial-head review. Separate study panels retain their own Terra
+6.1/high = 100 baselines and cost-sorted keys. Filled markers are current
+measurements; hollow markers are historical or partial-cohort DSF results.
+An asterisk identifies the three historical yields that require estimation.
+The series count different source outcomes:
 
 - **Current study:** the single-reviewer rows of [pareto.csv](pareto.csv), from
   the blinded Opus `verify9` round. Yield averages one reviewer's confirmed
@@ -153,25 +153,24 @@ These series count different source outcomes:
   reviewer-turn API costs; Greptile uses its per-review service prices.
   Greptile is a service reference whose repository context could not be pinned
   to each diff's commit; the PNG legend and caption state that limitation.
-- **Claude historical estimates:** the earlier **mr-boxington PR/revision
-  reviewer study**, preserved as `reviewcharts/data.json`, `native.csv` and
-  `README.txt`. Yield is the mean material-root total, deduplicated within each
-  PR and pass across follow-up revisions. Its denominator is Terra 6.1/high's
-  material-root total from that same historical cohort. The chart includes its
-  matching **historical Terra/high** reference at index 100 and **$0.103 per PR
-  workflow** in the historical panel. Current Terra/high at $0.044 per review
-  appears in the current panel, on its separate cost axis. The historical cost unit is the
-  **full PR workflow**, including follow-up reviews. For Terra/high, Opus/high, Sonnet/high
-  and Haiku/high, estimate that workflow at the observed initial-review mean
-  cost times **95 revision reviews / 47 PRs**. This charges every follow-up but
-  assumes it costs the same as an initial review; actual follow-up costs are
-  unavailable. Haiku/xhigh instead uses all 285 recorded review-cost bounds in
-  `reviewcharts/haiku-xhigh-metrics.json`, divided by 141 PR-passes. All costs
-  retain the requested five-minute cache-write normalization. Haiku/xhigh's
-  horizontal range is a request-tier pricing bound, with its marker at the
-  midpoint. The PNG itself labels these workflow assumptions and the different
-  corpus and grading method. These are historical estimates, not fresh Claude
-  results or a controlled comparison on the current 70 diffs.
+- **Historical initial reviews:** the earlier **mr-boxington PR/revision
+  reviewer study**, preserved in `reviewcharts/data.json`, `terra-grades.json`,
+  `terra-metrics.json`, `haiku-xhigh-grades.json` and `haiku-xhigh-metrics.json`.
+  Initial heads come from `revision_index=0` in the metrics. Accepted material
+  roots whose source references include those heads give **Terra/high
+  28/30/30** and **Haiku/xhigh 22/21/19** over three 47-review passes. Historical
+  yield divides each mean by Terra's **29.333** initial-review material roots;
+  its matching initial-review cost reference is **$0.051**.
+  Initial-only grades for **Haiku/high, Sonnet/high and Opus/high** were not
+  preserved. Their initial-review yields are **estimates**, marked `*` in the
+  PNG: each all-revision material-root mean is multiplied by Terra's measured
+  initial/all-revision ratio, **88/145 = 0.607**. This assumes that ratio
+  transfers between models; it does not establish their actual initial yield.
+  Cost uses the prior first-pass mean over **47 initial-head reviews**, with
+  the requested five-minute cache-write normalization. Haiku/xhigh's horizontal
+  range is a request-tier pricing bound, with its marker at the midpoint.
+  Initial-review scope, the three estimated yields and the different corpus
+  and grading method are stated in the PNG. No new Claude reviews were run.
 - **DSF/low estimate:** `verify9/sessions.csv`, `groups.csv` and
   `session_groups.csv` supply the DSF and control outcomes on the same 16
   covered diffs. Each matched-control estimate is DSF's 16-diff total times
@@ -190,7 +189,9 @@ These series count different source outcomes:
 The frozen local input table is
 `/mnt/optane/review-arms-20261113/sol-62-repeats/figure/single-model-cost-inputs.json`.
 It identifies the original historical bundle and its hash and contains the
-historical rows, matched DSF calibration table and cost assumptions. The
+historical rows, matched DSF calibration table and cost assumptions. The local
+`single-review-yield-audit.json` and `derive_initial_review_yields.py` record
+the initial-head grade reconstruction, source hashes and estimation formula. The
 companion `review-single-model-cost.csv` records each plotted value, raw yield,
 baseline and source. These detailed inputs remain local. The local
 `plot_single_model_cost.py` reproduces the chart from that snapshot and the
