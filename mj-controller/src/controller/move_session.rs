@@ -23,6 +23,15 @@ pub use crate::session_manager::move_ownership::{
     release_move_queue_hold, worker_subagent_queue_enabled,
 };
 
+/// Completes once the operation is cancelled or the daemon stops it. The
+/// executor exposes both as flags set without a wake, so a short poll bounds
+/// how long an unbounded wait outlives them.
+async fn until_interrupted(executor: &(impl CommandExecutor + Sync)) {
+    while !(executor.cancellation_requested() || executor.shutdown_interrupted()) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InPlaceReloadProgress {
     BeforeCommit,
@@ -369,7 +378,7 @@ fn retry_move_operation(
 ) -> bool {
     !move_needs_fresh_capture(operation, source)
         && matches_move_retry_selection(operation, requested)
-        && operation.checkpoint_retained()
+        && operation.retry_retained()
 }
 
 fn failed_move_has_only_its_source(operation: &MoveOperation) -> bool {
@@ -1676,7 +1685,7 @@ impl Controller {
         let previous = crate::database::load_move_operation(&source.id)?;
         // The sealed selection owns retry defaults. Reconstructing them from
         // the source can change the destination or lose an explicit policy.
-        if let Some(retained) = previous.as_ref().filter(|op| op.holds_source_environment()) {
+        if let Some(retained) = previous.as_ref().filter(|op| op.holds_retry_state()) {
             selection.profile_id = selection
                 .profile_id
                 .or(retained.selection.profile_id.clone());
@@ -1730,14 +1739,14 @@ impl Controller {
 
         if previous
             .as_ref()
-            .is_some_and(|op| op.holds_source_environment() && !op.checkpoint_retained())
+            .is_some_and(|op| op.holds_source_environment() && !op.retry_retained())
         {
             bail!(
                 "this Move cannot be retried. {}",
                 missing_move_checkpoint_recovery(&self.state, &source.id)
             );
         }
-        let retry = previous.as_ref().is_some_and(|op| op.checkpoint_retained());
+        let retry = previous.as_ref().is_some_and(|op| op.retry_retained());
         ensure!(
             matches!(
                 source.state,
@@ -1756,7 +1765,7 @@ impl Controller {
             !selection.clear_resource_allocation || selection.resource_allocation.is_none(),
             "select resource allocation or explicitly clear it, not both"
         );
-        if let Some(retained) = previous.as_ref().filter(|op| op.holds_source_environment()) {
+        if let Some(retained) = previous.as_ref().filter(|op| op.holds_retry_state()) {
             // An in-place Move transfers no files, so its file selection is
             // not part of what a retry has to repeat. Every surface (the web
             // retry has no large-transfer flag at all) retries it the same way.
@@ -1985,7 +1994,7 @@ impl Controller {
             .filter(|operation| {
                 matches_move_retry_selection(operation, &selection)
                     && !operation.is_resolved()
-                    && operation.checkpoint_retained()
+                    && operation.retry_retained()
             })
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
@@ -3381,11 +3390,19 @@ impl Controller {
                     .context("in-place Move requires a live worker connection")?
                     .connection_mut()
                     .protocol_version();
-                in_place::ensure_worker_supports_in_place_move(
-                    &id,
-                    protocol_version,
-                    operation.quota_stop_reason.is_some(),
-                )?;
+                // A Move that already holds the worker's dispatch hold may be
+                // settling a reload an older worker already restarted. That
+                // needs no staged reload, so the gate waits until the hold
+                // shows a reload still has to be sent (below).
+                if operation.in_place_expected_store_id.is_none()
+                    && !operation.in_place_harness_restarted
+                {
+                    in_place::ensure_worker_supports_in_place_move(
+                        &id,
+                        protocol_version,
+                        operation.quota_stop_reason.is_some(),
+                    )?;
+                }
                 let dest_profile_id = operation
                     .selection
                     .profile_id
@@ -3560,9 +3577,41 @@ impl Controller {
                         "in-place Move interrupted by daemon shutdown after holding dispatch"
                     );
                     if had_prior_expected_store_id && !operation.in_place_harness_restarted {
-                        let status = conn.client.status().await?;
+                        use mj_core::relay::InPlaceReloadPhase;
+                        let mut status = conn.client.status().await?;
+                        // A committed reload is starting its harness. The worker
+                        // owns that outcome and answers it with `Started`, a
+                        // typed failure, or its exit, so wait for the state
+                        // change instead of failing a retry the worker is about
+                        // to settle. The daemon yields admission while it waits:
+                        // a handoff cancels this and the next daemon resumes it.
+                        if status.in_place_move_hold.as_ref().is_some_and(|hold| {
+                            hold.operation_id == operation.operation_id
+                                && matches!(hold.reload_phase, Some(InPlaceReloadPhase::Committed))
+                        }) {
+                            executor.begin_resumable_work()?;
+                            let waited: Result<()> = async {
+                                while status.in_place_move_hold.as_ref().is_some_and(|hold| {
+                                    hold.operation_id == operation.operation_id
+                                        && matches!(hold.reload_phase, Some(InPlaceReloadPhase::Committed))
+                                }) {
+                                    ensure!(!executor.cancellation_requested(), "in-place Move cancelled while its committed reload starts");
+                                    ensure!(!executor.shutdown_interrupted(), "in-place Move interrupted by daemon shutdown while its committed reload starts");
+                                    // The poll and the status request both end at once
+                                    // when the Move is cancelled or the daemon stops it.
+                                    let next = conn.client.call_until(until_interrupted(executor), async |client| {
+                                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                        client.status().await
+                                    }).await?;
+                                    status = next.context("in-place Move interrupted while its committed reload starts")?;
+                                }
+                                Ok(())
+                            }.await;
+                            let resumed = executor.end_resumable_work("in-place Move committed reload");
+                            waited?;
+                            resumed?;
+                        }
                         if let Some(hold) = status.in_place_move_hold.filter(|hold| hold.operation_id == operation.operation_id) {
-                            use mj_core::relay::InPlaceReloadPhase;
                             match hold.reload_phase {
                                 Some(InPlaceReloadPhase::Started) => reload_progress = InPlaceReloadProgress::Started,
                                 Some(InPlaceReloadPhase::FailedAfterCommit { message }) => {
@@ -3571,7 +3620,7 @@ impl Controller {
                                     reload_progress = InPlaceReloadProgress::FailedAfterCommit;
                                     bail!("{message}");
                                 }
-                                Some(InPlaceReloadPhase::Committed) => bail!("in-place harness reload already committed and is starting; retry to reconnect"),
+                                Some(InPlaceReloadPhase::Committed) => bail!("in-place harness reload is still starting; retry to reconnect"),
                                 None if hold.harness_restarted => reload_progress = InPlaceReloadProgress::Started,
                                 None => reload_progress = InPlaceReloadProgress::BeforeCommit,
                             }
@@ -3579,6 +3628,12 @@ impl Controller {
                     }
                     if !operation.in_place_harness_restarted {
                         if reload_progress != InPlaceReloadProgress::Started {
+                        // Staging and the candidate-based reload need protocol 91.
+                        in_place::ensure_worker_supports_in_place_move(
+                            &id,
+                            protocol_version,
+                            operation.quota_stop_reason.is_some(),
+                        )?;
                         let source_harness = self
                             .state
                             .sessions
@@ -3769,9 +3824,46 @@ impl Controller {
                                 Ok(launch) => launch,
                                 Err(error) => { self.state.sessions.insert(id.clone(), previous_session); return Err(error); }
                             };
-                            match conn.client.restart_harness_in_place(&operation.operation_id, &expected_store_id, Box::new(launch_config), Some(candidate)).await {
-                                Ok(()) => reload_progress = InPlaceReloadProgress::Started,
+                            // The worker answers only once the replacement harness
+                            // has opened its session, or has failed to, so the
+                            // controller sets no deadline of its own: the worker
+                            // owns startup expiry and its failure or exit ends
+                            // this wait. Yield admission meanwhile; the hold, the
+                            // expected store and the worker's reload phase let the
+                            // next daemon resume an interrupted wait.
+                            if let Err(error) = executor.begin_resumable_work() {
+                                self.state.sessions.insert(id.clone(), previous_session);
+                                return Err(error);
+                            }
+                            let restarted = conn.client.call_until(until_interrupted(executor), async |client| {
+                                client.restart_harness_in_place(&operation.operation_id, &expected_store_id, Box::new(launch_config), Some(candidate)).await
+                            }).await;
+                            let resumed = executor.end_resumable_work("in-place Move reload");
+                            if matches!(restarted, Ok(None)) {
+                                // Cancelled or stopped for shutdown while the worker was still
+                                // answering. The worker went on without the daemon: its hold,
+                                // reload phase and our fence stay durable, and the next attempt
+                                // asks the hold what happened.
+                                reload_progress = InPlaceReloadProgress::Unknown;
+                                self.state.sessions.insert(id.clone(), previous_session);
+                                bail!("in-place Move interrupted while its harness reload was in flight; the worker keeps its hold and a retry resumes it");
+                            }
+                            match restarted {
+                                Ok(_) => {
+                                    reload_progress = InPlaceReloadProgress::Started;
+                                    resumed?;
+                                }
                                 Err(error) => {
+                                    if let Err(resume_error) = resumed {
+                                        // Admission is gone: a handoff has closed it and a
+                                        // successor may already be recovering these rows.
+                                        // Settle nothing and release nothing; the durable
+                                        // fence and the worker's hold let it decide.
+                                        tracing::warn!(session_id = %id, %error, "in-place reload failed after daemon admission closed; leaving settlement to the next daemon");
+                                        reload_progress = InPlaceReloadProgress::Unknown;
+                                        self.state.sessions.insert(id.clone(), previous_session);
+                                        return Err(resume_error);
+                                    }
                                     use mj_core::relay::{RelayErrorCode, RelayErrorDetail};
                                     let rejection = error.downcast_ref::<crate::worker_client::RelayRejected>();
                                     let committed_failure = rejection.and_then(|rejected| match &rejected.0.detail {
@@ -5265,7 +5357,7 @@ fn resolve_move_size_for_environment(
     is_subagent: bool,
     previous: Option<&MoveOperation>,
 ) -> Result<(bool, bool)> {
-    let sealed = previous.is_some_and(MoveOperation::holds_source_environment);
+    let sealed = previous.is_some_and(MoveOperation::holds_retry_state);
     // An explicit clear means "the destination's default" and is always
     // resolved: the person asked for a size, so an unknown current size is no
     // reason to keep an unbounded container. Otherwise a size is resolved
@@ -5336,7 +5428,7 @@ fn resolve_move_destination_size(
 fn move_size_is_destination_default(resolved_now: bool, previous: Option<&MoveOperation>) -> bool {
     resolved_now
         || previous.is_some_and(|operation| {
-            operation.holds_source_environment()
+            operation.holds_retry_state()
                 && operation
                     .accepted_preparation
                     .as_ref()
