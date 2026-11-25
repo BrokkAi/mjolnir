@@ -580,6 +580,9 @@ impl ResolveSuspendBlockersResponse {
                 .join(", ");
             text.push_str(&format!(" Moved: {moves}."));
         }
+        if !self.skipped_worktrees.is_empty() {
+            text.push_str(&format!(" Skipped: {}.", self.skipped_worktrees.join("; ")));
+        }
         text
     }
 }

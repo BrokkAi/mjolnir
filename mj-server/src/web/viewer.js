@@ -6939,6 +6939,9 @@ function blockerResolutionSummary(response) {
     const moves = response.moved_worktrees.map(m => `${m.from} -> ${m.to}`).join(', ');
     text += ` Moved: ${moves}.`;
   }
+  if (response.skipped_worktrees?.length) {
+    text += ` Skipped: ${response.skipped_worktrees.join('; ')}.`;
+  }
   return text;
 }
 
@@ -7025,7 +7028,9 @@ function confirmSessionSuspension(session, onNotice = () => {}) {
             const unfinished = preflight.children_not_handed_back?.length || 0;
             if (unfinished) body.append(el('p', '', `${unfinished} sub-agents have not handed back; suspending stops them.`));
             const owning = preflight.owning_children_to_suspend || 0;
-            if (owning) body.append(el('p', '', `Suspending also suspends ${owning} children with their own environments.`));
+            if (owning) body.append(el('p', 'danger', owning === 1
+              ? "Suspending also suspends one child with its own environment and drops that child's untracked files."
+              : `Suspending also suspends ${owning} children with their own environments and drops their untracked files.`));
             const back = button('Back', 'secondary');
             back.onclick = () => renderPreflight(preflight);
             const confirm = button('Suspend with history only', 'danger');

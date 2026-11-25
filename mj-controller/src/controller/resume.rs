@@ -2596,13 +2596,22 @@ impl Controller {
                     // restore_into_target applies the origin-delta snapshot.
                 }
             } else if let Some(upgraded_clone) = upgraded_legacy_worktree.as_ref() {
-                resume_notices.extend(restore_legacy_worktree_as_managed_clone(
-                    executor,
-                    upgraded_clone,
-                    &archive_path,
-                    archive_manifest,
-                    None,
-                )?);
+                if history_only_archive {
+                    if let Some(fresh_head) =
+                        super::worktree::restore_managed_clone_fresh_head(executor, upgraded_clone)?
+                    {
+                        self.record_fresh_managed_clone_head(session_id, fresh_head)?;
+                        recreated_managed_worktree = true;
+                    }
+                } else {
+                    resume_notices.extend(restore_legacy_worktree_as_managed_clone(
+                        executor,
+                        upgraded_clone,
+                        &archive_path,
+                        archive_manifest,
+                        None,
+                    )?);
+                }
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 if !transferring_workspace
                     && plan == ResumePlan::RawToWorkspace
