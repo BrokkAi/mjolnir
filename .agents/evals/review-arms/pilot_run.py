@@ -24,6 +24,9 @@ BUNDLES = {"mjolnir": "mjolnir", "bifrost-dev": "bifrost-history"}
 WRITER_ARMS = ("G", "R", "R-loc")
 ARMS = ("N", *WRITER_ARMS)
 TOOL_ARMS = ("R", "R-loc")
+# The one sentence of brief/WRITER.md that tells a writer how to read the change. A writer's
+# diff-reading configuration replaces it; the default keeps the prompt byte-identical.
+WRITER_DIFF_SENTENCE = "Read the change with\n`git diff {base} HEAD` and read the rest of the repository as you need."
 # Hundredths of a percentage point. Registered lean-pilot Sol/Terra rates.
 COST = {"writer": 43, "reviewer": driver.PILOT_TERRA_QUOTA_COST}
 
@@ -383,8 +386,12 @@ def publish_tool_assignment(path, args, job, diff, sid, *, engine_identity):
 
 
 class Pilot:
-    def __init__(self, args, config, manifest, raw, image, reference, steps, *, engine_identity=None):
+    def __init__(self, args, config, manifest, raw, image, reference, steps, *, engine_identity=None,
+                 writer_diff_reading=pilot_review.SINGLE_COMMAND, reviewer_diff_reading=pilot_review.SINGLE_COMMAND):
         self.args, self.config = args, config
+        self.diff_reading = {"writer": writer_diff_reading, "reviewer": reviewer_diff_reading}
+        if not set(self.diff_reading.values()) <= set(pilot_review.DIFF_READINGS):
+            raise ValueError(f"unknown diff reading {self.diff_reading}")
         self.engine_identity = engine_identity
         self.diffs = {row["key"]: row for row in manifest["diffs"]}
         self.writer_model = tuple(manifest["models"]["writer"].rsplit("/", 1))
@@ -401,7 +408,23 @@ class Pilot:
         self._lock = threading.RLock()
         self.messages = {}
         self.captures = {}
+        self.reads = {}
         self.attested = set()
+
+    def diff_reading_inputs(self, kind, row, bug):
+        """Prompt reads for `kind` and the inputs that bind its configuration.
+
+        The Stage 2a configuration adds no input, so its recorded inputs still match.
+        """
+        if self.diff_reading[kind] == pilot_review.SINGLE_COMMAND:
+            return None, {}
+        if row["key"] not in self.captures:
+            self.captures[row["key"]] = pilot_review.capture(bug)
+        if row["key"] not in self.reads:
+            self.reads[row["key"]] = pilot_review.plan_reads(pilot_review.file_diffs(*self.captures[row["key"]][:2]))
+        text = f"{pilot_review.READ_BYTES}\n{pilot_review.DIFF_READING_TEXT}\n{WRITER_DIFF_SENTENCE}"
+        return self.reads[row["key"]], {f"{kind}_diff_reading": self.diff_reading[kind],
+                                        f"{kind}_diff_reading_sha256": digest(text.encode())}
 
     def _state_lock(self):
         return self._lock if hasattr(self, "_lock") else nullcontext()
@@ -423,7 +446,22 @@ class Pilot:
                 # Replacing both placeholders in one pass leaves source text and
                 # RQL reference examples untouched.
                 replacements = {"base": row["base"], "message": self.messages[row["key"]]}
-                prompt = re.sub(r"\{(base|message)\}", lambda m: replacements[m[1]], self.prompts[job["arm"]])
+
+                def fill(text):
+                    return re.sub(r"\{(base|message)\}", lambda m: replacements[m[1]], text)
+
+                reads, reading = self.diff_reading_inputs("writer", row, bug)
+                inputs.update(reading)
+                if reads is None:
+                    prompt = fill(self.prompts[job["arm"]])
+                else:
+                    head, found, tail = self.prompts[job["arm"]].partition(WRITER_DIFF_SENTENCE)
+                    if not found or WRITER_DIFF_SENTENCE in tail:
+                        raise ValueError(f"{job['job']}: the writer prompt must name its diff read exactly once")
+                    trees = self.captures[row["key"]][:2]
+                    block = ("Read the change with the reads below.\n\n" + pilot_review.reads_text(*trees, reads)
+                             + "\n\nRead the rest of the repository as you need.")
+                    prompt = fill(head) + block + fill(tail)
             else:
                 brief = None
                 if job["arm"] != "N":
@@ -436,7 +474,10 @@ class Pilot:
                 if row["key"] not in self.captures:
                     self.captures[row["key"]] = pilot_review.capture(bug)
                 task = driver.context_text(bug)
-                prompt = pilot_review.prompt_with_rubric(self.rubric, self.captures[row["key"]], task, brief)
+                reads, reading = self.diff_reading_inputs("reviewer", row, bug)
+                inputs.update(reading)
+                prompt = pilot_review.prompt_with_rubric(self.rubric, self.captures[row["key"]], task, brief,
+                                                         reads=reads)
                 inputs.update(review_rubric_sha256=digest(self.rubric),
                               review_template_sha256=digest(pilot_review.TEMPLATE.encode()))
             if self.gold and self.gold in prompt:
@@ -601,6 +642,12 @@ def main():
                         help="accepted for compatibility; every writer and reviewer Git cache is attested")
     parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     parser.add_argument("--bifrost-clone", type=Path, default=Path("/mnt/optane/tmp/rust10/bifrost-src"))
+    parser.add_argument("--writer-diff-reading", choices=pilot_review.DIFF_READINGS, default=pilot_review.SINGLE_COMMAND,
+                        help="how writers read the diff; the default is the Stage 2a single command")
+    parser.add_argument("--reviewer-diff-reading", choices=pilot_review.DIFF_READINGS,
+                        default=pilot_review.SINGLE_COMMAND,
+                        help="how reviewers read the diff; independent of the writers' setting, so a reviewer-only "
+                             "rerun keeps the accepted briefs")
     parser.add_argument("--concurrency", type=int, default=1,
                         help="max concurrent jobs within one admitted diff (default: 1)")
     args = parser.parse_args()
@@ -641,7 +688,9 @@ def main():
         except BlockingIOError as e:
             raise RuntimeError("another pilot owns the study instance") from e
         with pilot_lock(args.run_root):
-            runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
+            runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity,
+                           writer_diff_reading=args.writer_diff_reading,
+                           reviewer_diff_reading=args.reviewer_diff_reading)
             try:
                 runner.retry_pending_revokes()
                 return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute,

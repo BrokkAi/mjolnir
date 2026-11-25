@@ -115,6 +115,26 @@ before that report exists. A failed pooled prescience verdict stops all pilot
 launches, including G, and a re-freeze cannot clear it. The private gold cases and pilot bug IDs are
 excluded from every prompt.
 
+## Diff reading
+
+Codex cuts one `exec_command` output at the model's 10,000-token policy (about 40,000 bytes) and
+keeps only the head and tail, whatever `max_output_tokens` the model asks for. Stage 2a sessions
+read the diff in one command, so 25 of its 35 diffs were cut (writers too: 117 of 125 writer
+rollouts carry the marker). `--writer-diff-reading` and `--reviewer-diff-reading` choose how each
+role reads the diff; they are independent, so a reviewer-only rerun keeps the accepted briefs.
+
+- `single-command` (default) is the Stage 2a prompt, byte for byte, and adds nothing to a job's
+  inputs, so the frozen Stage 2a artifacts still verify.
+- `bounded-reads-v1` lists numbered `git diff` reads of at most 32,000 bytes each (small files
+  batched, large files read in byte windows ending at line boundaries). Together they print the
+  whole diff once. Each job's `inputs.json` records `writer_diff_reading` or
+  `reviewer_diff_reading` and a digest of the instruction text and budget, and `prompt_sha256`
+  covers the rendered list.
+
+`tool_output_token_limit` in the Codex overlay would raise the policy, but it applies to every
+session of the profile and the model still chooses `max_output_tokens` (the reviewers chose 30,000,
+below the 48,800 tokens of the largest diff), so the harness splits the diff instead.
+
 ## Evidence and recovery
 
 The default root is `/mnt/optane/review-arms-pilot`. Under

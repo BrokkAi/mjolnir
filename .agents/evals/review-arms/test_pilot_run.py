@@ -5,6 +5,7 @@ from io import StringIO
 import hashlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -1022,6 +1023,95 @@ if not (attempt / "recover").exists():
         )
         actual = pilot_review.prompt_with_rubric(rubric, ("tree-a", "tree-b", 2, "Table"), "Task", "Brief.")
         self.assertEqual(actual.encode(), rubric + b"\n" + expected.encode())
+
+    def test_bounded_diff_reads_reach_a_diff_larger_than_the_exec_cap_and_stage2a_stays_unchanged(self):
+        # Codex 0.168/0.170 cut one exec_command output at 10,000 tokens, about 40,000 bytes
+        # (codex-rs/core/src/tools/context.rs), however many tokens the model asks for.
+        exec_cap = 40_000
+        repo = self.root / "repo"
+        repo.mkdir()
+
+        def git(*args, cwd=repo):
+            return subprocess.check_output(["git", "-C", cwd, *args], env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"})
+
+        def write(name, data):
+            (repo / name).write_bytes(data)
+
+        git("init", "-q", "-b", "main", cwd=self.root / "repo")
+        git("config", "user.email", "t@example.invalid")
+        git("config", "user.name", "t")
+        lines = b"".join(b"line %05d of a file that the change rewrites\n" % n for n in range(3000))
+        write("big.txt", lines)
+        write("old name.txt", b"".join(b"renamed %04d\n" % n for n in range(200)))
+        write("a.txt", b"decoy\n")
+        write("[ab].txt", b"glob\n")
+        write("wide.txt", b"x\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "base")
+        base = git("rev-parse", "HEAD").decode().strip()
+        write("big.txt", lines.replace(b"line", b"LINE"))
+        git("mv", "old name.txt", "new name.txt")
+        write("new name.txt", (repo / "new name.txt").read_bytes() + b"tail\n")
+        write("a.txt", b"decoy changed\n")
+        write("[ab].txt", b"glob changed\n")
+        write("wide.txt", ("\u00e9" * 40_000 + "\n").encode())  # one 80,000-byte line
+        git("add", "-A")
+        git("commit", "-q", "-m", "change")
+        head = git("rev-parse", "HEAD").decode().strip()
+
+        with unittest.mock.patch.object(pilot.driver, "REPO", str(repo)):
+            capture = pilot_review.capture({"base_commit": base, "intro_commit": head})
+            reads = pilot_review.plan_reads(pilot_review.file_diffs(*capture[:2]))
+        full = git("diff", "--no-ext-diff", "--ignore-submodules=none", *capture[:2])
+        self.assertGreater(len(full), 3 * exec_cap)
+        outputs = [subprocess.check_output(["bash", "-c", pilot_review.read_command(*capture[:2], read)], cwd=repo)
+                   for read in reads]
+        self.assertGreater(len(reads), 3)
+        self.assertEqual(b"".join(outputs), full)
+        for read, output in zip(reads, outputs, strict=True):
+            self.assertEqual(len(output), read[2])
+            self.assertLessEqual(len(output), pilot_review.READ_BYTES)
+            self.assertLess(pilot_review.READ_BYTES, exec_cap)
+            output.decode()
+
+        # The Stage 2a configuration renders its prompt and inputs unchanged; the new one adds
+        # the reads and binds its version, independently for writers and reviewers.
+        manifest = pilot.load_manifest(manifest_fixture().replace(b"first", b"zqxone").replace(b"second", b"zqxtwo"))
+        manifest["diffs"][0].update(intro=head, base=base)
+        raw = json.dumps(manifest).encode()
+        catalogue = (pilot.driver.SCRIPTS / "brief/rql-census/rql-documented-steps.md").read_text()
+        row = manifest["diffs"][0]
+        args = SimpleNamespace(run_root=self.root / "runs", profile="p")
+        writer = {"job": f"{row['key']}/G/r1/writer", "diff": row["key"], "arm": "G", "replicate": 1,
+                  "kind": "writer", "slot": None}
+        reviewer = dict(writer, job=f"{row['key']}/N/r1/reviewer-1", arm="N", kind="reviewer", slot=1)
+
+        def render(**reading):
+            runner = pilot.Pilot(args, {}, manifest, raw, "image", catalogue.encode(), None, **reading)
+            with (unittest.mock.patch.object(pilot, "repository", lambda *_: None),
+                  unittest.mock.patch.object(pilot.driver, "REPO", str(repo))):
+                return runner.render(writer), runner.render(reviewer)
+
+        old_writer, old_reviewer = render()
+        self.assertIn(f"`git diff {base} HEAD`", old_writer["prompt"])
+        self.assertIn(f"Run this exact command: `git -C . diff --no-ext-diff --ignore-submodules=none {capture[0]} {capture[1]}`",
+                      old_reviewer["prompt"])
+        self.assertFalse([key for key in old_writer["inputs"] | old_reviewer["inputs"] if "diff_reading" in key])
+        new_writer, new_reviewer = render(writer_diff_reading=pilot_review.BOUNDED_READS,
+                                          reviewer_diff_reading=pilot_review.BOUNDED_READS)
+        for params, kind in ((new_writer, "writer"), (new_reviewer, "reviewer")):
+            self.assertEqual(params["inputs"][f"{kind}_diff_reading"], pilot_review.BOUNDED_READS)
+            self.assertRegex(params["inputs"][f"{kind}_diff_reading_sha256"], "^[0-9a-f]{64}$")
+            for read in reads:
+                self.assertIn(pilot_review.read_command(*capture[:2], read), params["prompt"])
+        self.assertNotIn("git diff {base}", new_writer["prompt"])
+        self.assertNotIn("Run this exact command", new_reviewer["prompt"])
+        self.assertNotEqual(new_writer["inputs"]["prompt_sha256"], old_writer["inputs"]["prompt_sha256"])
+        # A reviewer-only change keeps the writer's prompt and inputs, so the accepted briefs stand.
+        only_writer, only_reviewer = render(reviewer_diff_reading=pilot_review.BOUNDED_READS)
+        self.assertEqual(only_writer["inputs"], old_writer["inputs"])
+        self.assertEqual(only_writer["prompt"], old_writer["prompt"])
+        self.assertEqual(only_reviewer["inputs"], new_reviewer["inputs"])
 
     def test_audit_rejects_unpinned_history_network_and_cache(self):
         transcript = self.root / "transcript.json"
