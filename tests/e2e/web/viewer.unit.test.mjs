@@ -1641,3 +1641,26 @@ test('changed files loads selected patches and keeps the latest selection', asyn
   await firstPatch;
   assert.equal(view.textContent, 'GIT binary patch');
 });
+
+
+test('suspend blockers show readable titles, five paths, expandable remainder and fix', () => {
+  const context = vm.createContext({ el: (tag, cls = '', text = '') => {
+    const node = makeNode(tag);
+    node.className = cls;
+    node.textContent = text;
+    return node;
+  } });
+  const start = viewerSource.indexOf('function blockerTitle(');
+  const end = viewerSource.indexOf('  return section;', start) + '  return section;\n}'.length;
+  vm.runInContext(viewerSource.slice(start, end), context);
+  const node = context.suspendBlockerSection({
+    kind: 'hidden_tracked_edits', paths: Array.from({length: 7}, (_, i) => 'file-' + i),
+    remedy: 'Clear index flags.',
+  }, 0);
+  assert.equal(node.children[0].textContent, '1. Hidden tracked edits (7 items)');
+  assert.equal(node.children[1].children.length, 5);
+  assert.equal(node.children[2].tagName, 'DETAILS');
+  assert.equal(node.children[2].children[0].textContent, 'Show 2 more');
+  assert.equal(node.children[2].children[1].children.length, 2);
+  assert.equal(node.children[3].textContent, 'Fix: Clear index flags.');
+});

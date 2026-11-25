@@ -2806,7 +2806,11 @@ pub(crate) fn format_suspend_dry_run(
     if !preflight.blockers.is_empty() {
         let _ = writeln!(out, "blockers:");
         for b in &preflight.blockers {
-            let _ = writeln!(out, "  - {}: {}", b.kind, b.remedy);
+            let _ = writeln!(out, "  {}", b.title());
+            for path in &b.paths {
+                let _ = writeln!(out, "    - {path}");
+            }
+            let _ = writeln!(out, "    fix: {}", b.remedy);
         }
     }
     if !preflight.operations.is_empty() {

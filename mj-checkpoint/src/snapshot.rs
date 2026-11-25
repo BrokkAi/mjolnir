@@ -199,31 +199,115 @@ pub enum SnapshotRefused {
         paths: Vec<Scoped<PathBuf>>,
     },
 }
+fn format_checkout_key(key: &CheckoutKey) -> String {
+    if key.checkout_path.as_os_str().is_empty() {
+        key.repository_id.clone()
+    } else if key.repository_id.is_empty() {
+        key.checkout_path.display().to_string()
+    } else {
+        format!("{}:{}", key.repository_id, key.checkout_path.display())
+    }
+}
+fn format_scoped_path(key: &CheckoutKey, path: &Path) -> String {
+    let key = format_checkout_key(key);
+    if key.is_empty() {
+        path.display().to_string()
+    } else {
+        format!("{key}:{}", path.display())
+    }
+}
+fn worktree_git_invocation(git_dir: &Path) -> String {
+    if git_dir.file_name() == Some(std::ffi::OsStr::new(".git"))
+        && let Some(parent) = git_dir.parent().filter(|p| !p.as_os_str().is_empty())
+    {
+        return format!(
+            "git -C {}",
+            mj_core::targets::posix_quote(&parent.to_string_lossy())
+        );
+    }
+    format!(
+        "git --git-dir {}",
+        mj_core::targets::posix_quote(&git_dir.to_string_lossy())
+    )
+}
+impl SnapshotRefused {
+    pub fn kind_code(&self) -> &'static str {
+        match self {
+            Self::Untracked(_) => "untracked",
+            Self::OperationInProgress(_) => "operation_in_progress",
+            Self::DirtySubmodule(_) => "dirty_submodule",
+            Self::MissingManagedOrigin(_) => "missing_managed_origin",
+            Self::OriginRemovedByTeardown(_) => "origin_removed_by_teardown",
+            Self::UnrepresentedGitState { .. } => "unrepresented_git_state",
+            Self::HiddenTrackedEdits(_) => "hidden_tracked_edits",
+            Self::IntentToAdd(_) => "intent_to_add",
+            Self::UntrackedSubmoduleRegistration(_) => "untracked_submodule_registration",
+            Self::TrackedKeepFiles { .. } => "tracked_keep_files",
+        }
+    }
+}
 impl std::fmt::Display for SnapshotRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingManagedOrigin(checkout) => write!(f,
-                "managed checkout {}:{} has no origin remote or source override; restore its origin with `git remote add origin <url>`",
-                checkout.repository_id, checkout.checkout_path.display()),
+            Self::MissingManagedOrigin(checkout) => write!(
+                f,
+                "managed checkout {} has no origin remote or source override; restore its origin with `git remote add origin <url>`",
+                format_checkout_key(checkout)
+            ),
             Self::OriginRemovedByTeardown(origins) => {
                 for (index, origin) in origins.iter().enumerate() {
-                    if index != 0 { write!(f, "; ")?; }
+                    if index != 0 {
+                        write!(f, "; ")?;
+                    }
                     if let Some(provider) = &origin.value.object_provider {
-                        let path = mj_core::targets::posix_quote(&origin.value.canonical_path.to_string_lossy());
-                        write!(f, "local origin {} relies on provider {} inside the managed teardown; make the origin an independent repository outside that set; to dissociate borrowed objects run `git -C {path} repack -a -d`, then remove its objects/info/alternates, and suspend again", origin.value.route.display(), provider.display())?;
+                        let path = mj_core::targets::posix_quote(
+                            &origin.value.canonical_path.to_string_lossy(),
+                        );
+                        write!(
+                            f,
+                            "local origin {} relies on provider {} inside the managed teardown; make the origin an independent repository outside that set; to dissociate borrowed objects run `git -C {path} repack -a -d`, then remove its objects/info/alternates, and suspend again",
+                            origin.value.route.display(),
+                            provider.display()
+                        )?;
                         continue;
                     }
-                    let directory = if origin.checkout.checkout_path.as_os_str().is_empty() { String::new() }
-                        else { format!(" -C {}", mj_core::targets::posix_quote(&origin.checkout.checkout_path.to_string_lossy())) };
-                    write!(f, "origin route {} for {}:{} depends on the managed teardown; ", origin.value.route.display(), origin.checkout.repository_id, origin.checkout.checkout_path.display())?;
+                    let directory = if origin.checkout.checkout_path.as_os_str().is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " -C {}",
+                            mj_core::targets::posix_quote(
+                                &origin.checkout.checkout_path.to_string_lossy()
+                            )
+                        )
+                    };
+                    write!(
+                        f,
+                        "origin route {} for {} depends on the managed teardown; ",
+                        origin.value.route.display(),
+                        format_checkout_key(&origin.checkout)
+                    )?;
                     let setting = match &origin.value.module_url_key {
-                        Some(key) => format!("config -f .gitmodules {}", mj_core::targets::posix_quote(key)),
+                        Some(key) => format!(
+                            "config -f .gitmodules {}",
+                            mj_core::targets::posix_quote(key)
+                        ),
                         None => "remote set-url origin".to_owned(),
                     };
                     if origin.value.target_is_removed {
-                        write!(f, "move the mirror {} outside the clone and run `git{directory} {setting} <new path>`", origin.value.canonical_path.display())?;
+                        write!(
+                            f,
+                            "move the mirror {} outside the clone and run `git{directory} {setting} <new path>`",
+                            origin.value.canonical_path.display()
+                        )?;
                     } else {
-                        write!(f, "run `git{directory} {setting} {}`", mj_core::targets::posix_quote(&origin.value.canonical_path.to_string_lossy()))?;
+                        write!(
+                            f,
+                            "run `git{directory} {setting} {}`",
+                            mj_core::targets::posix_quote(
+                                &origin.value.canonical_path.to_string_lossy()
+                            )
+                        )?;
                     }
                     write!(f, ", then suspend again")?;
                 }
@@ -235,54 +319,107 @@ impl std::fmt::Display for SnapshotRefused {
                 paths.len(),
                 keep_dir.display()
             ),
-            Self::UntrackedSubmoduleRegistration(paths) => write!(f, "{}", paths.iter().map(|entry| {
-                let directory = if entry.checkout.checkout_path.as_os_str().is_empty() { String::new() } else { format!(" -C {}", mj_core::targets::posix_quote(&entry.checkout.checkout_path.to_string_lossy())) };
-                format!("submodule registration {}:{}:{} is untracked and would not survive discard; run `git{directory} add {}` to preserve it before suspending", entry.checkout.repository_id, entry.checkout.checkout_path.display(), entry.value.display(), mj_core::targets::posix_quote(&entry.value.to_string_lossy()))
-            }).collect::<Vec<_>>().join("; ")),
-            Self::IntentToAdd(paths) => write!(f, "{}", paths.iter().map(|entry| {
-                let directory = if entry.checkout.checkout_path.as_os_str().is_empty() { String::new() }
-                    else { format!(" -C {}", mj_core::targets::posix_quote(&entry.checkout.checkout_path.to_string_lossy())) };
-                let path = mj_core::targets::posix_quote(&entry.value.to_string_lossy());
-                format!("intent-to-add {}:{}:{} cannot be captured; run `git{directory} add {path}` to stage its contents, or `git{directory} reset -- {path}` to leave it untracked",
-                    entry.checkout.repository_id, entry.checkout.checkout_path.display(), entry.value.display())
-            }).collect::<Vec<_>>().join("; ")),
-            Self::HiddenTrackedEdits(paths) => write!(
-                f,
-                "{} have skip-worktree or assume-unchanged flags; clear those flags before suspending or moving so all tracked edits can be verified",
-                paths
-                    .iter()
-                    .map(|path| format!(
-                        "{}:{}:{}",
-                        path.checkout.repository_id,
-                        path.checkout.checkout_path.display(),
-                        path.value.display()
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Self::UnrepresentedGitState { directories, worktrees } => {
-                let mut items = directories.iter().map(|item| format!("unsupported Git state at {}; finish or remove it through Git before suspending", item.value.display())).collect::<Vec<_>>();
-                items.extend(worktrees.iter().map(|item| {
-                    let repo = mj_core::targets::posix_quote(&item.value.git_dir.to_string_lossy());
-                    let path = mj_core::targets::posix_quote(&item.value.path.to_string_lossy());
-                    let alternative = if item.value.can_move_inside && !item.value.locked { " or move it inside the clone" } else { "" };
+            Self::UntrackedSubmoduleRegistration(paths)
+            | Self::IntentToAdd(paths)
+            | Self::HiddenTrackedEdits(paths) => {
+                let mut groups: Vec<(&CheckoutKey, Vec<&Path>)> = Vec::new();
+                for entry in paths {
+                    if let Some((_, values)) =
+                        groups.iter_mut().find(|(key, _)| **key == entry.checkout)
                     {
-                    let locked = if item.value.locked { format!("; this worktree is locked: once it is available and its contents are safe, deliberately run `git --git-dir {repo} --work-tree {repo} worktree unlock {path}` first") } else { String::new() };
-                    format!("unrepresented worktree {}{locked}; push or copy out anything wanted, then run `git --git-dir {repo} --work-tree {repo} worktree remove --force {path}`{alternative} before suspending", item.value.path.display())
+                        values.push(&entry.value);
+                    } else {
+                        groups.push((&entry.checkout, vec![&entry.value]));
+                    }
                 }
-                }));
+                for (i, (checkout, paths)) in groups.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    let directory = if checkout.checkout_path.as_os_str().is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " -C {}",
+                            mj_core::targets::posix_quote(
+                                &checkout.checkout_path.to_string_lossy()
+                            )
+                        )
+                    };
+                    let args = paths
+                        .iter()
+                        .map(|p| mj_core::targets::posix_quote(&p.to_string_lossy()))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let names = paths
+                        .iter()
+                        .map(|p| format_scoped_path(checkout, p))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    match self {
+                        Self::HiddenTrackedEdits(_) => write!(
+                            f,
+                            "{names} have skip-worktree or assume-unchanged flags; run `git{directory} update-index --no-skip-worktree -- {args}` then `git{directory} update-index --no-assume-unchanged -- {args}` before suspending or moving"
+                        )?,
+                        Self::IntentToAdd(_) => write!(
+                            f,
+                            "intent-to-add {names} cannot be captured; run `git{directory} add -- {args}` to stage contents, or `git{directory} reset -- {args}` to leave them untracked"
+                        )?,
+                        _ => write!(
+                            f,
+                            "submodule registration {names} is untracked and would not survive discard; run `git{directory} add -- {args}` to preserve it before suspending"
+                        )?,
+                    }
+                }
+                Ok(())
+            }
+            Self::UnrepresentedGitState {
+                directories,
+                worktrees,
+            } => {
+                let mut items = directories.iter().map(|item| format!("unsupported Git state at {}; finish or remove it through Git before suspending", item.value.display())).collect::<Vec<_>>();
+                let mut groups: BTreeMap<(PathBuf, bool), Vec<&UnrepresentedWorktree>> =
+                    BTreeMap::new();
+                for item in worktrees {
+                    let tree = &item.value;
+                    let git = worktree_git_invocation(&tree.git_dir);
+                    let path = mj_core::targets::posix_quote(&tree.path.to_string_lossy());
+                    if tree.locked {
+                        items.push(format!("locked unrepresented worktree {}; once it is available, push or copy out anything wanted, then run `{git} worktree unlock {path}` followed by `{git} worktree remove --force {path}` before suspending", tree.path.display()));
+                    } else {
+                        groups
+                            .entry((tree.git_dir.clone(), tree.can_move_inside))
+                            .or_default()
+                            .push(tree);
+                    }
+                }
+                for ((git_dir, movable), trees) in groups {
+                    let git = worktree_git_invocation(&git_dir);
+                    let alternative = if movable {
+                        " or move each inside the clone"
+                    } else {
+                        ""
+                    };
+                    if trees.len() == 1 {
+                        let path = mj_core::targets::posix_quote(&trees[0].path.to_string_lossy());
+                        items.push(format!("unrepresented worktree {}; push or copy out anything wanted, then run `{git} worktree remove --force {path}`{alternative} before suspending", trees[0].path.display()));
+                    } else {
+                        items.push(format!("{} unrepresented worktrees outside the clone; push or copy out anything wanted, then remove each with `{git} worktree remove --force <path>`{alternative} before suspending", trees.len()));
+                    }
+                }
                 write!(f, "{}", items.join("; "))
             }
-            Self::DirtySubmodule(path) => write!(f,
-                "submodule {}:{}:{} has tracked changes or an origin-relative delta; commit and push the work (including wanted refs and stashes)",
-                path.checkout.repository_id, path.checkout.checkout_path.display(), path.value.display()),
+            Self::DirtySubmodule(path) => write!(
+                f,
+                "submodule {} has tracked changes or an origin-relative delta; commit and push the work (including wanted refs and stashes)",
+                format_scoped_path(&path.checkout, &path.value)
+            ),
             Self::OperationInProgress(operation) => {
                 write!(
                     f,
-                    "{:?} in progress at {}:{}; finish it or run `git {command} {argument}` there before suspending",
+                    "{:?} in progress at {}; finish it or run `git {command} {argument}` there before suspending",
                     operation.kind,
-                    operation.checkout.repository_id,
-                    operation.checkout.checkout_path.display(),
+                    format_checkout_key(&operation.checkout),
                     command = abort_operation_arguments(operation.kind)[0],
                     argument = abort_operation_arguments(operation.kind)[1],
                 )
@@ -295,18 +432,13 @@ impl std::fmt::Display for SnapshotRefused {
                 )?;
                 for item in items {
                     match item {
-                        UntrackedItem::Path { checkout, path, .. } => write!(
-                            f,
-                            " {}:{}:{}",
-                            checkout.repository_id,
-                            checkout.checkout_path.display(),
-                            path.display()
-                        )?,
+                        UntrackedItem::Path { checkout, path, .. } => {
+                            write!(f, " {}", format_scoped_path(checkout, path))?
+                        }
                         UntrackedItem::NestedRepository { checkout, path, .. } => write!(
                             f,
-                            " {}:{} nested repository {}",
-                            checkout.repository_id,
-                            checkout.checkout_path.display(),
+                            " {} nested repository {}",
+                            format_checkout_key(checkout),
                             path.display()
                         )?,
                         UntrackedItem::Stash {
@@ -315,20 +447,21 @@ impl std::fmt::Display for SnapshotRefused {
                             message,
                         } => write!(
                             f,
-                            " {}:{} stash {commit} ({message})",
-                            checkout.repository_id,
-                            checkout.checkout_path.display()
+                            " {} stash {commit} ({message})",
+                            format_checkout_key(checkout)
                         )?,
                         UntrackedItem::KeepDirFile { checkout, path, .. } => write!(
                             f,
-                            " {}:{} .mj/keep/{}",
-                            checkout.repository_id,
-                            checkout.checkout_path.display(),
+                            " {} .mj/keep/{}",
+                            format_checkout_key(checkout),
                             path.display()
                         )?,
                     }
                 }
-                write!(f, ". Commit wanted files, move them outside the clone, or remove them before suspending. Preserve wanted stash contents outside the clone before dropping those stashes.")
+                write!(
+                    f,
+                    ". Commit wanted files, move them outside the clone, or remove them before suspending. Preserve wanted stash contents outside the clone before dropping those stashes."
+                )
             }
         }
     }
@@ -4288,6 +4421,61 @@ mod tests {
             .trim_end_matches('\n')
             .to_owned()
     }
+    #[test]
+    fn hidden_tracked_flags_are_detected_and_remedy_uses_separate_commands() {
+        let root = Repo::new();
+        git(
+            &root.checkout,
+            &["update-index", "--skip-worktree", "--", "file"],
+        );
+        let hidden = crate::archive::git::hidden_tracked_paths(&FileGit, &root.checkout).unwrap();
+        assert!(!hidden.is_empty());
+        let checkout = CheckoutKey {
+            repository_id: "project".into(),
+            checkout_path: root.checkout.clone(),
+        };
+        let remedy = SnapshotRefused::HiddenTrackedEdits(
+            hidden.into_iter().map(|p| scoped(&checkout, p)).collect(),
+        )
+        .to_string();
+        assert!(remedy.contains(" update-index --no-skip-worktree -- "));
+        assert!(remedy.contains(" update-index --no-assume-unchanged -- "));
+        assert!(remedy.contains(" then `git -C "));
+        assert!(!remedy.contains("--no-skip-worktree --no-assume-unchanged"));
+    }
+
+    #[test]
+    fn external_worktrees_group_unlocked_and_call_out_locked() {
+        let key = CheckoutKey::default();
+        let trees = (0..4)
+            .map(|i| {
+                scoped(
+                    &key,
+                    UnrepresentedWorktree {
+                        locked: i == 3,
+                        can_move_inside: true,
+                        git_dir: "/clone/.git".into(),
+                        path: format!("/outside/{i}").into(),
+                    },
+                )
+            })
+            .collect();
+        let remedy = SnapshotRefused::UnrepresentedGitState {
+            directories: vec![],
+            worktrees: trees,
+        }
+        .to_string();
+        assert!(remedy.contains("3 unrepresented worktrees"));
+        assert!(remedy.contains("locked unrepresented worktree /outside/3"));
+        assert!(remedy.contains("git -C '/clone' worktree unlock '/outside/3'"));
+        assert!(remedy.contains("git -C '/clone' worktree remove --force <path>"));
+        assert!(!remedy.contains("--work-tree"));
+        assert_eq!(
+            worktree_git_invocation(Path::new("/bare.git")),
+            "git --git-dir '/bare.git'"
+        );
+    }
+
     struct Repo {
         temp: tempfile::TempDir,
         origin: PathBuf,
@@ -6341,7 +6529,7 @@ mod tests {
             Some(SnapshotRefused::DirtySubmodule(_))
         ));
         assert!(
-            refused.to_string().contains("submodule workspace::sub"),
+            refused.to_string().contains("submodule workspace:sub"),
             "{refused:#}"
         );
         let raw = capture(&CheckoutOwnership::Raw { launch: None }).unwrap();

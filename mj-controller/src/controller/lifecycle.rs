@@ -548,11 +548,23 @@ impl Controller {
                             .blockers
                             .extend(inventory.blockers.into_iter().map(|b| {
                                 mj_core::suspend_consent::SuspendBlocker {
-                                    kind: format!("{:?}", b.kind),
+                                    kind: b.kind.kind_code().to_owned(),
                                     paths: b
                                         .paths
                                         .into_iter()
-                                        .map(|p| p.value.display().to_string())
+                                        .map(|p| {
+                                            if p.value.is_relative()
+                                                && !p.checkout.checkout_path.as_os_str().is_empty()
+                                            {
+                                                p.checkout
+                                                    .checkout_path
+                                                    .join(&p.value)
+                                                    .display()
+                                                    .to_string()
+                                            } else {
+                                                p.value.display().to_string()
+                                            }
+                                        })
                                         .collect(),
                                     remedy: b.remedy,
                                 }

@@ -119,6 +119,66 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
+=== suspend dialog with blockers (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│hel ───────  │Session: session-1                                                    │  on.        │
+│› · ACP pre  │Cannot suspend until these blockers are resolved:                     │             │
+│  Idle  pod  │1. Hidden tracked edits (7 items)                                     │             │
+│  │ No mess  │  - linked/file-1.txt                                                 │             │
+│  │          │  - linked/file-2.txt                                                 │             │
+│             │  - linked/file-3.txt                                                 │  ───────────╯
+│             │  - linked/file-4.txt                                                 │  ───────────╮
+│             │  - linked/file-5.txt                                                 │             │
+│             │  and 2 more (v to view all)                                          │  o open.    │
+╰───────────  │  Fix: Clear index flags in the linked checkout before suspending.    │  ───────────╯
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │c Cancel                                                              │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │                                                                      │             │
+│OPENAI       │  Cancel                                                              │             │
+│ + 2 refres  ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
+=== suspend blockers expanded (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│hel ───────  │Session: session-1                                                    │  on.        │
+│› · ACP pre  │Cannot suspend until these blockers are resolved:                     │             │
+│  Idle  pod  │1. Hidden tracked edits (7 items)                                     │             │
+│  │ No mess  │  - linked/file-1.txt                                                 │             │
+│  │          │  - linked/file-2.txt                                                 │             │
+│             │  - linked/file-3.txt                                                 │  ───────────╯
+│             │  - linked/file-4.txt                                                 │  ───────────╮
+│             │  - linked/file-5.txt                                                 │             │
+│             │  - linked/file-6.txt                                                 │  o open.    │
+╰───────────  │  - linked/file-7.txt                                                 │  ───────────╯
+╭ Targets ▾   │  Fix: Clear index flags in the linked checkout before suspending.    │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │c Cancel                                                              │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │                                                                      │             │
+│OPENAI       │  Cancel                                                              │             │
+│ + 2 refres  ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
 === suspend dialog with backend-only warnings (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │

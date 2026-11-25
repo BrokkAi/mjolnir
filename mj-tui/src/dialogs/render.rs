@@ -1596,11 +1596,34 @@ pub(crate) fn confirmation_body(
                         "Cannot suspend until these blockers are resolved:",
                         Style::default().fg(theme::palette().error),
                     ));
-                    for blocker in &preflight.blockers {
-                        lines.push(Line::raw(format!(
-                            "  {} — {}",
-                            blocker.kind, blocker.remedy
-                        )));
+                    for (index, blocker) in preflight.blockers.iter().enumerate() {
+                        if index > 0 {
+                            lines.push(Line::raw(""));
+                        }
+                        lines.push(Line::styled(
+                            format!(
+                                "{}. {} ({} items)",
+                                index + 1,
+                                blocker.title(),
+                                blocker.paths.len()
+                            ),
+                            Style::default().fg(theme::palette().warning),
+                        ));
+                        let limit = if *viewing_all_untracked {
+                            blocker.paths.len()
+                        } else {
+                            5
+                        };
+                        for path in blocker.paths.iter().take(limit) {
+                            lines.push(Line::raw(format!("  - {path}")));
+                        }
+                        if blocker.paths.len() > limit {
+                            lines.push(Line::raw(format!(
+                                "  and {} more (v to view all)",
+                                blocker.paths.len() - limit
+                            )));
+                        }
+                        lines.push(Line::raw(format!("  Fix: {}", blocker.remedy)));
                     }
                 } else {
                     lines.push(Line::raw(

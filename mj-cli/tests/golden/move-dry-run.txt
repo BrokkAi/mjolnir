@@ -1,4 +1,6 @@
 Route: direct host-to-host (or daemon stream fallback)
 Untracked files: 1, nested repositories: 0, untracked stashes: 0
 Blockers:
-  - unrepresented worktree /workspace/outside; push or copy out anything wanted, then run `git --git-dir /workspace/clone --work-tree /workspace/clone worktree remove --force /workspace/outside` or move it inside the clone before suspending
+  External worktrees & Git state
+    - /workspace/outside
+    fix: unrepresented worktree /workspace/outside; push or copy out anything wanted, then run `git -C /workspace/clone worktree remove --force /workspace/outside` or move it inside the clone before suspending

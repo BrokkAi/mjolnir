@@ -916,6 +916,18 @@ fn golden_dashboard_dialogs() {
                 ..Default::default()
             },
         ),
+        (
+            "suspend dialog with blockers",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                    kind: "hidden_tracked_edits".into(),
+                    paths: (1..=7).map(|i| format!("linked/file-{i}.txt")).collect(),
+                    remedy: "Clear index flags in the linked checkout before suspending.".into(),
+                }],
+                ..Default::default()
+            },
+        ),
         // Hard-won: #1679: backend-only warnings showed Continue anyway without a reason.
         (
             "suspend dialog with backend-only warnings",
@@ -942,6 +954,11 @@ fn golden_dashboard_dialogs() {
         );
         let lines = drawn(&mut dashboard, 100, 28);
         append_dialog_render(&mut output, label, 100, 28, &lines);
+        if label == "suspend dialog with blockers" {
+            dashboard.handle_key(key(KeyCode::Char('v')));
+            let lines = drawn(&mut dashboard, 100, 28);
+            append_dialog_render(&mut output, "suspend blockers expanded", 100, 28, &lines);
+        }
     }
 
     let mut targets = dashboard_with_session(running_session());

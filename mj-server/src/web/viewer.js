@@ -1,3 +1,25 @@
+function blockerTitle(kind) {
+  return {"untracked": "Untracked items", "operation_in_progress": "Git operation in progress", "dirty_submodule": "Dirty submodule", "missing_managed_origin": "Missing Git origin", "origin_removed_by_teardown": "Origin depends on clone", "unrepresented_git_state": "External worktrees & Git state", "hidden_tracked_edits": "Hidden tracked edits", "intent_to_add": "Intent-to-add files", "untracked_submodule_registration": "Untracked submodule registration", "tracked_keep_files": "Tracked .mj/keep files"}[kind] || kind;
+}
+function suspendBlockerSection(b, index) {
+  const section = el('section');
+  const paths = b.paths || [];
+  section.append(el('strong', '', `${index + 1}. ${blockerTitle(b.kind)} (${paths.length} items)`));
+  const pathList = el('ul');
+  for (const path of paths.slice(0, 5)) pathList.append(el('li', '', path));
+  section.append(pathList);
+  if (paths.length > 5) {
+    const details = el('details');
+    details.append(el('summary', '', `Show ${paths.length - 5} more`));
+    const rest = el('ul');
+    for (const path of paths.slice(5)) rest.append(el('li', '', path));
+    details.append(rest);
+    section.append(details);
+  }
+  section.append(el('p', '', `Fix: ${b.remedy}`));
+  return section;
+}
+
 import { renderMarkdown } from './markdown.js';
 import { renderToolOutput } from './tool-output.js';
 
@@ -6930,9 +6952,10 @@ function confirmSessionSuspension(session) {
         const ops = preflight.operations || [];
         if (blockers.length) {
           dialog.insertBefore(el('p', 'danger', 'Cannot suspend until these blockers are resolved:'), controls);
-          const list = el('ul');
-          for (const b of blockers) {
-            list.append(el('li', '', `${b.kind}: ${b.remedy}`));
+          const list = el('div');
+          for (const [index, b] of blockers.entries()) {
+            const section = suspendBlockerSection(b, index);
+            list.append(section);
           }
           dialog.insertBefore(list, controls);
           return;

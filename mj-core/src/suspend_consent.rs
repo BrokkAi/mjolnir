@@ -203,6 +203,48 @@ pub struct SuspendBlocker {
     pub remedy: String,
 }
 
+impl SuspendBlocker {
+    pub fn title(&self) -> &str {
+        match self.kind.as_str() {
+            "untracked" => "Untracked items",
+            "operation_in_progress" => "Git operation in progress",
+            "dirty_submodule" => "Dirty submodule",
+            "missing_managed_origin" => "Missing Git origin",
+            "origin_removed_by_teardown" => "Origin depends on clone",
+            "unrepresented_git_state" => "External worktrees & Git state",
+            "hidden_tracked_edits" => "Hidden tracked edits",
+            "intent_to_add" => "Intent-to-add files",
+            "untracked_submodule_registration" => "Untracked submodule registration",
+            "tracked_keep_files" => "Tracked .mj/keep files",
+            _ => &self.kind,
+        }
+    }
+    pub fn is_auto_fixable(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "hidden_tracked_edits" | "unrepresented_git_state"
+        )
+    }
+}
+impl SuspendPreflight {
+    pub fn has_auto_fixable_blockers(&self) -> bool {
+        self.blockers.iter().any(SuspendBlocker::is_auto_fixable)
+    }
+}
+pub fn format_blocker_cleanup_prompt(blockers: &[SuspendBlocker]) -> String {
+    let mut text = String::from(
+        "Inspect and resolve these suspend blockers. Preserve or push wanted work, then report when ready to suspend.\n",
+    );
+    for blocker in blockers {
+        text.push_str(&format!("\n{}\n", blocker.title()));
+        for path in &blocker.paths {
+            text.push_str(&format!("- {path}\n"));
+        }
+        text.push_str(&format!("Fix: {}\n", blocker.remedy));
+    }
+    text
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExistingCheckpointSummary {
@@ -454,4 +496,27 @@ pub fn format_move_untracked_refusal(count: usize, first_paths: &[String]) -> St
         "{count} untracked files will not be kept: {}{suffix} `git add` (or commit) anything you want to keep, or pass `--discard-untracked`.",
         preview.join(", ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspend_blocker_wire_schema_preserves_legacy_kinds_and_rejects_unknown_fields() {
+        let legacy = r#"{"kind":"HiddenTrackedEdits legacy detail","paths":["linked/file"],"remedy":"preserve work"}"#;
+        let blocker: SuspendBlocker = serde_json::from_str(legacy).unwrap();
+        assert_eq!(blocker.title(), "HiddenTrackedEdits legacy detail");
+        assert_eq!(
+            serde_json::from_str::<SuspendBlocker>(&serde_json::to_string(&blocker).unwrap())
+                .unwrap(),
+            blocker
+        );
+        assert!(
+            serde_json::from_str::<SuspendBlocker>(
+                r#"{"kind":"hidden_tracked_edits","paths":[],"remedy":"","extra":true}"#
+            )
+            .is_err()
+        );
+    }
 }
