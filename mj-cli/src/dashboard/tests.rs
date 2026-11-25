@@ -2039,3 +2039,64 @@ async fn workspace_draft_recovery_rejects_unmergeable_input_before_staging_retir
     );
     assert!(cache.start("session", true).is_none());
 }
+
+/// The daemon's remembered per-profile Oracle choice must reach the new-session
+/// draft from the startup snapshot and from every later runtime update.
+#[test]
+fn remembered_oracle_choice_reaches_the_new_session_draft_from_startup_and_updates() {
+    // The wizard draft reads exactly this accessor's data (`State::last_oracle_choices`).
+    let draft_oracle = |state: &State| state.last_oracle_choice_for("codex-1");
+    let mut daemon_state = State::default();
+    daemon_state
+        .last_oracle_choices
+        .insert("codex-1".into(), false);
+    // The feed's wire shape keeps one key per preference.
+    let wire = serde_json::to_value(mj_client::runtime_feed::RuntimeMetadata {
+        launch_preferences: daemon_state.launch_preferences(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(wire["last_oracle_choices"]["codex-1"], false);
+    assert!(wire["last_subagent_policies"].is_object());
+    let metadata: mj_client::runtime_feed::RuntimeMetadata = serde_json::from_value(wire).unwrap();
+
+    let loaded = LoadedDashboard::from_daemon(
+        "workspace",
+        "client",
+        Vec::new(),
+        mj_client::daemon::DashboardStartup {
+            runtime: mj_client::runtime_feed::RuntimeBootstrap {
+                cursor: mj_client::runtime_feed::RuntimeCursor {
+                    alert_sequence: 0,
+                    incarnation: "test".into(),
+                    sequence: 0,
+                    subagent_parents: Default::default(),
+                },
+                projection: mj_client::runtime_feed::RuntimeProjection {
+                    metadata,
+                    ..Default::default()
+                },
+            },
+            metadata: Default::default(),
+            pane_sizes: Default::default(),
+            conversation_layouts: Default::default(),
+            queued_prompts: Default::default(),
+        },
+    );
+    let mut state = loaded.controller.state.clone();
+    assert!(!draft_oracle(&state), "startup keeps the saved choice");
+
+    // An update that changes only another preference leaves the choice alone.
+    let mut update = daemon_state.launch_preferences();
+    update
+        .last_subagent_policies
+        .insert("codex-1".into(), mj_core::subagent::SubagentPolicy::None);
+    assert!(state.apply_launch_preferences(update.clone()));
+    assert!(!draft_oracle(&state));
+    assert!(!state.apply_launch_preferences(update.clone()), "unchanged");
+
+    // A later choice replaces it.
+    update.last_oracle_choices.clear();
+    assert!(state.apply_launch_preferences(update));
+    assert!(draft_oracle(&state));
+}
