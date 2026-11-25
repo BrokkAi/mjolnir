@@ -179,7 +179,13 @@ impl<'a> GitAccess<'a> {
     /// Claude `denyWrite` entries: hooks and configuration everywhere, and
     /// the siblings of a worktree-only session whole (Claude grants the
     /// common directory, so its own children are carved back out).
-    fn claude_denials(&self) -> BTreeSet<PathBuf> {
+    ///
+    /// `granted` is whether Claude is also granted these common directories.
+    /// Roots that are only preserved for a borrowed child are writable to
+    /// Claude as additional directories, with nothing granted by Mjolnir and
+    /// no native hooks or configuration protection, so their siblings are
+    /// protected file by file.
+    fn claude_denials(&self, granted: bool) -> BTreeSet<PathBuf> {
         let mut deny = BTreeSet::new();
         for common_dir in self.common_dirs() {
             for name in ["hooks", "config", "config.lock", "config.worktree"] {
@@ -187,12 +193,12 @@ impl<'a> GitAccess<'a> {
             }
             self.deny_modules(&common_dir.join("modules"), &mut deny);
             for other in sibling_worktrees(common_dir, &self.own) {
-                if self.clones.contains(common_dir) {
+                if granted && !self.clones.contains(common_dir) {
+                    deny.insert(other);
+                } else {
                     for name in ["config.worktree", "commondir", "gitdir"] {
                         deny.insert(other.join(name));
                     }
-                } else {
-                    deny.insert(other);
                 }
             }
         }
@@ -530,10 +536,9 @@ pub(super) fn configure_claude_git_sandbox(
         return Ok(());
     }
     let previous = match std::fs::read(&grants_path) {
-        Ok(body) => serde_json::from_slice::<ClaudeGrants>(&body).unwrap_or_else(|error| {
-            tracing::warn!(path = %grants_path.display(), %error, "ignoring unreadable sandbox grant record");
-            ClaudeGrants::default()
-        }),
+        // An unreadable record is an error: it names what Mjolnir may remove.
+        Ok(body) => serde_json::from_slice::<ClaudeGrants>(&body)
+            .with_context(|| format!("parse sandbox grant record {}", grants_path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ClaudeGrants::default(),
         Err(error) => {
             return Err(error).with_context(|| format!("read {}", grants_path.display()));
@@ -550,7 +555,26 @@ pub(super) fn configure_claude_git_sandbox(
         );
         desired.deny_write.extend(
             GitAccess::new(&targets)
-                .claude_denials()
+                .claude_denials(true)
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+        // Owner roots kept for a borrowed child are additional directories to
+        // Claude whether or not it works in them. Their hooks and
+        // configuration need the protection a working directory has, though
+        // nothing more is granted.
+        let covered = targets
+            .iter()
+            .map(|target| target.common_dir.clone())
+            .collect::<BTreeSet<_>>();
+        let preserved =
+            resolve_git_sandbox_targets(&sandbox.approved_roots, &sandbox.approved_roots)
+                .into_iter()
+                .filter(|target| !covered.contains(&target.common_dir))
+                .collect::<Vec<_>>();
+        desired.deny_write.extend(
+            GitAccess::new(&preserved)
+                .claude_denials(false)
                 .into_iter()
                 .map(|path| path.to_string_lossy().into_owned()),
         );
@@ -1223,6 +1247,77 @@ mod tests {
             repositories.clone.join(".git/worktrees/linked")
         );
         assert_eq!(targets[0].common_dir, repositories.clone.join(".git"));
+    }
+
+    #[test]
+    fn claude_protects_preserved_owner_roots_the_child_does_not_work_in() {
+        let repositories = repositories();
+        let git_dir = repositories.clone.join(".git");
+        let unrelated = repositories.base.join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        let root = repositories.base.join("worker");
+        let home = claude_home(&root);
+        // The child works outside any repository; its owner's clone is only
+        // an additional directory to Claude, writable and unprotected.
+        configure_claude_git_sandbox(
+            &root,
+            "session",
+            &home,
+            ExecutionPolicy::ConfiguredApprovals,
+            &HarnessSandbox {
+                directories: Vec::new(),
+                git_roots: Vec::new(),
+                approved_roots: vec![unrelated, repositories.clone.clone()],
+            },
+        )
+        .unwrap();
+
+        let filesystem = &claude_settings(&home)["sandbox"]["filesystem"];
+        let deny = filesystem["denyWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        for name in [
+            "hooks",
+            "config",
+            "config.lock",
+            "config.worktree",
+            "modules",
+        ] {
+            let protected = git_dir.join(name).to_str().unwrap().to_owned();
+            assert!(deny.contains(&protected), "{protected}");
+        }
+        let linked = git_dir.join("worktrees/linked");
+        for name in ["config.worktree", "commondir", "gitdir"] {
+            let protected = linked.join(name).to_str().unwrap().to_owned();
+            assert!(deny.contains(&protected), "{protected}");
+        }
+        // Nothing is granted: the child does not work in that repository.
+        assert!(filesystem.get("allowWrite").is_none());
+    }
+
+    #[test]
+    fn a_malformed_grant_record_is_an_error_that_leaves_the_settings_alone() {
+        let repositories = repositories();
+        let root = repositories.base.join("worker");
+        let home = claude_home(&root);
+        let settings = b"{\"sandbox\": {\"enabled\": true}}\n";
+        std::fs::write(home.join("settings.json"), settings).unwrap();
+        std::fs::write(home.join(CLAUDE_GRANTS_FILE), b"{not json").unwrap();
+
+        let error = configure_claude_git_sandbox(
+            &root,
+            "session",
+            &home,
+            ExecutionPolicy::ConfiguredApprovals,
+            &sandbox(vec![repositories.worktree.clone()], Vec::new()),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("parse sandbox grant record"));
+        assert_eq!(std::fs::read(home.join("settings.json")).unwrap(), settings);
     }
 
     #[test]
