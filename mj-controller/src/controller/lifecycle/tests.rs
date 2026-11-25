@@ -4183,6 +4183,71 @@ fn move_keep_preflight_and_capture_share_source_selection() {
 }
 
 #[cfg(unix)]
+#[test]
+fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
+    let name = "suspend_refusal_includes_paths_for_grouped_external_worktrees";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    let worktrees = [
+        directory.path().join("outside/first"),
+        directory.path().join("outside/second"),
+    ];
+    for worktree in &worktrees {
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["worktree", "add", "--detach"])
+            .arg(worktree)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Running;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(name),
+    }));
+    attach_local_managed_clone(&mut session, repo, origin);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+
+    let refusal = controller
+        .preflight_origin_delta_suspension(
+            name,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    let message = format!("{refusal:#}");
+    for worktree in &worktrees {
+        assert!(
+            message.contains(&worktree.display().to_string()),
+            "refusal omitted {}: {message}",
+            worktree.display()
+        );
+    }
+    assert!(
+        message.contains("worktree remove --force <path>"),
+        "refusal omitted grouped removal command: {message}"
+    );
+}
+
+#[cfg(unix)]
 fn init_managed_clone_with_origin(temp: &std::path::Path, session_id: &str) -> (PathBuf, PathBuf) {
     let origin = temp.join("origin.git");
     let seed = temp.join("seed");

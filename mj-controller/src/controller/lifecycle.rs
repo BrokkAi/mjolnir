@@ -745,7 +745,19 @@ impl Controller {
             let summary = preflight
                 .blockers
                 .iter()
-                .map(|b| b.remedy.as_str())
+                .map(|b| {
+                    let missing_paths = b
+                        .paths
+                        .iter()
+                        .filter(|path| !b.remedy.contains(path.as_str()))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if missing_paths.is_empty() {
+                        b.remedy.clone()
+                    } else {
+                        format!("{} [{}]", b.remedy, missing_paths.join(", "))
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(mj_core::refusal::Refusal::precondition(summary).into());

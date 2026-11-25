@@ -395,15 +395,20 @@ impl std::fmt::Display for SnapshotRefused {
                 }
                 for ((git_dir, movable), trees) in groups {
                     let git = worktree_git_invocation(&git_dir);
-                    let alternative = if movable {
-                        " or move each inside the clone"
-                    } else {
-                        ""
-                    };
                     if trees.len() == 1 {
+                        let alternative = if movable {
+                            " or move it inside the clone"
+                        } else {
+                            ""
+                        };
                         let path = mj_core::targets::posix_quote(&trees[0].path.to_string_lossy());
                         items.push(format!("unrepresented worktree {}; push or copy out anything wanted, then run `{git} worktree remove --force {path}`{alternative} before suspending", trees[0].path.display()));
                     } else {
+                        let alternative = if movable {
+                            " or move each inside the clone"
+                        } else {
+                            ""
+                        };
                         items.push(format!("{} unrepresented worktrees outside the clone; push or copy out anything wanted, then remove each with `{git} worktree remove --force <path>`{alternative} before suspending", trees.len()));
                     }
                 }
@@ -3179,8 +3184,35 @@ pub fn resolve_safe_suspend_blockers(
                 ));
                 continue;
             }
-            let parent = root.join(".mj/worktrees");
-            fs::create_dir_all(&parent)?;
+            let parent =
+                match mj_core::confined_path::ConfinedDir::open_root(&root).and_then(|root_dir| {
+                    root_dir
+                        .context("managed clone root disappeared")?
+                        .create_dir_all(Path::new(".mj/worktrees"))
+                }) {
+                    Ok(parent) => parent.path().to_path_buf(),
+                    Err(_) => {
+                        result.skipped_worktrees.push(format!(
+                            "{} (.mj/worktrees escapes clone)",
+                            tree.path.display()
+                        ));
+                        continue;
+                    }
+                };
+            let Ok(canonical_parent) = fs::canonicalize(&parent) else {
+                result.skipped_worktrees.push(format!(
+                    "{} (.mj/worktrees escapes clone)",
+                    tree.path.display()
+                ));
+                continue;
+            };
+            if !canonical_parent.starts_with(&root) {
+                result.skipped_worktrees.push(format!(
+                    "{} (.mj/worktrees escapes clone)",
+                    tree.path.display()
+                ));
+                continue;
+            }
             let name = tree
                 .path
                 .file_name()
@@ -4731,6 +4763,58 @@ mod tests {
                 assert!(flags.contains("H present"), "{flags}");
             }
             assert!(git(&repo.checkout, &["status", "--porcelain"]).is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_suspend_remediation_skips_worktrees_when_managed_destination_escapes() {
+        for symlink_dot_mj in [false, true] {
+            let repo = Repo::new();
+            let outside = repo.temp.path().join("outside-target");
+            fs::create_dir(&outside).unwrap();
+            let external = repo.temp.path().join("external/lane");
+            fs::create_dir_all(external.parent().unwrap()).unwrap();
+            git(
+                &repo.checkout,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    external.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            if symlink_dot_mj {
+                std::os::unix::fs::symlink(&outside, repo.checkout.join(".mj")).unwrap();
+            } else {
+                fs::create_dir(repo.checkout.join(".mj")).unwrap();
+                std::os::unix::fs::symlink(&outside, repo.checkout.join(".mj/worktrees")).unwrap();
+            }
+
+            let input = crate::checkpoint::managed_clone_snapshot_input(
+                "project",
+                &repo.checkout,
+                None,
+                PathBuf::new(),
+                None,
+            )
+            .unwrap();
+            let fixed = resolve_safe_suspend_blockers(&FileGit, &[input]).unwrap();
+
+            assert!(fixed.moved_worktrees.is_empty());
+            assert_eq!(
+                fixed.skipped_worktrees,
+                [format!(
+                    "{} (.mj/worktrees escapes clone)",
+                    external.display()
+                )]
+            );
+            assert!(external.is_dir(), "external worktree must stay in place");
+            assert!(
+                fs::read_dir(&outside).unwrap().next().is_none(),
+                "symlink target must remain empty"
+            );
         }
     }
 
