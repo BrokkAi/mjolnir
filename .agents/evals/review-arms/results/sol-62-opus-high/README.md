@@ -135,9 +135,9 @@ historical frontier and retain the original per-configuration sample caps.
 [High](pareto-sev-high.csv) · [Medium](pareto-sev-medium.csv) ·
 [Low](pareto-sev-low.csv)
 
-### Single-reviewer performance versus cost
+### Single-model review performance versus cost
 
-![Single-reviewer yield versus cost, including historical Claude and partial DSF estimates](review-single-model-cost.png)
+![Single-model yield versus workflow cost, including historical Claude and partial DSF estimates](review-single-model-cost.png)
 
 Yield is normalized to Terra 6.1/high = 100 within each source study. Current
 measurements use filled markers; historical Claude and partial-cohort DSF
@@ -152,11 +152,18 @@ estimates use hollow markers. These series count different source outcomes:
   reviewer study**, preserved as `reviewcharts/data.json`, `native.csv` and
   `README.txt`. Yield is the mean material-root total, deduplicated within each
   PR and pass across follow-up revisions. Its denominator is Terra 6.1/high's
-  material-root total from that same historical cohort. Costs use the earlier
-  study's initial-head review estimates with the requested five-minute cache
-  normalization; they exclude follow-up review costs. Haiku/xhigh's horizontal
-  range is a historical pricing bound, with its marker at the midpoint. These are historical
-  proxies, not fresh Claude results on the current 70 diffs.
+  material-root total from that same historical cohort. The cost unit is the
+  **full PR workflow**, including follow-up reviews. For Opus/high, Sonnet/high
+  and Haiku/high, estimate that workflow at the observed initial-review mean
+  cost times **95 revision reviews / 47 PRs**. This charges every follow-up but
+  assumes it costs the same as an initial review; actual follow-up costs are
+  unavailable. Haiku/xhigh instead uses all 285 recorded review-cost bounds in
+  `reviewcharts/haiku-xhigh-metrics.json`, divided by 141 PR-passes. All costs
+  retain the requested five-minute cache-write normalization. Haiku/xhigh's
+  horizontal range is a request-tier pricing bound, with its marker at the
+  midpoint. The PNG itself labels these workflow assumptions and the different
+  corpus and grading method. These are historical estimates, not fresh Claude
+  results or a controlled comparison on the current 70 diffs.
 - **DSF/low estimate:** `verify9/sessions.csv`, `groups.csv` and
   `session_groups.csv` supply the DSF and control outcomes on the same 16
   covered diffs. Each matched-control estimate is DSF's 16-diff total times
