@@ -965,7 +965,34 @@ fn replace_queued_images_with_placeholders(
 }
 
 impl Controller {
+    fn move_native_continuity(&self, operation: &MoveOperation) -> Result<bool> {
+        if let Some(preparation) = &operation.accepted_preparation {
+            return Ok(!preparation.cross_harness);
+        }
+        let source_kind = self
+            .config
+            .named_profile(&operation.source_profile_id)
+            .map(|profile| profile.kind)
+            .unwrap_or(
+                self.state
+                    .sessions
+                    .get(&operation.selection.session_id)
+                    .context("Move session missing")?
+                    .harness_kind,
+            );
+        self.config.native_continuity(
+            source_kind,
+            &operation.source_profile_id,
+            operation
+                .selection
+                .profile_id
+                .as_ref()
+                .unwrap_or(&operation.source_profile_id),
+        )
+    }
+
     fn apply_in_place_destination(&mut self, operation: &MoveOperation) -> Result<()> {
+        let native_continuity = self.move_native_continuity(operation)?;
         let profile_id = operation
             .selection
             .profile_id
@@ -993,7 +1020,9 @@ impl Controller {
         if let Some(choice) = &operation.selection.oracle_choice {
             session.oracle_choice = Some(Box::new(choice.clone()));
         }
-        session.native_session_id = operation.destination_native_session_id.clone();
+        if !native_continuity {
+            session.native_session_id = None;
+        }
         session.updated_at = now();
         Ok(())
     }
@@ -2264,15 +2293,7 @@ impl Controller {
                 source_additional_mounts: Vec::new(),
                 source_resource_allocation: None,
                 destination_target: None,
-                destination_native_session_id: if checked.in_place && self.config.native_continuity(
-                    source.harness_kind,
-                    &source.last_profile,
-                    checked.selection.profile_id.as_ref().unwrap_or(&source.last_profile),
-                )? {
-                    source.native_session_id.clone()
-                } else {
-                    None
-                },
+                destination_native_session_id: None,
                 destination_store_id: None,
                 configuration_fingerprint: self
                     .move_configuration_fingerprint(&checked.selection)?,
@@ -2780,7 +2801,7 @@ impl Controller {
                         let reopen_admission = self.source_has_request_queue(&id);
                         if started {
                             let destination_id = operation.selection.profile_id.as_ref().unwrap_or(&operation.source_profile_id).clone();
-                            let native_continuity = operation.destination_native_session_id.is_some();
+                            let native_continuity = self.move_native_continuity(&operation)?;
                             self.apply_in_place_destination(&operation)?;
                             if let Some(launch) = self.committed_in_place_launch(&operation, executor)? {
                                 self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = launch.environment.get("AWS_PROFILE").cloned();
@@ -2801,6 +2822,11 @@ impl Controller {
                         // continuation is admitted and no queued prompt is discarded.
                         conn.client.release_in_place_move_dispatch_checked(&operation.operation_id, &expected_store_id, Some(started)).await?;
                         if reopen_admission { conn.set_subagent_admission(true).await?; }
+                        if started && let Err(error) = crate::worker_client::drain_retired_logins(
+                            &mut conn.client, |id| self.config.profiles.get(id).cloned(),
+                        ).await {
+                            tracing::warn!(session_id = %id, %error, "cancelled Move retired login adoption will retry");
+                        }
                         operation.in_place_expected_store_id = None;
                         operation.in_place_held_command_ids.clear();
                         operation.queue_admission_finished = true;
@@ -3372,11 +3398,11 @@ impl Controller {
                     .context("in-place Move requires a live worker connection")?
                     .connection_mut()
                     .protocol_version();
-                in_place::ensure_worker_supports_in_place_move(
-                    &id,
-                    protocol_version,
-                    operation.quota_stop_reason.is_some(),
-                )?;
+                if operation.in_place_expected_store_id.is_none() && !operation.in_place_harness_restarted {
+                    in_place::ensure_worker_supports_in_place_move(
+                        &id, protocol_version, operation.quota_stop_reason.is_some(),
+                    )?;
+                }
                 let dest_profile_id = operation
                     .selection
                     .profile_id
@@ -3570,6 +3596,9 @@ impl Controller {
                     }
                     if !operation.in_place_harness_restarted {
                         if reload_progress != InPlaceReloadProgress::Started {
+                        // Settle already-started legacy reloads, but never send
+                        // a new credential-destructive reload to a pre-93 worker.
+                        in_place::ensure_worker_supports_in_place_move(&id, protocol_version, operation.quota_stop_reason.is_some())?;
                         let source_harness = self
                             .state
                             .sessions
@@ -3673,27 +3702,12 @@ impl Controller {
                         let source_backend =
                             super::backend_locator(source_locator, &previous_session, &self.config)?;
                         let source_worker_root = crate::targets::worker_root(&source_backend, &id)?;
-                        // Pull any refreshed copied Codex login from the source
-                        // staged home into the source profile's canonical store
-                        // before overwriting the staged home with destination
-                        // profile files (#1638). Skip on retries where destination
-                        // files may already be staged on disk.
-                        if !had_prior_expected_store_id {
-                            self.pull_staged_codex_login(
-                                &id,
-                                &previous_session,
-                                &source_backend,
-                                executor,
-                            )
-                            .await
-                            .context("pull source Codex login before in-place Move")?;
-                        }
                         let source_harness_kind = self
                             .config
                             .named_profile(&operation.source_profile_id)
                             .map(|profile| profile.kind)
                             .unwrap_or(previous_session.harness_kind);
-                        let native_continuity = operation.destination_native_session_id.is_some();
+                        let native_continuity = self.move_native_continuity(operation)?;
                         let utility_handoff = if !native_continuity {
                             let materialized = crate::database::load_materialized_session(&id)?
                                 .context(
@@ -3912,6 +3926,11 @@ impl Controller {
                         crate::database::save_move_operation(operation)?;
                     }
                     return Err(err);
+                }
+                if let Err(error) = crate::worker_client::drain_retired_logins(
+                    &mut conn.client, |id| self.config.profiles.get(id).cloned(),
+                ).await {
+                    tracing::warn!(session_id = %id, %error, "Move retired login adoption will retry during credential sync");
                 }
                 operation.in_place_expected_store_id = None;
                 operation.in_place_held_command_ids.clear();

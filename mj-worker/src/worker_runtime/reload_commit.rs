@@ -134,7 +134,13 @@ pub fn commit_pending_reload(root: &Path, pending: &PendingInPlaceReload) -> Res
     atomic_private_write_nosync_dir(
         &root.join(PENDING_RELOAD_FILE),
         &serde_json::to_vec(pending)?,
-    )
+    )?;
+    // Commit before capture: after any later failure, startup must roll forward
+    // before a source writer can run again. A pre-commit preparation failure
+    // must not leave a write-once receipt that a retry could reuse after rotation.
+    mj_core::config::sync_directory(root)?;
+    preserve_retired_login(root, pending)?;
+    Ok(())
 }
 
 pub fn sync_pending_reload_dir(root: &Path) -> Result<()> {
@@ -206,6 +212,7 @@ pub fn apply_committed_reload(
         &pending.operation_id,
         &pending.expected_store_id,
     )?;
+    let retired = preserve_retired_login(root, pending)?;
     let candidate = root.join(RELOAD_CANDIDATES_DIR).join(&pending.candidate_id);
     let home = Path::new(&manifest.target_profile_home);
     let home = if home.is_absolute() {
@@ -224,6 +231,12 @@ pub fn apply_committed_reload(
     }
     directory(home)?;
     for clear in &manifest.clear_paths {
+        ensure!(
+            !root
+                .join(RETIRED_LOGINS)
+                .starts_with(home.join(relative(clear)?)),
+            "reload would clear retired logins"
+        );
         let relative = relative(clear)?;
         if let Some(parent) = relative.parent() {
             mj_core::confined_path::reject_symlinks(home, parent, true)?;
@@ -279,6 +292,7 @@ pub fn apply_committed_reload(
             anyhow::bail!("shared reload login requires Unix symlinks");
         }
     }
+    reconcile_retired_login(&candidate, home, &retired)?;
     for name in ["ownership.json", "launch.json"] {
         atomic_private_write(&root.join(name), &std::fs::read(candidate.join(name))?)?;
     }
@@ -302,6 +316,10 @@ pub fn apply_committed_reload(
     std::fs::remove_file(root.join(PENDING_RELOAD_FILE))?;
     mj_core::config::sync_directory(root)?;
     std::fs::remove_dir_all(candidate)?;
+    if retired.login.is_none() {
+        std::fs::remove_file(retired_path(root, &pending.operation_id)?)?;
+        mj_core::config::sync_directory(&root.join(RETIRED_LOGINS))?;
+    }
     Ok(manifest)
 }
 
@@ -332,10 +350,432 @@ pub fn roll_forward_pending_reload_if_any(root: &Path) -> Result<Option<String>>
     Ok(operation)
 }
 
+const RETIRED_LOGINS: &str = "retired-logins";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetiredLoginRecord {
+    operation_id: String,
+    store_id: String,
+    // Persist an empty receipt too: replay must never capture destination bytes.
+    login: Option<mj_core::credentials::RetiredLoginSnapshot>,
+}
+
+fn retired_path(root: &Path, id: &str) -> Result<std::path::PathBuf> {
+    validate_candidate_id(id)?;
+    let relative = Path::new(RETIRED_LOGINS).join(format!("{id}.json"));
+    mj_core::confined_path::reject_symlinks(root, &relative, true)?;
+    Ok(root.join(relative))
+}
+
+fn preserve_retired_login(
+    root: &Path,
+    pending: &PendingInPlaceReload,
+) -> Result<RetiredLoginRecord> {
+    use mj_core::worker_launch::{WorkerLaunchConfig, WorkerOwnership};
+    let path = retired_path(root, &pending.operation_id)?;
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let record: RetiredLoginRecord = serde_json::from_slice(&bytes)?;
+            ensure!(
+                record.operation_id == pending.operation_id
+                    && record.store_id == pending.expected_store_id,
+                "retired login receipt identity mismatch"
+            );
+            return Ok(record);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    let login = match std::fs::read(root.join("ownership.json")) {
+        Ok(bytes) => {
+            let ownership: WorkerOwnership = serde_json::from_slice(&bytes)?;
+            let launch = WorkerLaunchConfig::read(&root.join("launch.json"))?;
+            mj_core::credentials::read_harvestable_copied_login(
+                launch.harness,
+                &launch.harness_home,
+            )?
+            .map(|bytes| mj_core::credentials::RetiredLoginSnapshot {
+                id: pending.operation_id.clone(),
+                profile_id: ownership.profile_id,
+                harness: launch.harness,
+                store_id: pending.expected_store_id.clone(),
+                login_relative_path: mj_core::credentials::copied_login_relative_path(
+                    launch.harness,
+                )
+                .expect("harvested login has a descriptor")
+                .to_owned(),
+                bytes,
+            })
+        }
+        // Legacy workers may not have an ownership marker.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let record = RetiredLoginRecord {
+        operation_id: pending.operation_id.clone(),
+        store_id: pending.expected_store_id.clone(),
+        login,
+    };
+    directory(&root.join(RETIRED_LOGINS))?;
+    atomic_private_write(&path, &serde_json::to_vec(&record)?)?;
+    mj_core::config::sync_directory(root)?;
+    Ok(record)
+}
+
+/// Connection-only reads; a WAL in flight cannot be acknowledged before replay.
+#[cfg(any(unix, test))]
+pub fn read_retired_logins(root: &Path) -> Result<Vec<mj_core::credentials::RetiredLoginSnapshot>> {
+    if root.join(PENDING_RELOAD_FILE).try_exists()? {
+        return Ok(Vec::new());
+    }
+    mj_core::confined_path::reject_symlinks(root, Path::new(RETIRED_LOGINS), true)?;
+    let entries = match std::fs::read_dir(root.join(RETIRED_LOGINS)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut logins = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.path().extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        ensure!(
+            entry.file_type()?.is_file(),
+            "retired login is not a regular file"
+        );
+        let record: RetiredLoginRecord = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+        ensure!(
+            entry.path() == retired_path(root, &record.operation_id)?,
+            "retired login filename mismatch"
+        );
+        if let Some(login) = record.login {
+            logins.push(login);
+        }
+    }
+    logins.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(logins)
+}
+
+#[cfg(any(unix, test))]
+pub fn ack_retired_login(root: &Path, id: &str) -> Result<()> {
+    ensure!(
+        !root.join(PENDING_RELOAD_FILE).try_exists()?,
+        "reload is still committing"
+    );
+    let path = retired_path(root, id)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => mj_core::config::sync_directory(&root.join(RETIRED_LOGINS)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn reconcile_retired_login(
+    candidate: &Path,
+    home: &Path,
+    record: &RetiredLoginRecord,
+) -> Result<()> {
+    use mj_core::{
+        credentials::{CredentialSnapshot, SyncAction},
+        worker_launch::WorkerOwnership,
+    };
+    let Some(login) = &record.login else {
+        return Ok(());
+    };
+    let ownership: WorkerOwnership =
+        serde_json::from_slice(&std::fs::read(candidate.join("ownership.json"))?)?;
+    let launch = mj_core::worker_launch::WorkerLaunchConfig::read(&candidate.join("launch.json"))?;
+    if ownership.profile_id != login.profile_id || launch.harness != login.harness {
+        return Ok(());
+    }
+    let Some(bytes) = mj_core::credentials::read_copied_login(login.harness, home)? else {
+        return Ok(());
+    };
+    if matches!(
+        mj_core::credentials::reconcile(
+            &CredentialSnapshot::of(login.harness, &bytes),
+            &CredentialSnapshot::of(login.harness, &login.bytes)
+        ),
+        SyncAction::Pull
+    ) {
+        let path = home.join(&login.login_relative_path);
+        mj_core::confined_path::reject_symlinks(home, &login.login_relative_path, false)?;
+        let copy = mj_core::credentials::credential_copy_for_harness(login.harness, &login.bytes);
+        atomic_private_write(&path, &copy)?;
+    }
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use mj_core::worker_launch::ReloadSharedLogin;
+
+    #[test]
+    fn reload_commit_retains_late_source_grants_across_every_replay_cut() {
+        use mj_core::{config::HarnessKind, worker_launch::WorkerOwnership};
+        use std::os::unix::fs::PermissionsExt;
+        for kind in [
+            HarnessKind::Codex,
+            HarnessKind::Kimi,
+            HarnessKind::Grok,
+            HarnessKind::Muse,
+            HarnessKind::Antigravity,
+            HarnessKind::Claude,
+        ] {
+            for cut in 0..3 {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path();
+                let pending = fixture(root);
+                let candidate = root.join("reload-candidates/candidate");
+                let home = root.join("home");
+                let ownership = WorkerOwnership {
+                    version: 3,
+                    no_github_credentials: false,
+                    workspace_id: "default".into(),
+                    session_id: "session".into(),
+                    profile_id: "source".into(),
+                    bundle_id: "bundle".into(),
+                    target_template_id: "target".into(),
+                    instance_id: None,
+                };
+                ownership.write(&root.join("ownership.json")).unwrap();
+                ownership.write(&candidate.join("ownership.json")).unwrap();
+                let mut launch =
+                    crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap());
+                launch.harness = kind;
+                launch.write(&root.join("launch.json")).unwrap();
+                launch.write(&candidate.join("launch.json")).unwrap();
+                let bytes = |late: bool| {
+                    let time = if late {
+                        "2026-11-25T00:00:00Z"
+                    } else {
+                        "2026-11-24T00:00:00Z"
+                    };
+                    let epoch = if late { 1795564800_i64 } else { 1795478400_i64 };
+                    serde_json::to_vec(&match kind {
+                        HarnessKind::Codex => serde_json::json!({"last_refresh":time,"tokens":{"refresh_token":"grant"}}),
+                        HarnessKind::Kimi => serde_json::json!({"expires_at":epoch,"refresh_token":"grant"}),
+                        HarnessKind::Grok => serde_json::json!({"issuer::grant":{"expires_at":time,"refresh_token":"grant"}}),
+                        HarnessKind::Muse => serde_json::json!({"providers":{"meta":{"expires_at":epoch,"refresh_token":"grant"}}}),
+                        HarnessKind::Antigravity => serde_json::json!({"token":{"expiry":time,"refresh_token":"grant"}}),
+                        HarnessKind::Claude => serde_json::json!({"claudeAiOauth":{"expiresAt":epoch*1000,"refreshToken":"grant"}}),
+                        _ => unreachable!(),
+                    }).unwrap()
+                };
+                let relative = mj_core::credentials::copied_login_relative_path(kind).unwrap();
+                let live = home.join(relative);
+                let staged = candidate.join("profile").join(relative);
+                std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+                std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+                std::fs::write(&live, bytes(false)).unwrap();
+                std::fs::write(
+                    staged,
+                    mj_core::credentials::credential_copy_for_harness(kind, &bytes(false)),
+                )
+                .unwrap();
+                let mut manifest: ReloadCandidateManifest = serde_json::from_slice(
+                    &std::fs::read(candidate.join("manifest.json")).unwrap(),
+                )
+                .unwrap();
+                manifest.harness = kind;
+                manifest.shared_login = None;
+                manifest.clear_paths.push(
+                    relative
+                        .components()
+                        .next()
+                        .unwrap()
+                        .as_os_str()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                );
+                std::fs::write(
+                    candidate.join("manifest.json"),
+                    serde_json::to_vec(&manifest).unwrap(),
+                )
+                .unwrap();
+                // The source spends/rotates its grant after candidate preparation.
+                std::fs::write(&live, bytes(true)).unwrap();
+                if cut == 0 {
+                    // Shipped pre-93 WALs have no retirement receipt yet.
+                    atomic_private_write(
+                        &root.join(PENDING_RELOAD_FILE),
+                        &serde_json::to_vec(&pending).unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    commit_pending_reload(root, &pending).unwrap();
+                }
+                assert!(read_retired_logins(root).unwrap().is_empty());
+                assert!(ack_retired_login(root, "move").is_err());
+                if cut >= 1 {
+                    std::fs::write(&live, bytes(false)).unwrap();
+                }
+                if cut >= 2 {
+                    let mut destination = ownership.clone();
+                    destination.profile_id = "already-promoted".into();
+                    destination.write(&root.join("ownership.json")).unwrap();
+                    launch.write(&root.join("launch.json")).unwrap();
+                }
+                roll_forward_pending_reload_if_any(root).unwrap();
+                let logins = read_retired_logins(root).unwrap();
+                assert_eq!(logins.len(), 1);
+                assert_eq!(logins[0].profile_id, "source");
+                assert_eq!(logins[0].bytes, bytes(true));
+                assert_eq!(
+                    std::fs::read(&live).unwrap(),
+                    mj_core::credentials::credential_copy_for_harness(kind, &bytes(true)).as_ref()
+                );
+                assert_eq!(
+                    std::fs::metadata(retired_path(root, "move").unwrap())
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+                ack_retired_login(root, "move").unwrap();
+                ack_retired_login(root, "move").unwrap();
+                assert!(read_retired_logins(root).unwrap().is_empty());
+                assert!(ack_retired_login(root, "../launch").is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn reload_commit_never_captures_shared_or_stripped_logins() {
+        use mj_core::config::HarnessKind;
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let outside = dir.path().join("canonical");
+        std::fs::write(&outside, b"{\"last_refresh\":\"2026-11-25T00:00:00Z\"}").unwrap();
+        symlink(&outside, home.join("auth.json")).unwrap();
+        assert!(
+            mj_core::credentials::read_harvestable_copied_login(HarnessKind::Codex, &home)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::create_dir(dir.path().join("credentials")).unwrap();
+        symlink(dir.path().join("credentials"), home.join("credentials")).unwrap();
+        assert!(
+            mj_core::credentials::read_harvestable_copied_login(HarnessKind::Kimi, &home)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(
+            home.join(".credentials.json"),
+            b"{\"claudeAiOauth\":{\"expiresAt\":9999999999999}}",
+        )
+        .unwrap();
+        assert!(
+            mj_core::credentials::read_harvestable_copied_login(HarnessKind::Claude, &home)
+                .unwrap()
+                .is_none()
+        );
+        for kind in [HarnessKind::OpenCode, HarnessKind::Dsh] {
+            assert!(
+                mj_core::credentials::read_harvestable_copied_login(kind, &home)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn reload_commit_precommit_failure_cannot_pin_an_old_grant_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pending = fixture(root);
+        let home = root.join("home");
+        let launch = crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap());
+        launch.write(&root.join("launch.json")).unwrap();
+        std::fs::write(root.join("ownership.json"), serde_json::to_vec(&serde_json::json!({
+            "version":3,"session_id":"session","profile_id":"source","bundle_id":"bundle","target_template_id":"target",
+        })).unwrap()).unwrap();
+        std::fs::write(
+            home.join("auth.json"),
+            br#"{"last_refresh":"2026-11-24T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let candidate = root.join("reload-candidates/candidate");
+        let saved = root.join("saved-candidate");
+        std::fs::rename(&candidate, &saved).unwrap();
+        assert!(commit_pending_reload(root, &pending).is_err());
+        assert!(!root.join(PENDING_RELOAD_FILE).exists());
+        assert!(!retired_path(root, "move").unwrap().exists());
+        std::fs::rename(saved, candidate).unwrap();
+        let refreshed = br#"{"last_refresh":"2026-11-25T00:00:00Z"}"#;
+        std::fs::write(home.join("auth.json"), refreshed).unwrap();
+        commit_pending_reload(root, &pending).unwrap();
+        let record = preserve_retired_login(root, &pending).unwrap();
+        assert_eq!(record.login.unwrap().bytes, refreshed);
+    }
+
+    #[test]
+    fn reload_commit_retired_grants_never_cross_profiles_or_replace_shared_links() {
+        for shared in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let pending = fixture(root);
+            let candidate = root.join("reload-candidates/candidate");
+            let home = root.join("home");
+            let fresh = br#"{"last_refresh":"2026-11-25T00:00:00Z"}"#;
+            let stale = br#"{"last_refresh":"2026-11-24T00:00:00Z"}"#;
+            std::fs::write(home.join("auth.json"), fresh).unwrap();
+            std::fs::write(candidate.join("profile/auth.json"), stale).unwrap();
+            let source = serde_json::json!({"version":3,"session_id":"session","profile_id":"source",
+                "bundle_id":"bundle","target_template_id":"target"});
+            std::fs::write(
+                root.join("ownership.json"),
+                serde_json::to_vec(&source).unwrap(),
+            )
+            .unwrap();
+            let mut destination = source.clone();
+            if !shared {
+                destination["profile_id"] = "different-profile".into();
+            }
+            std::fs::write(
+                candidate.join("ownership.json"),
+                serde_json::to_vec(&destination).unwrap(),
+            )
+            .unwrap();
+            let launch = crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap());
+            launch.write(&root.join("launch.json")).unwrap();
+            launch.write(&candidate.join("launch.json")).unwrap();
+            let mut manifest: ReloadCandidateManifest =
+                serde_json::from_slice(&std::fs::read(candidate.join("manifest.json")).unwrap())
+                    .unwrap();
+            if !shared {
+                manifest.shared_login = None;
+            }
+            std::fs::write(
+                candidate.join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            commit_pending_reload(root, &pending).unwrap();
+            apply_committed_reload(root, &pending).unwrap();
+            assert_eq!(read_retired_logins(root).unwrap()[0].bytes, fresh);
+            if shared {
+                assert!(
+                    std::fs::symlink_metadata(home.join("auth.json"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                assert_eq!(
+                    std::fs::read(root.join("shared-auth")).unwrap(),
+                    b"shared login"
+                );
+            } else {
+                assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), stale);
+            }
+        }
+    }
 
     fn fixture(root: &Path) -> PendingInPlaceReload {
         let home = root.join("home");

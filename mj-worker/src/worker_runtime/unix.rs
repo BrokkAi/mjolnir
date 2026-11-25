@@ -4040,6 +4040,41 @@ pub(super) async fn serve_client_with_shared_credentials(
                 write_logged_response(&mut writer, &response, &session_id, "cpu_usage").await?;
                 continue;
             }
+            if matches!(&envelope.request, RelayRequest::ReadRetiredLogins | RelayRequest::AckRetiredLogin { .. }) {
+                // Share the credential admission boundary: Hold sets its state
+                // then drains this guard before preservation/commit. An ack can
+                // never delete a receipt while a reload is committing it.
+                let _retired_read = credentials.read().await;
+                let held = relay.observe().expect("relay state lock poisoned").in_place_move_hold_active();
+                let root = relay_root.clone();
+                let request = envelope.request.clone();
+                let result = mj_core::runtime::spawn_blocking(move || -> Result<RelayResponsePayload> {
+                    if held {
+                        anyhow::ensure!(matches!(request, RelayRequest::ReadRetiredLogins), "reload holds retired login acknowledgements");
+                        return Ok(RelayResponsePayload::RetiredLogins { logins: Vec::new() });
+                    }
+                    match request {
+                        RelayRequest::ReadRetiredLogins => Ok(RelayResponsePayload::RetiredLogins {
+                            logins: super::reload_commit::read_retired_logins(&root)?,
+                        }),
+                        RelayRequest::AckRetiredLogin { id } => {
+                            super::reload_commit::ack_retired_login(&root, &id)?;
+                            Ok(RelayResponsePayload::RetiredLoginAcknowledged)
+                        }
+                        _ => unreachable!(),
+                    }
+                }).await.context("retired login task stopped").and_then(|result| result);
+                let body = match result {
+                    Ok(payload) => RelayResponseBody::Ok { payload },
+                    Err(error) => RelayResponseBody::Error { error: RelayProtocolError {
+                        code: RelayErrorCode::Internal, message: format!("retired login operation failed: {error:#}"), retryable: true, detail: None,
+                    } },
+                };
+                write_logged_response(&mut writer, &RelayResponseEnvelope {
+                    request_id: envelope.request_id, protocol_version: envelope.protocol_version, body,
+                }, &session_id, "retired_login").await?;
+                continue;
+            }
             if matches!(
                 &envelope.request,
                 RelayRequest::CredentialState
@@ -5586,6 +5621,68 @@ mod preparation_tests {
         // A continuation can already be pending when the worker releases the
         // hold. The successful reply must wake dispatch before it is written.
         assert_eq!(wakes.try_recv(), Ok(()));
+        writer.shutdown().await.unwrap();
+        handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_place_move_retired_logins_use_only_the_connection_and_ack_durably() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("retired-logins")).unwrap();
+        let login = mj_core::credentials::RetiredLoginSnapshot {
+            id: "move".into(),
+            profile_id: "source".into(),
+            harness: HarnessKind::Codex,
+            store_id: "store".into(),
+            login_relative_path: "auth.json".into(),
+            bytes: serde_json::to_vec(&serde_json::json!({"secret":"x".repeat(70000)})).unwrap(),
+        };
+        std::fs::write(
+            root.join("retired-logins/move.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "operation_id":"move", "store_id":"store", "login":login,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let relay = test_relay(root);
+        let before = relay.lock().unwrap().operational_state();
+        let (client, server) = UnixStream::pair().unwrap();
+        let (wake, _wakes) = mpsc::channel(4);
+        let (fatal, _fatal_reports) = mpsc::channel(1);
+        let handler = mj_core::runtime::spawn(serve_client_with_shared_credentials(
+            server,
+            relay.clone(),
+            wake,
+            SharedCredentials::new(Err("no login".into())),
+            ConnectionRuntime::default(),
+            fatal,
+        ));
+        let (read, mut writer) = client.into_split();
+        let mut reader = BufReader::new(read);
+        let response = request(
+            &mut reader,
+            &mut writer,
+            "read-retired",
+            RelayRequest::ReadRetiredLogins,
+        )
+        .await;
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::RetiredLogins { logins } } if logins == vec![login])
+        );
+        let response = request(
+            &mut reader,
+            &mut writer,
+            "ack-retired",
+            RelayRequest::AckRetiredLogin { id: "move".into() },
+        )
+        .await;
+        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+        assert!(!root.join("retired-logins/move.json").exists());
+        assert_eq!(relay.lock().unwrap().operational_state(), before);
+        assert!(!RelayRequest::ReadRetiredLogins.supported_at(92));
+        assert!(!RelayRequest::AckRetiredLogin { id: "move".into() }.supported_at(92));
         writer.shutdown().await.unwrap();
         handler.await.unwrap().unwrap();
     }

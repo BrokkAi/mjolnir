@@ -731,6 +731,15 @@ impl RuntimeState {
 }
 
 impl mj_controller::worker_client::CredentialSyncRuntime for RuntimeState {
+    fn credential_profile(&self, profile_id: &str) -> Option<mj_core::config::HarnessProfile> {
+        self.owner()
+            .controller
+            .config
+            .profiles
+            .get(profile_id)
+            .cloned()
+    }
+
     fn credential_targets(
         &self,
     ) -> Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>> {

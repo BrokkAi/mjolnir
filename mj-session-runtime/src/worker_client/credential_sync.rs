@@ -38,6 +38,7 @@ pub enum HostSlopcopLogin {
 /// and configuration, so sync reads these facts from it when it acts and
 /// keeps no copy. Tests run sync without a daemon.
 pub trait CredentialSyncRuntime: Send + Sync {
+    fn credential_profile(&self, profile_id: &str) -> Option<mj_core::config::HarnessProfile>;
     /// The published list of sessions to keep supplied.
     fn credential_targets(&self) -> Arc<watch::Sender<Vec<CredentialSyncTarget>>>;
     fn credential_session_ids(
@@ -2543,7 +2544,7 @@ pub async fn run_on_session(
         SessionRelays::Direct => {
             let _queued = QueuedJob(hold);
             let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
-            let result = run_work(&mut client, target, work).await;
+            let result = run_work(&mut client, target, work, _queued.0.0.runtime.as_ref()).await;
             if let Err(error) = client.detach().await {
                 tracing::warn!(
                     session_id = %target.session_id,
@@ -2559,7 +2560,13 @@ async fn run_work(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     work: SyncWork,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
 ) -> Result<SessionSync> {
+    if let Some(runtime) = runtime
+        && let Err(error) = drain_retired_logins(client, |id| runtime.credential_profile(id)).await
+    {
+        tracing::warn!(session_id = %target.session_id, %error, "could not adopt retired logins; retained for retry");
+    }
     match work {
         SyncWork::Full(canonical) => reconcile_on(client, target, &canonical).await,
         SyncWork::Aws(aws) => {
@@ -2895,7 +2902,7 @@ impl RelayConnectionJob for CredentialSyncJob {
                     return;
                 }
             }
-            let result = run_work(client, &target, work).await;
+            let result = run_work(client, &target, work, hold.0.runtime.as_ref()).await;
             // Released before the answer, so whoever awaits it can take the
             // session's install lock at once.
             hold.finish();
@@ -2920,6 +2927,65 @@ impl RelayConnectionJob for CredentialSyncJob {
                 "credential sync refusal receiver was already closed"
             );
         }
+    }
+}
+
+/// Canonical adoption uses the same locked file/Keychain path as ordinary sync.
+pub async fn adopt_copied_login(
+    profile: &mj_core::config::HarnessProfile,
+    bytes: &[u8],
+) -> Result<bool> {
+    anyhow::ensure!(
+        profile.auth_scheme().uses_native_login_file(),
+        "profile no longer uses a native login"
+    );
+    anyhow::ensure!(
+        mj_core::credentials::harvestable_login_bytes(profile.kind, bytes)?,
+        "login is not a harvestable copied grant"
+    );
+    let access = LoginAccess::bounded(
+        profile
+            .kind
+            .login_store(mj_core::config::HarnessHost::current(), &profile.home),
+    );
+    let installed = access.install_if_newer(profile.kind, bytes).await?;
+    let incoming = CredentialSnapshot::of(profile.kind, bytes);
+    anyhow::ensure!(
+        installed.installed
+            || installed.snapshot.fingerprint == incoming.fingerprint
+            || (installed.snapshot.freshness_epoch_ms.is_some()
+                && reconcile(&installed.snapshot, &incoming) != SyncAction::Pull),
+        "canonical login cannot be ordered against the retired grant; retaining the source copy"
+    );
+    Ok(installed.installed)
+}
+
+/// Read immutable source ownership, adopt under the canonical lock, then ack.
+/// Lost replies are safe: installation is freshness-based and acknowledgements
+/// are idempotent. No secret enters an event or a checkpoint.
+pub async fn drain_retired_logins(
+    client: &mut RelayClient,
+    profile: impl Fn(&str) -> Option<mj_core::config::HarnessProfile>,
+) -> Result<()> {
+    let mut failure = None;
+    for login in client.read_retired_logins().await? {
+        let result = async {
+            if let Some(profile) = profile(&login.profile_id) {
+                anyhow::ensure!(profile.kind == login.harness, "retired login harness differs from source profile");
+                adopt_copied_login(&profile, &login.bytes).await?;
+            } else {
+                tracing::info!(profile_id = %login.profile_id, "retired login source profile no longer exists");
+            }
+            client.ack_retired_login(&login.id).await
+        }.await;
+        if let Err(error) = result {
+            tracing::warn!(profile_id = %login.profile_id, operation_id = %login.id, %error, "retired login retained for retry");
+            failure = Some(error);
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -3346,4 +3412,162 @@ pub fn sync_method_unsupported(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RelayRejected>()
         .is_some_and(|rejected| rejected.0.code == RelayErrorCode::InvalidRequest)
+}
+
+#[cfg(all(test, unix))]
+mod retired_tests {
+    use super::*;
+    use mj_core::config::{HarnessKind, HarnessProfile};
+
+    // Recorded relay peer: exercise the wire client and canonical store/locks.
+    const PEER: &str = r#"
+import json, sys, os
+path, protocol = sys.argv[1], int(sys.argv[2])
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req['request']['method']
+    if method == 'hello':
+        payload = {'type':'hello','data':{'negotiated':protocol,'relay_version':'retired-login-fixture','session_id':'retired-test'}}
+    elif method == 'read_retired_logins':
+        with open(path) as f: logins = json.load(f)
+        payload = {'type':'retired_logins','data':{'logins':logins}}
+    elif method == 'ack_retired_login':
+        with open(path) as f: logins = json.load(f)
+        logins = [login for login in logins if login['id'] != req['request']['params']['id']]
+        with open(path, 'w') as f: json.dump(logins, f)
+        payload = {'type':'retired_login_acknowledged'}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({'request_id':req['request_id'],'protocol_version':protocol,'result':'ok','payload':payload}), flush=True)
+"#;
+
+    #[tokio::test]
+    async fn credential_sync_retired_grants_retry_failed_adoption_and_ack_only_after_install() {
+        let root = tempfile::tempdir().unwrap();
+        for kind in [
+            HarnessKind::Codex,
+            HarnessKind::Kimi,
+            HarnessKind::Grok,
+            HarnessKind::Muse,
+            HarnessKind::Antigravity,
+            HarnessKind::Claude,
+        ] {
+            if kind == HarnessKind::Claude && cfg!(target_os = "macos") {
+                continue;
+            }
+            let home = root.path().join(kind.id());
+            std::fs::create_dir_all(&home).unwrap();
+            let marker = harness_authentication_marker(kind, &home);
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            // A directory at the canonical file makes adoption fail visibly.
+            std::fs::create_dir(&marker).unwrap();
+            let mut json = match kind {
+                HarnessKind::Codex => serde_json::json!({"last_refresh":"2026-11-25T00:00:00Z"}),
+                HarnessKind::Kimi => serde_json::json!({"expires_at":1795564800_i64}),
+                HarnessKind::Grok => {
+                    serde_json::json!({"issuer::id":{"expires_at":"2026-11-25T00:00:00Z"}})
+                }
+                HarnessKind::Muse => {
+                    serde_json::json!({"providers":{"meta":{"expires_at":1795564800_i64}}})
+                }
+                HarnessKind::Antigravity => {
+                    serde_json::json!({"token":{"expiry":"2026-11-25T00:00:00Z"}})
+                }
+                HarnessKind::Claude => {
+                    serde_json::json!({"claudeAiOauth":{"expiresAt":1795564800000_i64,"refreshToken":"grant"}})
+                }
+                _ => unreachable!(),
+            };
+            json["padding"] = serde_json::Value::String("x".repeat(70000));
+            let bytes = serde_json::to_vec(&json).unwrap();
+            let login = mj_core::credentials::RetiredLoginSnapshot {
+                id: "move".into(),
+                profile_id: "source-profile".into(),
+                harness: kind,
+                store_id: "store".into(),
+                login_relative_path: kind.credential_file_name().into(),
+                bytes: bytes.clone(),
+            };
+            let receipts = home.join("receipts.json");
+            std::fs::write(&receipts, serde_json::to_vec(&vec![login.clone()]).unwrap()).unwrap();
+            let spec = CommandSpec::new(
+                "python3",
+                [
+                    "-c".to_owned(),
+                    PEER.to_owned(),
+                    receipts.to_string_lossy().into_owned(),
+                    "93".into(),
+                ],
+            );
+            let mut client = RelayClient::connect(&spec, "retired-test").await.unwrap();
+            let profile = HarnessProfile::new(kind, home.clone());
+            assert!(
+                drain_retired_logins(&mut client, |_| Some(profile.clone()))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                client.read_retired_logins().await.unwrap(),
+                vec![login.clone()]
+            );
+            std::fs::remove_dir(&marker).unwrap();
+            drain_retired_logins(&mut client, |_| Some(profile.clone()))
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+            assert!(client.read_retired_logins().await.unwrap().is_empty());
+            // A lost ack can replay installation without changing canonical bytes.
+            std::fs::write(&receipts, serde_json::to_vec(&vec![login.clone()]).unwrap()).unwrap();
+            drain_retired_logins(&mut client, |_| Some(profile.clone()))
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+            // Unknown, unequal grants have no safe discard ordering.
+            let mut ambiguous = login.clone();
+            ambiguous.bytes = if kind == HarnessKind::Claude {
+                br#"{"claudeAiOauth":{"refreshToken":"unknown-new"}}"#.to_vec()
+            } else {
+                br#"{"refresh_token":"unknown-new"}"#.to_vec()
+            };
+            let unknown_canonical = if kind == HarnessKind::Claude {
+                br#"{"claudeAiOauth":{"refreshToken":"unknown-old"}}"#.as_slice()
+            } else {
+                br#"{"refresh_token":"unknown-old"}"#.as_slice()
+            };
+            std::fs::write(&marker, unknown_canonical).unwrap();
+            std::fs::write(
+                &receipts,
+                serde_json::to_vec(&vec![ambiguous.clone()]).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                drain_retired_logins(&mut client, |_| Some(profile.clone()))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(client.read_retired_logins().await.unwrap(), vec![ambiguous]);
+            assert_eq!(std::fs::read(&marker).unwrap(), unknown_canonical);
+            std::fs::write(&marker, &bytes).unwrap();
+            std::fs::write(&receipts, serde_json::to_vec(&vec![login]).unwrap()).unwrap();
+            drain_retired_logins(&mut client, |_| None).await.unwrap();
+            assert!(client.read_retired_logins().await.unwrap().is_empty());
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+            client.detach().await.unwrap();
+            // Pre-93 workers must never receive an unknown retired-login RPC.
+            let old = CommandSpec::new(
+                "python3",
+                [
+                    "-c".to_owned(),
+                    PEER.to_owned(),
+                    receipts.to_string_lossy().into_owned(),
+                    "92".into(),
+                ],
+            );
+            let mut client = RelayClient::connect(&old, "retired-test").await.unwrap();
+            drain_retired_logins(&mut client, |_| panic!("old worker has no snapshots"))
+                .await
+                .unwrap();
+            client.detach().await.unwrap();
+        }
+    }
 }

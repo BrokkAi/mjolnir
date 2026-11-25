@@ -9698,8 +9698,17 @@ for line in sys.stdin:
 #[cfg(unix)]
 #[tokio::test]
 async fn reload_launch_config_spawns_updated_command_args_and_writes_supervisor_spec() {
+    exercise_planned_reload_continuity(None, false).await;
+    exercise_planned_reload_continuity(Some("ses-initial"), false).await;
+}
+
+#[cfg(unix)]
+async fn exercise_planned_reload_continuity(resume: Option<&str>, fail_retirement: bool) {
     let _ = mj_harness_install::login_environment::initialize_from_parent();
     let temp = tempfile::tempdir().unwrap();
+    if fail_retirement {
+        std::fs::write(temp.path().join("fail-retirement"), "").unwrap();
+    }
     let bridge_script = |session_id: &str| {
         format!(
             r#"
@@ -9713,12 +9722,15 @@ for line in sys.stdin:
     with Path("{session_id}-methods").open("a") as methods:
         methods.write(m + "\n")
     if m == "initialize":
-        res = {{"protocolVersion": 1}}
-    elif m == "session/new":
+        res = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
+    elif m in ("session/new", "session/load"):
         res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}, {{"id": "agent-full-access", "name": "Full access"}}]}}}}
     else:
         res = {{}}
     print(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}), flush=True)
+if "{session_id}" == "ses-initial":
+    Path("auth.json").write_text(json.dumps({{"last_refresh":"2026-11-25T00:00:00Z","tokens":{{"refresh_token":"retired-grant"}}}}))
+    if Path("fail-retirement").exists(): sys.exit(1)
 "#
         )
     };
@@ -9728,6 +9740,8 @@ for line in sys.stdin:
     });
     spec.cwd = temp.path().to_path_buf();
     spec.harness = HarnessKind::Codex;
+    spec.resume_session = Some("ses-initial".into());
+    spec.native_session_history = NativeSessionHistory::MayHaveHistory;
     spec.command = "python3".into();
     spec.args = vec!["-u".into(), "-c".into(), bridge_script("ses-initial")];
 
@@ -9748,7 +9762,7 @@ for line in sys.stdin:
         crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
     next_launch.cwd = temp.path().to_path_buf();
     next_launch.harness = HarnessKind::Codex;
-    next_launch.native_session_id = None;
+    next_launch.native_session_id = resume.map(str::to_owned);
     let next_command = PathBuf::from("python3");
     let next_args = vec![
         "-u".into(),
@@ -9762,6 +9776,39 @@ for line in sys.stdin:
     let mut next_supervisor = crate::worker_runtime::AcpSupervisorSpec::from(&next_launch);
     next_supervisor.command = next_command.clone();
     next_supervisor.args = next_args.clone();
+    // Candidate preparation precedes the source's final refresh on stdin EOF.
+    let candidate = temp.path().join("reload-candidates/continuity");
+    std::fs::create_dir_all(candidate.join("profile")).unwrap();
+    let stale =
+        br#"{"last_refresh":"2026-11-24T00:00:00Z","tokens":{"refresh_token":"stale-grant"}}"#;
+    std::fs::write(temp.path().join("auth.json"), stale).unwrap();
+    std::fs::write(candidate.join("profile/auth.json"), stale).unwrap();
+    next_launch.write(&temp.path().join("launch.json")).unwrap();
+    next_launch.write(&candidate.join("launch.json")).unwrap();
+    let ownership = serde_json::json!({"version":3,"session_id":"session","profile_id":"source",
+        "bundle_id":"bundle","target_template_id":"target"});
+    for path in [
+        temp.path().join("ownership.json"),
+        candidate.join("ownership.json"),
+    ] {
+        std::fs::write(path, serde_json::to_vec(&ownership).unwrap()).unwrap();
+    }
+    let manifest = mj_core::worker_launch::ReloadCandidateManifest {
+        operation_id: "continuity".into(),
+        expected_store_id: "store".into(),
+        candidate_id: "continuity".into(),
+        harness: HarnessKind::Codex,
+        target_profile_home: temp.path().to_string_lossy().into_owned(),
+        clear_paths: vec!["auth.json".into()],
+        protected_paths: Vec::new(),
+        shared_login: None,
+        clear_github_token: false,
+    };
+    std::fs::write(
+        candidate.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
@@ -9790,6 +9837,29 @@ for line in sys.stdin:
         .await
         .unwrap();
 
+    if fail_retirement {
+        assert!(
+            matches!(resolution.await.unwrap(), ReloadResolution::RefusedBeforeCommit(message) if message.contains("retirement"))
+        );
+        assert!(runtime.await.unwrap().is_err());
+        assert!(candidate.exists());
+        assert!(
+            !temp
+                .path()
+                .join(mj_core::worker_launch::PENDING_RELOAD_FILE)
+                .exists()
+        );
+        assert!(!temp.path().join("retired-logins").exists());
+        assert!(
+            std::fs::read_to_string(temp.path().join("auth.json"))
+                .unwrap()
+                .contains("retired-grant")
+        );
+        while let Ok(event) = event_rx.try_recv() {
+            assert!(!matches!(event, RuntimeEvent::HarnessRestarting { .. }));
+        }
+        return;
+    }
     let applied = loop {
         match tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
             .await
@@ -9816,6 +9886,21 @@ for line in sys.stdin:
         !spawned.exists(),
         "replacement process started before the barrier"
     );
+    let pending = mj_core::worker_launch::PendingInPlaceReload {
+        operation_id: "continuity".into(),
+        expected_store_id: "store".into(),
+        candidate_id: "continuity".into(),
+        git_setup_name: None,
+    };
+    crate::worker_runtime::reload_commit::commit_pending_reload(temp.path(), &pending).unwrap();
+    crate::worker_runtime::reload_commit::apply_committed_reload(temp.path(), &pending).unwrap();
+    let retired = crate::worker_runtime::reload_commit::read_retired_logins(temp.path()).unwrap();
+    assert_eq!(retired.len(), 1);
+    assert!(String::from_utf8_lossy(&retired[0].bytes).contains("retired-grant"));
+    assert_eq!(
+        std::fs::read(temp.path().join("auth.json")).unwrap(),
+        retired[0].bytes
+    );
     applied.send(Ok(None)).unwrap();
 
     let resolution = resolution
@@ -9840,17 +9925,19 @@ for line in sys.stdin:
             native_session_id, ..
         } = event
         {
-            assert_eq!(native_session_id, "ses-reloaded");
+            assert_eq!(native_session_id, resume.unwrap_or("ses-reloaded"));
             break;
         }
     }
     assert!(spawned.exists());
     let methods = std::fs::read_to_string(temp.path().join("ses-reloaded-methods")).unwrap();
-    assert!(methods.lines().any(|method| method == "session/new"));
-    assert!(
-        !methods
-            .lines()
-            .any(|method| method == "session/load" || method == "session/resume")
+    assert_eq!(
+        methods.lines().any(|method| method == "session/new"),
+        resume.is_none()
+    );
+    assert_eq!(
+        methods.lines().any(|method| method == "session/load"),
+        resume.is_some()
     );
     shutdown.cancel();
     let _ = runtime.await;
@@ -10029,4 +10116,10 @@ fn reload_launch_config_clears_stale_accepted_config_selectors() {
     spec.initial_model = cross_harness.initial_model.clone();
     assert_eq!(spec.startup_model().as_deref(), Some("claude-sonnet"));
     assert!(spec.accepted_config.lock().unwrap().effort.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_launch_config_failed_retirement_refuses_before_destructive_commit() {
+    exercise_planned_reload_continuity(None, true).await;
 }

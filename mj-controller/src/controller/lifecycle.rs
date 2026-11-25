@@ -3426,6 +3426,24 @@ impl Controller {
                     .get(session_id)
                     .with_context(|| format!("unknown session {session_id}"))?
                     .clone();
+                // Reachable workers may still hold the last refreshed source grant.
+                let retired = (|| -> Result<()> {
+                    let spec = self.reconnect_command(session_id)?;
+                    mj_core::runtime::block_on(async {
+                        let mut client =
+                            crate::worker_client::RelayClient::connect(&spec, session_id).await?;
+                        let result =
+                            crate::worker_client::drain_retired_logins(&mut client, |id| {
+                                self.config.profiles.get(id).cloned()
+                            })
+                            .await;
+                        let detached = client.detach().await;
+                        result.and(detached)
+                    })?
+                })();
+                if let Err(error) = retired {
+                    tracing::warn!(session_id, %error, "could not adopt retired logins before destroy");
+                }
                 let mut outcome = DestroyOutcome::default();
                 if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
                     outcome.cleanup(

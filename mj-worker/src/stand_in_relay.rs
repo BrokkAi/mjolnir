@@ -444,6 +444,35 @@ pub fn serve_latch_relay() {
                     ),
                 },
             }
+        } else if matches!(
+            &request.request,
+            mj_core::relay::RelayRequest::ReadRetiredLogins
+                | mj_core::relay::RelayRequest::AckRetiredLogin { .. }
+        ) {
+            let worker_root = std::fs::read_to_string(Path::new(&root).join("staged-worker-root"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from(&root));
+            let payload = match &request.request {
+                mj_core::relay::RelayRequest::ReadRetiredLogins => {
+                    mj_core::relay::RelayResponsePayload::RetiredLogins {
+                        logins: crate::worker_runtime::reload_commit::read_retired_logins(
+                            &worker_root,
+                        )
+                        .unwrap(),
+                    }
+                }
+                mj_core::relay::RelayRequest::AckRetiredLogin { id } => {
+                    crate::worker_runtime::reload_commit::ack_retired_login(&worker_root, id)
+                        .unwrap();
+                    mj_core::relay::RelayResponsePayload::RetiredLoginAcknowledged
+                }
+                _ => unreachable!(),
+            };
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id.clone(),
+                protocol_version: request.protocol_version,
+                body: mj_core::relay::RelayResponseBody::Ok { payload },
+            }
         } else if let mj_core::relay::RelayRequest::RestartHarnessInPlace {
             candidate_id,
             operation_id,

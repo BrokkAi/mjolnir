@@ -1774,3 +1774,73 @@ pub fn remove_github_authentication_environment(
 
 #[cfg(test)]
 mod tests;
+
+/// Copied native logins which may rotate a grant in a staged home.
+/// Paths come from the harness configuration; database exports are push-only.
+pub fn copied_login_relative_path(kind: HarnessKind) -> Option<&'static Path> {
+    match kind {
+        HarnessKind::OpenCode | HarnessKind::Dsh => None,
+        _ => Some(Path::new(kind.credential_file_name())),
+    }
+}
+
+pub fn harvestable_login_bytes(kind: HarnessKind, bytes: &[u8]) -> Result<bool> {
+    if copied_login_relative_path(kind).is_none() {
+        return Ok(false);
+    }
+    validate_credential_payload(kind, bytes)?;
+    Ok(!kind.copies_omit_refresh_token() || credential_holds_refresh_token(kind, bytes))
+}
+
+/// Read only a copied regular file, never a shared login or linked home.
+pub fn read_copied_login(kind: HarnessKind, home: &Path) -> Result<Option<Vec<u8>>> {
+    let Some(relative) = copied_login_relative_path(kind) else {
+        return Ok(None);
+    };
+    let mut path = home.to_owned();
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if let Some(component) = component {
+            path.push(component);
+        }
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(None),
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if !std::fs::symlink_metadata(&path)?.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(std::fs::read(path)?))
+}
+
+/// A retired source must still hold a refresh grant when its harness strips
+/// grants from ordinary copies. Destination copies may legitimately be stripped.
+pub fn read_harvestable_copied_login(kind: HarnessKind, home: &Path) -> Result<Option<Vec<u8>>> {
+    let Some(bytes) = read_copied_login(kind, home)? else {
+        return Ok(None);
+    };
+    Ok(harvestable_login_bytes(kind, &bytes)?.then_some(bytes))
+}
+
+/// Secret, connection-only retired login. Never put this in relay observations.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetiredLoginSnapshot {
+    pub id: String,
+    pub profile_id: String,
+    pub harness: HarnessKind,
+    pub store_id: String,
+    pub login_relative_path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for RetiredLoginSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetiredLoginSnapshot")
+            .field("id", &self.id)
+            .field("profile_id", &self.profile_id)
+            .field("harness", &self.harness)
+            .finish_non_exhaustive()
+    }
+}

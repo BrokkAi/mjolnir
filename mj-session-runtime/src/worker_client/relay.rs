@@ -449,6 +449,28 @@ impl RelayClient {
 
     /// Read this session's credential file. Callers must keep these bytes out
     /// of durable relay observations, logs, and archives.
+    pub async fn read_retired_logins(
+        &mut self,
+    ) -> Result<Vec<mj_core::credentials::RetiredLoginSnapshot>> {
+        if !RelayRequest::ReadRetiredLogins.supported_at(self.protocol_version) {
+            return Ok(Vec::new());
+        }
+        match self.call(RelayRequest::ReadRetiredLogins).await? {
+            RelayResponsePayload::RetiredLogins { logins } => Ok(logins),
+            _ => bail!("relay returned an unexpected retired login response"),
+        }
+    }
+
+    pub async fn ack_retired_login(&mut self, id: &str) -> Result<()> {
+        match self
+            .call(RelayRequest::AckRetiredLogin { id: id.to_owned() })
+            .await?
+        {
+            RelayResponsePayload::RetiredLoginAcknowledged => Ok(()),
+            _ => bail!("relay returned an unexpected retired login acknowledgement"),
+        }
+    }
+
     pub async fn read_credentials(&mut self) -> Result<Vec<u8>> {
         match self.call(RelayRequest::ReadCredentials).await? {
             RelayResponsePayload::Credentials { data } => BASE64

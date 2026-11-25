@@ -2700,6 +2700,10 @@ mod staged_reload_tests {
         launch.cwd = root.to_owned();
         launch.session_id = "session-1".into();
         launch.accepted_reload_operation_id = Some("move".into());
+        launch.write(&root.join("launch.json")).unwrap();
+        std::fs::write(root.join("ownership.json"), serde_json::to_vec(&serde_json::json!({
+            "version":3, "session_id":"session-1", "profile_id":"source", "bundle_id":"bundle", "target_template_id":"target",
+        })).unwrap()).unwrap();
         (relay, launch, store)
     }
 
@@ -2712,7 +2716,9 @@ mod staged_reload_tests {
         )
         .unwrap();
         launch.write(&candidate.join("launch.json")).unwrap();
-        std::fs::write(candidate.join("ownership.json"), "destination ownership").unwrap();
+        std::fs::write(candidate.join("ownership.json"), serde_json::to_vec(&serde_json::json!({
+            "version":3, "session_id":"session-1", "profile_id":"destination", "bundle_id":"bundle", "target_template_id":"target",
+        })).unwrap()).unwrap();
         let manifest = ReloadCandidateManifest {
             operation_id: "move".into(),
             expected_store_id: store.into(),
