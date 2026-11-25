@@ -35,7 +35,7 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
         .arg(&command)
         .current_dir(&s.cwd)
         .env_clear()
-        .envs(&s.environment)
+        .envs(&*s.environment.lock().unwrap())
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -63,13 +63,17 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
         let mut stderr = child.stderr.take().unwrap();
         let out_s = s.clone();
         let out_id = task_id.clone();
-        let output = mj_core::runtime::spawn(async move {
+        let out_cancel = cancel.clone();
+        let mut output = mj_core::runtime::spawn(async move {
             let mut buf = [0; 4096];
             let mut batch = Vec::new();
             let mut tick = tokio::time::interval(Duration::from_millis(200));
             loop {
                 let mut flush = false;
-                let end = tokio::select! {r=stdout.read(&mut buf)=>match r {Ok(0)=>true,Ok(n)=>{batch.extend_from_slice(&buf[..n]);false},Err(error)=>{tracing::warn!(%error,"monitor stdout failed");true}},_=tick.tick()=>{flush=true;false}};
+                let end = tokio::select! {biased; _=out_cancel.cancelled()=>break,r=stdout.read(&mut buf)=>match r {Ok(0)=>true,Ok(n)=>{batch.extend_from_slice(&buf[..n]);false},Err(error)=>{tracing::warn!(%error,"monitor stdout failed");true}},_=tick.tick()=>{flush=true;false}};
+                if out_cancel.is_cancelled() {
+                    break;
+                }
                 if !batch.is_empty() && (end || batch.len() >= 16384 || flush) {
                     out_s.deliver_wake(
                         &out_id,
@@ -86,11 +90,13 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
                 }
             }
         });
-        let errors = mj_core::runtime::spawn(async move {
+        let err_cancel = cancel.clone();
+        let mut errors = mj_core::runtime::spawn(async move {
             let mut tail = Vec::new();
             let mut buf = [0; 4096];
             loop {
-                match stderr.read(&mut buf).await {
+                match tokio::select! { biased; _ = err_cancel.cancelled() => break, result = stderr.read(&mut buf) => result }
+                {
                     Ok(0) => break,
                     Ok(n) => {
                         tail.extend_from_slice(&buf[..n]);
@@ -116,15 +122,28 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
         let (status, stopped, timed_out) = tokio::select! {_=cancel.cancelled()=>{kill(pgid,libc::SIGTERM);kill(pgid,libc::SIGKILL);(child.wait().await,true,false)},_=deadline=>{kill(pgid,libc::SIGTERM);kill(pgid,libc::SIGKILL);(child.wait().await,false,true)},r=child.wait()=>(r,false,false)};
         // The shell may exit before descendants close inherited pipes.
         kill(pgid, libc::SIGKILL);
-        if let Err(error) = output.await {
-            tracing::error!(%error,"monitor output task failed");
-        }
-        let tail = match errors.await {
-            Ok(t) => t,
-            Err(error) => {
-                tracing::error!(%error,"monitor stderr task failed");
-                Vec::new()
+        // Escaped descendants can retain pipes after the owned group exits.
+        // Bound only this final drain; cancellation always remains responsive.
+        let drained = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            result = tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(&mut output, &mut errors) }) => result.ok(),
+        };
+        let tail = if let Some((out, err)) = drained {
+            if let Err(error) = out {
+                tracing::error!(%error, "monitor output task failed");
             }
+            match err {
+                Ok(tail) => tail,
+                Err(error) => {
+                    tracing::error!(%error,"monitor stderr task failed");
+                    Vec::new()
+                }
+            }
+        } else {
+            output.abort();
+            errors.abort();
+            Vec::new()
         };
         s.monitors.lock().unwrap().remove(&task_id);
         if !stopped && !cancel.is_cancelled() {
@@ -167,6 +186,48 @@ pub(super) async fn stop(s: &Service, id: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn claude_mcp_monitor_stop_drains_escaped_descendant_pipes() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "test-session", "test").unwrap(),
+        ));
+        let (tx, _rx) = mpsc::channel(100);
+        let guard = start_claude_mcp_service(
+            root.path(),
+            root.path().into(),
+            std::env::vars().collect(),
+            HarnessKind::Codex,
+            relay,
+            tx,
+            &tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let result = start(&guard.service, json!({"description":"escaped pipes", "command":r#"python3 -c 'import os,time; os.setsid(); open("escaped.pid","w").write(str(os.getpid())); time.sleep(30)' & wait"#, "persistent":true})).unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(root.path().join("escaped.pid")).await
+                    && let Ok(pid) = text.parse::<i32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(2),
+            stop(&guard.service, result["task_id"].as_str().unwrap()),
+        )
+        .await;
+        // The escaped session is intentionally outside the monitor's process group.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        stopped.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn claude_mcp_monitor_stop_and_drop_kill_descendants() {
         for explicit in [true, false] {

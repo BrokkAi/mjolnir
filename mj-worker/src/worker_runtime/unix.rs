@@ -152,7 +152,7 @@ struct RunningHarness {
     commands: mpsc::Sender<CommandRequest>,
     _reviewer: Arc<ReviewCapture>,
     subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
-    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpShutdownGuard>,
+    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpControllerGuard>,
     _subagents: Option<super::subagents::SubagentEndpoint>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     shell_cleanup: tokio_util::task::TaskTracker,
@@ -262,7 +262,7 @@ struct PreparedAcpSetup {
     reviewer: Arc<ReviewCapture>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
-    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpShutdownGuard>,
+    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpControllerGuard>,
     acp_spec: LaunchSpec,
     shell_cleanup: tokio_util::task::TaskTracker,
     managed_cache_root: Option<PathBuf>,
@@ -277,7 +277,7 @@ struct StartedBridgeTasks {
     commands: Option<mpsc::Sender<CommandRequest>>,
     reviewer: Option<Arc<ReviewCapture>>,
     subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
-    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpShutdownGuard>,
+    claude_mcp_guard: Option<super::claude_mcp::ClaudeMcpControllerGuard>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     shell_cleanup: Option<tokio_util::task::TaskTracker>,
 }
@@ -369,20 +369,15 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         primary_relay: relay.clone(),
         operation: tokio::sync::Mutex::new(()),
     });
-    let claude_mcp_guard =
-        if mj_core::claude_mcp::ClaudeMcpCapabilities::for_harness(config.harness).is_empty() {
-            None
-        } else {
-            Some(super::claude_mcp::start_claude_mcp_service(
-                &root,
-                config.cwd.clone(),
-                session_environment.clone(),
-                config.harness,
-                relay.clone(),
-                dispatch_wake,
-                &runtime,
-            )?)
-        };
+    let controller = super::claude_mcp::ClaudeMcpController::new(
+        root.clone(),
+        config.cwd.clone(),
+        relay.clone(),
+        dispatch_wake,
+        runtime.clone(),
+    );
+    let claude_mcp_active = controller.reconcile(config.harness, session_environment.clone())?;
+    let claude_mcp_guard = Some(super::claude_mcp::ClaudeMcpControllerGuard(controller));
     let subagent_socket_guard = Some(SharedSubagentsShutdownGuard(shared_subagents.clone()));
     let subagents = if subagent_role.is_some() {
         Some(shared_subagents.ensure_serving(
@@ -476,11 +471,11 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         subagent_policy: crate::acp::launch_subagent_policy(&config),
         managed_subagent,
         instruction_role,
-        claude_mcp_socket: crate::acp::launch_claude_mcp_socket(
-            &root,
-            config.harness,
-            profile_registration,
-        ),
+        claude_mcp_socket: claude_mcp_active
+            .then(|| {
+                crate::acp::launch_claude_mcp_socket(&root, config.harness, profile_registration)
+            })
+            .flatten(),
         subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
             &root,
             &config,
@@ -573,7 +568,7 @@ fn start_bridge(
     antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     relay: Arc<RelayCell>,
     dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
-    task_monitors: TaskMonitors,
+    mut task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
     cancel: &CancellationToken,
@@ -605,6 +600,7 @@ fn start_bridge(
             subagents: subagents.clone(),
         },
     )?;
+    task_monitors.claude_mcp = claude_mcp_guard.as_ref().map(|guard| guard.0.clone());
     let acp_shutdown = CancellationToken::new();
     let mut started = StartedBridgeTasks {
         acp_shutdown: Some(acp_shutdown.clone()),
@@ -1253,11 +1249,8 @@ async fn restart_harness_in_place_response(
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
-            claude_mcp_socket: crate::acp::launch_claude_mcp_socket(
-                relay_root,
-                launch_config.harness,
-                profile_registration,
-            ),
+            // The coordinator reconciles the service at committed reload admission.
+            claude_mcp_socket: None,
             subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
                 relay_root,
                 &launch_config,

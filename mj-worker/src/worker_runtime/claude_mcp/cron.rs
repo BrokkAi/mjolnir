@@ -41,8 +41,8 @@ impl Schedule {
         }
         Ok(Self {
             fields,
-            dom_any: parts[2] == "*",
-            dow_any: parts[4] == "*",
+            dom_any: parts[2].starts_with('*'),
+            dow_any: parts[4].starts_with('*'),
         })
     }
     fn next_fire_after(&self, after: DateTime<Local>) -> Option<DateTime<Local>> {
@@ -52,9 +52,9 @@ impl Schedule {
             let dom = self.fields[2].contains(&date.day());
             let dow = self.fields[4].contains(&date.weekday().num_days_from_sunday());
             let day = match (self.dom_any, self.dow_any) {
-                (true, true) => true,
-                (true, false) => dow,
-                (false, true) => dom,
+                (true, true) => dom && dow,
+                (true, false) => dom && dow,
+                (false, true) => dom && dow,
                 (false, false) => dom || dow,
             };
             if self.fields[3].contains(&date.month()) && day {
@@ -128,8 +128,8 @@ fn arm(s: &Arc<Service>, job: Job) {
             let now = chrono::Utc::now().timestamp_millis();
             let expired = job.expires_at_ms.is_some_and(|e| now >= e);
             if !expired {
-                s.deliver_wake(
-                    &job.id,
+                s.deliver_wake_with_key(
+                    &format!("claude-cron-{}-{}", job.id, job.next_fire_at_ms),
                     format!("[mj-claude cron {} ({})]\n{}", job.id, job.cron, job.prompt),
                 );
             }
@@ -248,6 +248,12 @@ mod tests {
             .next_fire_after(at)
             .unwrap();
         assert_eq!(next.minute(), 10);
+        let stepped = Schedule::parse("0 9 */2 * 1")
+            .unwrap()
+            .next_fire_after(at)
+            .unwrap();
+        assert_eq!(stepped.weekday().num_days_from_monday(), 0);
+        assert_eq!(stepped.day() % 2, 1);
         for bad in [
             "* * *",
             "*/0 * * * *",

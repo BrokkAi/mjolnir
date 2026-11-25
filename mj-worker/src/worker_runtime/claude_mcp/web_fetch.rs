@@ -5,7 +5,8 @@ fn entities(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        if let Some(end) = rest.find(';').filter(|n| *n < 16) {
+        let limit = rest.floor_char_boundary(16.min(rest.len()));
+        if let Some(end) = rest[..limit].find(';') {
             let e = &rest[1..end];
             let decoded = match e {
                 "amp" => Some('&'),
@@ -40,6 +41,20 @@ fn convert(html: &str, markdown: bool) -> String {
     let mut links = Vec::new();
     let mut pre = false;
     while !rest.is_empty() {
+        if let Some(hidden) = &skip {
+            let lower = rest.to_ascii_lowercase();
+            let closing = format!("</{hidden}");
+            let end = lower.match_indices(&closing).find_map(|(i, _)| {
+                let after = &lower[i + closing.len()..];
+                let trimmed = after.trim_start_matches(|c: char| c.is_ascii_whitespace());
+                trimmed
+                    .starts_with('>')
+                    .then_some(i + closing.len() + after.len() - trimmed.len() + 1)
+            });
+            rest = end.map_or("", |end| &rest[end..]);
+            skip = None;
+            continue;
+        }
         if rest.starts_with("<!--") {
             rest = rest.find("-->").map_or("", |n| &rest[n + 3..]);
             continue;
@@ -58,12 +73,6 @@ fn convert(html: &str, markdown: bool) -> String {
                 .unwrap_or("")
                 .trim_end_matches('/');
             rest = &rest[end + 1..];
-            if let Some(hidden) = &skip {
-                if close && name == hidden {
-                    skip = None;
-                }
-                continue;
-            }
             if ["script", "style", "noscript", "template"].contains(&name)
                 && !close
                 && !tag.trim_end().ends_with('/')
@@ -191,7 +200,7 @@ pub(super) async fn fetch(a: Value) -> Result<Value> {
         .redirect(reqwest::redirect::Policy::limited(10))
         .user_agent("mjolnir-web-fetch/1.0")
         .build()?;
-    let mut response = client.get(parsed).send().await?;
+    let response = client.get(parsed).send().await?;
     let final_url = response.url().to_string();
     let status = response.status();
     let content_type = response
@@ -200,16 +209,7 @@ pub(super) async fn fetch(a: Value) -> Result<Value> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_owned();
-    let mut body = Vec::new();
-    let mut body_truncated = false;
-    while let Some(chunk) = response.chunk().await? {
-        let available = (5 * 1024 * 1024usize).saturating_sub(body.len());
-        body.extend_from_slice(&chunk[..available.min(chunk.len())]);
-        if chunk.len() > available {
-            body_truncated = true;
-            break;
-        }
-    }
+    let body = response.bytes().await?;
     let raw = String::from_utf8_lossy(&body);
     let html = content_type.contains("html")
         || ["<!doctype", "<html"]
@@ -224,7 +224,7 @@ pub(super) async fn fetch(a: Value) -> Result<Value> {
     let page: String = content.chars().skip(offset).take(max).collect();
     let next = offset.saturating_add(page.chars().count());
     Ok(
-        json!({"url":url,"final_url":final_url,"status":status.as_u16(),"status_text":status.canonical_reason().unwrap_or(""),"content_type":content_type,"bytes":body.len(),"duration_ms":started.elapsed().as_millis(),"format":format,"content":page,"offset":offset,"next_offset":if next<total{Some(next)}else{None},"total_chars":total,"truncated":body_truncated||next<total}),
+        json!({"url":url,"final_url":final_url,"status":status.as_u16(),"status_text":status.canonical_reason().unwrap_or(""),"content_type":content_type,"bytes":body.len(),"duration_ms":started.elapsed().as_millis(),"format":format,"content":page,"offset":offset,"next_offset":if next<total{Some(next)}else{None},"total_chars":total,"truncated":next<total}),
     )
 }
 
@@ -242,7 +242,7 @@ mod tests {
                 let mut req = vec![0; 4096];
                 use tokio::io::AsyncReadExt;
                 assert!(stream.read(&mut req).await.unwrap() > 0);
-                let body = "<html><script src='ignored' /><h1>hé😀</h1><p><a data-href='https://wrong.example' href='https://example.com'>link &amp; more</a><code>x</code></p><script>bad</script></html>";
+                let body = "<html><script src='ignored' /><h1>hé😀</h1><p><a data-href='https://wrong.example' href='https://example.com'>link &amp; more</a><code>x</code></p><script>bad; if (a < b) { console.log(1); }</script><p>after</p></html>";
                 let reply = if n == 0 {
                     format!(
                         "HTTP/1.1 302 Found\r\nLocation: http://{addr}/final\r\nContent-Length: 0\r\n\r\n"
@@ -270,6 +270,8 @@ mod tests {
         assert!(content.contains("[link & more](https://example.com)"));
         assert!(content.contains("`x`"));
         assert!(!content.contains("bad"));
+        assert!(!content.contains("console.log"));
+        assert!(content.contains("after"));
         server.await.unwrap();
         assert!(fetch(json!({"url":"file:///etc/passwd"})).await.is_err());
     }

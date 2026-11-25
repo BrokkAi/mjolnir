@@ -62,6 +62,7 @@ impl HarnessStartup {
 
 #[derive(Default)]
 pub(super) struct TaskMonitors {
+    pub(super) claude_mcp: Option<super::super::claude_mcp::ClaudeMcpController>,
     kimi: Option<KimiTaskMonitor>,
     antigravity: Option<AntigravityTaskMonitor>,
 }
@@ -81,10 +82,12 @@ impl TaskMonitors {
             HarnessKind::Kimi => Self {
                 kimi: Some(KimiTaskMonitor::new(home())),
                 antigravity: None,
+                claude_mcp: None,
             },
             HarnessKind::Antigravity => Self {
                 kimi: None,
                 antigravity: Some(AntigravityTaskMonitor::new(home())),
+                claude_mcp: None,
             },
             _ => Self::default(),
         }
@@ -1151,15 +1154,21 @@ pub(super) async fn apply_harness_reload_transition(
             capabilities.subagent_role,
             registered,
         );
+        let claude_mcp_active = task_monitors
+            .claude_mcp
+            .as_ref()
+            .map(|controller| controller.reconcile(launch_config.harness, environment.clone()))
+            .transpose()?
+            .unwrap_or(false);
         Some(AppliedReloadRuntime {
             committed: staged,
             environment,
             subagent_mcp_socket: socket,
-            claude_mcp_socket: crate::acp::launch_claude_mcp_socket(
-                &root,
-                launch_config.harness,
-                registered,
-            ),
+            claude_mcp_socket: if claude_mcp_active {
+                crate::acp::launch_claude_mcp_socket(&root, launch_config.harness, registered)
+            } else {
+                None
+            },
             managed_subagent: capabilities.managed_subagent,
         })
     } else {
@@ -1195,7 +1204,9 @@ pub(super) async fn apply_harness_reload_transition(
     } else {
         login_identity.observe_file(None);
     }
+    let claude_mcp = task_monitors.claude_mcp.take();
     *task_monitors = TaskMonitors::new(harness, &credentials);
+    task_monitors.claude_mcp = claude_mcp;
     Ok(runtime)
 }
 

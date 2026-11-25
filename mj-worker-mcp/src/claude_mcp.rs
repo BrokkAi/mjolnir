@@ -139,7 +139,7 @@ fn definition(name: &str) -> Value {
                 "prompt":{"type":"string","description":"Wake prompt; required unless stop is true."},
                 "reason":{"type":"string","description":"Reason for waking; required unless stop is true."},
                 "stop":{"type":"boolean","default":false,"description":"Cancel the pending dynamic wakeup."},
-                "noop":{"type":"boolean","default":false,"description":"Mark the wakeup as a no-op."}
+                "noop":{"type":"boolean","default":false,"description":"Record whether the current loop check found no change to report (metadata only; the wakeup still fires)."}
             }),
             vec![],
         ),

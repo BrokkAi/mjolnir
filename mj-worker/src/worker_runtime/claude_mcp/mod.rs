@@ -41,7 +41,8 @@ fn required(v: &Value, key: &str) -> Result<String> {
 struct Service {
     root: PathBuf,
     cwd: PathBuf,
-    environment: BTreeMap<String, String>,
+    environment: Mutex<BTreeMap<String, String>>,
+    harness: Mutex<HarnessKind>,
     relay: Arc<RelayCell>,
     dispatch: mpsc::Sender<()>,
     cancel: CancellationToken,
@@ -52,12 +53,14 @@ struct Service {
 }
 impl Service {
     fn deliver_wake(&self, key: &str, text: String) {
-        let key = format!("{key}-{}", id());
+        self.deliver_wake_with_key(&format!("{key}-{}", id()), text);
+    }
+    fn deliver_wake_with_key(&self, key: &str, text: String) {
         if let Err(error) = self
             .relay
             .lock()
             .expect("relay state lock poisoned")
-            .deliver_agent_wake(CLAUDE_MCP_SERVER, &key, text)
+            .deliver_agent_wake(CLAUDE_MCP_SERVER, key, text)
         {
             tracing::error!(%error,"utility wake delivery failed");
         }
@@ -116,12 +119,76 @@ impl Service {
         )
     }
 }
+#[derive(Clone)]
+pub struct ClaudeMcpController(Arc<ControllerState>);
+struct ControllerState {
+    root: PathBuf,
+    cwd: PathBuf,
+    relay: Arc<RelayCell>,
+    dispatch: mpsc::Sender<()>,
+    runtime: tokio::runtime::Handle,
+    service: Mutex<Option<ClaudeMcpShutdownGuard>>,
+}
+pub struct ClaudeMcpControllerGuard(pub ClaudeMcpController);
+impl Drop for ClaudeMcpControllerGuard {
+    fn drop(&mut self) {
+        self.0.0.service.lock().unwrap().take();
+    }
+}
+impl ClaudeMcpController {
+    pub fn new(
+        root: PathBuf,
+        cwd: PathBuf,
+        relay: Arc<RelayCell>,
+        dispatch: mpsc::Sender<()>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        Self(Arc::new(ControllerState {
+            root,
+            cwd,
+            relay,
+            dispatch,
+            runtime,
+            service: Mutex::new(None),
+        }))
+    }
+    pub fn reconcile(
+        &self,
+        harness: HarnessKind,
+        environment: BTreeMap<String, String>,
+    ) -> Result<bool> {
+        let mut slot = self.0.service.lock().unwrap();
+        if ClaudeMcpCapabilities::for_harness(harness).is_empty() {
+            slot.take();
+            return Ok(false);
+        }
+        if let Some(guard) = slot.as_ref() {
+            guard.update_runtime(harness, environment);
+        } else {
+            *slot = Some(start_claude_mcp_service(
+                &self.0.root,
+                self.0.cwd.clone(),
+                environment,
+                harness,
+                self.0.relay.clone(),
+                self.0.dispatch.clone(),
+                &self.0.runtime,
+            )?);
+        }
+        Ok(true)
+    }
+}
+
 pub struct ClaudeMcpShutdownGuard {
     service: Arc<Service>,
     listener: JoinHandle<()>,
     path: PathBuf,
 }
 impl ClaudeMcpShutdownGuard {
+    pub fn update_runtime(&self, harness: HarnessKind, environment: BTreeMap<String, String>) {
+        *self.service.environment.lock().unwrap() = environment;
+        *self.service.harness.lock().unwrap() = harness;
+    }
     pub fn shutdown(&self) {
         self.service.cancel.cancel();
         for monitor in self.service.monitors.lock().unwrap().values() {
@@ -172,7 +239,8 @@ pub fn start_claude_mcp_service(
     let service = Arc::new(Service {
         root: worker_root.into(),
         cwd,
-        environment,
+        environment: Mutex::new(environment),
+        harness: Mutex::new(harness),
         relay,
         dispatch: dispatch_wake,
         cancel: CancellationToken::new(),
@@ -194,7 +262,8 @@ pub fn start_claude_mcp_service(
                         let (read,mut write)=stream.into_split();let mut line=String::new();
                         BufReader::new(read).read_line(&mut line).await?;
                         let req:ClaudeMcpRpcRequest=serde_json::from_str(&line)?;
-                        let result=if ClaudeMcpCapabilities::for_harness(harness).supports_tool(&req.tool) {s.call(req).await} else {Err(anyhow::anyhow!("tool is not enabled for this harness"))};
+                        let enabled = ClaudeMcpCapabilities::for_harness(*s.harness.lock().unwrap()).supports_tool(&req.tool);
+                        let result=if enabled {s.call(req).await} else {Err(anyhow::anyhow!("tool is not enabled for this harness"))};
                         let response=match result {Ok(v)=>ClaudeMcpRpcResponse{ok:true,result:Some(v),error:None},Err(e)=>ClaudeMcpRpcResponse{ok:false,result:None,error:Some(format!("{e:#}"))}};
                         let mut bytes=serde_json::to_vec(&response)?;bytes.push(b'\n');write.write_all(&bytes).await?;
                         Ok::<_,anyhow::Error>(())
@@ -231,6 +300,65 @@ mod tests {
         assert_eq!(v["ok"], true, "{v}");
         v["result"].clone()
     }
+    #[tokio::test]
+    async fn claude_mcp_controller_reconciles_harness_and_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "test-session", "test").unwrap(),
+        ));
+        let (tx, _rx) = mpsc::channel(100);
+        let controller = ClaudeMcpController::new(
+            root.path().into(),
+            root.path().into(),
+            relay,
+            tx,
+            tokio::runtime::Handle::current(),
+        );
+        let guard = ClaudeMcpControllerGuard(controller.clone());
+        assert!(
+            !controller
+                .reconcile(HarnessKind::Claude, BTreeMap::new())
+                .unwrap()
+        );
+        assert!(
+            controller
+                .reconcile(HarnessKind::Codex, std::env::vars().collect())
+                .unwrap()
+        );
+        let path = root.path().join(CLAUDE_MCP_SOCKET);
+        rpc(&path, "monitor_list", json!({})).await;
+        assert!(
+            controller
+                .reconcile(
+                    HarnessKind::Muse,
+                    BTreeMap::from([("MARKER".into(), "updated".into())])
+                )
+                .unwrap()
+        );
+        {
+            let active = controller.0.service.lock().unwrap();
+            let service = &active.as_ref().unwrap().service;
+            assert_eq!(*service.harness.lock().unwrap(), HarnessKind::Muse);
+            assert_eq!(
+                service.environment.lock().unwrap().get("MARKER").unwrap(),
+                "updated"
+            );
+        }
+        assert!(
+            !controller
+                .reconcile(HarnessKind::Claude, BTreeMap::new())
+                .unwrap()
+        );
+        assert!(!path.exists());
+        assert!(
+            controller
+                .reconcile(HarnessKind::Codex, std::env::vars().collect())
+                .unwrap()
+        );
+        drop(guard);
+        assert!(!path.exists());
+    }
+
     #[tokio::test]
     async fn claude_mcp_socket_timers_persistence_and_monitor_pipes() {
         let root = tempfile::tempdir().unwrap();

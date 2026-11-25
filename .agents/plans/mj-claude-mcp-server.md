@@ -59,6 +59,10 @@ A user can verify the behavior end to end by starting a non-Claude session (or r
   Rationale: Isolated reviewers must stay strictly read-only with no extra MCP capabilities; managed children on Codex/other harnesses benefit from `web_fetch`/`monitor` during work just as Claude children have those built-ins natively, and worker shutdown/parking cleanly kills all child monitors and timers.
   Date/Author: 2026-11-25 / parent agent.
 
+- Decision: Manage `ClaudeMcpService` through a cloneable `ClaudeMcpController` reconciled on initial startup and committed harness reload, and remove the initial speculative 5 MiB `web_fetch` body truncation cap.
+  Rationale: Pre-push review round 1 identified that in-place harness reloads can refresh credentials/environment or change harness capabilities (including Claude to/from non-Claude), and that a fixed 5 MiB body cap made later pages unreachable via `offset`. `ClaudeMcpController::reconcile` updates active service harness/environment in place, starts the service on Claude-to-non-Claude reload, and stops it on non-Claude-to-Claude reload; reading the full HTTP body under the 30s timeout keeps `offset`/`next_offset` and `truncated` consistent.
+  Date/Author: 2026-11-25 / parent agent.
+
 - Decision: Do not modify `go/`.
   Rationale: `AGENTS.md` states "Only work on go/ if you are explicitly instructed to do so."
   Date/Author: 2026-11-25 / parent agent.
