@@ -1696,15 +1696,16 @@ const REMOTE_TARGET_KINDS: &str =
 /// Fill the machine on stored placements that have none, and return the
 /// session placements filled so the caller can update its copies.
 ///
-/// A local placement is on `local` by its kind. An SSH or legacy EC2
-/// placement takes the machine of its target template, from `templates`, only
+/// A local placement is on `local` by its kind. An SSH placement takes the
+/// machine of its target template, from `templates`, only
 /// when that machine is where the placement itself says it runs
 /// ([`machine_hosts_placement`]): a template repointed to another host since
 /// the placement was made would otherwise hand the placement the wrong
 /// machine. A placement whose template is gone, or whose template no longer
 /// names its host, stays `NULL`: nothing else records which machine it ran
 /// on, and a guess could send sessions to the wrong host. Only rows still
-/// `NULL` change, so a concurrent writer's value is kept.
+/// `NULL` change, so a concurrent writer's value is kept. Legacy EC2
+/// placements always stay `NULL` (see [`machine_hosts_placement`]).
 pub fn backfill_machine_ids(
     templates: &BTreeMap<String, (MachineId, Machine)>,
 ) -> Result<BTreeMap<String, MachineId>> {

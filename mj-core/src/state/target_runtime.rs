@@ -220,8 +220,9 @@ impl TargetRuntimeSettings {
 /// placement itself recorded: the locator's SSH `host` and the frozen access
 /// settings. A template that was repointed since the placement was made names
 /// a machine that fails this test, and the placement stays unassigned rather
-/// than taking the wrong machine. A legacy EC2 placement is recognised only
-/// by its frozen settings, since its locator names an instance, not a host.
+/// than taking the wrong machine. A legacy EC2 placement is never assigned:
+/// its frozen settings hold the AWS profile, region and user but not the
+/// launch template, so they cannot tell two machines in one account apart.
 #[must_use]
 pub fn machine_hosts_placement(
     machine: &Machine,
@@ -240,22 +241,7 @@ pub fn machine_hosts_placement(
                 None => true,
             }
         }
-        Machine::AwsEc2 {
-            aws_profile,
-            region,
-            ssh_user,
-            ..
-        } => matches!(
-            runtime.map(|runtime| &runtime.connection),
-            Some(TargetConnection::Aws {
-                profile: recorded_profile,
-                region: recorded_region,
-                ssh_user: recorded_user,
-                ..
-            }) if recorded_profile == aws_profile.as_deref().unwrap_or("default")
-                && recorded_region == region
-                && recorded_user == ssh_user
-        ),
+        Machine::AwsEc2 { .. } => false,
     }
 }
 

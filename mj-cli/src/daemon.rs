@@ -2426,6 +2426,11 @@ pub(crate) async fn fence_store(destination: String, note: Option<String>) -> Re
         DataLayout::current().root(),
         "fence the Mjolnir store",
     )?;
+    // Checked here, before the daemon is stopped, so a bad argument changes nothing.
+    ensure!(
+        !destination.trim().is_empty(),
+        "`mj daemon fence --to` needs a destination, such as the new host's name"
+    );
     ensure!(
         !daemon_configured_for_container().await,
         "this instance runs its daemon in a container, so its store is in the container's volume \

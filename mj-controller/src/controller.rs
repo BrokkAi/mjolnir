@@ -847,10 +847,10 @@ impl Controller {
     }
 
     /// Fill the machine on placements that have none: local placements by
-    /// kind, SSH and legacy EC2 placements from the machine their target
-    /// template names, when that machine is where the placement recorded
-    /// itself to be. A placement whose template was removed or repointed keeps
-    /// no machine; migrate maps those by hand.
+    /// kind, SSH placements from the machine their target template names,
+    /// when that machine is where the placement recorded itself to be. A
+    /// placement whose template was removed or repointed, and every legacy
+    /// EC2 placement, keeps no machine; migrate maps those by hand.
     fn backfill_machine_ids(&mut self) -> Result<()> {
         let templates = self
             .config
