@@ -413,18 +413,9 @@ fn rewrite_move(
         rewrite_session(session, spec)?;
     }
     for grant in &mut op.granted_keys {
-        if let Some(path) = &mut grant.private_key_path {
-            migration_paths::relocate_ssh_identity_path(
-                path,
-                &spec.old_config_root,
-                &spec.new_config_root,
-                &spec.old_home,
-                &spec.new_home,
-            );
-        }
-        if let Some(path) = &mut grant.known_hosts_path {
-            migration_paths::relocate_ec2_path(path, &spec.old_config_root, &spec.new_config_root);
-        }
+        // `private_key_path` and `known_hosts_path` live on the move peer host
+        // where deferred cleanup runs `rm -f`; only the controller-side SSH
+        // arguments used to reach that peer move with the daemon.
         if let Some(ssh) = &mut grant.ssh_target {
             migration_paths::relocate_ssh_args(
                 &mut ssh.ssh_args,
@@ -1894,7 +1885,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             op.granted_keys[0].private_key_path.as_deref(),
-            Some(spec.new_home.join(".ssh/grant").as_path())
+            Some(spec.old_home.join(".ssh/grant").as_path())
         );
         assert_eq!(
             op.granted_keys[0].ssh_target.as_ref().unwrap().ssh_args[0],

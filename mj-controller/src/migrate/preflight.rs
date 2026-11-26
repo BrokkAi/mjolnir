@@ -308,6 +308,23 @@ pub fn inspect_preflight(
             }
         }
     }
+    let mut query = connection
+        .prepare("SELECT managed_worktree FROM sessions WHERE managed_worktree IS NOT NULL")?;
+    for row in query.query_map([], |row| row.get::<_, String>(0))? {
+        let worktree: mj_core::state::ManagedWorktree = serde_json::from_str(&row?)?;
+        if let mj_core::state::ManagedWorktreeTarget::Ssh { ssh_args, .. } = &worktree.target {
+            add_connection(None, ssh_args, false);
+        }
+    }
+    let mut query = connection.prepare("SELECT placement_json FROM environments")?;
+    for row in query.query_map([], |row| row.get::<_, String>(0))? {
+        let placement: mj_store::database::EnvironmentPlacement = serde_json::from_str(&row?)?;
+        if let Some(worktree) = &placement.managed_worktree
+            && let mj_core::state::ManagedWorktreeTarget::Ssh { ssh_args, .. } = &worktree.target
+        {
+            add_connection(None, ssh_args, false);
+        }
+    }
     for (path, configured) in identity_paths {
         let source = mj_core::path_input::expand_home(&path, Some(old_home))?;
         let config_copied = source
