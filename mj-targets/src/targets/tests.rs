@@ -1108,7 +1108,9 @@ fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(local.exists.args, ["container", "exists", name.as_str()]);
+    assert_eq!(local.exists.program, "sh");
+    assert_eq!(local.exists.args.last().unwrap(), &name);
+    assert!(local.exists.args[1].contains("podman_resource_exists container \"$1\""));
     assert_eq!(local.inspect.args, ["container", "inspect", name.as_str()]);
     assert_eq!(local.start.args, ["start", name.as_str()]);
 
@@ -1124,10 +1126,9 @@ fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
     .unwrap()
     .unwrap();
     assert_eq!(remote.exists.program, "ssh");
-    assert_eq!(
-        unwrapped_remote_line(remote.exists.args.last().unwrap()),
-        format!("'podman' 'container' 'exists' '{name}'")
-    );
+    let remote_exists = unwrapped_remote_line(remote.exists.args.last().unwrap());
+    assert!(remote_exists.contains("podman_resource_exists container"));
+    assert!(remote_exists.ends_with(&format!("'mj-podman-exists' '{name}'")));
     assert_eq!(remote.inspect.program, "ssh");
     assert_eq!(
         unwrapped_remote_line(remote.inspect.args.last().unwrap()),
@@ -2517,8 +2518,8 @@ fn podman_cleanup_confirmation_checks_container_and_workspace_storage() {
     assert!(!cleanup_target_is_confirmed_absent(&locator, SESSION, &live).unwrap());
     let command = &live.seen.borrow()[0];
     assert_eq!(command.program, "sh");
-    assert!(command.args[1].contains("podman container exists"));
-    assert!(command.args[1].contains("podman volume exists"));
+    assert!(command.args[1].contains("podman_resource_exists container"));
+    assert!(command.args[1].contains("podman_resource_exists volume"));
     assert!(command.args.contains(&volume));
 
     let absent = PodmanPreflightExecutor::with_outputs([podman_output("")]);
@@ -6537,4 +6538,89 @@ printf '%s\n' "$FAKE_INFO"
         error.to_string(),
         "SSH connectivity test failed for dev@example.test with status 255: Host key verification failed."
     );
+}
+
+// Hard-won: #1708: Podman returned exit 1 for a broken rootless namespace and live sessions were discarded.
+#[cfg(unix)]
+#[test]
+fn podman_runtime_failure_is_not_resource_absence() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "podman",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >>"$MJ_PODMAN_TEST_LOG"
+case "$1 $2" in
+    'container exists'|'volume exists') exit 1 ;;
+    'container inspect') printf 'true|%s\n' "$MJ_PODMAN_TEST_SESSION"; exit 0 ;;
+    'info ')
+        if [ "$MJ_PODMAN_TEST_HEALTH" = broken ]; then
+            echo 'invalid internal status: could not find any running process' >&2
+            exit 1
+        fi
+        exit 0 ;;
+    'stop '*|'rm '*) exit 0 ;;
+    *) echo 'unexpected Podman test invocation' >&2; exit 90 ;;
+esac
+"#,
+    );
+    let name = resource_name(SESSION).unwrap();
+    let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: name.clone(),
+        workspace_storage: PodmanWorkspaceLocator::Volume {
+            name: format!("{name}-workspace"),
+        },
+    };
+    let recovery = target_recovery_plan(&locator, SESSION).unwrap().unwrap();
+    let absence = super::cleanup::podman_absence_command(
+        None,
+        &name,
+        match &locator {
+            TargetLocator::LocalPodman {
+                workspace_storage, ..
+            } => workspace_storage,
+            _ => unreachable!(),
+        },
+        SESSION,
+    );
+    let quiesce = quiesce_plan(&locator, SESSION).unwrap().unwrap();
+    let cleanup = podman_cleanup_plan(&locator, SESSION, false).unwrap();
+    let run = |command: &CommandSpec, health: &str| {
+        let mut command = command.clone();
+        command
+            .env
+            .insert("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()));
+        command.env.insert(
+            "MJ_PODMAN_TEST_LOG".into(),
+            root.path().join("calls").display().to_string(),
+        );
+        command
+            .env
+            .insert("MJ_PODMAN_TEST_SESSION".into(), SESSION.into());
+        command
+            .env
+            .insert("MJ_PODMAN_TEST_HEALTH".into(), health.into());
+        ProcessExecutor.execute(&command).unwrap()
+    };
+    // Every negative observation, including post-stop/remove verification,
+    // must remain unknown when the independent engine read also fails.
+    for command in [
+        &recovery.exists,
+        &absence,
+        &quiesce.commands[0],
+        &cleanup.commands[0],
+    ] {
+        assert_ne!(run(command, "broken").status, 0);
+    }
+    assert_eq!(run(&recovery.exists, "broken").status, 125);
+    assert_eq!(run(&absence, "broken").status, 2);
+    assert_eq!(run(&recovery.exists, "healthy").status, 1);
+    assert_eq!(run(&absence, "healthy").status, 0);
+    assert_eq!(run(&quiesce.commands[0], "healthy").status, 0);
+    assert_eq!(run(&cleanup.commands[0], "healthy").status, 0);
+    let calls = std::fs::read_to_string(root.path().join("calls")).unwrap();
+    assert!(!calls.lines().any(|line| line.starts_with("volume rm")));
 }

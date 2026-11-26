@@ -306,6 +306,19 @@ fn borrowed_worker_cleanup_plan_scoped(
     )
 }
 
+// Podman 5.7 can return the same exit status for a missing resource and a
+// broken rootless runtime. A negative observation needs an independent healthy
+// engine read before it can authorize Lost, cleanup, or storage retirement.
+pub(super) const PODMAN_RESOURCE_EXISTS_SCRIPT: &str = r#"podman_resource_exists() {
+    mj_exists_status=0
+    podman "$1" exists "$2" || mj_exists_status=$?
+    if [ "$mj_exists_status" -eq 1 ]; then
+        podman info >/dev/null 2>&1 || return 125
+    fi
+    return "$mj_exists_status"
+}
+"#;
+
 pub(super) const PODMAN_CONTAINER_IDENTITY_SCRIPT: &str = r#"set -eu
 container=$1
 session=$2
@@ -347,7 +360,7 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         _ => return Ok(None),
     };
     let script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}if podman container inspect \"$container\" >/dev/null 2>&1; then\n    stop_err=$(podman stop --time 0 --ignore \"$container\" 2>&1 >/dev/null) || true\n    [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n    # `container exists` exits 1 only for a definite absence; 125 is an error.\n    status=0\n    podman container exists \"$container\" || status=$?\n    case $status in\n        0)\n            running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\")\n            [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\n            ;;\n        1) ;;\n        *)\n            echo 'could not determine whether the Podman session container stopped' >&2\n            exit 1\n            ;;\n    esac\nfi\n"
+        "{PODMAN_RESOURCE_EXISTS_SCRIPT}{PODMAN_CONTAINER_IDENTITY_SCRIPT}if podman container inspect \"$container\" >/dev/null 2>&1; then\n    stop_err=$(podman stop --time 0 --ignore \"$container\" 2>&1 >/dev/null) || true\n    [ -z \"$stop_err\" ] || printf '%s\\n' \"$stop_err\" >&2\n    # Confirm engine health before accepting absence.\n    status=0\n    podman_resource_exists container \"$container\" || status=$?\n    case $status in\n        0)\n            running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\")\n            [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\n            ;;\n        1) ;;\n        *)\n            echo 'could not determine whether the Podman session container stopped' >&2\n            exit 1\n            ;;\n    esac\nfi\n"
     );
     let command = match ssh {
         Some(ssh) => ssh_command(
@@ -477,7 +490,7 @@ pub(super) fn podman_cleanup_plan(
         _ => unreachable!("Podman cleanup requires a Podman locator"),
     };
     let remove_container_script = format!(
-        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\n[ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\n# `container exists` exits 1 only for a definite absence; 125 is an error.\nstatus=0\npodman container exists \"$container\" || status=$?\ncase $status in\n    1) ;;\n    0) echo 'Podman session container is still present' >&2; exit 1 ;;\n    *) echo 'could not determine whether the Podman session container was removed' >&2; exit 1 ;;\nesac\n"
+        "{PODMAN_RESOURCE_EXISTS_SCRIPT}{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\n[ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\n# Confirm engine health before accepting absence.\nstatus=0\npodman_resource_exists container \"$container\" || status=$?\ncase $status in\n    1) ;;\n    0) echo 'Podman session container is still present' >&2; exit 1 ;;\n    *) echo 'could not determine whether the Podman session container was removed' >&2; exit 1 ;;\nesac\n"
     );
     let mut steps = vec![PodmanCleanupStep {
         purpose: "remove exact stopped Podman session container",
@@ -710,7 +723,7 @@ pub(super) fn podman_absence_command(
 ) -> CommandSpec {
     let storage_check = match workspace_storage {
         PodmanWorkspaceLocator::ContainerLayer => "exit 0".to_owned(),
-        PodmanWorkspaceLocator::Volume { .. } => r#"podman volume exists "$3"
+        PodmanWorkspaceLocator::Volume { .. } => r#"podman_resource_exists volume "$3"
 case $? in
     0) exit 1 ;;
     1) exit 0 ;;
@@ -730,13 +743,13 @@ esac"#
         }
     };
     let script = format!(
-        r#"podman container exists "$1"
+        r#"{PODMAN_RESOURCE_EXISTS_SCRIPT}podman_resource_exists container "$1"
 case $? in
     0) exit 1 ;;
     1) ;;
     *) exit 2 ;;
 esac
-podman volume exists "$4"
+podman_resource_exists volume "$4"
 case $? in
     0) exit 1 ;;
     1) ;;
