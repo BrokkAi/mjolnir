@@ -314,8 +314,9 @@ function SettingRowView({
     return (
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onNavigate(row.path)}
-        className="flex w-full items-center gap-3 rounded-lg border border-line bg-surface p-3 text-left hover:bg-raised"
+        className="flex w-full items-center gap-3 rounded-lg border border-line bg-surface p-3 text-left hover:bg-raised disabled:opacity-60"
       >
         <div className="min-w-0 flex-1">
           <p className="break-words text-sm font-medium text-fg">{row.label}</p>
@@ -420,6 +421,8 @@ export default function SettingsView({ path }: SettingsViewProps) {
 
   const requestedPath = JSON.parse(JSON.stringify(path)) as string[];
   const pathKey = JSON.stringify(requestedPath);
+  const pathKeyRef = useRef(pathKey);
+  pathKeyRef.current = pathKey;
   const requestedPathRef = useRef(requestedPath);
   requestedPathRef.current = requestedPath;
 
@@ -582,6 +585,9 @@ export default function SettingsView({ path }: SettingsViewProps) {
   const runEdit = async (edit: SettingsEdit): Promise<EditOutcome> => {
     const editPage = pageRef.current?.path;
     if (!editPage) return 'failed';
+    const editPageKey = JSON.stringify(editPage);
+    const structural = edit.kind === 'add' || edit.kind === 'remove' || edit.kind === 'action';
+    if (structural) setBusy(true);
     setError(null);
     setNotice(null);
     pollSuppressedRef.current = false;
@@ -589,12 +595,12 @@ export default function SettingsView({ path }: SettingsViewProps) {
     let outcome: EditOutcome = 'failed';
     await enqueue(async valid => {
       try {
+        if (JSON.stringify(pageRef.current?.path ?? []) !== editPageKey || pathKeyRef.current !== editPageKey) return;
         const result = await editSettings(draftRef.current, editPage, edit);
         if (!valid()) return;
         draftRef.current = result.draft;
         setDocument(current => current ? { ...current, draft: result.draft } : current);
         applyOptions(result.draft);
-        applyPage(result.page);
         if (edit.kind === 'set' || edit.kind === 'toggle') {
           const key = JSON.stringify(edit.path);
           const next = { ...fieldErrorsRef.current };
@@ -612,9 +618,24 @@ export default function SettingsView({ path }: SettingsViewProps) {
           setFieldErrors(next);
         }
         if (!result.error && result.notice) setNotice(result.notice);
-        if (JSON.stringify(result.page.path) !== JSON.stringify(editPage)) navigate({ name: 'settings', path: result.page.path });
+        if (pathKeyRef.current === editPageKey) {
+          applyPage(result.page);
+          if (JSON.stringify(result.page.path) !== editPageKey) navigate({ name: 'settings', path: result.page.path });
+        }
         outcome = result.error ? 'refused' : 'accepted';
-      } catch (failure) { if (valid()) setError(describe(failure)); }
+      } catch (failure) {
+        if (valid()) {
+          const message = describe(failure);
+          setError(message);
+          if (edit.kind === 'set' || edit.kind === 'toggle') {
+            const next = { ...fieldErrorsRef.current, [JSON.stringify(edit.path)]: message };
+            fieldErrorsRef.current = next;
+            setFieldErrors(next);
+          }
+        }
+      } finally {
+        if (valid() && structural) setBusy(false);
+      }
     });
     return outcome;
   };
@@ -803,7 +824,7 @@ export default function SettingsView({ path }: SettingsViewProps) {
             <div key={action.id} className="min-w-0">
             <button
               type="button"
-              disabled={busy || Boolean(action.disabled_reason)}
+              disabled={busy || pageLoading || Boolean(action.disabled_reason)}
               title={action.disabled_reason}
               onClick={() => void runEdit({ kind: 'action', id: action.id })}
               className="h-10 rounded-lg border border-line px-3 text-sm font-medium text-fg hover:bg-raised disabled:opacity-50"
@@ -833,7 +854,7 @@ export default function SettingsView({ path }: SettingsViewProps) {
                 key={`${JSON.stringify(row.path)}-${resetFields}`}
                 row={row}
                 error={fieldErrors[JSON.stringify(row.path)]}
-                disabled={busy}
+                disabled={busy || pageLoading}
                 onEdit={runEdit}
                 onNavigate={navigateTo}
                 onClearError={clearFieldError}
@@ -847,7 +868,7 @@ export default function SettingsView({ path }: SettingsViewProps) {
         <section aria-label="Add entry" className="flex flex-col gap-2">
           <AddEntryControl
             add={add}
-            disabled={busy}
+            disabled={busy || pageLoading}
             onAdd={name => void runEdit({ kind: 'add', path: page.path, name })}
           />
         </section>
@@ -856,7 +877,7 @@ export default function SettingsView({ path }: SettingsViewProps) {
       {page.removable && (
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || pageLoading}
           onClick={() => void runEdit({ kind: 'remove', path: page.path })}
           className="h-10 self-start rounded-lg border border-danger/40 px-3 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
         >

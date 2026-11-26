@@ -211,7 +211,7 @@ describe('SettingsView live settings', () => {
     fireEvent.blur(input);
     await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(1));
     await act(async () => fail(new Error('Connection failed')));
-    await screen.findByText('Connection failed');
+    expect(await screen.findAllByText('Connection failed')).toHaveLength(2);
     expect(input).toHaveValue('retry me');
     fireEvent.keyDown(input, { key: 'Enter' });
     fireEvent.blur(input);
@@ -242,6 +242,95 @@ describe('SettingsView live settings', () => {
     await act(async () => finishSecond({ draft: draft(), page: page() }));
     expect(input).toHaveValue('old');
     await waitFor(() => expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument());
+  });
+
+  it('keeps an in-flight edit in the draft without restoring its page after navigation', async () => {
+    let finishEdit!: (value: unknown) => void;
+    let finishPage!: (value: unknown) => void;
+    api.editSettings.mockImplementationOnce(() => new Promise(resolve => { finishEdit = resolve; }));
+    api.getSettingsPage.mockImplementationOnce(() => new Promise(resolve => { finishPage = resolve; }));
+    function Harness() {
+      const route = useUiStore(state => state.route);
+      return route.name === 'settings' ? <SettingsView path={route.path} /> : null;
+    }
+    render(<Harness />);
+    const input = await screen.findByRole('textbox', { name: 'Name' });
+    fireEvent.change(input, { target: { value: 'B' } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(1));
+    act(() => useUiStore.setState({ route: { name: 'settings', path: ['subagents'] } }));
+    await screen.findByText('Loading page…');
+    expect(input).toBeDisabled();
+    const oldPage = { ...page([], 'B'), notices: ['Stale edit page'] };
+    await act(async () => finishEdit({ draft: draft('B'), page: oldPage }));
+    await waitFor(() => expect(api.getSettingsPage).toHaveBeenCalledWith(draft('B'), ['subagents']));
+    expect(screen.queryByText('Stale edit page')).not.toBeInTheDocument();
+    expect(useUiStore.getState().route).toEqual({ name: 'settings', path: ['subagents'] });
+    const destination = { ...page(['subagents'], 'B'), help: 'Destination page' };
+    await act(async () => finishPage(response(destination)));
+    expect(await screen.findByText('Destination page')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Name' })).toBeEnabled();
+  });
+
+  it('does not apply a queued edit to a shifted array entry after removal', async () => {
+    const path = ['review', 'reviewers', '0'];
+    const parent = ['review', 'reviewers'];
+    const entryPage = { ...page(path), removable: true };
+    entryPage.groups[0].rows[0].path = [...path, 'model'];
+    const parentPage = page(parent, 'B');
+    parentPage.groups = [{ rows: [{ path: parent, label: 'Reviewers', control: 'read_only', text: 'One reviewer' }] }];
+    let finishFirst!: (value: unknown) => void;
+    let finishRemove!: (value: unknown) => void;
+    api.getSettings.mockResolvedValue({ ...doc(), page: entryPage });
+    api.getSettingsPage.mockResolvedValue(response(parentPage));
+    api.editSettings.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishRemove = resolve; }));
+    useUiStore.setState({ route: { name: 'settings', path } });
+    function Harness() {
+      const route = useUiStore(state => state.route);
+      return route.name === 'settings' ? <SettingsView path={route.path} /> : null;
+    }
+    render(<Harness />);
+    const input = await screen.findByRole('textbox', { name: 'Name' });
+    fireEvent.change(input, { target: { value: 'B' } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(1));
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove this entry' }));
+      // A blur already queued with the remove must not target the shifted index.
+      fireEvent.change(input, { target: { value: 'C' } });
+      fireEvent.blur(input);
+    });
+    expect(input).toBeDisabled();
+    await act(async () => finishFirst({ draft: draft('B'), page: entryPage }));
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(2));
+    expect(api.editSettings.mock.calls[1][2]).toEqual({ kind: 'remove', path });
+    await act(async () => finishRemove({ draft: draft('B'), page: parentPage }));
+    await waitFor(() => expect(useUiStore.getState().route).toEqual({ name: 'settings', path: parent }));
+    expect(api.editSettings).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('One reviewer')).toBeInTheDocument();
+  });
+
+  it('refuses a queued save if the preceding field edit fails', async () => {
+    render(<SettingsView path={[]} />);
+    const input = await screen.findByRole('textbox', { name: 'Name' });
+    await changeName('changed');
+    await screen.findByText('Unsaved changes');
+    let fail!: (error: Error) => void;
+    api.editSettings.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    fireEvent.change(input, { target: { value: 'latest' } });
+    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(2));
+    await act(async () => fail(new Error('Connection failed')));
+    await screen.findByText('Fix the rejected settings before saving.');
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    expect(input).toHaveValue('latest');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.queryByText('Connection failed')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledTimes(1));
+    expect(api.saveSettings.mock.calls[0][1]).toEqual(draft('latest'));
   });
 
   it('shows the review action reason and dispatches it once enabled', async () => {
