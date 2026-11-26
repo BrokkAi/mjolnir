@@ -284,8 +284,8 @@ pub enum PromptCompletion {
     Finished,
     Cancelled,
     QuotaLimit,
-    /// The provider declined the request (ACP `Refusal`), for example
-    /// through a content filter. The turn failed, but not for an unknown reason.
+    /// The harness reported ACP `Refusal`, for example a provider content
+    /// filter. The turn failed, but not for an unknown reason.
     Refused,
     Error,
 }

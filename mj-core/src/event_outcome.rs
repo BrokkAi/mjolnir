@@ -19,7 +19,6 @@ pub enum OutcomeReason {
     CommandFailed,
     ProviderFailure,
     QuotaLimit,
-    ProviderRefusal,
     UnrecognizedStopReason,
     NonzeroExit,
     Signaled,
@@ -80,7 +79,7 @@ impl TurnOutcomeKind {
                         (TurnResultKind::Failed, Some(OutcomeReason::QuotaLimit))
                     }
                     PromptCompletion::Refused => {
-                        (TurnResultKind::Failed, Some(OutcomeReason::ProviderRefusal))
+                        (TurnResultKind::Failed, Some(OutcomeReason::ProviderFailure))
                     }
                     PromptCompletion::Error => (
                         TurnResultKind::Failed,
@@ -145,10 +144,7 @@ impl MaterializedTurnOutcome {
         if let Some(diagnostic) = &self.diagnostic {
             result.message = Some(diagnostic.message.clone());
             if result.kind == TurnResultKind::Failed
-                && !matches!(
-                    result.reason,
-                    Some(OutcomeReason::QuotaLimit | OutcomeReason::ProviderRefusal)
-                )
+                && result.reason != Some(OutcomeReason::QuotaLimit)
             {
                 result.reason = Some(OutcomeReason::ProviderFailure);
             }
@@ -316,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_refusal_is_not_an_unrecognized_stop() {
+    fn a_refusal_is_a_provider_failure_not_an_unrecognized_stop() {
         let turn = MaterializedTurnOutcome {
             work_facts: None,
             answered_through: None,
@@ -339,7 +335,7 @@ mod tests {
         };
         let result = turn.result();
         assert_eq!(result.kind, TurnResultKind::Failed);
-        assert_eq!(result.reason, Some(OutcomeReason::ProviderRefusal));
+        assert_eq!(result.reason, Some(OutcomeReason::ProviderFailure));
     }
 
     #[test]
