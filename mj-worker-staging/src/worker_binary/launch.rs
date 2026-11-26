@@ -268,6 +268,7 @@ pub fn worker_launch_config(
         target_environment,
         config,
         aws_source.as_ref(),
+        None,
     )
 }
 
@@ -284,6 +285,7 @@ pub fn worker_launch_config_with_checkout(
     mut target_environment: std::collections::BTreeMap<String, String>,
     config: &mj_core::config::Config,
     aws_source: Option<&mj_core::aws_credentials::AwsCredentialSource>,
+    pinned_memory_key: Option<&str>,
 ) -> Result<(
     WorkerLaunchConfig,
     Option<ProjectMemoryLaunchConfig>,
@@ -467,6 +469,7 @@ pub fn worker_launch_config_with_checkout(
         &workspace,
         &target_profile_home,
         worker_workspace.parent_worktree,
+        pinned_memory_key,
     )?;
     project_memory.mcp_delivery = project_memory_mcp_delivery(profile.kind, backend);
     project_memory.history_socket = Some(mj_core::target_path::join(

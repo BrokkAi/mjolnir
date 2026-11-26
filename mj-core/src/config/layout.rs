@@ -147,6 +147,14 @@ const DATA_ENTRIES: &[(&str, MigrateAction)] = &[
     (LOGS, MigrateAction::CopyOptional),
     (DIAGNOSTICS, MigrateAction::CopyOptional),
     (JEV_DECISIONS, MigrateAction::CopyOptional),
+    // Legacy leftovers; current code no longer writes these diagnostics.
+    ("backups", MigrateAction::CopyOptional),
+    ("moves", MigrateAction::CopyOptional),
+    // Legacy caches and log, no longer written by current code.
+    ("git-brokers", MigrateAction::Skip),
+    ("git-seeds", MigrateAction::Skip),
+    ("update-check.json", MigrateAction::Skip),
+    ("node.log", MigrateAction::Skip),
 ];
 
 /// Top-level configuration entries.
@@ -210,7 +218,7 @@ pub fn classify_data_entry(relative: &Path) -> Classification {
         (SESSIONS, Some(name)) if name.ends_with(CHECKPOINT_ARCHIVE_SUFFIX) => {
             Classification::Known(MigrateAction::Copy)
         }
-        // `sessions/<session-id>/attachments`. Nothing else is written there.
+        // The tombstone prevents a late upload from recreating deleted attachments.
         (SESSIONS, Some(_)) => {
             let attachments = relative
                 .components()
@@ -220,9 +228,10 @@ pub fn classify_data_entry(relative: &Path) -> Classification {
                     _ => None,
                 });
             match attachments {
-                None | Some(crate::attachment::ATTACHMENT_DIR) => {
+                None | Some(crate::attachment::ATTACHMENT_DIR | "attachments.deleted") => {
                     Classification::Known(MigrateAction::Copy)
                 }
+                Some("attachments.lock") => Classification::Known(MigrateAction::Skip),
                 Some(_) => Classification::Unknown,
             }
         }
@@ -239,6 +248,44 @@ pub fn classify_config_entry(relative: &Path) -> Classification {
     match first {
         INSTANCES => Classification::NestedStore,
         name => lookup(CONFIG_ENTRIES, name),
+    }
+}
+
+#[cfg(test)]
+mod migration_classification_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_and_legacy_entries_keep_their_migration_semantics() {
+        for (path, expected) in [
+            (
+                "sessions/id/attachments.lock",
+                Classification::Known(MigrateAction::Skip),
+            ),
+            (
+                "sessions/id/attachments.deleted",
+                Classification::Known(MigrateAction::Copy),
+            ),
+            (
+                "backups/old",
+                Classification::Known(MigrateAction::CopyOptional),
+            ),
+            (
+                "moves/old",
+                Classification::Known(MigrateAction::CopyOptional),
+            ),
+            ("git-brokers/x", Classification::Known(MigrateAction::Skip)),
+            ("git-seeds/x", Classification::Known(MigrateAction::Skip)),
+            (
+                "update-check.json",
+                Classification::Known(MigrateAction::Skip),
+            ),
+            ("node.log", Classification::Known(MigrateAction::Skip)),
+            ("sessions/id/user-file", Classification::Unknown),
+            ("user-file", Classification::Unknown),
+        ] {
+            assert_eq!(classify_data_entry(Path::new(path)), expected, "{path}");
+        }
     }
 }
 

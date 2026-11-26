@@ -15,6 +15,7 @@ pub mod controller;
 pub use mj_accounts::harness_login;
 pub use mj_import::handoff;
 pub mod image;
+pub mod migrate;
 pub use mj_accounts::opencode_logins;
 pub use mj_accounts::power_ranking;
 pub use mj_accounts::profile_health;

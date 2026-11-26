@@ -10,16 +10,19 @@ pub fn project_memory_launch(
     workspace: &(String, Vec<String>),
     target_profile_home: &str,
     parent_worktree: Option<&mj_core::state::ManagedWorktree>,
+    pinned_key: Option<&str>,
 ) -> Result<ProjectMemoryLaunchConfig> {
     // A sub-agent works in its owner's checkout. For an isolated owner that is
     // the owner's own clone, not the project, so the child takes the owner's
     // checkout for its identity and shares the owner's memory (R10-4).
-    let identity = if let Some(project) = &session.project {
-        project.memory_identity()?
+    let project_key = if let Some(project) = &session.project {
+        project.memory_identity()?.key()?
+    } else if let Some(key) = pinned_key {
+        key.to_owned()
     } else {
         ProjectMemoryIdentity::for_legacy_session(session, checkout, bundle, parent_worktree)?
+            .key()?
     };
-    let project_key = identity.key()?;
     let replica_slug = project_memory_replica_slug(&project_key, &session.id);
     let project_root = mj_core::target_path::join(
         Path::new(target_profile_home),
