@@ -69,6 +69,25 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
     }
 }
 
+/// Retain input after a usage limit or recognized authentication refusal.
+fn retains_prompt_input(outcome: &RelayCommandOutcome) -> bool {
+    let RelayCommandOutcome::Prompt {
+        stop_reason,
+        diagnostic,
+        ..
+    } = outcome
+    else {
+        return false;
+    };
+    match crate::state::classify_prompt_completion(stop_reason) {
+        crate::state::PromptCompletion::QuotaLimit => true,
+        crate::state::PromptCompletion::Error => diagnostic
+            .as_ref()
+            .is_some_and(crate::credentials::turn_diagnostic_reports_auth_failure),
+        _ => false,
+    }
+}
+
 fn clear_notifications(snapshot: &mut RelaySnapshot, ordinal: u64) {
     snapshot.person_input_through = ordinal;
     snapshot.request = None;
@@ -1117,10 +1136,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.capacity_retry = None;
                 }
             }
-            if matches!(outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
-                if crate::state::classify_prompt_completion(stop_reason) == crate::state::PromptCompletion::QuotaLimit)
-                && command.prompt_blocks().is_some()
-            {
+            if retains_prompt_input(outcome) && command.prompt_blocks().is_some() {
                 let mut input = snapshot
                     .quota_prompt_contexts
                     .remove(command_id)
@@ -1157,14 +1173,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         )),
                     )));
                 }
-                let generated_retry =
+                let generated_retry = matches!(
+                    command,
+                    RelayCommand::ResumeAfterQuota { .. }
+                        | RelayCommand::ContinueAuthorizedWork { .. }
+                ) || crate::continuation::GeneratedPrompt::of(
+                    crate::continuation::carried_command(command_id),
+                )
+                .is_some_and(|generated| {
                     matches!(
-                        command,
-                        RelayCommand::ResumeAfterQuota { .. }
-                            | RelayCommand::ContinueAuthorizedWork { .. }
-                    ) || crate::continuation::GeneratedPrompt::of(
-                        crate::continuation::carried_command(command_id),
-                    ) == Some(crate::continuation::GeneratedPrompt::QuotaRetry);
+                        generated,
+                        crate::continuation::GeneratedPrompt::QuotaRetry
+                            | crate::continuation::GeneratedPrompt::AuthenticationRetry
+                    )
+                });
                 // Restart continuations dispatch only a note; retain the carried payload.
                 if !generated_retry && let Some(blocks) = command.prompt_blocks() {
                     input.extend(blocks.iter().cloned());
@@ -1367,14 +1389,18 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     target.state = RelayDispatchState::Completed;
                     if let Some(receiver) = receiver {
                         if snapshot.dispatches.contains_key(&receiver) {
-                            snapshot.steered_prompt_contexts.entry(receiver).or_default().extend(steered);
-                        } else if snapshot.handled_commands.get(&receiver)
+                            snapshot
+                                .steered_prompt_contexts
+                                .entry(receiver)
+                                .or_default()
+                                .extend(steered);
+                        } else if snapshot
+                            .handled_commands
+                            .get(&receiver)
                             .and_then(|handled| handled.outcome.as_ref())
-                            .is_some_and(|outcome| matches!(outcome,
-                                RelayCommandOutcome::Prompt { stop_reason, .. }
-                                if crate::state::classify_prompt_completion(stop_reason) == crate::state::PromptCompletion::QuotaLimit))
+                            .is_some_and(retains_prompt_input)
                         {
-                            // The acknowledgement can follow the quota completion.
+                            // The acknowledgement can follow the refused turn.
                             snapshot.quota_interrupted_input.extend(steered);
                         }
                     }
@@ -1891,15 +1917,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 retained.append(&mut snapshot.quota_interrupted_input);
                 snapshot.quota_interrupted_input = retained;
                 if let Some(context) = frozen_context {
-                    match snapshot.pending_prompt_context.as_mut() {
-                        Some(pending) => pending.text = format!("{context}\n\n{}", pending.text),
-                        None => {
-                            snapshot.pending_prompt_context = Some(PendingPromptContext {
-                                text: context,
-                                attached_command_id: None,
-                            })
-                        }
-                    }
+                    prepend_pending_prompt_context(&mut snapshot.pending_prompt_context, context);
                 }
             }
         }

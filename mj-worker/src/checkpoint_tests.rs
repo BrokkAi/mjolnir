@@ -423,6 +423,7 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     // does after a worker restart.
     let (mut spec, _) = fixture(temp.path());
     let claimed = "claimed mail for the queued prompt";
+    spec.canonical_session.pending_prompt_context = Some("later pending context".into());
     spec.canonical_session.mailbox = Some(CanonicalMailbox {
         quota_input: mj_core::archive::CanonicalQuotaInput {
             steered: Default::default(),
@@ -582,7 +583,11 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     submit_relay(&mut discarded, "queued-1", next_prompt());
     let started = discarded.claim_pending_commands(true).unwrap();
     assert_eq!(started[0].command_id, "queued-1");
-    assert!(started[0].hidden_prompt_context.is_none());
+    // Hard-won: 74e095a3a: queue discard lost the restart's frozen context.
+    assert_eq!(
+        started[0].hidden_prompt_context.as_deref(),
+        Some("frozen handoff\n\nlater pending context")
+    );
 }
 
 #[test]

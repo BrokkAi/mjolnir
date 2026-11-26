@@ -87,7 +87,7 @@ pub fn carries_mailbox_wake(command_id: &str) -> bool {
 pub const USER_BYTES: usize = 32 * 1024;
 pub const ASSISTANT_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
-pub const QUOTA_REPLAY_NOTE: &str = "Your previous turn stopped at a usage limit, possibly before you saw all its input. The input follows; skip anything you already handled.";
+pub const QUOTA_REPLAY_NOTE: &str = "Your previous turn stopped early, possibly before you saw all of its input. The input follows; skip anything you already handled.";
 pub const PROMPT: &str = "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.";
 /// Historical sub-agent reminder, retained to exclude old journal prompts from authorization.
 pub const PARENT_WAIT_PROMPT_TEXT: &str =

@@ -1657,6 +1657,19 @@ pub struct PendingPromptContext {
     pub attached_command_id: Option<String>,
 }
 
+/// Return interrupted prompt context ahead of context that arrived later.
+pub fn prepend_pending_prompt_context(pending: &mut Option<PendingPromptContext>, context: String) {
+    match pending {
+        Some(pending) => pending.text = format!("{context}\n\n{}", pending.text),
+        None => {
+            *pending = Some(PendingPromptContext {
+                text: context,
+                attached_command_id: None,
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingUserShellContext {
     pub shell_command_id: String,

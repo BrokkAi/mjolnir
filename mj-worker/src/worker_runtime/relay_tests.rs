@@ -11938,6 +11938,99 @@ fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
         );
     }
 
+    // Hard-won: 74e095a3a: an authentication refusal dropped the quota replay.
+    for is_auth in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        submit(
+            &mut relay,
+            "auth-source",
+            self::prompt("quota input before move"),
+        );
+        relay.claim_pending_commands(true).unwrap();
+        finish(
+            &mut relay,
+            "auth-source",
+            mj_core::diagnostic::QUOTA_STOP_REASON,
+        );
+        submit(
+            &mut relay,
+            "quota-retry-move-auth",
+            RelayCommand::Prompt {
+                prompt: mj_core::continuation::prompt_blocks(),
+            },
+        );
+        relay.claim_pending_commands(true).unwrap();
+        let diagnostic = if is_auth {
+            mj_core::diagnostic::TurnDiagnostic::from_acp(
+                &agent_client_protocol::Error::auth_required(),
+            )
+        } else {
+            mj_core::diagnostic::TurnDiagnostic {
+                message: "context too long".into(),
+                code: None,
+                http_status: None,
+                reset_at: None,
+                login_fingerprint: None,
+            }
+        };
+        relay
+            .record_command_completed(
+                "quota-retry-move-auth",
+                mj_core::relay::RelayCommandOutcome::Prompt {
+                    stop_reason: "error".into(),
+                    diagnostic: Some(diagnostic.clone()),
+                    usage: None,
+                    work_facts: None,
+                },
+            )
+            .unwrap();
+        if is_auth {
+            submit(
+                &mut relay,
+                "auth-retry-1",
+                RelayCommand::Prompt {
+                    prompt: mj_core::continuation::prompt_blocks(),
+                },
+            );
+            relay.claim_pending_commands(true).unwrap();
+            relay
+                .record_command_completed(
+                    "auth-retry-1",
+                    mj_core::relay::RelayCommandOutcome::Prompt {
+                        stop_reason: "error".into(),
+                        diagnostic: Some(diagnostic),
+                        usage: None,
+                        work_facts: None,
+                    },
+                )
+                .unwrap();
+        }
+        submit(
+            &mut relay,
+            "after-auth-result",
+            self::prompt("next user request"),
+        );
+        let next = relay.claim_pending_commands(true).unwrap().remove(0);
+        let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+            panic!("not a prompt")
+        };
+        let text = serde_json::to_string(&prompt).unwrap();
+        assert_eq!(
+            text.matches("quota input before move").count(),
+            usize::from(is_auth)
+        );
+        if is_auth {
+            assert!(text.contains(mj_core::continuation::QUOTA_REPLAY_NOTE));
+        }
+        assert!(!text.contains(mj_core::continuation::PROMPT));
+    }
+
     // Removing a queued restart continuation returns the input it inherited.
     let root = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();

@@ -42,6 +42,30 @@ pub fn relay_seed_for_restore(
     native_continuity: bool,
     queue_policy: QueueRestorePolicy,
 ) -> Result<mj_core::relay::RestoredRelaySeed> {
+    let mut pending_context =
+        canonical
+            .pending_prompt_context
+            .clone()
+            .map(|text| mj_core::relay::PendingPromptContext {
+                text,
+                attached_command_id: None,
+            });
+    if !queue_policy.keeps_queue()
+        && let Some(mailbox) = &canonical.mailbox
+    {
+        for queued in canonical.queued_prompts.iter().rev() {
+            if let Some(context) = mailbox
+                .quota_input
+                .frozen_prompt_contexts
+                .get(&queued.command_id)
+            {
+                mj_core::relay::prepend_pending_prompt_context(
+                    &mut pending_context,
+                    context.clone(),
+                );
+            }
+        }
+    }
     let seed = mj_core::relay::RestoredRelaySeed {
         command_ledger: None,
         assessment_state: native_continuity
@@ -121,7 +145,7 @@ pub fn relay_seed_for_restore(
         native_use_evidence: native_continuity
             .then(|| canonical.native_use_evidence.clone())
             .flatten(),
-        pending_prompt_context: canonical.pending_prompt_context.clone(),
+        pending_prompt_context: pending_context.map(|context| context.text),
     };
     seed.validate()?;
     Ok(seed)
