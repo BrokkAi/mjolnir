@@ -405,7 +405,13 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             relay.step_clock(),
             relay.tools_in_flight(),
             relay.turn_context(),
-            Arc::new(Mutex::new(accepted_config)),
+            {
+                let shared = relay.accepted_config();
+                *shared
+                    .lock()
+                    .expect("accepted session configuration lock poisoned") = accepted_config;
+                shared
+            },
             relay.login_identity.clone(),
             relay.operator_away.clone(),
         )

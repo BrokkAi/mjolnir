@@ -802,7 +802,6 @@ async fn run_inner(
             pending_supervisor_spec = supervisor_spec;
             match resolved_environment {
                 Ok(environment) => {
-                    spec.apply_reload_accepted_config(&launch_config);
                     spec.environment = environment;
                     if let Some(command) = command {
                         spec.command = command;

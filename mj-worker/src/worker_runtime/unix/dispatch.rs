@@ -1118,6 +1118,12 @@ pub(super) async fn apply_harness_reload_transition(
         } else {
             publish_git_setup(&root, git_setup)?;
         }
+        // The launch is committed; the replacement bridge starts from what is
+        // left of the accepted pair. The running harness is still the old one.
+        relay
+            .lock()
+            .expect("relay lock")
+            .retire_accepted_selectors_for_reload(&launch_config)?;
         let before = launch_config.environment.clone();
         let (registered, boundary, mailbox) = apply_profile_configuration(
             &root,

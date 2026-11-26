@@ -16,6 +16,28 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove the accepted model and/or effort from durable configuration values.
+/// A harness may record a selector under its own option id, which
+/// `AcceptedSessionConfig::from_configuration` also reads, so both go.
+fn retire_selector_values(
+    values: &mut BTreeMap<String, String>,
+    options: &[agent_client_protocol::v1::schema::SessionConfigOption],
+    model: bool,
+    effort: bool,
+) -> bool {
+    let mut changed = false;
+    for (canonical, retire) in [("model", model), ("effort", effort)] {
+        if !retire {
+            continue;
+        }
+        changed |= values.remove(canonical).is_some();
+        if let Some(option) = mj_core::acp::find_session_config_option(options, canonical) {
+            changed |= values.remove(&option.id.to_string()).is_some();
+        }
+    }
+    changed
+}
+
 impl DurableRelay {
     /// Claim destination ownership before recording its identity or changing input.
     pub fn begin_pending_parked_move(&mut self) -> Result<()> {
@@ -69,6 +91,13 @@ impl DurableRelay {
             .map_err(|error| anyhow!("apply parked Move continuation: {}", error.message))?;
         }
         let mut next = self.snapshot.clone();
+        // A Move that starts a fresh native conversation booted without the
+        // accepted pair (`accepted_config_for_boot`). Retire it from the
+        // journal with the Move, or the next worker start restores it (#1704).
+        if parked.discard_native_session_id.is_some() {
+            let options = next.config_options.clone();
+            retire_selector_values(&mut next.config, &options, true, true);
+        }
         if let Some(handoff) = &parked.prompt_context {
             anyhow::ensure!(
                 !handoff.trim().is_empty(),
@@ -101,6 +130,36 @@ impl DurableRelay {
         next.handled_commands
             .insert(marker, self.parked_move_receipt());
         self.commit_snapshot(next)
+    }
+
+    /// Retire the accepted selectors a reload to `launch` makes stale, from
+    /// the journal and from the runtime's shared view in one step. Another
+    /// harness cannot restore this harness's model or effort, and a launch
+    /// that names its own initial model supersedes the accepted model. Call
+    /// before the reload records its harness as the running one.
+    pub fn retire_accepted_selectors_for_reload(
+        &mut self,
+        launch: &mj_core::worker_launch::WorkerLaunchConfig,
+    ) -> Result<()> {
+        let harness_changed = self.verdict_harness != Some(launch.harness);
+        let model = harness_changed || launch.initial_model.is_some();
+        let effort = harness_changed;
+        let mut next = self.snapshot.clone();
+        let options = next.config_options.clone();
+        if retire_selector_values(&mut next.config, &options, model, effort) {
+            self.commit_snapshot(next)?;
+        }
+        let mut accepted = self
+            .accepted_config
+            .lock()
+            .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?;
+        if model {
+            accepted.model = None;
+        }
+        if effort {
+            accepted.effort = None;
+        }
+        Ok(())
     }
 
     /// The destination has opened; commit the Move before permitting any work.

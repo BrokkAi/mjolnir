@@ -7355,6 +7355,106 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
     );
 }
 
+// Hard-won: #1704: cross-harness Move left the old harness's model in the worker journal
+#[test]
+fn launch_changes_retire_the_accepted_pair_for_later_worker_starts() {
+    let temp = tempfile::tempdir().unwrap();
+    let accepted = |model: &str, effort: Option<&str>| mj_core::acp::AcceptedSessionConfig {
+        model: Some(model.into()),
+        effort: effort.map(Into::into),
+    };
+    let record = |relay: &mut DurableRelay, key: &str, value: &str| {
+        relay
+            .record_observation(RelayObservation::ConfigurationUpdated {
+                key: key.into(),
+                value: value.into(),
+            })
+            .unwrap();
+    };
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Antigravity);
+    record(&mut relay, "model", "gemini-4-neon");
+    record(&mut relay, "effort", "high");
+    let mut launch = launch_config("/var/lib/hel/profiles/session");
+    launch.harness = HarnessKind::Antigravity;
+    // Seed the shared view as worker startup does.
+    *relay.accepted_config().lock().unwrap() =
+        unix::accepted_config_for_boot(&launch, &relay, Some("gemini-thread"));
+    assert_eq!(
+        *relay.accepted_config().lock().unwrap(),
+        accepted("gemini-4-neon", Some("high"))
+    );
+
+    // A same-harness reload that names its own model supersedes only the model.
+    launch.initial_model = Some("gemini-next".into());
+    relay.retire_accepted_selectors_for_reload(&launch).unwrap();
+    let effort_only = mj_core::acp::AcceptedSessionConfig {
+        model: None,
+        effort: Some("high".into()),
+    };
+    assert_eq!(*relay.accepted_config().lock().unwrap(), effort_only);
+    assert_eq!(
+        unix::accepted_config_for_boot(&launch, &relay, Some("gemini-thread")),
+        effort_only
+    );
+    record(&mut relay, "model", "gemini-4-neon");
+
+    // The live sequence: an in-place Move to Claude with no model chosen,
+    // then a later worker start (an upgrade) from the same journal.
+    *relay.accepted_config().lock().unwrap() = accepted("gemini-4-neon", Some("high"));
+    launch.harness = HarnessKind::Claude;
+    launch.initial_model = None;
+    relay.retire_accepted_selectors_for_reload(&launch).unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Claude);
+    assert_eq!(
+        *relay.accepted_config().lock().unwrap(),
+        mj_core::acp::AcceptedSessionConfig::default()
+    );
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "claude-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    assert_eq!(
+        unix::accepted_config_for_boot(&launch, &relay, Some("claude-thread")),
+        mj_core::acp::AcceptedSessionConfig::default()
+    );
+
+    // A parked Move that discards the native thread boots without the pair;
+    // committing the Move retires it for every later start too.
+    record(&mut relay, "model", "opus");
+    record(&mut relay, "effort", "xhigh");
+    relay
+        .apply_parked_move_launch(&mj_core::worker_launch::ParkedMoveLaunch {
+            operation_id: "parked-move".into(),
+            discard_native_session_id: Some("claude-thread".into()),
+            prompt_context: None,
+            discard_queued_prompts: false,
+            quota_continuation: None,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "destination-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    launch.harness = HarnessKind::Codex;
+    assert_eq!(
+        unix::accepted_config_for_boot(&launch, &relay, Some("destination-thread")),
+        mj_core::acp::AcceptedSessionConfig::default()
+    );
+}
+
 #[test]
 fn a_queued_prompt_keeps_the_unused_codex_thread_eligible_for_replacement() {
     let temp = tempfile::tempdir().unwrap();
