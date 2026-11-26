@@ -613,7 +613,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
 fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("runtime-removal.sqlite3");
-    let record = session("old-session", "project-1");
+    let mut record = session("old-session", "project-1");
     save_session_to(&path, &record).unwrap();
     let receipt = serde_json::json!({
         "type": "runtime_resolved",
@@ -663,6 +663,8 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     drop(connection);
     forget_verified_schema(&path);
 
+    // The upgrade records `local` on a local placement.
+    record.machine_id = Some(mj_core::config::MachineId::local());
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
         record
@@ -770,6 +772,8 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
             .unwrap(),
         schema::MINIMUM_COMPATIBLE_VERSION
     );
+    // The upgrade records `local` on a local placement.
+    record.machine_id = Some(mj_core::config::MachineId::local());
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
         record

@@ -1220,6 +1220,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
             r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
         ).unwrap()).into()),
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,

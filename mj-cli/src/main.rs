@@ -3330,6 +3330,7 @@ mod tests {
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
+                machine_id: None,
                 launch_base: None,
                 launch_branch: None,
                 checkout: None,

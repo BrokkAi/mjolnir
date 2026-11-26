@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 160;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 161;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3795,6 +3795,37 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
         )?;
         transaction.commit()?;
     }
+    // Revision 161 is breaking: it adds the nullable `machine_id` placement
+    // column to `session_targets` and `environment_workers`. Older binaries
+    // rewrite `session_targets` with DELETE plus INSERT and would drop the
+    // column on every session save. `environment_workers` alone would be
+    // compatible, because its writer upserts named columns and keeps the rest.
+    // O(1) DDL plus an update of the two small placement tables: local rows get
+    // `'local'` here; SSH and legacy EC2 rows stay NULL until the daemon fills
+    // them from the target template at load.
+    if version < 161 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        for table in ["session_targets", "environment_workers"] {
+            if !super::legacy_schema::table_has_column(&transaction, table, "machine_id")? {
+                transaction
+                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN machine_id TEXT;"))?;
+            }
+        }
+        transaction.execute_batch(
+            "UPDATE session_targets SET machine_id = 'local'
+                 WHERE machine_id IS NULL
+                   AND kind IN ('local-bare','local-podman','local-docker','apple-container');
+             UPDATE environment_workers SET machine_id = 'local'
+                 WHERE machine_id IS NULL
+                   AND kind IN ('local-bare','local-podman','local-docker','apple-container');
+             UPDATE schema_compatibility SET minimum_compatible_version = 161 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (161, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=161;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4741,6 +4772,13 @@ mod reader_tests {
         drop(open_writer(&path).unwrap());
         stamp_schema_version(&path, 151);
         let mut connection = Connection::open(&path).unwrap();
+        // This fixture saves sessions with current code, which writes the
+        // placement column revision 161 adds. Revision 152 never reaches 161.
+        for table in ["session_targets", "environment_workers"] {
+            connection
+                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN machine_id TEXT;"))
+                .unwrap();
+        }
         let mjolnir = serde_json::json!({
             "mode": "mjolnir",
             "subtle": { "model": "preserved", "effort": "high" }
@@ -6282,7 +6320,7 @@ mod reader_tests {
         let upgraded = open_writer(&path).unwrap();
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(160));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert_eq!(
             checkpoint_archive_column(&upgraded, "symlinked"),
             PathBuf::from("symlinked.hel.zip")
@@ -6363,6 +6401,76 @@ mod reader_tests {
         assert_eq!(
             checkpoint_archive_column(&open_writer(&first_db).unwrap(), "moved"),
             PathBuf::from("moved.hel.zip")
+        );
+    }
+
+    /// Revision 161 gives every local placement `local` and leaves SSH and
+    /// legacy EC2 placements unknown for the daemon to fill, and raises the
+    /// floor because older binaries rewrite `session_targets` without the
+    /// column.
+    #[test]
+    fn revision_161_records_local_machines_and_leaves_remote_placements_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("machines.sqlite3");
+        for id in ["local-bare", "local-podman", "ssh-podman", "ssh-bare"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        stamp_schema_version(&path, 160);
+        let raw = Connection::open(&path).unwrap();
+        for table in ["session_targets", "environment_workers"] {
+            assert!(!legacy_schema::table_has_column(&raw, table, "machine_id").unwrap());
+        }
+        raw.execute_batch(
+            "DELETE FROM environment_workers;
+             DELETE FROM session_targets;
+             INSERT INTO session_targets(session_id, kind, host, resource_id, workspace)
+                 VALUES ('local-bare', 'local-bare', NULL, NULL, x'2f77'),
+                        ('local-podman', 'local-podman', NULL, 'container-1', NULL),
+                        ('ssh-podman', 'ssh-podman', 'builder.test', 'container-2', NULL),
+                        ('ssh-bare', 'ssh-bare', 'builder.test', NULL, x'2f77');
+             INSERT INTO environments(environment_id, owner_session_id, phase, placement_json)
+                 VALUES ('environment', 'local-bare', 'active', '{}');
+             INSERT INTO environment_workers(lease_id, environment_id, worker_session_id, kind, host, resource_id, workspace, target_template_id)
+                 VALUES ('lease-local', 'environment', 'local-bare', 'local-docker', NULL, 'container-3', NULL, 'docker'),
+                        ('lease-ssh', 'environment', 'ssh-podman', 'ssh-podman', 'builder.test', 'container-2', NULL, 'podman');",
+        )
+        .unwrap();
+        drop(raw);
+        forget_verified_schema(&path);
+
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(161));
+        assert!(state.ensure_supported_by(160).is_err());
+        let machines = |table: &str, key: &str| -> Vec<(String, Option<String>)> {
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT {key}, machine_id FROM {table} ORDER BY {key}"
+                ))
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let local = Some("local".to_owned());
+        assert_eq!(
+            machines("session_targets", "session_id"),
+            [
+                ("local-bare".to_owned(), local.clone()),
+                ("local-podman".to_owned(), local.clone()),
+                ("ssh-bare".to_owned(), None),
+                ("ssh-podman".to_owned(), None),
+            ]
+        );
+        assert_eq!(
+            machines("environment_workers", "lease_id"),
+            [
+                ("lease-local".to_owned(), local),
+                ("lease-ssh".to_owned(), None)
+            ]
         );
     }
 
@@ -6925,6 +7033,15 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 161 {
+            for table in ["session_targets", "environment_workers"] {
+                if legacy_schema::table_has_column(&connection, table, "machine_id").unwrap() {
+                    connection
+                        .execute_batch(&format!("ALTER TABLE {table} DROP COLUMN machine_id;"))
+                        .unwrap();
+                }
+            }
+        }
         if version < 158 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS pending_retired_logins;")
@@ -7701,6 +7818,9 @@ mod reader_tests {
             }
         ));
         drop(upgraded);
+        // The upgrade records `local` on a local placement.
+        let mut record = record;
+        record.machine_id = Some(mj_core::config::MachineId::local());
         assert_eq!(load_state_from(&path).unwrap().sessions[&record.id], record);
     }
 
@@ -7737,6 +7857,9 @@ mod reader_tests {
         ));
         drop(upgraded);
         let restored = load_state_from(&path).unwrap();
+        // The upgrade records `local` on a local placement.
+        let mut record = record;
+        record.machine_id = Some(mj_core::config::MachineId::local());
         assert_eq!(restored.sessions[&record.id], record);
     }
 

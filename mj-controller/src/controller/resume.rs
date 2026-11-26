@@ -2500,6 +2500,7 @@ impl Controller {
                 .context("resume target disappeared")?
                 .into(),
         );
+        record.machine_id = self.config.template_machine_id(target_id);
         record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.target = None;

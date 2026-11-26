@@ -914,6 +914,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         archived: _,
         // Written by `replace_targets` below rather than by this statement.
         target: _,
+        // Written by `replace_targets` with the placement.
+        machine_id: _,
         native_session_id: _,
         acp_session_title: _,
         session_title_override: _,
@@ -1013,7 +1015,7 @@ fn replace_targets_with_parent(
         [session.id.as_str()],
     )?;
     if let Some(target) = &session.target {
-        insert_target(tx, &session.id, target)?;
+        insert_target(tx, &session.id, target, session.machine_id.as_ref())?;
     }
     Ok(())
 }
@@ -1301,6 +1303,7 @@ pub(super) fn insert_target(
     tx: &Transaction<'_>,
     session_id: &str,
     target: &TargetLocator,
+    machine_id: Option<&MachineId>,
 ) -> Result<()> {
     let StoredTargetValues {
         kind,
@@ -1313,8 +1316,8 @@ pub(super) fn insert_target(
         borrowed_from,
     } = stored_target_values(target)?;
     tx.execute(
-        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, machine_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             session_id,
             kind,
@@ -1324,7 +1327,8 @@ pub(super) fn insert_target(
             workspace,
             worker_id,
             workspace_storage,
-            borrowed_from
+            borrowed_from,
+            machine_id.map(MachineId::as_str)
         ],
     )?;
     Ok(())
@@ -1344,7 +1348,42 @@ fn load_targets_selected(
             session.target = Some(Box::new(target));
         }
     }
+    for (session_id, machine_id) in read_target_machines(connection, id)? {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.machine_id = Some(machine_id);
+        }
+    }
     Ok(())
+}
+
+/// The machine each placement records. Separate from [`read_targets`], which
+/// revision 122's backfill also runs, before the column exists. A placement
+/// with no machine recorded is absent from the result.
+fn read_target_machines(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<BTreeMap<String, MachineId>> {
+    let predicate = if id.is_some() {
+        " AND session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT session_id, machine_id FROM session_targets WHERE machine_id IS NOT NULL{predicate}"
+    ))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
+        let session_id: String = row.get(0)?;
+        let machine_id: String = row.get(1)?;
+        let machine_id = MachineId::new(machine_id).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, error.into())
+        })?;
+        Ok((session_id, machine_id))
+    })?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
 }
 
 pub(super) fn read_targets(
@@ -1633,6 +1672,87 @@ pub fn backfill_target_runtime(
     })
 }
 
+/// Target kinds that run on this computer, so on the machine `local`
+/// whatever the configuration says.
+const LOCAL_TARGET_KINDS: &str = "'local-bare','local-podman','local-docker','apple-container'";
+/// Target kinds on another host, whose machine only the target template names.
+const REMOTE_TARGET_KINDS: &str =
+    "'ssh-bare','ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro','aws-ec2'";
+
+/// Fill the machine on stored placements that have none, and return the
+/// session placements filled so the caller can update its copies.
+///
+/// A local placement is on `local` by its kind. An SSH or legacy EC2
+/// placement takes the machine of its target template, `templates`, when that
+/// template still exists. A placement whose template is gone stays `NULL`:
+/// nothing else records which machine it ran on, and a guess could send
+/// sessions to the wrong host. Only rows still `NULL` change, so a concurrent
+/// writer's value is kept.
+pub fn backfill_machine_ids(
+    templates: &BTreeMap<String, MachineId>,
+) -> Result<BTreeMap<String, MachineId>> {
+    let templates = templates.clone();
+    submit_database_write("backfill_machine_ids", move |_| {
+        let mut connection = open(&database_path())?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut filled = BTreeMap::new();
+        {
+            let mut local = tx.prepare(&format!(
+                "SELECT session_id FROM session_targets WHERE machine_id IS NULL AND kind IN ({LOCAL_TARGET_KINDS})"
+            ))?;
+            for session_id in local.query_map([], |row| row.get::<_, String>(0))? {
+                filled.insert(session_id?, MachineId::local());
+            }
+            let mut remote = tx.prepare(&format!(
+                "SELECT t.session_id, s.target_template_id FROM session_targets t
+                 JOIN sessions s USING(session_id)
+                 WHERE t.machine_id IS NULL AND t.kind IN ({REMOTE_TARGET_KINDS})"
+            ))?;
+            let rows = remote
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (session_id, template_id) in rows {
+                if let Some(machine_id) = templates.get(&template_id) {
+                    filled.insert(session_id, machine_id.clone());
+                }
+            }
+        }
+        for (session_id, machine_id) in &filled {
+            tx.execute(
+                "UPDATE session_targets SET machine_id = ?2 WHERE session_id = ?1 AND machine_id IS NULL",
+                params![session_id, machine_id.as_str()],
+            )?;
+        }
+        tx.execute(
+            &format!("UPDATE environment_workers SET machine_id = 'local' WHERE machine_id IS NULL AND kind IN ({LOCAL_TARGET_KINDS})"),
+            [],
+        )?;
+        let workers = {
+            let mut statement = tx.prepare(&format!(
+                "SELECT lease_id, target_template_id FROM environment_workers
+                 WHERE machine_id IS NULL AND kind IN ({REMOTE_TARGET_KINDS})"
+            ))?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (lease_id, template_id) in workers {
+            if let Some(machine_id) = templates.get(&template_id) {
+                tx.execute(
+                    "UPDATE environment_workers SET machine_id = ?2 WHERE lease_id = ?1 AND machine_id IS NULL",
+                    params![lease_id, machine_id.as_str()],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(filled)
+    })
+}
+
 const SESSION_QUERY: &str =
     "SELECT s.session_id, s.title, s.harness_kind, s.last_profile, c.bundle_id,
                 s.target_template_id, s.state, s.native_session_id, s.acp_session_title,
@@ -1671,6 +1791,7 @@ fn decode_session(
         oracle: row.get(34)?,
         project: decode_shared(row, 30, &mut interns.projects)?,
         target_runtime: decode_shared(row, 26, &mut interns.runtimes)?,
+        machine_id: None,
         harness_kind,
         create_managed_worktree: row.get(21)?,
         launch_base: row.get(25)?,

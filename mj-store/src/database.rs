@@ -15,6 +15,7 @@ use chrono::Utc;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use mj_core::config::MachineId;
 use mj_core::state::{
     CheckpointMetadata, HostContainerSize, ManagedWorktree, MaterializedExecutionState,
     MaterializedQueuedPrompt, MaterializedSession, MaterializedSessionSummary, MaterializedTurn,
@@ -30,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 160;
+const SCHEMA_VERSION: i64 = 161;
 
 pub mod web_push;
 pub use web_push::*;
@@ -127,6 +128,7 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,

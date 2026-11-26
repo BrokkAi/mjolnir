@@ -30,12 +30,100 @@ use super::{
 /// not the file has a `[machines.local]` table.
 pub const LOCAL_MACHINE_ID: &str = "local";
 
-fn local_machine_id() -> String {
-    LOCAL_MACHINE_ID.to_owned()
+/// The id of a machine: the key of a `[machines.<id>]` table, the `machine`
+/// a runtime names, and the `machine_id` a stored placement records.
+///
+/// Holding one proves the text passed [`validate_id`], so a machine id read
+/// from the file, the database or the API is checked once, where it enters.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct MachineId(String);
+
+impl MachineId {
+    /// A machine id, or an error naming why `id` is not one.
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let id = id.into();
+        validate_id("machine", &id)?;
+        Ok(Self(id))
+    }
+
+    /// The machine Mjolnir itself runs on.
+    #[must_use]
+    pub fn local() -> Self {
+        Self(LOCAL_MACHINE_ID.to_owned())
+    }
+
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        self.0 == LOCAL_MACHINE_ID
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-fn is_local_machine_id(id: &str) -> bool {
-    id == LOCAL_MACHINE_ID
+impl From<MachineId> for String {
+    fn from(id: MachineId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<String> for MachineId {
+    type Error = anyhow::Error;
+
+    fn try_from(id: String) -> Result<Self> {
+        Self::new(id)
+    }
+}
+
+impl std::str::FromStr for MachineId {
+    type Err = anyhow::Error;
+
+    fn from_str(id: &str) -> Result<Self> {
+        Self::new(id)
+    }
+}
+
+impl std::fmt::Display for MachineId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for MachineId {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for MachineId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for MachineId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for MachineId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+fn local_machine_id() -> MachineId {
+    MachineId::local()
+}
+
+fn is_local_machine_id(id: &MachineId) -> bool {
+    id.is_local()
 }
 
 /// One host that runtimes run on.
@@ -112,11 +200,10 @@ impl Machine {
         }
     }
 
-    pub(super) fn validate(&self, id: &str) -> Result<()> {
-        validate_id("machine", id)?;
+    pub(super) fn validate(&self, id: &MachineId) -> Result<()> {
         match self {
             Self::Local { build_cache } => {
-                if !is_local_machine_id(id) {
+                if !id.is_local() {
                     bail!(
                         "machine {id:?} is this machine, which is always called {LOCAL_MACHINE_ID:?}"
                     );
@@ -131,7 +218,7 @@ impl Machine {
                 workspace_prefix,
                 build_cache,
             } => {
-                if is_local_machine_id(id) {
+                if id.is_local() {
                     bail!("machine {LOCAL_MACHINE_ID:?} is reserved for this machine");
                 }
                 ssh.validate(id)?;
@@ -149,7 +236,7 @@ impl Machine {
                 ssh_user,
                 ..
             } => {
-                if is_local_machine_id(id) {
+                if id.is_local() {
                     bail!("machine {LOCAL_MACHINE_ID:?} is reserved for this machine");
                 }
                 if region.trim().is_empty()
@@ -173,11 +260,11 @@ impl Machine {
 
 /// Every machine in `machines`, validated, plus the checks that only make
 /// sense across the whole collection.
-pub(super) fn validate_machines(machines: &BTreeMap<String, Machine>) -> Result<()> {
+pub(super) fn validate_machines(machines: &BTreeMap<MachineId, Machine>) -> Result<()> {
     for (id, machine) in machines {
         machine.validate(id)?;
     }
-    let ssh: Vec<(&String, &SshConnection)> = machines
+    let ssh: Vec<(&MachineId, &SshConnection)> = machines
         .iter()
         .filter_map(|(id, machine)| match machine {
             Machine::Ssh { ssh, .. } => Some((id, ssh)),
@@ -205,7 +292,7 @@ pub enum StoredTarget {
             default = "local_machine_id",
             skip_serializing_if = "is_local_machine_id"
         )]
-        machine: String,
+        machine: MachineId,
         /// Only meaningful on an SSH machine; a bare runtime on this machine
         /// always uses the configured approvals.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,7 +303,7 @@ pub enum StoredTarget {
             default = "local_machine_id",
             skip_serializing_if = "is_local_machine_id"
         )]
-        machine: String,
+        machine: MachineId,
         #[serde(flatten)]
         container: ContainerTemplate,
     },
@@ -225,7 +312,7 @@ pub enum StoredTarget {
             default = "local_machine_id",
             skip_serializing_if = "is_local_machine_id"
         )]
-        machine: String,
+        machine: MachineId,
         #[serde(flatten)]
         container: ContainerTemplate,
     },
@@ -234,14 +321,14 @@ pub enum StoredTarget {
             default = "local_machine_id",
             skip_serializing_if = "is_local_machine_id"
         )]
-        machine: String,
+        machine: MachineId,
         #[serde(flatten)]
         container: ContainerTemplate,
     },
     /// An AWS Nitro Sandbox: a microVM per session on an EC2 host reached
     /// over SSH. Only an SSH machine can hold it, so the machine is required.
     Nitro {
-        machine: String,
+        machine: MachineId,
         #[serde(flatten)]
         container: ContainerTemplate,
     },
@@ -254,7 +341,7 @@ pub(super) const STORED_TARGET_KINDS: [&str; 5] =
 impl StoredTarget {
     /// The machine this runtime runs on.
     #[must_use]
-    pub fn machine(&self) -> &str {
+    pub fn machine(&self) -> &MachineId {
         match self {
             Self::Bare { machine, .. }
             | Self::Podman { machine, .. }
@@ -279,13 +366,13 @@ impl StoredTarget {
 /// no `[machines.local]` table.
 fn machine_for(
     id: &str,
-    machine_id: &str,
-    machines: &BTreeMap<String, Machine>,
+    machine_id: &MachineId,
+    machines: &BTreeMap<MachineId, Machine>,
 ) -> Result<Machine> {
     if let Some(machine) = machines.get(machine_id) {
         return Ok(machine.clone());
     }
-    if is_local_machine_id(machine_id) {
+    if machine_id.is_local() {
         return Ok(Machine::Local { build_cache: None });
     }
     bail!("target {id:?} names machine {machine_id:?}, which is not defined")
@@ -296,7 +383,7 @@ fn machine_for(
 pub fn resolve_target(
     id: &str,
     target: &StoredTarget,
-    machines: &BTreeMap<String, Machine>,
+    machines: &BTreeMap<MachineId, Machine>,
 ) -> Result<TargetTemplate> {
     let machine_id = target.machine();
     let machine = machine_for(id, machine_id, machines)?;
@@ -410,48 +497,64 @@ pub fn resolve_target(
 
 /// The id of the machine in `machines` equal to `wanted`, inserting it under a
 /// collision-free id derived from `base` when it is not there yet.
-fn machine_id_for(machines: &mut BTreeMap<String, Machine>, wanted: Machine, base: &str) -> String {
+fn machine_id_for(
+    machines: &mut BTreeMap<MachineId, Machine>,
+    wanted: Machine,
+    base: &str,
+) -> MachineId {
     if let Some((id, _)) = machines.iter().find(|(_, candidate)| **candidate == wanted) {
         return id.clone();
     }
-    let id = unique_config_id(machines, base);
+    let id = generated_machine_id(machines, base);
     machines.insert(id.clone(), wanted);
     id
+}
+
+/// A machine id derived from `base` that no machine in `machines` holds yet.
+/// A `base` that is not a valid id falls back to `machine`.
+fn generated_machine_id(machines: &BTreeMap<MachineId, Machine>, base: &str) -> MachineId {
+    let base = if validate_id("machine", base).is_ok() {
+        base
+    } else {
+        "machine"
+    };
+    MachineId::new(unique_config_id(machines, base))
+        .expect("a derived machine id is a valid configuration id")
 }
 
 /// The id of this machine, making sure `machines` holds it and that it owns
 /// the build cache settings a local container runtime carried.
 fn local_machine_for(
-    machines: &mut BTreeMap<String, Machine>,
+    machines: &mut BTreeMap<MachineId, Machine>,
     build_cache: Option<&TargetBuildCache>,
     target_id: &str,
-) -> String {
+) -> MachineId {
     let entry = machines
-        .entry(LOCAL_MACHINE_ID.to_owned())
+        .entry(MachineId::local())
         .or_insert(Machine::Local { build_cache: None });
     fold_build_cache(entry, build_cache, LOCAL_MACHINE_ID, target_id);
-    LOCAL_MACHINE_ID.to_owned()
+    MachineId::local()
 }
 
 /// The id of the SSH machine in `machines` reaching `ssh`, creating it when
 /// absent. At most one machine may hold a given connection, so the connection
 /// alone identifies it.
 fn ssh_machine_id(
-    machines: &mut BTreeMap<String, Machine>,
+    machines: &mut BTreeMap<MachineId, Machine>,
     ssh: &SshConnection,
     workspace_prefix: Option<&PathBuf>,
     build_cache: Option<&TargetBuildCache>,
     target_id: &str,
-) -> String {
+) -> MachineId {
     let id = match find_ssh_machine(machines, ssh) {
-        Some(id) => id.to_owned(),
+        Some(id) => id.clone(),
         None => {
             let base = if validate_id("machine", &ssh.host).is_ok() {
                 ssh.host.clone()
             } else {
                 target_id.to_owned()
             };
-            let id = unique_config_id(machines, &base);
+            let id = generated_machine_id(machines, &base);
             machines.insert(
                 id.clone(),
                 Machine::Ssh {
@@ -476,7 +579,7 @@ fn ssh_machine_id(
         && current != prefix
     {
         tracing::warn!(
-            machine = id,
+            machine = %id,
             target = target_id,
             "keeping the workspace directory already set for this machine and ignoring the one on this runtime"
         );
@@ -516,7 +619,7 @@ fn fold_build_cache(
 pub fn stored_target(
     id: &str,
     target: &TargetTemplate,
-    machines: &mut BTreeMap<String, Machine>,
+    machines: &mut BTreeMap<MachineId, Machine>,
 ) -> StoredTarget {
     let without_cache = |container: &ContainerTemplate| {
         let mut container = container.clone();
@@ -525,7 +628,7 @@ pub fn stored_target(
     };
     match target {
         TargetTemplate::LocalBare => StoredTarget::Bare {
-            machine: LOCAL_MACHINE_ID.to_owned(),
+            machine: MachineId::local(),
             permissions: None,
         },
         TargetTemplate::LocalPodman { container } => StoredTarget::Podman {
@@ -606,39 +709,39 @@ fn aws_machine(target: &TargetTemplate) -> Option<Machine> {
 /// The id of the SSH machine reaching `ssh`. At most one machine may hold a
 /// given connection, so the connection alone identifies it.
 fn find_ssh_machine<'a>(
-    machines: &'a BTreeMap<String, Machine>,
+    machines: &'a BTreeMap<MachineId, Machine>,
     ssh: &SshConnection,
-) -> Option<&'a str> {
+) -> Option<&'a MachineId> {
     machines
         .iter()
         .find(|(_, machine)| matches!(machine, Machine::Ssh { ssh: other, .. } if other == ssh))
-        .map(|(id, _)| id.as_str())
+        .map(|(id, _)| id)
 }
 
 /// The id of the machine in `machines` a fused target runs on, matched the
 /// way saving matches it, or `None` when no machine there holds it yet.
 /// Every local runtime runs on `local`, which exists whether or not
 /// `machines` names it.
-pub fn target_machine_id<'a>(
+pub fn target_machine_id(
     target: &TargetTemplate,
-    machines: &'a BTreeMap<String, Machine>,
-) -> Option<&'a str> {
+    machines: &BTreeMap<MachineId, Machine>,
+) -> Option<MachineId> {
     match target {
         TargetTemplate::LocalBare
         | TargetTemplate::LocalPodman { .. }
         | TargetTemplate::LocalDocker { .. }
-        | TargetTemplate::AppleContainer { .. } => Some(LOCAL_MACHINE_ID),
+        | TargetTemplate::AppleContainer { .. } => Some(MachineId::local()),
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
         | TargetTemplate::SshAppleContainer { ssh, .. }
-        | TargetTemplate::SshNitro { ssh, .. } => find_ssh_machine(machines, ssh),
+        | TargetTemplate::SshNitro { ssh, .. } => find_ssh_machine(machines, ssh).cloned(),
         TargetTemplate::AwsEc2 { .. } => {
             let wanted = aws_machine(target)?;
             machines
                 .iter()
                 .find(|(_, machine)| **machine == wanted)
-                .map(|(id, _)| id.as_str())
+                .map(|(id, _)| id.clone())
         }
     }
 }

@@ -1726,6 +1726,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         notifications_ignored: false,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,

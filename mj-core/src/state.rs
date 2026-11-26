@@ -1772,6 +1772,13 @@ pub struct SessionRecord {
     /// Connection and worker settings captured when this target was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_runtime: Option<Arc<TargetRuntimeSettings>>,
+    /// The configured machine this placement runs on, stored beside the
+    /// placement (`session_targets.machine_id`) and nowhere else. `None`
+    /// means unknown: a row written before machines were recorded whose
+    /// template is gone. Database-owned; omitted from portable session
+    /// formats.
+    #[serde(skip)]
+    pub machine_id: Option<crate::config::MachineId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2296,6 +2303,7 @@ impl SessionRecord {
         target_runtime_settings_for(
             &self.id,
             &self.target_template_id,
+            self.machine_id.as_ref(),
             self.target.as_deref(),
             self.target_runtime.as_deref(),
             config,
@@ -3740,19 +3748,30 @@ pub struct ResumeRepositorySourceReceipt {
 }
 
 /// Access settings for a recorded physical placement, independent of its session.
+///
+/// `machine_id` is the machine the placement records, when it records one.
 pub fn target_runtime_settings_for<'a>(
     session_id: &str,
     target_template_id: &str,
+    machine_id: Option<&crate::config::MachineId>,
     target: Option<&TargetLocator>,
     runtime: Option<&'a TargetRuntimeSettings>,
     config: &Config,
 ) -> Result<Cow<'a, TargetRuntimeSettings>> {
     if let Some(runtime) = runtime {
         // How to reach the target follows the machine's current ssh
-        // options; where it is stays as recorded (launch finding R3-7).
-        if let Some(refreshed) = config.targets.get(target_template_id).and_then(|template| {
-            runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
-        }) {
+        // options; where it is stays as recorded (launch finding R3-7). The
+        // recorded machine is asked first, so a placement whose template was
+        // removed or renamed still follows `[machines.<id>]`; the template is
+        // the answer for a placement that records no machine.
+        let refreshed = machine_id
+            .and_then(|id| config.machines.get(id))
+            .and_then(|machine| runtime.with_current_machine_ssh_options(machine))
+            .or_else(|| {
+                let template = config.targets.get(target_template_id)?;
+                runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
+            });
+        if let Some(refreshed) = refreshed {
             return Ok(std::borrow::Cow::Owned(refreshed));
         }
         return Ok(std::borrow::Cow::Borrowed(runtime));

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{SessionRecord, SessionResourceAllocation, TargetLocator};
 use crate::config::{
-    Environment, EnvironmentValue, ExecutionPolicy, SshConnection, TargetTemplate,
+    Environment, EnvironmentValue, ExecutionPolicy, Machine, SshConnection, TargetTemplate,
 };
 use crate::targets::AdditionalMount;
 
@@ -179,6 +179,21 @@ impl TargetRuntimeSettings {
             },
         };
         Some(refreshed)
+    }
+}
+
+impl TargetRuntimeSettings {
+    /// These recorded settings with the SSH options `machine` now has, or
+    /// `None` when `machine` is not an SSH machine, these settings do not
+    /// reach it by SSH, or there is nothing new to take. The same rules as
+    /// [`Self::with_current_ssh_options`] decide whether it is the same place.
+    pub fn with_current_machine_ssh_options(&self, machine: &Machine) -> Option<Self> {
+        let Machine::Ssh { ssh, .. } = machine else {
+            return None;
+        };
+        let mut current = self.clone();
+        current.connection = TargetConnection::Ssh { ssh: ssh.clone() };
+        self.with_current_ssh_options(&current)
     }
 }
 

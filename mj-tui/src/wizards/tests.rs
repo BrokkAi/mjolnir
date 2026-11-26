@@ -4729,7 +4729,9 @@ fn a_machine_without_a_runtime_keeps_the_target_step_and_says_why() {
         workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
         build_cache: None,
     };
-    config.machines.insert("nas".into(), nas);
+    config
+        .machines
+        .insert(mj_core::config::MachineId::new("nas").unwrap(), nas);
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
     crate::test_support::answer_availability(&mut dashboard, |dashboard| {
@@ -4753,7 +4755,10 @@ fn unreachable_only_target_blocking_notice_keeps_remediation() {
     config.targets.clear();
     config.targets.insert("machine".into(), bare_ssh_target());
     config.default_targets = ["machine".to_owned()].into();
-    config.machines.insert("machine".into(), bare_ssh_machine());
+    config.machines.insert(
+        mj_core::config::MachineId::new("machine").unwrap(),
+        bare_ssh_machine(),
+    );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
     crate::test_support::answer_availability(&mut dashboard, |dashboard| {
@@ -5069,10 +5074,10 @@ fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
             .config
             .targets
             .insert("machine".into(), bare_ssh_target());
-        dashboard
-            .config
-            .machines
-            .insert("machine".into(), bare_ssh_machine());
+        dashboard.config.machines.insert(
+            mj_core::config::MachineId::new("machine").unwrap(),
+            bare_ssh_machine(),
+        );
         // A second runtime on the same machine shares its one line.
         let TargetTemplate::SshBare { ssh, .. } = bare_ssh_target() else {
             unreachable!("a bare SSH target");

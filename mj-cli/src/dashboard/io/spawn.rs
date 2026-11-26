@@ -634,7 +634,7 @@ pub(crate) fn spawn_profile_login_statuses(
 pub(crate) fn spawn_setup_discovery(
     generation: u64,
     scope: DetectScope,
-    machines: Vec<(String, mj_core::config::Machine)>,
+    machines: Vec<(mj_core::config::MachineId, mj_core::config::Machine)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {

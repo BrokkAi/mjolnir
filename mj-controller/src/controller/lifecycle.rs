@@ -3428,7 +3428,7 @@ impl Controller {
         }
 
         let resolve = |target, template, runtime| {
-            super::backend::recorded_backend_locator(target, id, template, runtime, &self.config)
+            super::backend::recorded_backend_locator(target, id, template, None, runtime, &self.config)
                 .inspect_err(|error| {
                     tracing::debug!(session_id = id, %error, "could not resolve a candidate Move credential host");
                 })

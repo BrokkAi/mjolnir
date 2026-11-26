@@ -12,7 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use mj_core::config::{
-    Config, ContainerTemplate, Machine, PermissionMode, SshConnection, TargetTemplate,
+    Config, ContainerTemplate, Machine, MachineId, PermissionMode, SshConnection, TargetTemplate,
 };
 use mj_core::targets::{
     CommandOutput, CommandSpec, join_remote_command, posix_quote, remote_command_line,
@@ -33,7 +33,7 @@ use crate::targets::{
 /// What probing one machine found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineProbe {
-    pub machine_id: String,
+    pub machine_id: MachineId,
     /// The machine as it was probed. What was found describes this host
     /// only, so it is applied only while the configuration still names the
     /// machine unchanged.
@@ -84,7 +84,7 @@ impl MachineProbe {
 /// Probe the runtimes `machine` can run. `None` for this machine, whose
 /// runtimes the local discovery finds.
 pub fn probe_machine(
-    machine_id: &str,
+    machine_id: &MachineId,
     machine: &Machine,
     executor: &impl CommandExecutor,
 ) -> Option<MachineProbe> {
@@ -95,7 +95,7 @@ pub fn probe_machine(
         Machine::Ssh { ssh, .. } => probe_ssh_machine(ssh, executor),
     };
     Some(MachineProbe {
-        machine_id: machine_id.to_owned(),
+        machine_id: machine_id.clone(),
         machine: machine.clone(),
         outcome,
     })
@@ -104,7 +104,7 @@ pub fn probe_machine(
 /// Probe several machines at once. Each one is a separate host with its own
 /// timeouts, so a host that does not answer delays only its own result.
 pub fn probe_machines(
-    machines: &[(String, Machine)],
+    machines: &[(MachineId, Machine)],
     executor: &(impl CommandExecutor + Sync),
 ) -> Vec<MachineProbe> {
     std::thread::scope(|scope| {
@@ -591,7 +591,7 @@ pub fn add_machine_runtimes(
     config_path: &Path,
     probes: &[MachineProbe],
     cancelled: &dyn Fn() -> bool,
-) -> Result<BTreeMap<String, BTreeMap<String, TargetTemplate>>> {
+) -> Result<BTreeMap<MachineId, BTreeMap<String, TargetTemplate>>> {
     let additions = |config: &Config| {
         probes
             .iter()

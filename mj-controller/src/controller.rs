@@ -793,13 +793,15 @@ impl Controller {
                 tracing::warn!(session_id = %session.id, "{issue}");
             }
         }
-        self.backfill_target_runtime()
+        self.backfill_target_runtime()?;
+        self.backfill_machine_ids()
     }
 
     pub fn reload(&mut self) -> Result<()> {
         // Capture legacy settings from the previous config before a manual
         // edit removes them. Only fill missing metadata, never overwrite it.
         self.backfill_target_runtime()?;
+        self.backfill_machine_ids()?;
         *self = Self::load()?;
         Ok(())
     }
@@ -826,6 +828,28 @@ impl Controller {
                 Err(error) => {
                     tracing::warn!(session_id = %session.id, %error, "target access needs configuration repair")
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fill the machine on placements that have none: local placements by
+    /// kind, SSH and legacy EC2 placements from the machine their target
+    /// template names. A placement whose template was removed keeps no
+    /// machine; migrate maps those by hand.
+    fn backfill_machine_ids(&mut self) -> Result<()> {
+        let templates = self
+            .config
+            .targets
+            .keys()
+            .filter_map(|id| {
+                let machine = self.config.template_machine_id(id)?;
+                (!machine.is_local()).then(|| (id.clone(), machine))
+            })
+            .collect();
+        for (session_id, machine_id) in crate::database::backfill_machine_ids(&templates)? {
+            if let Some(session) = self.state.sessions.get_mut(&session_id) {
+                session.machine_id.get_or_insert(machine_id);
             }
         }
         Ok(())
@@ -1179,6 +1203,7 @@ impl Controller {
             notifications_ignored,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
+            machine_id: self.config.template_machine_id(target_id),
             build_cache: None,
             create_managed_worktree,
             launch_base,

@@ -812,6 +812,13 @@ impl Controller {
                 .context("harness profile disappeared before provisioning")?
                 .ensure_ready(&session.last_profile)?;
             let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
+            // The placement saved once the target exists records the machine
+            // this template runs on.
+            self.state
+                .sessions
+                .get_mut(session_id)
+                .unwrap()
+                .machine_id = self.config.template_machine_id(&session.target_template_id);
             if let Some(recorded) = &session.target_runtime {
                 runtime.tool_cache = recorded.tool_cache.clone();
                 runtime.container_settings = recorded.container_settings.clone();

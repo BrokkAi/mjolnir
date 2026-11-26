@@ -443,6 +443,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -1106,9 +1107,10 @@ pub(crate) fn publish_unreachable_machine(
     routine: bool,
 ) {
     use mj_client::availability::{AvailabilityNote, AvailabilityVerdict};
+    let machine_id = mj_core::config::MachineId::new(machine).unwrap();
     let ids: Vec<_> = dashboard
         .config
-        .machine_runtimes(machine)
+        .machine_runtimes(&machine_id)
         .map(|(id, _)| id)
         .collect();
     let summary = if routine {

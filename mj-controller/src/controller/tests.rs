@@ -3205,6 +3205,133 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
         .unwrap();
 }
 
+/// Revision 160 leaves SSH placements without a machine. Loading the daemon
+/// state fills each from the machine its target template names, fills local
+/// placements by kind, and leaves a placement whose template was removed
+/// unknown rather than guessing a host.
+#[test]
+fn load_fills_placement_machines_from_surviving_templates_only() {
+    const MARKER: &str = "MJ_TEST_PLACEMENT_MACHINE_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "load_fills_placement_machines_from_surviving_templates_only",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut config = registration_config();
+    let TargetTemplate::SshPodman { ssh, .. } = durable_remote_template("builder.test") else {
+        unreachable!("the fixture is an ssh-podman template")
+    };
+    config.machines.insert(
+        mj_core::config::MachineId::new("builder").unwrap(),
+        mj_core::config::Machine::Ssh {
+            ssh,
+            workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+            build_cache: None,
+        },
+    );
+    config
+        .targets
+        .insert("podman".into(), durable_remote_template("builder.test"));
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let placements = [
+        (
+            "0123456789abcdef0123456789abcde1",
+            "local-docker",
+            TargetLocator::LocalDocker {
+                container_id: "local-container".into(),
+                borrowed_from: None,
+            },
+            Some("local"),
+        ),
+        (
+            "0123456789abcdef0123456789abcde2",
+            "podman",
+            TargetLocator::SshPodman {
+                host: "builder.test".into(),
+                container_id: "kept-container".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            Some("builder"),
+        ),
+        (
+            "0123456789abcdef0123456789abcde3",
+            "removed",
+            TargetLocator::SshPodman {
+                host: "removed.test".into(),
+                container_id: "removed-container".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            None,
+        ),
+    ];
+    for (id, template, target, _) in &placements {
+        let mut session = super::test_support::checkpoint_test_session(id);
+        session.target_template_id = (*template).into();
+        session.target = Some(Box::new(target.clone()));
+        // These rows are what revision 160 leaves: placements with no machine.
+        session.machine_id = None;
+        controller
+            .state
+            .sessions
+            .insert(session.id.clone(), session);
+    }
+    save_fixture_state(&mut controller);
+    let machines = |state: &State| {
+        placements
+            .iter()
+            .map(|(id, ..)| {
+                state.sessions[*id]
+                    .machine_id
+                    .as_ref()
+                    .map(|machine| machine.as_str().to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected: Vec<Option<String>> = placements
+        .iter()
+        .map(|(_, _, _, machine)| machine.map(str::to_owned))
+        .collect();
+
+    let mut loaded = Controller::load().unwrap();
+    assert_eq!(machines(&loaded.state), [None, None, None]);
+    loaded.prepare_persisted_sessions().unwrap();
+    assert_eq!(machines(&loaded.state), expected);
+    assert_eq!(
+        machines(&crate::database::load_state().unwrap()),
+        expected,
+        "the filled machines are stored, not only held in memory"
+    );
+    // The environment's worker leases follow the same rule as the sessions.
+    let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    let mut statement = connection
+        .prepare("SELECT worker_session_id, machine_id FROM environment_workers ORDER BY worker_session_id")
+        .unwrap();
+    let workers: Vec<(String, Option<String>)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        workers,
+        placements
+            .iter()
+            .zip(&expected)
+            .map(|((id, ..), machine)| ((*id).to_owned(), machine.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn target_backfill_does_not_block_reload_after_a_concurrent_deletion() {
     const MARKER: &str = "MJ_TEST_TARGET_BACKFILL_DELETE_CHILD";

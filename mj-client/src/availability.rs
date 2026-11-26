@@ -1,11 +1,11 @@
 //! Daemon-computed environment readiness; profile environments retain sources only.
 use crate::settings::RejectedRuntime;
-use mj_core::config::{Machine, TargetTemplate};
+use mj_core::config::{Machine, MachineId, TargetTemplate};
 use std::collections::BTreeMap;
 /// What probing one machine found.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct MachineRuntimeProbe {
-    pub machine_id: String,
+    pub machine_id: MachineId,
     /// The machine as it was probed.
     pub machine: Machine,
     pub finding: MachineFinding,

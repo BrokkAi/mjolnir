@@ -216,22 +216,29 @@ fn read_environment_workers(
     .collect()
 }
 
-fn store_worker(
+/// The lease an existing worker row already holds for `target`, or a new id.
+fn worker_lease(
     transaction: &Transaction<'_>,
     environment_id: &str,
     session_id: &str,
-    target_template_id: &str,
-    runtime: Option<&TargetRuntimeSettings>,
     target: &TargetLocator,
 ) -> Result<String> {
     let existing = read_environment_workers(transaction, environment_id)?
         .into_iter()
         .find(|worker| worker.session_id == session_id && worker.target.same_resource(target));
-    let lease = existing
-        .map(|worker| worker.lease_id)
-        .unwrap_or(mj_core::state::new_session_id()?);
-    let fields = super::state_io::stored_target_values(target)?;
-    transaction.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,runtime_json,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(lease_id) DO UPDATE SET address=excluded.address,workspace_storage=excluded.workspace_storage,runtime_json=coalesce(environment_workers.runtime_json,excluded.runtime_json)",params![lease,environment_id,session_id,target_template_id,runtime.map(serde_json::to_string).transpose()?,fields.kind,fields.host,fields.resource,fields.address,fields.workspace,fields.worker_id,fields.workspace_storage,fields.borrowed_from])?;
+    Ok(match existing {
+        Some(worker) => worker.lease_id,
+        None => mj_core::state::new_session_id()?,
+    })
+}
+
+/// Publish the environment's lease for `target`, when this transaction owns it.
+fn point_environment_at_lease(
+    transaction: &Transaction<'_>,
+    environment_id: &str,
+    session_id: &str,
+    lease: &str,
+) -> Result<()> {
     if read_environment(transaction, environment_id)?
         .is_some_and(|environment| environment.owner_session_id == session_id)
     {
@@ -240,6 +247,44 @@ fn store_worker(
             params![environment_id, lease],
         )?;
     }
+    Ok(())
+}
+
+/// Write a worker row. `machine_id` is the configured machine the placement
+/// runs on; `None` records "unknown", which the daemon fills at load from the
+/// template when it still exists. A row that already has a machine keeps it
+/// (the lease names one physical resource, which stays on one machine).
+fn store_worker(
+    transaction: &Transaction<'_>,
+    environment_id: &str,
+    session_id: &str,
+    target_template_id: &str,
+    runtime: Option<&TargetRuntimeSettings>,
+    target: &TargetLocator,
+    machine_id: Option<&MachineId>,
+) -> Result<String> {
+    let lease = worker_lease(transaction, environment_id, session_id, target)?;
+    let fields = super::state_io::stored_target_values(target)?;
+    transaction.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,runtime_json,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,machine_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(lease_id) DO UPDATE SET address=excluded.address,workspace_storage=excluded.workspace_storage,runtime_json=coalesce(environment_workers.runtime_json,excluded.runtime_json),machine_id=coalesce(environment_workers.machine_id,excluded.machine_id)",params![lease,environment_id,session_id,target_template_id,runtime.map(serde_json::to_string).transpose()?,fields.kind,fields.host,fields.resource,fields.address,fields.workspace,fields.worker_id,fields.workspace_storage,fields.borrowed_from,machine_id.map(MachineId::as_str)])?;
+    point_environment_at_lease(transaction, environment_id, session_id, &lease)?;
+    Ok(lease)
+}
+
+/// `store_worker` as it was before revision 160 added `machine_id`. The
+/// environment backfills of revision 122 run against that schema, so they
+/// cannot name the column.
+fn store_worker_before_machine_id(
+    transaction: &Transaction<'_>,
+    environment_id: &str,
+    session_id: &str,
+    target_template_id: &str,
+    runtime: Option<&TargetRuntimeSettings>,
+    target: &TargetLocator,
+) -> Result<String> {
+    let lease = worker_lease(transaction, environment_id, session_id, target)?;
+    let fields = super::state_io::stored_target_values(target)?;
+    transaction.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,runtime_json,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(lease_id) DO UPDATE SET address=excluded.address,workspace_storage=excluded.workspace_storage,runtime_json=coalesce(environment_workers.runtime_json,excluded.runtime_json)",params![lease,environment_id,session_id,target_template_id,runtime.map(serde_json::to_string).transpose()?,fields.kind,fields.host,fields.resource,fields.address,fields.workspace,fields.worker_id,fields.workspace_storage,fields.borrowed_from])?;
+    point_environment_at_lease(transaction, environment_id, session_id, &lease)?;
     Ok(lease)
 }
 
@@ -381,6 +426,7 @@ pub(super) fn capture_session_environment(
             &session.target_template_id,
             session.target_runtime.as_deref(),
             target,
+            session.machine_id.as_ref(),
         )?;
     }
 
@@ -617,7 +663,7 @@ pub(super) fn backfill_environments(transaction: &Transaction<'_>) -> Result<()>
             params![worker, id],
         )?;
         if let Some(target) = placement.target {
-            store_worker(
+            store_worker_before_machine_id(
                 transaction,
                 id,
                 &worker,
@@ -812,7 +858,7 @@ fn register_historical_environment(
     let id = mj_core::state::new_session_id()?;
     transaction.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES (?1,?2,'active',?3)",params![id,owner,serde_json::to_string(&placement)?])?;
     if let Some(target) = &placement.target {
-        store_worker(
+        store_worker_before_machine_id(
             transaction,
             &id,
             owner,

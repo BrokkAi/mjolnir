@@ -425,7 +425,10 @@ pub fn instance_identity_for(instance: Option<&str>, data_dir: &Path) -> String 
 }
 
 /// The first available configuration identifier, retaining a readable base.
-pub fn unique_config_id<T>(entries: &BTreeMap<String, T>, base: &str) -> String {
+pub fn unique_config_id<K: Ord + std::borrow::Borrow<str>, T>(
+    entries: &BTreeMap<K, T>,
+    base: &str,
+) -> String {
     if !entries.contains_key(base) {
         return base.to_owned();
     }
@@ -434,7 +437,7 @@ pub fn unique_config_id<T>(entries: &BTreeMap<String, T>, base: &str) -> String 
         // Configuration identifiers are ASCII and limited to 64 bytes.
         let prefix = base.chars().take(64 - suffix.len()).collect::<String>();
         let candidate = format!("{prefix}{suffix}");
-        if !entries.contains_key(&candidate) {
+        if !entries.contains_key(candidate.as_str()) {
             return candidate;
         }
     }

@@ -1987,7 +1987,7 @@ fn raw_ssh_permissions_are_required_and_podman_rejects_them() {
     // Saving names the host the three runtimes share, so the file that comes
     // back has the machine the in-memory config never spelled out.
     config.machines.insert(
-        "builder".into(),
+        MachineId::new("builder").unwrap(),
         Machine::Ssh {
             ssh: SshConnection {
                 host: "builder".into(),
@@ -2291,7 +2291,7 @@ fn cache_opt_out_migration_covers_implicit_local_and_all_older_config_versions()
         assert_eq!(Config::load_from(&path).unwrap(), config);
         // A newly added machine uses the normal default, not a hidden veto.
         config.machines.insert(
-            "new".into(),
+            MachineId::new("new").unwrap(),
             serde_json::from_value(serde_json::json!({"kind":"ssh", "host":"new.example.com"}))
                 .unwrap(),
         );
@@ -2379,9 +2379,10 @@ fn saving_can_reenable_one_machine_during_global_cache_migration() {
     let path = directory.path().join("config.toml");
     fs::write(&path, "version = 13\n[build_cache]\nenabled = false\n").unwrap();
     let mut config = Config::load_from(&path).unwrap();
-    config
-        .machines
-        .insert("local".into(), Machine::Local { build_cache: None });
+    config.machines.insert(
+        MachineId::new("local").unwrap(),
+        Machine::Local { build_cache: None },
+    );
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     assert!(!saved.contains("build_cache"), "{saved}");

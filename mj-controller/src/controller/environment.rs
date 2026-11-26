@@ -77,6 +77,7 @@ fn backend(worker: &EnvironmentWorker, config: &Config) -> Result<targets::Targe
         &worker.target,
         &worker.session_id,
         &worker.target_template_id,
+        None,
         worker.runtime.as_ref(),
         config,
     )
@@ -479,6 +480,7 @@ pub(super) fn retire_owned_environment_with_clone_prerequisite(
             target,
             &session_id,
             &placement.target_template_id,
+            None,
             placement.runtime.as_ref(),
             config,
         )?;

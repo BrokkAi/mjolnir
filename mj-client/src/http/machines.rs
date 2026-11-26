@@ -41,7 +41,7 @@ pub struct TestTargetRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoverSetupRequest {
     pub scope: crate::discovery::DetectScope,
-    pub machines: Vec<(String, mj_core::config::Machine)>,
+    pub machines: Vec<(mj_core::config::MachineId, mj_core::config::Machine)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,7 +136,7 @@ impl HttpDaemonClient {
     pub async fn discover_setup(
         &self,
         scope: crate::discovery::DetectScope,
-        machines: Vec<(String, mj_core::config::Machine)>,
+        machines: Vec<(mj_core::config::MachineId, mj_core::config::Machine)>,
     ) -> anyhow::Result<SetupDetection> {
         self.post_json(
             "/api/v1/setup/discover",
