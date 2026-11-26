@@ -196,9 +196,9 @@ pub fn ensure_recovery_target_running(
         .context("check whether container session target exists")?;
     match existence.status {
         0 => {}
-        // Existence plans prove engine health before reporting absence. Podman
-        // can also return 1 when its rootless runtime is broken (#1708). SSH
-        // preserves the guarded remote status.
+        // Podman existence plans report 1 only from a successful engine
+        // listing; `podman exists` itself also returns 1 when its rootless
+        // runtime is broken (#1708). SSH preserves the remote status.
         1 => return Ok(TargetRecoveryOutcome::Missing),
         _ => {
             checked_command_output(&plan.exists, existence)

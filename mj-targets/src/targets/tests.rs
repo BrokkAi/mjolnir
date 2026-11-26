@@ -3748,7 +3748,7 @@ fn an_ssh_podman_cleanup_runs_in_one_command_and_stops_at_a_refused_container() 
         let environment = fake_ssh_podman_environment();
         let home = environment.path().join("home");
         let state = home.join("fake-podman");
-        std::fs::write(state.join("container"), "").unwrap();
+        std::fs::write(state.join("container"), &name).unwrap();
         std::fs::write(state.join("volumes"), format!("{workspace}\n{temporary}\n")).unwrap();
         let cache = home.join(format!(".cache/mjolnir/git/sessions/{SESSION}"));
         std::fs::create_dir_all(&cache).unwrap();
@@ -3987,7 +3987,12 @@ mkdir -p "$state"
 printf '%s\n' "$*" >>"$state/invocations"
 case "${1-}" in
 container)
-    case ${2-} in inspect|exists) ;; *) exit 2 ;; esac
+    case ${2-} in inspect|exists) ;; ls)
+        # The engine's listing: ID and name of each container.
+        if [ -f "$state/container-labels" ]; then
+            printf 'fakeid %s\n' "$(cat "$state/container-name" 2>/dev/null || true)"
+        fi
+        exit 0 ;; *) exit 2 ;; esac
     for argument do name=$argument; done
     case $name in *-mount-init) labels=helper-labels ;; *) labels=container-labels ;; esac
     [ -f "$state/$labels" ] || exit 1
@@ -4024,6 +4029,7 @@ run)
         ;;
 
     *)
+        printf '%s' "$name" >"$state/container-name"
         printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" >"$state/container-labels"
         [ "${FAKE_DOCKER_FAIL_RUN:-0}" = 1 ] && exit 125
         ;;
@@ -6113,6 +6119,9 @@ volume)
             printf 'true|%s\n' "$FAKE_SESSION"
         fi
         ;;
+    ls)
+        cat "$state/volumes" 2>/dev/null || true
+        ;;
     create)
         printf '%s\n' "$last" >>"$state/volumes"
         echo "$last"
@@ -6125,6 +6134,12 @@ volume)
     ;;
 container)
     case "$*" in
+    'container ls'*)
+        # The engine's listing: ID and name of each container.
+        if [ -f "$state/container" ]; then
+            printf 'fakeid %s\n' "$(cat "$state/container")"
+        fi
+        ;;
     *Mounts*)
         printf '[{"Type":"volume","Name":"%s","Destination":"/tmp","RW":true}]\n' "$FAKE_TMP_VOLUME"
         ;;
@@ -6135,7 +6150,12 @@ container)
     esac
     ;;
 run)
-    : >"$state/container"
+    name=
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = --name ]; then name=$2; fi
+        shift
+    done
+    printf '%s' "$name" >"$state/container"
     echo fake-container-id
     ;;
 rm)
@@ -6544,24 +6564,50 @@ printf '%s\n' "$FAKE_INFO"
 #[cfg(unix)]
 #[test]
 fn podman_runtime_failure_is_not_resource_absence() {
+    const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
+    // `exists` always answers 1 and `info` always passes: the namespace has
+    // recovered between the calls a health-check-after-the-fact design makes.
+    // Only the single listing, which fails when the engine cannot answer, may
+    // decide presence.
     mj_core::test_hooks::install_fake_command(
         &bin,
         "podman",
         r#"#!/bin/sh
 printf '%s\n' "$*" >>"$MJ_PODMAN_TEST_LOG"
+n=$MJ_PODMAN_TEST_NAME
 case "$1 $2" in
     'container exists'|'volume exists') exit 1 ;;
-    'container inspect') printf 'true|%s\n' "$MJ_PODMAN_TEST_SESSION"; exit 0 ;;
-    'info ')
-        if [ "$MJ_PODMAN_TEST_HEALTH" = broken ]; then
-            echo 'invalid internal status: could not find any running process' >&2
-            exit 1
-        fi
+    'info ') exit 0 ;;
+    'container ls'|'volume ls')
+        case $MJ_PODMAN_TEST_MODE in
+            broken)
+                echo 'invalid internal status: could not find any running process' >&2
+                exit 1 ;;
+            live)
+                if [ "$2" = ls ] && [ "$1" = container ]; then
+                    printf '%s other,%s\n' "$MJ_PODMAN_TEST_ID" "$n"
+                else
+                    printf '%s\n%s-tmp\n' "$n-workspace" "$n"
+                fi ;;
+            sibling)
+                if [ "$1" = container ]; then
+                    printf '%s %s-move-0123456789abcdef\n' "$MJ_PODMAN_TEST_ID" "$n"
+                else
+                    printf '%s-workspace-old\n' "$n"
+                fi ;;
+        esac
         exit 0 ;;
-    'stop '*|'rm '*) exit 0 ;;
+    'container inspect')
+        case "$*" in
+            *State.Running*) echo false ;;
+            *) printf 'true|%s\n' "$MJ_PODMAN_TEST_SESSION" ;;
+        esac
+        exit 0 ;;
+    'volume inspect') printf 'true|%s\n' "$MJ_PODMAN_TEST_SESSION"; exit 0 ;;
+    'stop '*|'rm '*|'volume rm') exit 0 ;;
     *) echo 'unexpected Podman test invocation' >&2; exit 90 ;;
 esac
 "#,
@@ -6588,39 +6634,64 @@ esac
     );
     let quiesce = quiesce_plan(&locator, SESSION).unwrap().unwrap();
     let cleanup = podman_cleanup_plan(&locator, SESSION, false).unwrap();
-    let run = |command: &CommandSpec, health: &str| {
+    let calls = root.path().join("calls");
+    let run = |command: &CommandSpec, mode: &str| {
         let mut command = command.clone();
         command
             .env
             .insert("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()));
-        command.env.insert(
-            "MJ_PODMAN_TEST_LOG".into(),
-            root.path().join("calls").display().to_string(),
-        );
-        command
-            .env
-            .insert("MJ_PODMAN_TEST_SESSION".into(), SESSION.into());
-        command
-            .env
-            .insert("MJ_PODMAN_TEST_HEALTH".into(), health.into());
-        ProcessExecutor.execute(&command).unwrap()
+        for (key, value) in [
+            ("MJ_PODMAN_TEST_LOG", calls.display().to_string()),
+            ("MJ_PODMAN_TEST_SESSION", SESSION.into()),
+            ("MJ_PODMAN_TEST_NAME", name.clone()),
+            ("MJ_PODMAN_TEST_ID", ID.into()),
+            ("MJ_PODMAN_TEST_MODE", mode.into()),
+        ] {
+            command.env.insert(key.into(), value);
+        }
+        ProcessExecutor.execute(&command).unwrap().status
     };
-    // Every negative observation, including post-stop/remove verification,
-    // must remain unknown when the independent engine read also fails.
-    for command in [
-        &recovery.exists,
-        &absence,
-        &quiesce.commands[0],
-        &cleanup.commands[0],
-    ] {
-        assert_ne!(run(command, "broken").status, 0);
+    let log = || std::fs::read_to_string(&calls).unwrap_or_default();
+    let cleanup_statuses =
+        |mode: &str| -> Vec<i32> { cleanup.commands.iter().map(|c| run(c, mode)).collect() };
+
+    // A failed listing is unknown everywhere, including post-stop/remove
+    // verification and the storage steps, and nothing is removed.
+    assert_eq!(run(&recovery.exists, "broken"), 125);
+    assert_eq!(run(&absence, "broken"), 2);
+    assert_ne!(run(&quiesce.commands[0], "broken"), 0);
+    assert!(cleanup_statuses("broken").iter().any(|status| *status != 0));
+    assert!(!log().lines().any(|line| {
+        line.starts_with("volume rm") || line.starts_with("rm ") || line.starts_with("stop ")
+    }));
+
+    // The listing shows live resources while `exists` still says 1 and `info`
+    // is healthy: they are present, whether the locator is the name or an ID.
+    assert_eq!(run(&recovery.exists, "live"), 0);
+    let mut by_id = recovery.exists.clone();
+    *by_id.args.last_mut().unwrap() = ID[..12].to_owned();
+    assert_eq!(run(&by_id, "live"), 0);
+    assert_eq!(run(&absence, "live"), 1);
+    assert_eq!(run(&quiesce.commands[0], "live"), 0);
+    assert_ne!(
+        run(&cleanup.commands[0], "live"),
+        0,
+        "the fake keeps listing the container after rm"
+    );
+    // Storage steps remove only volumes the listing shows, after an owner check.
+    assert!(cleanup.commands.len() > 2);
+    for command in &cleanup.commands[1..] {
+        assert_eq!(run(command, "live"), 0);
     }
-    assert_eq!(run(&recovery.exists, "broken").status, 125);
-    assert_eq!(run(&absence, "broken").status, 2);
-    assert_eq!(run(&recovery.exists, "healthy").status, 1);
-    assert_eq!(run(&absence, "healthy").status, 0);
-    assert_eq!(run(&quiesce.commands[0], "healthy").status, 0);
-    assert_eq!(run(&cleanup.commands[0], "healthy").status, 0);
-    let calls = std::fs::read_to_string(root.path().join("calls")).unwrap();
-    assert!(!calls.lines().any(|line| line.starts_with("volume rm")));
+    assert!(log().lines().any(|line| line.starts_with("volume rm")));
+
+    // A sibling generation (`<name>-move-…`) is not this container.
+    assert_eq!(run(&recovery.exists, "sibling"), 1);
+    assert_eq!(run(&absence, "sibling"), 0);
+
+    // Healthy and truly absent is accepted.
+    assert_eq!(run(&recovery.exists, "empty"), 1);
+    assert_eq!(run(&absence, "empty"), 0);
+    assert_eq!(run(&quiesce.commands[0], "empty"), 0);
+    assert!(cleanup_statuses("empty").iter().all(|status| *status == 0));
 }
