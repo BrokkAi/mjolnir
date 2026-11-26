@@ -428,17 +428,17 @@ action: ProbeGitStatus { session_id: "session-1" }
 === changed files while the checkout probe is pending (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────── ▁   ▄   □ ╮╭ No conversation open ────────────────────────────────────╮
-│ Create   Open   Filter: _____________││No conversation open.                                     │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: _____________│╭ No conversation open ────────────────────────────────────╮
+│                                                                                                  │
 │                                                                                           en.    │
-╰───────                                                                                    ───────╯
-╭ Target  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮   ▁   ▄ ╮
-│  Host   │Reading the checkout…                                                         │         │
+╰───────  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮  ───────╯
+╭ Target  │Reading the checkout…                                                         │   ▁   ▄ ╮
+│  Host   │                                                                              │         │
 ╰───────  │                                                                              │  ───────╯
 ╭ Profil  │                                                                              │   ▁   ▄ ╮
 │ANTHROP  │                                                                              │         ▐
-│ + refr  │                                                                              │         │
 ╰───────  │                                                                              │  ───────╯
 ╭ Notifi  │  Refresh (r)     Close                                                       │   ▁   ▄ ╮
 │Nothing  ╰──────────────────────────────────────────────────────────────────────────────╯         │
@@ -454,17 +454,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 === changed files first page (100x24) ===
 ╭ Worksp                                                                                       ⋯───╮
 │ defaul                                                                                           │
-╰───────  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮  ───────╯
-╭ Sessio  │⎇ feature/dialogs ↑3 ↓1 ±36   36 files · +666 −630                            │  ───────╮
-│ Create  │                                                                              │         │
-│         │modified src/module-00.rs         +1 −0                                       │  en.    │
-╰───────  │modified src/module-01.rs         +2 −1                                      ▐│  ───────╯
-╭ Target  │modified src/module-02.rs         +3 −2                                      ▐│   ▁   ▄ ╮
-│  Host   │modified src/module-03.rs         +4 −3                                      ▐│         │
-╰───────  │modified src/module-04.rs         +5 −4                                      ▐│  ───────╯
-╭ Profil  │modified src/module-05.rs         +6 −5                                      ││   ▁   ▄ ╮
-│ANTHROP  │modified src/module-06.rs         +7 −6                                      ││         ▐
-│ + refr  │modified src/module-07.rs         +8 −7                                      ││         │
+╰───────  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮         │
+╭ Sessio  │⎇ feature/dialogs ↑3 ↓1 ±36   36 files · +666 −630                            │  ───────╯
+│ Create  │                                                                              │  ───────╮
+│         │modified src/module-00.rs         +1 −0                                       │         │
+│         │modified src/module-01.rs         +2 −1                                      ▐│  en.    │
+╰───────  │modified src/module-02.rs         +3 −2                                      ▐│  ───────╯
+╭ Target  │modified src/module-03.rs         +4 −3                                      ▐│   ▁   ▄ ╮
+│  Host   │modified src/module-04.rs         +5 −4                                      ▐│         │
+╰───────  │modified src/module-05.rs         +6 −5                                      ││  ───────╯
+╭ Profil  │modified src/module-06.rs         +7 −6                                      ││   ▁   ▄ ╮
+│ANTHROP  │modified src/module-07.rs         +8 −7                                      ││         ▐
 ╰───────  │modified src/module-08.rs         +9 −8                                      ││  ───────╯
 ╭ Notifi  │modified src/module-09.rs        +10 −9                                      ││   ▁   ▄ ╮
 │Nothing  │modified src/module-10.rs       +11 −10                                      ││         │
@@ -480,17 +480,17 @@ Enter op
 === changed files after paging down (100x24) ===
 ╭ Worksp                                                                                       ⋯───╮
 │ defaul                                                                                           │
-╰───────  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮  ───────╯
-╭ Sessio  │⎇ feature/dialogs ↑3 ↓1 ±36   36 files · +666 −630                            │  ───────╮
-│ Create  │                                                                              │         │
-│         │modified src/module-10.rs       +11 −10                                       │  en.    │
-╰───────  │modified src/module-11.rs       +12 −11                                      ││  ───────╯
-╭ Target  │modified src/module-12.rs       +13 −12                                      ││   ▁   ▄ ╮
-│  Host   │modified src/module-13.rs       +14 −13                                      ││         │
-╰───────  │modified src/module-14.rs       +15 −14                                      ▐│  ───────╯
-╭ Profil  │modified src/module-15.rs       +16 −15                                      ▐│   ▁   ▄ ╮
-│ANTHROP  │modified src/module-16.rs       +17 −16                                      ▐│         ▐
-│ + refr  │modified src/module-17.rs       +18 −17                                      ▐│         │
+╰───────  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮         │
+╭ Sessio  │⎇ feature/dialogs ↑3 ↓1 ±36   36 files · +666 −630                            │  ───────╯
+│ Create  │                                                                              │  ───────╮
+│         │modified src/module-10.rs       +11 −10                                       │         │
+│         │modified src/module-11.rs       +12 −11                                      ││  en.    │
+╰───────  │modified src/module-12.rs       +13 −12                                      ││  ───────╯
+╭ Target  │modified src/module-13.rs       +14 −13                                      ││   ▁   ▄ ╮
+│  Host   │modified src/module-14.rs       +15 −14                                      ▐│         │
+╰───────  │modified src/module-15.rs       +16 −15                                      ▐│  ───────╯
+╭ Profil  │modified src/module-16.rs       +17 −16                                      ▐│   ▁   ▄ ╮
+│ANTHROP  │modified src/module-17.rs       +18 −17                                      ▐│         ▐
 ╰───────  │modified src/module-18.rs       +19 −18                                      ││  ───────╯
 ╭ Notifi  │modified src/module-19.rs       +20 −19                                      ││   ▁   ▄ ╮
 │Nothing  │modified src/module-20.rs       +21 −20                                      ││         │
@@ -508,17 +508,17 @@ action: None
 === dashboard after closing changed files (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────── ▁   ▄   □ ╮╭ No conversation open ────────────────────────────────────╮
-│ Create   Open   Filter: _____________││No conversation open.                                     │
-│                                      ││Press Tab for Sessions, then Enter on the one to open.    │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: _____________│╭ No conversation open ────────────────────────────────────╮
+│                                      ││No conversation open.                                     │
+│                                  ◇ ⋯ ││Press Tab for Sessions, then Enter on the one to open.    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                                         ▐
-│ + refreshing…                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                 │
@@ -1438,17 +1438,17 @@ notice while the check runs: Some("Still checking the Git identity on this host�
 === Git identity with the email typed (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────── ▁   ▄   □ ╮╭ No conversation open ────────────────────────────────────╮
-│ Create   Open                                                                                    │
-│                                                                                  one to open.    │
-╰─────────────────  ╭ × Set up Git identity ───────────────────────────────────╮  ─────────────────╯
-╭ Targets ▾ ──────  │Git on this host has no commit author, so sessions cannot │  ────────── ▁   ▄ ╮
-│  Host / fleet  T  │commit. Mjolnir saves this to your global Git             │                   │
-╰─────────────────  │configuration.                                            │  ─────────────────╯
-╭ Profiles ▾ (not   │                                                          │  ────────── ▁   ▄ ╮
-│ANTHROPIC          │Name:  Ada Lovelace                                       │                   ▐
-│ + refreshing…     │Email: ada.example.com                                    │                   │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────╯
+│ Create   Open                                                                   ─────────────────╮
+│                                                                                                  │
+│                   ╭ × Set up Git identity ───────────────────────────────────╮   one to open.    │
+╰─────────────────  │Git on this host has no commit author, so sessions cannot │  ─────────────────╯
+╭ Targets ▾ ──────  │commit. Mjolnir saves this to your global Git             │  ────────── ▁   ▄ ╮
+│  Host / fleet  T  │configuration.                                            │                   │
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Profiles ▾ (not   │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
+│ANTHROPIC          │Email: ada.example.com                                    │                   ▐
 ╰─────────────────  │                                                          │  ─────────────────╯
 ╭ Notifications (0  │                                                          │  ────────── ▁   ▄ ╮
 │Nothing needs you  │                                                          │                   │
@@ -1466,17 +1466,17 @@ escape while saving: None
 === Git identity saving (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────── ▁   ▄   □ ╮╭ No conversation open ────────────────────────────────────╮
-│ Create   Open                                                                                    │
-│                                                                                  one to open.    │
-╰─────────────────  ╭ × Set up Git identity ───────────────────────────────────╮  ─────────────────╯
-╭ Targets ▾ ──────  │Git on this host has no commit author, so sessions cannot │  ────────── ▁   ▄ ╮
-│  Host / fleet  T  │commit. Mjolnir saves this to your global Git             │                   │
-╰─────────────────  │configuration.                                            │  ─────────────────╯
-╭ Profiles ▾ (not   │                                                          │  ────────── ▁   ▄ ╮
-│ANTHROPIC          │Name:  Ada Lovelace                                       │                   ▐
-│ + refreshing…     │Email: ada.example.com                                    │                   │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────╯
+│ Create   Open                                                                   ─────────────────╮
+│                                                                                                  │
+│                   ╭ × Set up Git identity ───────────────────────────────────╮   one to open.    │
+╰─────────────────  │Git on this host has no commit author, so sessions cannot │  ─────────────────╯
+╭ Targets ▾ ──────  │commit. Mjolnir saves this to your global Git             │  ────────── ▁   ▄ ╮
+│  Host / fleet  T  │configuration.                                            │                   │
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Profiles ▾ (not   │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
+│ANTHROPIC          │Email: ada.example.com                                    │                   ▐
 ╰─────────────────  │                                                          │  ─────────────────╯
 ╭ Notifications (0  │Saving Git identity…                                      │  ────────── ▁   ▄ ╮
 │Nothing needs you  │                                                          │                   │
@@ -1492,17 +1492,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 === Git identity save failure keeps the fields (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────── ▁   ▄   □ ╮╭ No conversation open ────────────────────────────────────╮
-│ Create   Open                                                                                    │
-│                                                                                  one to open.    │
-╰─────────────────  ╭ × Set up Git identity ───────────────────────────────────╮  ─────────────────╯
-╭ Targets ▾ ──────  │Git on this host has no commit author, so sessions cannot │  ────────── ▁   ▄ ╮
-│  Host / fleet  T  │commit. Mjolnir saves this to your global Git             │                   │
-╰─────────────────  │configuration.                                            │  ─────────────────╯
-╭ Profiles ▾ (not   │                                                          │  ────────── ▁   ▄ ╮
-│ANTHROPIC          │Name:  Ada Lovelace                                       │                   ▐
-│ + refreshing…     │Email: ada.example.com                                    │                   │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────╯
+│ Create   Open                                                                   ─────────────────╮
+│                                                                                                  │
+│                   ╭ × Set up Git identity ───────────────────────────────────╮   one to open.    │
+╰─────────────────  │Git on this host has no commit author, so sessions cannot │  ─────────────────╯
+╭ Targets ▾ ──────  │commit. Mjolnir saves this to your global Git             │  ────────── ▁   ▄ ╮
+│  Host / fleet  T  │configuration.                                            │                   │
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Profiles ▾ (not   │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
+│ANTHROPIC          │Email: ada.example.com                                    │                   ▐
 ╰─────────────────  │                                                          │  ─────────────────╯
 ╭ Notifications (0  │Git email "ada.example.com" needs an @                    │  ────────── ▁   ▄ ╮
 │Nothing needs you  │                                                          │                   │
