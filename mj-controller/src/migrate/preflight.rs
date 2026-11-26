@@ -1,6 +1,6 @@
 //! Read-only host migration inventory and safety checks.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -10,7 +10,7 @@ use mj_core::config::{
 };
 use mj_store::database::{
     MigrationPreconditions, StoreMigrationInventory, inspect_migration_inventory,
-    inspect_migration_preconditions,
+    inspect_migration_preconditions_with_templates,
 };
 use rusqlite::Connection;
 
@@ -95,8 +95,36 @@ pub fn inspect_preflight(
         "destination already has a config.toml; clean it manually or choose --dest-instance"
     );
     let (ec2_resources, ec2_warnings) = inspect_ec2_resources(old_config_root)?;
-    let preconditions = inspect_migration_preconditions(connection, old_data_root)?;
-    let inventory = inspect_migration_inventory(connection)?;
+    let mut inventory = inspect_migration_inventory(connection)?;
+    let remote_templates: BTreeSet<String> = config
+        .targets
+        .iter()
+        .filter(|(_, target)| {
+            !matches!(
+                target,
+                mj_core::config::TargetTemplate::LocalBare
+                    | mj_core::config::TargetTemplate::LocalPodman { .. }
+                    | mj_core::config::TargetTemplate::LocalDocker { .. }
+                    | mj_core::config::TargetTemplate::AppleContainer { .. }
+            )
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    inventory
+        .remote_template_ids
+        .extend(remote_templates.iter().cloned());
+    let local_templates: BTreeMap<String, BTreeSet<String>> = config
+        .targets
+        .iter()
+        .filter(|(id, _)| !remote_templates.contains(*id))
+        .map(|(id, target)| (id.clone(), BTreeSet::from([target.kind_name().to_owned()])))
+        .collect();
+    let preconditions = inspect_migration_preconditions_with_templates(
+        connection,
+        old_data_root,
+        &local_templates,
+        &remote_templates,
+    )?;
     let mut home_copies = Vec::new();
     let mut warnings = ec2_warnings;
     let mut checked_destinations = BTreeSet::new();
@@ -133,12 +161,11 @@ pub fn inspect_preflight(
                 "profile {id} uses unmanaged home outside source HOME: {}",
                 profile.home.display()
             ));
-            if !destination_exists(&profile.home)? {
-                warnings.push(format!(
-                    "profile {id} home is absent on destination: {}",
-                    profile.home.display()
-                ));
-            }
+            ensure!(
+                destination_exists(&profile.home)?,
+                "profile {id} home is absent on destination: {}",
+                profile.home.display()
+            );
             continue;
         };
         if exists(&profile.home)? {
@@ -182,6 +209,11 @@ pub fn inspect_preflight(
     ] {
         if let Some(path) = path {
             if let Ok(relative) = path.strip_prefix(old_home) {
+                ensure!(
+                    exists(path)?,
+                    "{label} does not exist on source: {}",
+                    path.display()
+                );
                 let destination = new_home.join(relative);
                 check_destination(&destination, &destination_exists, &mut checked_destinations)?;
                 home_copies.push(HomeCopy {
@@ -194,12 +226,114 @@ pub fn inspect_preflight(
                     "{label} is outside source HOME: {}",
                     path.display()
                 ));
-                if !destination_exists(path)? {
-                    warnings.push(format!(
-                        "{label} is absent on destination: {}",
-                        path.display()
-                    ));
+                ensure!(
+                    destination_exists(path)?,
+                    "{label} is absent on destination: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    let mut identity_paths: Vec<(PathBuf, bool)> = Vec::new();
+    let mut add_connection = |identity: Option<&PathBuf>, args: &[String], configured| {
+        identity_paths.extend(identity.into_iter().cloned().map(|path| (path, configured)));
+        identity_paths.extend(
+            mj_core::config::migration_paths::extract_ssh_identity_arg_paths(args)
+                .into_iter()
+                .map(|path| (path, configured)),
+        );
+    };
+    for machine in config.machines.values() {
+        match machine {
+            Machine::Ssh { ssh, .. } => {
+                add_connection(ssh.identity_file.as_ref(), &ssh.extra_args, true)
+            }
+            Machine::AwsEc2 {
+                identity_file,
+                ssh_args,
+                ..
+            } => add_connection(identity_file.as_ref(), ssh_args, true),
+            Machine::Local { .. } => {}
+        }
+    }
+    for target in config.targets.values() {
+        use mj_core::config::TargetTemplate;
+        match target {
+            TargetTemplate::SshBare { ssh, .. }
+            | TargetTemplate::SshPodman { ssh, .. }
+            | TargetTemplate::SshDocker { ssh, .. }
+            | TargetTemplate::SshAppleContainer { ssh, .. }
+            | TargetTemplate::SshNitro { ssh, .. } => {
+                add_connection(ssh.identity_file.as_ref(), &ssh.extra_args, true)
+            }
+            TargetTemplate::AwsEc2 {
+                identity_file,
+                ssh_args,
+                ..
+            } => add_connection(identity_file.as_ref(), ssh_args, true),
+            _ => {}
+        }
+    }
+    for sql in [
+        "SELECT target_runtime_json FROM sessions WHERE target_runtime_json IS NOT NULL",
+        "SELECT runtime_json FROM environment_workers WHERE runtime_json IS NOT NULL",
+    ] {
+        let mut query = connection.prepare(sql)?;
+        for row in query.query_map([], |row| row.get::<_, String>(0))? {
+            let runtime: mj_core::state::TargetRuntimeSettings = serde_json::from_str(&row?)?;
+            match &runtime.connection {
+                mj_core::state::TargetConnection::Ssh { ssh } => {
+                    add_connection(ssh.identity_file.as_ref(), &ssh.extra_args, false)
                 }
+                mj_core::state::TargetConnection::Aws {
+                    identity_file,
+                    ssh_args,
+                    ..
+                } => add_connection(identity_file.as_ref(), ssh_args, false),
+                mj_core::state::TargetConnection::Local => {}
+            }
+        }
+    }
+    for (path, configured) in identity_paths {
+        let source = mj_core::path_input::expand_home(&path, Some(old_home))?;
+        if source.starts_with(old_config_root) {
+            continue;
+        }
+        if let Ok(relative) = source.strip_prefix(old_home) {
+            if !exists(&source)? {
+                ensure!(
+                    !configured,
+                    "configured SSH identity does not exist on source: {}",
+                    source.display()
+                );
+                warnings.push(format!(
+                    "historical SSH identity does not exist on source: {}",
+                    source.display()
+                ));
+                continue;
+            }
+            let destination = new_home.join(relative);
+            check_destination(&destination, &destination_exists, &mut checked_destinations)?;
+            home_copies.push(HomeCopy {
+                source,
+                destination,
+                private: true,
+            });
+        } else {
+            warnings.push(format!(
+                "SSH identity outside source HOME: {}",
+                source.display()
+            ));
+            if !destination_exists(&source)? {
+                ensure!(
+                    !configured,
+                    "configured SSH identity is absent on destination: {}",
+                    source.display()
+                );
+                warnings.push(format!(
+                    "historical SSH identity is absent on destination: {}",
+                    source.display()
+                ));
             }
         }
     }
@@ -400,10 +534,10 @@ fn plan_extra_home_file(
     copies: &mut Vec<HomeCopy>,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    if !exists(source)? {
-        return Ok(());
-    }
     if let Ok(relative) = source.strip_prefix(old_home) {
+        if !exists(source)? {
+            return Ok(());
+        }
         let destination = new_home.join(relative);
         check_destination(&destination, probe, checked)?;
         copies.push(HomeCopy {
@@ -416,12 +550,11 @@ fn plan_extra_home_file(
             "profile data outside source HOME: {}",
             source.display()
         ));
-        if !probe(source)? {
-            warnings.push(format!(
-                "profile data is absent on destination: {}",
-                source.display()
-            ));
-        }
+        ensure!(
+            probe(source)?,
+            "profile data is absent on destination: {}",
+            source.display()
+        );
     }
     Ok(())
 }
@@ -922,6 +1055,295 @@ mod tests {
         );
         std::fs::write(&resource, "{").unwrap();
         assert!(format!("{:#}", inspect().unwrap_err()).contains("parse EC2 resource record"));
+    }
+
+    #[test]
+    fn preflight_requires_external_credentials_and_copies_home_ssh_identities() {
+        use mj_core::config::{MachineId, SshConnection};
+        let root = tempfile::tempdir().unwrap();
+        let old_home = root.path().join("home-a");
+        let new_home = root.path().join("home-b");
+        let data = root.path().join("data");
+        std::fs::create_dir_all(old_home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        for key in ["id", "other", "tilde"] {
+            std::fs::write(old_home.join(".ssh").join(key), "key").unwrap();
+        }
+        let db = data.join("mj.sqlite3");
+        let mut recorded = mj_store::database::test_session("one", "project");
+        recorded.target = Some(Box::new(TargetLocator::SshBare {
+            host: "historical".into(),
+            workspace: "/work/one".into(),
+            worker_id: None,
+        }));
+        let mut runtime = mj_core::state::TargetRuntimeSettings::from(
+            &mj_core::config::TargetTemplate::LocalBare,
+        );
+        runtime.kind = "ssh-bare".into();
+        runtime.connection = mj_core::state::TargetConnection::Ssh {
+            ssh: SshConnection {
+                host: "historical".into(),
+                user: None,
+                identity_file: Some(old_home.join(".ssh/missing-historical")),
+                extra_args: vec![
+                    "-i".into(),
+                    root.path()
+                        .join("outside/missing-historical")
+                        .to_string_lossy()
+                        .into(),
+                ],
+            },
+        };
+        recorded.target_runtime = Some(std::sync::Arc::new(runtime));
+        mj_store::database::save_session_to(&db, &recorded).unwrap();
+        let connection = Connection::open(db).unwrap();
+        let external = root.path().join("outside");
+        let mut config = Config::default();
+        let inspect = |config: &Config, destination_present: bool| {
+            inspect_preflight(
+                &connection,
+                config,
+                &data,
+                &old_home.join("config"),
+                &old_home,
+                &new_home,
+                &root.path().join("new-data"),
+                &new_home.join("config"),
+                "source",
+                |path| Ok(destination_present && path.starts_with(&external)),
+            )
+        };
+        config.profiles.insert(
+            "external".into(),
+            HarnessProfile::new(HarnessKind::Codex, external.join("profile")),
+        );
+        assert!(
+            inspect(&config, false)
+                .unwrap_err()
+                .to_string()
+                .contains("profile external home is absent")
+        );
+        assert!(
+            inspect(&config, true)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|w| w.contains("outside source HOME"))
+        );
+        config.profiles.clear();
+        config.github.session_token_path = Some(external.join("token"));
+        assert!(
+            inspect(&config, false)
+                .unwrap_err()
+                .to_string()
+                .contains("GitHub session token is absent")
+        );
+        assert!(
+            inspect(&config, true)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|w| w.contains("GitHub session token is outside"))
+        );
+        config.github.session_token_path = None;
+        config.github.app = Some(mj_core::config::GithubAppConfig {
+            app_id: 1,
+            private_key_path: external.join("app"),
+            installations: Default::default(),
+            session_permissions: None,
+            token_permissions: None,
+        });
+        assert!(
+            inspect(&config, false)
+                .unwrap_err()
+                .to_string()
+                .contains("GitHub App key is absent")
+        );
+        assert!(
+            inspect(&config, true)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|w| w.contains("GitHub App key is outside"))
+        );
+        config.github.app = None;
+        config.machines.insert(
+            MachineId::new("ssh").unwrap(),
+            Machine::Ssh {
+                ssh: SshConnection {
+                    host: "host".into(),
+                    user: None,
+                    identity_file: Some(external.join("key")),
+                    extra_args: vec![],
+                },
+                workspace_prefix: ".local/workspaces".into(),
+                build_cache: None,
+            },
+        );
+        assert!(
+            inspect(&config, false)
+                .unwrap_err()
+                .to_string()
+                .contains("configured SSH identity is absent")
+        );
+        assert!(
+            inspect(&config, true)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|w| w.contains("SSH identity outside"))
+        );
+        let Machine::Ssh { ssh, .. } = config.machines.get_mut("ssh").unwrap() else {
+            unreachable!()
+        };
+        ssh.identity_file = Some(old_home.join(".ssh/id"));
+        ssh.extra_args = vec![
+            "-i".into(),
+            old_home.join(".ssh/other").to_string_lossy().into(),
+            "-i~/.ssh/tilde".into(),
+        ];
+        let preflight = inspect(&config, false).unwrap();
+        assert!(preflight.warnings.iter().any(|warning| warning.contains("historical SSH identity does not exist on source")));
+        assert!(preflight.warnings.iter().any(|warning| warning.contains("historical SSH identity is absent on destination")));
+        for key in ["id", "other", "tilde"] {
+            assert!(preflight.home_copies.iter().any(|copy| copy.private
+                && copy.source == old_home.join(".ssh").join(key)
+                && copy.destination == new_home.join(".ssh").join(key)));
+        }
+        let error = inspect_preflight(
+            &connection,
+            &config,
+            &data,
+            &old_home.join("config"),
+            &old_home,
+            &new_home,
+            &root.path().join("new-data"),
+            &new_home.join("config"),
+            "source",
+            |path| Ok(path == new_home.join(".ssh/id")),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("destination path already exists")
+        );
+        config.github.session_token_path = Some(old_home.join("missing-token"));
+        assert!(
+            inspect(&config, false)
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist on source")
+        );
+    }
+
+    #[test]
+    fn external_nested_profile_data_must_exist_at_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("external/data");
+        let mut checked = BTreeSet::new();
+        let mut copies = Vec::new();
+        let mut warnings = Vec::new();
+        let error = plan_extra_home_file(
+            &data,
+            &root.path().join("home"),
+            &root.path().join("new-home"),
+            &|_| Ok(false),
+            &mut checked,
+            &mut copies,
+            &mut warnings,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("absent on destination"));
+        plan_extra_home_file(
+            &data,
+            &root.path().join("home"),
+            &root.path().join("new-home"),
+            &|_| Ok(true),
+            &mut checked,
+            &mut copies,
+            &mut warnings,
+        )
+        .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("outside source HOME"))
+        );
+    }
+
+    #[test]
+    fn preflight_detects_configured_remote_template_with_local_history() {
+        use mj_core::config::{SshConnection, TargetTemplate};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let path = data.join("mj.sqlite3");
+        mj_store::database::save_session_to(
+            &path,
+            &mj_store::database::test_session("one", "project"),
+        )
+        .unwrap();
+        let connection = Connection::open(path).unwrap();
+        connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('deleted','local')", []).unwrap();
+        let mut config = Config::default();
+        config.targets.insert(
+            "local".into(),
+            TargetTemplate::SshBare {
+                ssh: SshConnection {
+                    host: "remote".into(),
+                    user: None,
+                    identity_file: None,
+                    extra_args: vec![],
+                },
+                permissions: mj_core::config::PermissionMode::Guardian,
+                workspace_prefix: ".local/workspaces".into(),
+            },
+        );
+        let result = inspect_preflight(
+            &connection,
+            &config,
+            &data,
+            &root.path().join("old-config"),
+            &root.path().join("old-home"),
+            &root.path().join("new-home"),
+            &root.path().join("new-data"),
+            &root.path().join("new-config"),
+            "source",
+            |_| Ok(false),
+        )
+        .unwrap();
+        assert!(result.inventory.remote_template_ids.contains("local"));
+        assert!(
+            result
+                .preconditions
+                .blockers
+                .iter()
+                .any(|item| item.contains("ambiguous historical template"))
+        );
+        config
+            .targets
+            .insert("local".into(), TargetTemplate::LocalBare);
+        let result = inspect_preflight(
+            &connection,
+            &config,
+            &data,
+            &root.path().join("old-config"),
+            &root.path().join("old-home"),
+            &root.path().join("new-home"),
+            &root.path().join("new-data"),
+            &root.path().join("new-config"),
+            "source",
+            |_| Ok(false),
+        )
+        .unwrap();
+        assert!(
+            result
+                .preconditions
+                .blockers
+                .iter()
+                .any(|item| item.contains("ambiguous historical template"))
+        );
     }
 
     #[cfg(unix)]

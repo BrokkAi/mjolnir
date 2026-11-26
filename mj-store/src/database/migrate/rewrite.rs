@@ -17,6 +17,8 @@ pub struct MigrationRewriteSpec {
     pub old_config_root: PathBuf,
     pub new_config_root: PathBuf,
     pub old_home: PathBuf,
+    pub new_home: PathBuf,
+    pub remote_template_ids: BTreeSet<String>,
     pub source_ssh: SshConnection,
     pub source_machine_id: MachineId,
     /// Old template ID -> recorded local kind -> new SSH template ID.
@@ -35,7 +37,7 @@ pub struct StoreRewriteSummary {
     pub pinned_memory_keys: usize,
 }
 
-fn local_kind(kind: &str) -> bool {
+pub(super) fn local_kind(kind: &str) -> bool {
     matches!(
         kind,
         "local-bare" | "local-podman" | "local-docker" | "apple-container"
@@ -72,10 +74,10 @@ fn rewrite_unambiguous_template(
     if let Some(configured) = spec.source_templates.get(id) {
         all_kinds.extend(configured.keys().cloned());
     }
-    if all_kinds.len() > 1 {
+    if mixed_template_kinds(all_kinds.len(), spec.remote_template_ids.contains(id)) {
         ensure!(
             resolved,
-            "historical template {id:?} has multiple local kinds and no recorded locator"
+            "historical template {id:?} is ambiguous without a recorded locator"
         );
     } else if let Some(kind) = all_kinds.first() {
         rewrite_template(id, kind, spec)?;
@@ -159,18 +161,37 @@ fn rewrite_runtime(
     match &mut runtime.connection {
         TargetConnection::Local => {}
         TargetConnection::Ssh { ssh } => {
-            if let Some(path) = &mut ssh.identity_file {
-                migration_paths::relocate_ec2_path(
-                    path,
+            if local_kind.is_some() {
+                if let Some(path) = &mut ssh.identity_file {
+                    migration_paths::relocate_ec2_path(
+                        path,
+                        &spec.old_config_root,
+                        &spec.new_config_root,
+                    );
+                }
+                migration_paths::relocate_ec2_ssh_args(
+                    &mut ssh.extra_args,
                     &spec.old_config_root,
                     &spec.new_config_root,
                 );
+            } else {
+                if let Some(path) = &mut ssh.identity_file {
+                    migration_paths::relocate_ssh_identity_path(
+                        path,
+                        &spec.old_config_root,
+                        &spec.new_config_root,
+                        &spec.old_home,
+                        &spec.new_home,
+                    );
+                }
+                migration_paths::relocate_ssh_args(
+                    &mut ssh.extra_args,
+                    &spec.old_config_root,
+                    &spec.new_config_root,
+                    &spec.old_home,
+                    &spec.new_home,
+                );
             }
-            migration_paths::relocate_ec2_ssh_args(
-                &mut ssh.extra_args,
-                &spec.old_config_root,
-                &spec.new_config_root,
-            );
         }
         TargetConnection::Aws {
             identity_file,
@@ -178,16 +199,20 @@ fn rewrite_runtime(
             ..
         } => {
             if let Some(path) = identity_file {
-                migration_paths::relocate_ec2_path(
+                migration_paths::relocate_ssh_identity_path(
                     path,
                     &spec.old_config_root,
                     &spec.new_config_root,
+                    &spec.old_home,
+                    &spec.new_home,
                 );
             }
-            migration_paths::relocate_ec2_ssh_args(
+            migration_paths::relocate_ssh_args(
                 ssh_args,
                 &spec.old_config_root,
                 &spec.new_config_root,
+                &spec.old_home,
+                &spec.new_home,
             );
         }
     }
@@ -224,10 +249,12 @@ fn rewrite_worktree(worktree: &mut ManagedWorktree, spec: &MigrationRewriteSpec)
             true
         }
         ManagedWorktreeTarget::Ssh { ssh_args, .. } => {
-            migration_paths::relocate_ec2_ssh_args(
+            migration_paths::relocate_ssh_args(
                 ssh_args,
                 &spec.old_config_root,
                 &spec.new_config_root,
+                &spec.old_home,
+                &spec.new_home,
             );
             false
         }
@@ -387,16 +414,24 @@ fn rewrite_move(
     }
     for grant in &mut op.granted_keys {
         if let Some(path) = &mut grant.private_key_path {
-            migration_paths::relocate_ec2_path(path, &spec.old_config_root, &spec.new_config_root);
+            migration_paths::relocate_ssh_identity_path(
+                path,
+                &spec.old_config_root,
+                &spec.new_config_root,
+                &spec.old_home,
+                &spec.new_home,
+            );
         }
         if let Some(path) = &mut grant.known_hosts_path {
             migration_paths::relocate_ec2_path(path, &spec.old_config_root, &spec.new_config_root);
         }
         if let Some(ssh) = &mut grant.ssh_target {
-            migration_paths::relocate_ec2_ssh_args(
+            migration_paths::relocate_ssh_args(
                 &mut ssh.ssh_args,
                 &spec.old_config_root,
                 &spec.new_config_root,
+                &spec.old_home,
+                &spec.new_home,
             );
         }
     }
@@ -483,13 +518,29 @@ pub fn apply_store_migration(
         fence.matches_snapshot(&spec.expected_fence),
         "staged store fence does not match migration source"
     );
-    let preconditions = inspect_migration_preconditions(&tx, &spec.old_data_root)?;
+    let configured_kinds = spec
+        .source_templates
+        .iter()
+        .map(|(id, kinds)| (id.clone(), kinds.keys().cloned().collect()))
+        .collect();
+    let preconditions = inspect_migration_preconditions_with_templates(
+        &tx,
+        &spec.old_data_root,
+        &configured_kinds,
+        &spec.remote_template_ids,
+    )?;
     ensure!(
         preconditions.blockers.is_empty(),
         "migration blocked: {}",
         preconditions.blockers.join("; ")
     );
-    let template_kinds = inspect_migration_inventory(&tx)?.local_template_kinds;
+    let inventory = inspect_migration_inventory(&tx)?;
+    let template_kinds = inventory.local_template_kinds;
+    let mut effective_spec = spec.clone();
+    effective_spec
+        .remote_template_ids
+        .extend(inventory.remote_template_ids);
+    let spec = &effective_spec;
     let max_discovery_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(sequence),0) FROM project_discovery_changes",
         [],
@@ -534,7 +585,11 @@ pub fn apply_store_migration(
                 })
                 .map(|runtime| runtime.kind.clone())
         });
-        original_sessions.insert(id.clone(), (template.clone(), kind.clone()));
+        let recorded_kind = targets
+            .get(&id)
+            .map(|target| mj_core::targets::locator_kind_name(target).to_owned())
+            .or_else(|| runtime.as_ref().map(|runtime| runtime.kind.clone()));
+        original_sessions.insert(id.clone(), (template.clone(), recorded_kind));
         if let Some(kind) = &kind {
             rewrite_template(&mut template, kind, spec)?;
         }
@@ -742,10 +797,12 @@ pub fn apply_store_migration(
             .with_context(|| format!("invalid SSH snapshot cache key {id}"))?;
         let mut ssh: mj_core::targets::SshTarget = serde_json::from_str(encoded)
             .with_context(|| format!("decode SSH snapshot cache key {id}"))?;
-        migration_paths::relocate_ec2_ssh_args(
+        migration_paths::relocate_ssh_args(
             &mut ssh.ssh_args,
             &spec.old_config_root,
             &spec.new_config_root,
+            &spec.old_home,
+            &spec.new_home,
         );
         tx.execute(
             "UPDATE host_snapshot_cache SET host=?2 WHERE id=?1",
@@ -800,15 +857,22 @@ pub fn apply_store_migration(
             rewrite_worktree(worktree, spec);
         }
         if let Some(kinds) = spec.source_templates.get(&template) {
-            if kinds.len() == 1 {
-                rewrite_template(&mut template, kinds.keys().next().expect("one kind"), spec)?;
-            } else if kinds.len() > 1 && !processed {
+            if !mixed_template_kinds(kinds.len(), spec.remote_template_ids.contains(&template)) {
+                if let Some(kind) = kinds.keys().next() {
+                    rewrite_template(&mut template, kind, spec)?;
+                }
+            } else if !processed {
                 let kind = original_sessions.get(&id)
                     .filter(|(current, _)| current == &template)
                     .and_then(|(_, kind)| kind.as_deref())
-                    .filter(|kind| kinds.contains_key(*kind))
                     .with_context(|| format!("project discovery change {sequence} has ambiguous historical template {template:?}"))?;
-                rewrite_template(&mut template, kind, spec)?;
+                if local_kind(kind) {
+                    ensure!(
+                        kinds.contains_key(kind),
+                        "project discovery change {sequence} has ambiguous historical template {template:?}"
+                    );
+                    rewrite_template(&mut template, kind, spec)?;
+                }
             }
         }
         tx.execute("UPDATE project_discovery_changes SET target_template_id=?2,managed_worktree=?3 WHERE sequence=?1",params![sequence,template,worktree.as_ref().map(serde_json::to_string).transpose()?])?;
@@ -917,6 +981,8 @@ mod tests {
             old_config_root: old_config.clone(),
             new_config_root: new_config,
             old_home: root.path().join("old-home"),
+            new_home: root.path().join("new-home"),
+            remote_template_ids: BTreeSet::new(),
             source_ssh: SshConnection {
                 host: "source".into(),
                 user: Some("alice".into()),
@@ -1269,8 +1335,139 @@ mod tests {
     }
 
     #[test]
+    fn migration_rewrite_preserves_mixed_remote_discovery_history() {
+        let (_root, path, mut spec) = fixture();
+        spec.pinned_memory_keys.clear();
+        spec.source_templates.insert(
+            "mixed-ssh".into(),
+            BTreeMap::from([("local-bare".into(), "source-bare".into())]),
+        );
+        let mut local = super::super::super::tests::session("local", "project");
+        local.checkpoint = None;
+        local.target_template_id = "mixed-ssh".into();
+        local.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: DataLayout::at(&spec.old_data_root).worker_root("local"),
+        }));
+        save_session_to(&path, &local).unwrap();
+        let mut remote = local.clone();
+        remote.id = "remote".into();
+        remote.target = Some(Box::new(TargetLocator::SshBare {
+            host: "remote".into(),
+            workspace: "/work/remote".into(),
+            worker_id: None,
+        }));
+        save_session_to(&path, &remote).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        let mut prepared_placement = EnvironmentPlacement::from_session(&local);
+        prepared_placement.target_template_id = "prepared-remote".into();
+        prepared_placement.runtime = None;
+        let mut remote_runtime =
+            TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare);
+        remote_runtime.kind = "ssh-bare".into();
+        remote_runtime.connection = TargetConnection::Ssh {
+            ssh: spec.source_ssh.clone(),
+        };
+        prepared_placement.prepared_destination =
+            Some(super::super::super::EnvironmentPreparedDestination {
+                operation_id: "prepared".into(),
+                destination: PreparedMoveDestination {
+                    launch_args: vec![],
+                    runtime: remote_runtime,
+                    state: PreparedDestinationState::LaunchPending,
+                },
+            });
+        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('prepared-env','local','reclaimed',?1)", [serde_json::to_string(&prepared_placement).unwrap()]).unwrap();
+        assert!(
+            inspect_migration_inventory(&connection)
+                .unwrap()
+                .remote_template_ids
+                .contains("prepared-remote")
+        );
+        connection.execute("INSERT INTO retained_move_sources(operation_id,session_id,source_json,exclusions_json,created_at) VALUES ('old','remote',?1,'[]','now')", [serde_json::to_string(&remote).unwrap()]).unwrap();
+        connection
+            .execute("DELETE FROM project_discovery_changes", [])
+            .unwrap();
+        connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('deleted','mixed-ssh')", []).unwrap();
+        let processed = connection.last_insert_rowid();
+        connection
+            .execute(
+                "UPDATE project_discovery_progress SET sequence=?1 WHERE singleton=1",
+                [processed],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('deleted','mixed-ssh')", []).unwrap();
+        let pending = connection.last_insert_rowid();
+        let inspect = || inspect_migration_preconditions(&connection, &spec.old_data_root).unwrap();
+        assert!(
+            inspect_migration_inventory(&connection)
+                .unwrap()
+                .remote_template_ids
+                .contains("mixed-ssh")
+        );
+        assert!(inspect().blockers.iter().any(
+            |error| error.contains(&format!("change {pending}")) && error.contains("ambiguous")
+        ));
+        set_store_fence(&connection, &spec.expected_fence).unwrap();
+        assert!(
+            apply_store_migration(&path, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        connection
+            .execute(
+                "DELETE FROM project_discovery_changes WHERE sequence=?1",
+                [pending],
+            )
+            .unwrap();
+        let mut op = super::super::super::session_move::tests::operation(&local);
+        op.phase = MovePhase::Failed;
+        op.source_target = None;
+        op.destination_target = None;
+        op.prepared_destination = None;
+        op.recovery_session = None;
+        op.selection.target_template_id = None;
+        connection.execute("INSERT INTO session_moves(session_id,operation_id,operation_json) VALUES ('local','move-mixed',?1)", [serde_json::to_string(&op).unwrap()]).unwrap();
+        assert!(
+            inspect()
+                .blockers
+                .iter()
+                .any(|error| error.contains("move-mixed") && error.contains("ambiguous"))
+        );
+        op.phase = MovePhase::Completed;
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?1 WHERE session_id='local'",
+                [serde_json::to_string(&op).unwrap()],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('remote','mixed-ssh'),('local','mixed-ssh')", []).unwrap();
+        assert!(inspect().blockers.is_empty(), "{:?}", inspect().blockers);
+        drop(connection);
+        apply_store_migration(&path, &spec).unwrap();
+        let connection = Connection::open(path).unwrap();
+        let mut query = connection
+            .prepare("SELECT target_template_id FROM project_discovery_changes ORDER BY sequence")
+            .unwrap();
+        let values: Vec<String> = query
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(values, ["mixed-ssh", "mixed-ssh", "source-bare"]);
+    }
+
+    #[test]
     fn migration_rewrites_retained_moves_leases_and_host_history() {
         let (_root, path, mut spec) = fixture();
+        spec.source_ssh.identity_file = Some(spec.old_home.join(".ssh/source-key"));
+        spec.source_ssh.extra_args = vec![
+            "-i".into(),
+            spec.old_home
+                .join(".ssh/source-extra")
+                .to_string_lossy()
+                .into(),
+        ];
         spec.source_templates
             .entry("local".into())
             .or_default()
@@ -1313,11 +1510,18 @@ mod tests {
             ssh: SshConnection {
                 host: "destination-b".into(),
                 user: None,
-                identity_file: Some(spec.old_config_root.join("ec2/id/key")),
-                extra_args: vec![format!(
-                    "UserKnownHostsFile={}",
-                    spec.old_config_root.join("ec2/id/known_hosts").display()
-                )],
+                identity_file: Some(spec.old_home.join(".ssh/remote-key")),
+                extra_args: vec![
+                    format!(
+                        "UserKnownHostsFile={}",
+                        spec.old_config_root.join("ec2/id/known_hosts").display()
+                    ),
+                    "-i".into(),
+                    spec.old_home
+                        .join(".ssh/remote-extra")
+                        .to_string_lossy()
+                        .into(),
+                ],
             },
         };
         remote.target_runtime = Some(Arc::new(remote_runtime));
@@ -1355,9 +1559,7 @@ mod tests {
         connection.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,kind,workspace,target_template_id,runtime_json) VALUES ('reclaimed-lease','reclaimed','one','local-bare',?1,'local',NULL)",[path_to_blob(&DataLayout::at(&spec.old_data_root).worker_root("one"))]).unwrap();
         connection.execute("UPDATE environments SET target_lease_id='reclaimed-lease' WHERE environment_id='reclaimed'",[]).unwrap();
         let mut remote_placement = EnvironmentPlacement::from_session(&remote);
-        remote_placement.runtime = Some(TargetRuntimeSettings::from(
-            &mj_core::config::TargetTemplate::LocalBare,
-        ));
+        remote_placement.runtime = remote.target_runtime.as_deref().cloned();
         connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('remote-env','remote','active',?1)",[serde_json::to_string(&remote_placement).unwrap()]).unwrap();
         connection.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,kind,host,workspace,target_template_id,runtime_json) VALUES ('remote-lease','remote-env','remote','ssh-bare','destination-b',?1,'remote-b',?2)",params![path_to_blob(Path::new("/home/b/work/remote")),serde_json::to_string(&remote.target_runtime).unwrap()]).unwrap();
         connection.execute("UPDATE environments SET target_lease_id='remote-lease' WHERE environment_id='remote-env'",[]).unwrap();
@@ -1369,6 +1571,21 @@ mod tests {
             .unwrap();
         let mut op = super::super::super::session_move::tests::operation(&session);
         op.phase = MovePhase::Completed;
+        op.granted_keys.push(mj_core::state::GrantedMoveKey {
+            host: "remote".into(),
+            comment: "key".into(),
+            private_key_path: Some(spec.old_home.join(".ssh/grant")),
+            known_hosts_path: None,
+            authorized_keys_path: None,
+            worker_bin: None,
+            ssh_target: Some(mj_core::targets::SshTarget {
+                destination: "remote".into(),
+                ssh_args: vec![format!(
+                    "-i{}",
+                    spec.old_home.join(".ssh/grant-extra").display()
+                )],
+            }),
+        });
         op.destination_target = session.target.as_deref().cloned();
         op.source_snapshot = Some(Box::new(MoveSourceSnapshot {
             archive_path: archive.clone(),
@@ -1392,7 +1609,7 @@ mod tests {
         connection.execute("INSERT INTO session_moves(session_id,operation_id,operation_json) VALUES ('legacy','legacy-move',?1)",[legacy_op.to_string()]).unwrap();
         connection.execute("INSERT INTO worker_restart_intents(session_id,operation_id,target_json,desired_build,phase) VALUES ('one','restart',?1,'build','prepared')",[serde_json::to_string(session.target.as_ref().unwrap()).unwrap()]).unwrap();
         connection.execute("INSERT INTO retained_move_sources(operation_id,session_id,source_json,exclusions_json,created_at) VALUES ('retained','one',?1,'[\"cache\"]','now')",[serde_json::to_string(&session).unwrap()]).unwrap();
-        let old_key = spec.old_config_root.join("ec2/id/key");
+        let old_key = spec.old_home.join(".ssh/cache-key");
         let ssh = mj_core::targets::SshTarget {
             destination: "ec2".into(),
             ssh_args: vec!["-i".into(), old_key.to_string_lossy().into_owned()],
@@ -1478,7 +1695,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(&reclaimed_runtime.connection, TargetConnection::Ssh { ssh } if ssh.identity_file.as_deref() == Some(spec.new_config_root.join("ec2/source/key").as_path()))
+            matches!(&reclaimed_runtime.connection, TargetConnection::Ssh { ssh } if ssh.identity_file.as_deref() == Some(spec.old_home.join(".ssh/source-key").as_path()))
         );
         let reclaimed_target = TargetLocator::SshHostBare {
             host: spec.source_ssh.host.clone(),
@@ -1591,10 +1808,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(remote_placement.target_template_id, "remote-b");
-        assert!(matches!(
-            remote_placement.runtime.unwrap().connection,
-            TargetConnection::Local
-        ));
+        let TargetConnection::Ssh { ssh } = remote_placement.runtime.unwrap().connection else {
+            panic!("SSH placement expected")
+        };
+        assert_eq!(
+            ssh.identity_file.unwrap(),
+            spec.new_home.join(".ssh/remote-key")
+        );
+        assert_eq!(
+            ssh.extra_args[2],
+            spec.new_home.join(".ssh/remote-extra").to_string_lossy()
+        );
+        let lease: TargetRuntimeSettings = serde_json::from_str(
+            &connection
+                .query_row(
+                    "SELECT runtime_json FROM environment_workers WHERE lease_id='remote-lease'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let TargetConnection::Ssh { ssh } = lease.connection else {
+            panic!("SSH lease expected")
+        };
+        assert_eq!(
+            ssh.identity_file.unwrap(),
+            spec.new_home.join(".ssh/remote-key")
+        );
+        assert_eq!(
+            ssh.extra_args[2],
+            spec.new_home.join(".ssh/remote-extra").to_string_lossy()
+        );
         let runtime: TargetRuntimeSettings = serde_json::from_str(
             &connection
                 .query_row(
@@ -1610,9 +1855,13 @@ mod tests {
         };
         assert_eq!(
             ssh.identity_file.unwrap(),
-            spec.new_config_root.join("ec2/id/key")
+            spec.new_home.join(".ssh/remote-key")
         );
         assert!(ssh.extra_args[0].contains(spec.new_config_root.to_str().unwrap()));
+        assert_eq!(
+            ssh.extra_args[2],
+            spec.new_home.join(".ssh/remote-extra").to_string_lossy()
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -1643,6 +1892,14 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
+        assert_eq!(
+            op.granted_keys[0].private_key_path.as_deref(),
+            Some(spec.new_home.join(".ssh/grant").as_path())
+        );
+        assert_eq!(
+            op.granted_keys[0].ssh_target.as_ref().unwrap().ssh_args[0],
+            format!("-i{}", spec.new_home.join(".ssh/grant-extra").display())
+        );
         assert_eq!(
             op.checkpoint.unwrap().archive_path,
             spec.new_data_root.join("sessions/archive.hel.zip")
@@ -1704,7 +1961,7 @@ mod tests {
         let cache: String = connection
             .query_row("SELECT host FROM host_snapshot_cache", [], |row| row.get(0))
             .unwrap();
-        assert!(cache.contains(spec.new_config_root.to_str().unwrap()));
+        assert!(cache.contains(spec.new_home.join(".ssh/cache-key").to_str().unwrap()));
         let sizes: Vec<(String, i64)> = {
             let mut q = connection
                 .prepare("SELECT host,cpus FROM host_container_sizes ORDER BY host")

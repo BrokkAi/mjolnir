@@ -246,11 +246,11 @@ Goal: fix `layout.rs` misclassifications discovered on the live store, add the `
      - Loads staged `config.toml` with staged `secrets.toml` beside it.
      - Adds `[machines.<source-id>]` (`Machine::Ssh`, moving A's `[machines.local].build_cache` to A's machine and clearing B's `[machines.local].build_cache`).
      - Keeps B's `local` templates for new B sessions and creates distinct SSH target templates (`<source-id>-podman`, `<source-id>-docker`, `<source-id>-apple-container`, `<source-id>-bare`) for migrated A sessions/leases.
-     - Rewrites managed profile homes (`managed_profile_home_in(old_config_root, id)` -> `new_config_root`), AND rewrites copied unmanaged `$HOME`-relative profile homes (`<old_home>/<rel>` -> `<new_home>/<rel>`) and copied `$HOME`-relative `[github].session_token_path` / `github.app.private_key_path` (`<old_home>/<rel>` -> `<new_home>/<rel>`) when `$HOME` differs between A and B.
+     - Rewrites managed profile homes (`managed_profile_home_in(old_config_root, id)` -> `new_config_root`), copied unmanaged `$HOME`-relative profile homes (`<old_home>/<rel>` -> `<new_home>/<rel>`), copied `$HOME`-relative `[github].session_token_path` / `github.app.private_key_path`, and copied `$HOME`-relative non-EC2 SSH `identity_file` / `-i` paths when `$HOME` differs between A and B.
      - Component-aware rewrites `<old_config_root>/ec2/...` in `Machine::Ssh` (`identity_file`, `extra_args` `-i`/`UserKnownHostsFile=...`) and `Machine::AwsEc2` (`identity_file`, `ssh_args`).
      - Sanitizes `[daemon]` for native B execution.
-     - Validates via `Config::validate()` and writes with `Config::save_to`.
-     - Updates `go.json` renamed target IDs if needed.
+     - Validates via `Config::validate()` and writes atomically from an immutable staged source `config.toml` to a separate output path with `Config::save_to` (making retries idempotent).
+     - Leaves `go.json` untouched so `default`, `recent`, and project recipes keep launching new sessions locally on host B.
    - Post-commit Codex symlink detachment (`detach_codex_auth_symlink(worker_root)`):
      - Runs on A strictly AFTER B's activation commit succeeds (so rollback leaves A 100% untouched).
      - Verifies `symlink_metadata(<worker_root>/profile)` is a real directory (not a symlink), reads linked `auth.json`, validates JSON, writes mode-`0600` temp file in the same directory, fsyncs, and atomically renames over `auth.json`. (Document in code/help that detached Codex copies retain their refresh token, matching existing SSH Codex sessions.)

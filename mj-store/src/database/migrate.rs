@@ -28,6 +28,7 @@ pub struct StoreMigrationInventory {
     pub session_targets_by_kind_and_state: BTreeMap<(String, String), usize>,
     /// Recorded local runtime kinds, including leases from removed templates.
     pub local_template_kinds: BTreeMap<String, BTreeSet<String>>,
+    pub remote_template_ids: BTreeSet<String>,
     /// Kind, environment phase, and whether this is the current lease.
     pub environment_workers_by_kind_and_phase: BTreeMap<(String, String, bool), usize>,
     pub unidentified_placements: Vec<UnidentifiedPlacement>,
@@ -61,16 +62,7 @@ pub fn inspect_migration_inventory(connection: &Connection) -> Result<StoreMigra
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })? {
         let (id, kind) = row?;
-        if matches!(
-            kind.as_str(),
-            "local-bare" | "local-podman" | "local-docker" | "apple-container"
-        ) {
-            inventory
-                .local_template_kinds
-                .entry(id)
-                .or_default()
-                .insert(kind);
-        }
+        record_template_kind(&mut inventory, &id, &kind);
     }
     let mut query = connection.prepare("SELECT s.target_template_id,s.target_runtime_json FROM sessions s LEFT JOIN session_targets t ON t.session_id=s.session_id WHERE t.session_id IS NULL AND s.target_runtime_json IS NOT NULL")?;
     for row in query.query_map([], |row| {
@@ -78,18 +70,7 @@ pub fn inspect_migration_inventory(connection: &Connection) -> Result<StoreMigra
     })? {
         let (id, json) = row?;
         let runtime: mj_core::state::TargetRuntimeSettings = serde_json::from_str(&json)?;
-        if matches!(runtime.connection, mj_core::state::TargetConnection::Local)
-            && matches!(
-                runtime.kind.as_str(),
-                "local-bare" | "local-podman" | "local-docker" | "apple-container"
-            )
-        {
-            inventory
-                .local_template_kinds
-                .entry(id)
-                .or_default()
-                .insert(runtime.kind);
-        }
+        record_template_kind(&mut inventory, &id, &runtime.kind);
     }
     let mut query = connection.prepare("SELECT session_id,operation_json FROM session_moves")?;
     for row in query.query_map([], |row| {
@@ -126,75 +107,78 @@ pub fn inspect_migration_inventory(connection: &Connection) -> Result<StoreMigra
                 None,
             ),
         };
-        let source_kind = source_target.as_ref().and_then(rewrite::local_locator_kind);
-        if let Some(kind) = source_kind {
-            inventory
-                .local_template_kinds
-                .entry(source_id)
-                .or_default()
-                .insert(kind.into());
-        }
-        let destination_kind = destination_target
+        let source_kind = source_target
             .as_ref()
-            .and_then(rewrite::local_locator_kind)
-            .map(str::to_owned)
-            .or_else(|| prepared.as_ref().and_then(rewrite::prepared_kind));
-        if let (Some(id), Some(kind)) = (destination_id, destination_kind.as_ref()) {
-            inventory
-                .local_template_kinds
-                .entry(id)
-                .or_default()
-                .insert(kind.clone());
+            .map(mj_core::targets::locator_kind_name);
+        if let Some(kind) = source_kind {
+            record_template_kind(&mut inventory, &source_id, kind);
+        }
+        let mut destination_kinds = BTreeSet::new();
+        if let Some(target) = &destination_target {
+            destination_kinds.insert(mj_core::targets::locator_kind_name(target));
+        }
+        if let Some(prepared) = &prepared {
+            destination_kinds.insert(prepared.runtime.kind.as_str());
+            if let Some(target) = prepared.target() {
+                destination_kinds.insert(mj_core::targets::locator_kind_name(target));
+            }
+        }
+        if let Some(id) = &destination_id {
+            for kind in &destination_kinds {
+                record_template_kind(&mut inventory, id, kind);
+            }
         }
         if let Some(accepted) = accepted {
             if let Some(kind) = source_kind {
-                inventory
-                    .local_template_kinds
-                    .entry(accepted.source_target_template_id)
-                    .or_default()
-                    .insert(kind.into());
+                record_template_kind(&mut inventory, &accepted.source_target_template_id, kind);
             }
-            if let (Some(id), Some(kind)) =
-                (accepted.selection.target_template_id, destination_kind)
-            {
-                inventory
-                    .local_template_kinds
-                    .entry(id)
-                    .or_default()
-                    .insert(kind);
+            if let Some(id) = accepted.selection.target_template_id {
+                for kind in &destination_kinds {
+                    record_template_kind(&mut inventory, &id, kind);
+                }
             }
         }
         if let Some(session) = recovery {
-            record_session_template(&mut inventory.local_template_kinds, &session);
+            record_session_template(&mut inventory, &session);
         }
     }
     let mut query = connection.prepare("SELECT source_json FROM retained_move_sources")?;
     for row in query.query_map([], |row| row.get::<_, String>(0))? {
         let session: SessionRecord = serde_json::from_str(&row?)?;
-        record_session_template(&mut inventory.local_template_kinds, &session);
+        record_session_template(&mut inventory, &session);
     }
     let mut query = connection
         .prepare("SELECT placement_json FROM environments WHERE target_lease_id IS NULL")?;
     for row in query.query_map([], |row| row.get::<_, String>(0))? {
         let placement: serde_json::Value = serde_json::from_str(&row?)?;
+        let mut kinds = Vec::new();
         if let Some(runtime) = placement.get("runtime").filter(|value| !value.is_null()) {
             let runtime: mj_core::state::TargetRuntimeSettings =
                 serde_json::from_value(runtime.clone())?;
-            if matches!(runtime.connection, mj_core::state::TargetConnection::Local)
-                && matches!(
-                    runtime.kind.as_str(),
-                    "local-bare" | "local-podman" | "local-docker" | "apple-container"
-                )
-            {
-                let id = placement
-                    .get("target_template_id")
-                    .and_then(serde_json::Value::as_str)
-                    .context("environment placement with local runtime has no template ID")?;
-                inventory
-                    .local_template_kinds
-                    .entry(id.to_owned())
-                    .or_default()
-                    .insert(runtime.kind);
+            kinds.push(runtime.kind);
+        }
+        if let Some(prepared) = placement
+            .get("prepared_destination")
+            .and_then(|value| value.get("destination"))
+            .filter(|value| !value.is_null())
+        {
+            let prepared: mj_core::state::PreparedMoveDestination =
+                serde_json::from_value(prepared.clone())?;
+            kinds.push(
+                prepared
+                    .target()
+                    .map(mj_core::targets::locator_kind_name)
+                    .unwrap_or(&prepared.runtime.kind)
+                    .to_owned(),
+            );
+        }
+        if !kinds.is_empty() {
+            let id = placement
+                .get("target_template_id")
+                .and_then(serde_json::Value::as_str)
+                .context("environment placement with runtime has no template ID")?;
+            for kind in kinds {
+                record_template_kind(&mut inventory, id, &kind);
             }
         }
     }
@@ -270,36 +254,46 @@ pub fn inspect_migration_inventory(connection: &Connection) -> Result<StoreMigra
     Ok(inventory)
 }
 
-fn record_session_template(
-    templates: &mut BTreeMap<String, BTreeSet<String>>,
-    session: &SessionRecord,
-) {
+fn record_template_kind(inventory: &mut StoreMigrationInventory, id: &str, kind: &str) {
+    if rewrite::local_kind(kind) {
+        inventory
+            .local_template_kinds
+            .entry(id.to_owned())
+            .or_default()
+            .insert(kind.to_owned());
+    } else {
+        inventory.remote_template_ids.insert(id.to_owned());
+    }
+}
+
+fn record_session_template(inventory: &mut StoreMigrationInventory, session: &SessionRecord) {
     let kind = session
         .target
         .as_deref()
-        .and_then(rewrite::local_locator_kind)
-        .map(str::to_owned)
+        .map(mj_core::targets::locator_kind_name)
         .or_else(|| {
             session
-                .target
-                .is_none()
-                .then_some(session.target_runtime.as_ref())
-                .flatten()
-                .filter(|runtime| {
-                    matches!(runtime.connection, mj_core::state::TargetConnection::Local)
-                        && matches!(
-                            runtime.kind.as_str(),
-                            "local-bare" | "local-podman" | "local-docker" | "apple-container"
-                        )
-                })
-                .map(|runtime| runtime.kind.clone())
+                .target_runtime
+                .as_deref()
+                .map(|runtime| runtime.kind.as_str())
         });
     if let Some(kind) = kind {
-        templates
-            .entry(session.target_template_id.clone())
-            .or_default()
-            .insert(kind);
+        record_template_kind(inventory, &session.target_template_id, kind);
     }
+}
+
+fn mixed_template_kinds(local_count: usize, remote: bool) -> bool {
+    local_count > 1 || (local_count > 0 && remote)
+}
+
+fn mixed_template(
+    id: &str,
+    local: &BTreeMap<String, BTreeSet<String>>,
+    remote: &BTreeSet<String>,
+) -> bool {
+    local
+        .get(id)
+        .is_some_and(|kinds| mixed_template_kinds(kinds.len(), remote.contains(id)))
 }
 
 fn runtime_references_ec2_path(json: &str) -> Result<bool> {
@@ -370,6 +364,32 @@ pub fn inspect_migration_preconditions(
     connection: &Connection,
     old_data_root: &Path,
 ) -> Result<MigrationPreconditions> {
+    inspect_migration_preconditions_with_remote_templates(
+        connection,
+        old_data_root,
+        &BTreeSet::new(),
+    )
+}
+
+pub fn inspect_migration_preconditions_with_remote_templates(
+    connection: &Connection,
+    old_data_root: &Path,
+    extra_remote_templates: &BTreeSet<String>,
+) -> Result<MigrationPreconditions> {
+    inspect_migration_preconditions_with_templates(
+        connection,
+        old_data_root,
+        &BTreeMap::new(),
+        extra_remote_templates,
+    )
+}
+
+pub fn inspect_migration_preconditions_with_templates(
+    connection: &Connection,
+    old_data_root: &Path,
+    extra_local_templates: &BTreeMap<String, BTreeSet<String>>,
+    extra_remote_templates: &BTreeSet<String>,
+) -> Result<MigrationPreconditions> {
     // Inventory and ownership must describe the same snapshot. A caller may
     // already hold the cutover transaction, in which case it owns that snapshot.
     let snapshot = if connection.is_autocommit() {
@@ -381,7 +401,16 @@ pub fn inspect_migration_preconditions(
         None
     };
     let mut result = MigrationPreconditions::default();
-    let template_kinds = inspect_migration_inventory(connection)?.local_template_kinds;
+    let inventory = inspect_migration_inventory(connection)?;
+    let mut template_kinds = inventory.local_template_kinds;
+    for (id, kinds) in extra_local_templates {
+        template_kinds
+            .entry(id.clone())
+            .or_default()
+            .extend(kinds.iter().cloned());
+    }
+    let mut remote_templates = inventory.remote_template_ids;
+    remote_templates.extend(extra_remote_templates.iter().cloned());
     let mut moves = connection.prepare(
         "SELECT m.session_id,m.operation_id,m.operation_json,m.close_requested_operation_id,s.state
          FROM session_moves m LEFT JOIN sessions s ON s.session_id=m.session_id ORDER BY m.session_id",
@@ -416,7 +445,7 @@ pub fn inspect_migration_preconditions(
         };
         let ambiguous: BTreeSet<&str> = unresolved_move_template_ids(&op)
             .into_iter()
-            .filter(|id| template_kinds.get(*id).is_some_and(|kinds| kinds.len() > 1))
+            .filter(|id| mixed_template(id, &template_kinds, &remote_templates))
             .collect();
         if active || owned {
             result.blockers.push(format!(
@@ -441,7 +470,8 @@ pub fn inspect_migration_preconditions(
         ))
     })? {
         let (sequence, id, current, target_kind, runtime) = row?;
-        if let Some(kinds) = template_kinds.get(&id).filter(|kinds| kinds.len() > 1) {
+        if mixed_template(&id, &template_kinds, &remote_templates) {
+            let kinds = &template_kinds[&id];
             let kind = if let Some(kind) = target_kind {
                 Some(kind)
             } else {
@@ -449,13 +479,12 @@ pub fn inspect_migration_preconditions(
                     .as_deref()
                     .map(serde_json::from_str::<mj_core::state::TargetRuntimeSettings>)
                     .transpose()?
-                    .filter(|runtime| {
-                        matches!(runtime.connection, mj_core::state::TargetConnection::Local)
-                    })
                     .map(|runtime| runtime.kind)
             };
             if current.as_deref() != Some(id.as_str())
-                || !kind.as_ref().is_some_and(|kind| kinds.contains(kind))
+                || !kind
+                    .as_ref()
+                    .is_some_and(|kind| !rewrite::local_kind(kind) || kinds.contains(kind))
             {
                 result.blockers.push(format!("project discovery change {sequence} has ambiguous historical template {id:?} without a matching current placement"));
             }

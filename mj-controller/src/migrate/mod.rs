@@ -155,6 +155,8 @@ mod tests {
             old_config_root: root.path().join("old-config"),
             new_config_root: root.path().join("new-config"),
             old_home: root.path().join("old-home"),
+            new_home: root.path().join("new-home"),
+            remote_template_ids: Default::default(),
             source_ssh: SshConnection {
                 host: "source".into(),
                 user: None,

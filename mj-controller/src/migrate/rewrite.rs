@@ -95,7 +95,8 @@ pub struct StagedConfigRewriteSpec {
 /// Add a machine for the source and equivalent SSH templates while keeping
 /// this host's local templates available for new sessions.
 pub fn rewrite_staged_config_and_files(
-    config_path: &Path,
+    source_config_path: &Path,
+    output_config_path: &Path,
     spec: &StagedConfigRewriteSpec,
 ) -> Result<mj_store::database::SourceTemplateMap> {
     use anyhow::{Context, ensure};
@@ -103,10 +104,14 @@ pub fn rewrite_staged_config_and_files(
         Config, DaemonConfig, Machine, MachineId, PermissionMode, TargetTemplate, migration_paths,
     };
     ensure!(
+        source_config_path != output_config_path,
+        "source and output config paths must differ"
+    );
+    ensure!(
         spec.source_ssh.host != "local",
         "source host alias 'local' is reserved; choose another --source-host alias for host A"
     );
-    let mut config = Config::load_from(config_path)?.with_local_targets();
+    let mut config = Config::load_from(source_config_path)?.with_local_targets();
     let mut source_ssh = spec.source_ssh.clone();
     if let Some(path) = &mut source_ssh.identity_file {
         migration_paths::relocate_ec2_path(path, &spec.old_config_root, &spec.new_config_root);
@@ -135,16 +140,20 @@ pub fn rewrite_staged_config_and_files(
         match machine {
             Machine::Ssh { ssh, .. } => {
                 if let Some(path) = &mut ssh.identity_file {
-                    migration_paths::relocate_ec2_path(
+                    migration_paths::relocate_ssh_identity_path(
                         path,
                         &spec.old_config_root,
                         &spec.new_config_root,
+                        &spec.old_home,
+                        &spec.new_home,
                     );
                 }
-                migration_paths::relocate_ec2_ssh_args(
+                migration_paths::relocate_ssh_args(
                     &mut ssh.extra_args,
                     &spec.old_config_root,
                     &spec.new_config_root,
+                    &spec.old_home,
+                    &spec.new_home,
                 );
             }
             Machine::AwsEc2 {
@@ -153,16 +162,20 @@ pub fn rewrite_staged_config_and_files(
                 ..
             } => {
                 if let Some(path) = identity_file {
-                    migration_paths::relocate_ec2_path(
+                    migration_paths::relocate_ssh_identity_path(
                         path,
                         &spec.old_config_root,
                         &spec.new_config_root,
+                        &spec.old_home,
+                        &spec.new_home,
                     );
                 }
-                migration_paths::relocate_ec2_ssh_args(
+                migration_paths::relocate_ssh_args(
                     ssh_args,
                     &spec.old_config_root,
                     &spec.new_config_root,
+                    &spec.old_home,
+                    &spec.new_home,
                 );
             }
             Machine::Local { .. } => {}
@@ -178,16 +191,20 @@ pub fn rewrite_staged_config_and_files(
             | TargetTemplate::SshAppleContainer { ssh, .. }
             | TargetTemplate::SshNitro { ssh, .. } => {
                 if let Some(path) = &mut ssh.identity_file {
-                    migration_paths::relocate_ec2_path(
+                    migration_paths::relocate_ssh_identity_path(
                         path,
                         &spec.old_config_root,
                         &spec.new_config_root,
+                        &spec.old_home,
+                        &spec.new_home,
                     );
                 }
-                migration_paths::relocate_ec2_ssh_args(
+                migration_paths::relocate_ssh_args(
                     &mut ssh.extra_args,
                     &spec.old_config_root,
                     &spec.new_config_root,
+                    &spec.old_home,
+                    &spec.new_home,
                 );
             }
             TargetTemplate::AwsEc2 {
@@ -196,16 +213,20 @@ pub fn rewrite_staged_config_and_files(
                 ..
             } => {
                 if let Some(path) = identity_file {
-                    migration_paths::relocate_ec2_path(
+                    migration_paths::relocate_ssh_identity_path(
                         path,
                         &spec.old_config_root,
                         &spec.new_config_root,
+                        &spec.old_home,
+                        &spec.new_home,
                     );
                 }
-                migration_paths::relocate_ec2_ssh_args(
+                migration_paths::relocate_ssh_args(
                     ssh_args,
                     &spec.old_config_root,
                     &spec.new_config_root,
+                    &spec.old_home,
+                    &spec.new_home,
                 );
             }
             _ => {}
@@ -268,11 +289,6 @@ pub fn rewrite_staged_config_and_files(
             kind_and_suffix(target).map(|(kind, suffix)| (id.clone(), kind, suffix, target.clone()))
         })
         .collect();
-    let current_kinds: std::collections::BTreeMap<String, String> = local
-        .iter()
-        .map(|(id, kind, _, _)| (id.clone(), (*kind).to_owned()))
-        .collect();
-    let current_ids: std::collections::BTreeSet<String> = config.targets.keys().cloned().collect();
     let mut mapping = mj_store::database::SourceTemplateMap::new();
     let mut by_kind = std::collections::BTreeMap::<String, String>::new();
     for (old_id, kind, suffix, target) in local {
@@ -360,59 +376,7 @@ pub fn rewrite_staged_config_and_files(
     }
     config.daemon = DaemonConfig::default();
     config.validate()?;
-    let go_path = config_path.with_file_name("go.json");
-    let rewritten_go = if go_path.exists() {
-        mj_core::go::GoPreferences::load(&go_path)?;
-        let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&go_path)?)?;
-        fn recipe(
-            value: &mut serde_json::Value,
-            mapping: &mj_store::database::SourceTemplateMap,
-            current_kinds: &std::collections::BTreeMap<String, String>,
-            current_ids: &std::collections::BTreeSet<String>,
-        ) {
-            if let Some(target) = value.get_mut("target_id")
-                && let Some(id) = target.as_str()
-                && let Some(kinds) = mapping.get(id)
-            {
-                let new = if let Some(kind) = current_kinds.get(id) {
-                    kinds.get(kind)
-                } else if !current_ids.contains(id) && kinds.len() == 1 {
-                    kinds.values().next()
-                } else {
-                    None
-                };
-                if let Some(new) = new {
-                    *target = new.clone().into();
-                }
-            }
-        }
-        if let Some(default) = json.get_mut("default") {
-            recipe(default, &mapping, &current_kinds, &current_ids);
-        }
-        if let Some(recent) = json.get_mut("recent") {
-            recipe(recent, &mapping, &current_kinds, &current_ids);
-        }
-        if let Some(projects) = json
-            .get_mut("projects")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for project in projects {
-                if let Some(value) = project.get_mut("recipe") {
-                    recipe(value, &mapping, &current_kinds, &current_ids);
-                }
-            }
-        }
-        let mut file = tempfile::NamedTempFile::new_in(go_path.parent().unwrap_or(Path::new(".")))?;
-        file.write_all(&serde_json::to_vec_pretty(&json)?)?;
-        file.as_file().sync_all()?;
-        Some(file)
-    } else {
-        None
-    };
-    config.save_to(config_path)?;
-    if let Some(file) = rewritten_go {
-        file.persist(&go_path)?;
-    }
+    config.save_to(output_config_path)?;
     Ok(mapping)
 }
 
@@ -430,9 +394,12 @@ mod config_migration_tests {
         let new_home = root.path().join("new-home");
         let old_config = old_home.join(".config/mjolnir");
         let new_config = new_home.join(".config/mjolnir");
-        let staged = root.path().join("staged");
+        let staged = root.path().join("raw");
+        let out = root.path().join("out");
         std::fs::create_dir_all(&staged).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
         let path = staged.join("config.toml");
+        let output = out.join("config.toml");
         let mut config = Config::default();
         config.profiles.insert(
             "managed".into(),
@@ -451,6 +418,7 @@ mod config_migration_tests {
                 mj_core::config::EnvironmentValue::FromSecret("KEY".into()),
             )]));
         std::fs::write(staged.join("secrets.toml"), "KEY = \"retained-secret\"\n").unwrap();
+        std::fs::write(out.join("secrets.toml"), "KEY = \"retained-secret\"\n").unwrap();
         config.github.session_token_path = Some("/outside/token".into());
         config.machines.insert(
             MachineId::local(),
@@ -507,18 +475,57 @@ mod config_migration_tests {
                 )],
             },
         );
+        let mut personal_ssh = SshConnection {
+            host: "personal-host".into(),
+            user: None,
+            identity_file: Some(old_home.join(".ssh/id_key")),
+            extra_args: vec![format!("-i{}", old_home.join(".ssh/other").display())],
+        };
+        config.machines.insert(
+            MachineId::new("personal-ssh").unwrap(),
+            Machine::Ssh {
+                ssh: personal_ssh.clone(),
+                workspace_prefix: ".local/share/mjolnir/workspaces".into(),
+                build_cache: None,
+            },
+        );
+        personal_ssh.host = "target-host".into();
+        config.targets.insert(
+            "personal-ssh-target".into(),
+            mj_core::config::TargetTemplate::SshBare {
+                ssh: personal_ssh,
+                permissions: mj_core::config::PermissionMode::Guardian,
+                workspace_prefix: ".local/share/mjolnir/workspaces".into(),
+            },
+        );
+        config.machines.insert(
+            MachineId::new("personal-aws").unwrap(),
+            Machine::AwsEc2 {
+                aws_profile: None,
+                region: "us-east-1".into(),
+                launch_template: "lt-personal".into(),
+                launch_template_version: None,
+                ssh_user: "ubuntu".into(),
+                address_source: Default::default(),
+                identity_file: Some(old_home.join(".ssh/aws-key")),
+                ssh_args: vec![
+                    "-i".into(),
+                    old_home.join(".ssh/aws-extra").to_string_lossy().into(),
+                ],
+            },
+        );
         config.save_to(&path).unwrap();
-        std::fs::write(staged.join("go.json"),r#"{"version":2,"default":{"profile_id":"managed","target_id":"localhost","bundle_id":null,"project_directory":null,"create_managed_worktree":null,"additional_mounts":[],"resource_allocation":null},"projects":[]}"#).unwrap();
+        std::fs::write(staged.join("go.json"),r#"{"version":2,"default":{"profile_id":"managed","target_id":"localhost","bundle_id":null,"project_directory":null,"create_managed_worktree":null,"additional_mounts":[],"resource_allocation":null},"recent":{"target_id":"podman"},"projects":[]}"#).unwrap();
         let spec = StagedConfigRewriteSpec {
             old_config_root: old_config,
             new_config_root: new_config.clone(),
-            old_home,
+            old_home: old_home.clone(),
             new_home: new_home.clone(),
             source_machine_id: MachineId::new("source").unwrap(),
             source_ssh: SshConnection {
                 host: "source-host".into(),
                 user: None,
-                identity_file: None,
+                identity_file: Some(old_home.join(".ssh/source-key")),
                 extra_args: vec![],
             },
             historical_local_templates: std::collections::BTreeMap::from([
@@ -532,8 +539,18 @@ mod config_migration_tests {
                 ),
             ]),
         };
-        let mapping = rewrite_staged_config_and_files(&path, &spec).unwrap();
-        let reloaded = Config::load_from(&path).unwrap().with_local_targets();
+        let original = std::fs::read(&path).unwrap();
+        let go_original = std::fs::read(staged.join("go.json")).unwrap();
+        let mapping = rewrite_staged_config_and_files(&path, &output, &spec).unwrap();
+        let first = std::fs::read(&output).unwrap();
+        assert_eq!(
+            mapping,
+            rewrite_staged_config_and_files(&path, &output, &spec).unwrap()
+        );
+        assert_eq!(first, std::fs::read(&output).unwrap());
+        assert_eq!(original, std::fs::read(&path).unwrap());
+        assert_eq!(go_original, std::fs::read(staged.join("go.json")).unwrap());
+        let reloaded = Config::load_from(&output).unwrap().with_local_targets();
         reloaded.validate().unwrap();
         assert_eq!(
             reloaded.profiles["managed"].home,
@@ -572,6 +589,53 @@ mod config_migration_tests {
                 .iter()
                 .any(|arg| arg.contains(new_config.to_str().unwrap()))
         );
+        let Machine::Ssh { ssh, .. } = &reloaded.machines["personal-ssh"] else {
+            panic!("SSH machine expected")
+        };
+        assert_eq!(
+            ssh.identity_file.as_deref(),
+            Some(new_home.join(".ssh/id_key").as_path())
+        );
+        assert_eq!(
+            ssh.extra_args[0],
+            format!("-i{}", new_home.join(".ssh/other").display())
+        );
+        let mj_core::config::TargetTemplate::SshBare { ssh, .. } =
+            &reloaded.targets["personal-ssh-target"]
+        else {
+            panic!("SSH target expected")
+        };
+        assert_eq!(
+            ssh.identity_file.as_deref(),
+            Some(new_home.join(".ssh/id_key").as_path())
+        );
+        assert_eq!(
+            ssh.extra_args[0],
+            format!("-i{}", new_home.join(".ssh/other").display())
+        );
+        let Machine::AwsEc2 {
+            identity_file,
+            ssh_args,
+            ..
+        } = &reloaded.machines["personal-aws"]
+        else {
+            panic!("AWS machine expected")
+        };
+        assert_eq!(
+            identity_file.as_deref(),
+            Some(new_home.join(".ssh/aws-key").as_path())
+        );
+        assert_eq!(
+            ssh_args[1],
+            new_home.join(".ssh/aws-extra").to_string_lossy()
+        );
+        let Machine::Ssh { ssh, .. } = &reloaded.machines["source"] else {
+            panic!("source machine expected")
+        };
+        assert_eq!(
+            ssh.identity_file.as_deref(),
+            Some(old_home.join(".ssh/source-key").as_path())
+        );
         assert!(reloaded.machines.contains_key("source"));
         assert!(matches!(
             reloaded.machines.get("local"),
@@ -598,11 +662,12 @@ mod config_migration_tests {
         assert_eq!(mapping["retired-template"]["local-bare"], "source-bare");
         let go: serde_json::Value =
             serde_json::from_slice(&std::fs::read(staged.join("go.json")).unwrap()).unwrap();
-        assert_eq!(go["default"]["target_id"], "source-bare");
+        assert_eq!(go["default"]["target_id"], "localhost");
+        assert_eq!(go["recent"]["target_id"], "podman");
     }
 
     #[test]
-    fn malformed_go_preferences_leave_staged_config_unchanged() {
+    fn malformed_go_preferences_are_left_untouched() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.toml");
         Config::default().save_to(&path).unwrap();
@@ -622,8 +687,13 @@ mod config_migration_tests {
             },
             historical_local_templates: Default::default(),
         };
-        let error = rewrite_staged_config_and_files(&path, &spec).unwrap_err();
-        assert!(format!("{error:#}").contains("read fast-start preferences"));
+        let output = root.path().join("out/config.toml");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        rewrite_staged_config_and_files(&path, &output, &spec).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("go.json")).unwrap(),
+            "{"
+        );
     }
 }
