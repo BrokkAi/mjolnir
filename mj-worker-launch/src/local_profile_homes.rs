@@ -149,44 +149,71 @@ pub fn session_has_a_staged_home_on_target(
     config: &mj_core::config::Config,
     executor: &impl CommandExecutor,
 ) -> bool {
+    probe_staged_home_on_target(session, config, executor).unwrap_or(false)
+}
+
+/// Return an ownership verdict only when the target can prove one.
+pub fn probe_staged_home_on_target(
+    session: &mj_core::state::SessionRecord,
+    config: &mj_core::config::Config,
+    executor: &impl CommandExecutor,
+) -> Option<bool> {
     let Some(locator @ TargetLocator::SshHostBare { data_root, .. }) = session.target.as_deref()
     else {
-        return session_has_a_staged_home_of_its_own(session);
+        return Some(session_has_a_staged_home_of_its_own(session));
     };
     if session.harness_kind.nested_home() {
-        return true;
+        return Some(session_has_a_staged_home_of_its_own(session));
     }
-    let Ok(backend) = crate::targets::backend_locator(locator, session, config) else {
-        return false;
+    let backend = match crate::targets::backend_locator(locator, session, config) {
+        Ok(backend) => backend,
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, %error, "could not check remote profile ownership");
+            return None;
+        }
     };
     let home = mj_core::config::DataLayout::at(data_root)
         .worker_root(&session.id)
         .join("profile");
-    let Ok(command) = crate::targets::command_on_locator(
+    let command = match crate::targets::command_on_locator(
         mj_core::targets::SshTrafficClass::Control,
         &backend,
         &session.id,
         vec![
             "sh".into(),
             "-c".into(),
-            "test ! -L \"$1\" && test -d \"$1\"".into(),
+            "if [ ! -L \"$1\" ] && [ -d \"$1\" ]; then printf 'owned\\n'; else printf 'shared\\n'; fi".into(),
             "mj-profile-ownership".into(),
             mj_core::target_path::text(&home),
         ],
         "check remote profile ownership",
-    ) else {
-        return false;
+    ) {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, %error, "could not check remote profile ownership");
+            return None;
+        }
     };
     match executor.execute(&command) {
-        Ok(output) if output.status == 0 => true,
-        Ok(output) if output.status == 1 => false,
+        Ok(output)
+            if output.status == 0
+                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("owned") =>
+        {
+            Some(true)
+        }
+        Ok(output)
+            if output.status == 0
+                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("shared") =>
+        {
+            Some(false)
+        }
         Ok(output) => {
             tracing::warn!(session_id = %session.id, status = output.status, "could not check remote profile ownership");
-            false
+            None
         }
         Err(error) => {
             tracing::warn!(session_id = %session.id, %error, "could not check remote profile ownership");
-            false
+            None
         }
     }
 }
@@ -465,7 +492,7 @@ mod tests {
 
     #[test]
     fn host_bare_profile_probe_runs_on_ssh_and_fails_closed() {
-        struct Probe(i32);
+        struct Probe(i32, &'static str);
         impl CommandExecutor for Probe {
             fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
                 mj_core::targets::DeadlinePause::none()
@@ -491,7 +518,7 @@ mod tests {
                 command: &crate::targets::CommandSpec,
             ) -> anyhow::Result<crate::targets::CommandOutput> {
                 assert_eq!(command.program, "ssh");
-                assert!(command.args.last().unwrap().contains("test ! -L"));
+                assert!(command.args.last().unwrap().contains("[ ! -L"));
                 assert!(
                     command
                         .args
@@ -504,7 +531,7 @@ mod tests {
                 }
                 Ok(crate::targets::CommandOutput {
                     status: self.0,
-                    stdout: vec![],
+                    stdout: self.1.as_bytes().to_vec(),
                     stderr: vec![],
                 })
             }
@@ -528,21 +555,36 @@ mod tests {
             },
         };
         record.target_runtime = Some(runtime.into());
-        for status in [0, 1, 255, -1] {
+        for (status, stdout, expected) in [
+            (0, "owned\n", Some(true)),
+            (0, "shared\n", Some(false)),
+            (0, "unexpected\n", None),
+            (1, "shared\n", None),
+            (255, "owned\n", None),
+            (-1, "", None),
+        ] {
+            assert_eq!(
+                probe_staged_home_on_target(
+                    &record,
+                    &mj_core::config::Config::default(),
+                    &Probe(status, stdout)
+                ),
+                expected
+            );
             assert_eq!(
                 session_has_a_staged_home_on_target(
                     &record,
                     &mj_core::config::Config::default(),
-                    &Probe(status)
+                    &Probe(status, stdout)
                 ),
-                status == 0
+                expected.unwrap_or(false)
             );
         }
         record.harness_kind = HarnessKind::OpenCode;
         assert!(session_has_a_staged_home_on_target(
             &record,
             &mj_core::config::Config::default(),
-            &Probe(-1)
+            &Probe(-1, "")
         ));
     }
 }

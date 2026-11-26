@@ -259,7 +259,7 @@ impl CredentialWakes {
             return false;
         };
         self.observe_profile_with(&session.id, backend, || {
-            mj_worker_launch::local_profile_homes::session_has_a_staged_home_on_target(
+            mj_worker_launch::local_profile_homes::probe_staged_home_on_target(
                 session,
                 config,
                 &mj_core::targets::ProcessExecutor,
@@ -271,7 +271,7 @@ impl CredentialWakes {
         &self,
         id: &str,
         backend: mj_core::targets::TargetLocator,
-        probe: impl FnOnce() -> bool,
+        probe: impl FnOnce() -> Option<bool>,
     ) -> bool {
         let epoch = {
             let mut profiles = self
@@ -286,7 +286,9 @@ impl CredentialWakes {
             }
             entry.epoch
         };
-        let allowed = probe();
+        let Some(allowed) = probe() else {
+            return false;
+        };
         let mut profiles = self
             .profiles
             .lock()
@@ -4549,12 +4551,16 @@ mod host_bare_ownership_tests {
             },
             data_root: "/source".into(),
         };
-        assert!(wakes.observe_profile_with("s", backend.clone(), || true));
+        assert!(!wakes.observe_profile_with("s", backend.clone(), || None));
+        assert!(wakes.observe_profile_with("s", backend.clone(), || Some(true)));
         assert!(
             wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated"))
         );
         wakes.invalidate_profile("s");
-        assert!(!wakes.observe_profile_with("s", backend.clone(), || false));
+        assert!(!wakes.observe_profile_with("s", backend.clone(), || Some(false)));
+        assert!(
+            !wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated"))
+        );
         wakes.invalidate_profile("s");
         let barrier = Arc::new(Barrier::new(2));
         std::thread::scope(|scope| {
@@ -4565,7 +4571,7 @@ mod host_bare_ownership_tests {
                 other_wakes.observe_profile_with("s", other_backend, || {
                     other_barrier.wait();
                     other_barrier.wait();
-                    true
+                    Some(true)
                 })
             });
             barrier.wait();
@@ -4573,6 +4579,6 @@ mod host_bare_ownership_tests {
             barrier.wait();
             assert!(!task.join().unwrap());
         });
-        assert!(wakes.observe_profile_with("s", backend, || true));
+        assert!(wakes.observe_profile_with("s", backend, || Some(true)));
     }
 }
