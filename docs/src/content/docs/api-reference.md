@@ -1343,7 +1343,8 @@ completed turns. These events do not prescribe retries or automatic pauses.
 `turn.outcome.kind` is `completed`, `input_required`, `cancelled`, `rejected`,
 `interrupted`, or `failed`. Unsuccessful outcomes include `reason` and `message`;
 `stop_reason` preserves the original harness value. Provider diagnostics and
-usage remain on `turn`. Quota exhaustion is `failed` with reason `quota_limit`.
+usage remain on `turn`. Quota exhaustion is `failed` with reason `quota_limit`. A provider refusal,
+such as a content filter, is `failed` with reason `provider_refusal`.
 Unknown harness endings are `failed` with reason `unrecognized_stop_reason`.
 Events, `mj wait`, and transcript rendering share this classification; `wait`
 keeps its own exit codes.

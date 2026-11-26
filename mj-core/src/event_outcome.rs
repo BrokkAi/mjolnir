@@ -19,6 +19,7 @@ pub enum OutcomeReason {
     CommandFailed,
     ProviderFailure,
     QuotaLimit,
+    ProviderRefusal,
     UnrecognizedStopReason,
     NonzeroExit,
     Signaled,
@@ -77,6 +78,9 @@ impl TurnOutcomeKind {
                     ),
                     PromptCompletion::QuotaLimit => {
                         (TurnResultKind::Failed, Some(OutcomeReason::QuotaLimit))
+                    }
+                    PromptCompletion::Refused => {
+                        (TurnResultKind::Failed, Some(OutcomeReason::ProviderRefusal))
                     }
                     PromptCompletion::Error => (
                         TurnResultKind::Failed,
@@ -141,7 +145,10 @@ impl MaterializedTurnOutcome {
         if let Some(diagnostic) = &self.diagnostic {
             result.message = Some(diagnostic.message.clone());
             if result.kind == TurnResultKind::Failed
-                && result.reason != Some(OutcomeReason::QuotaLimit)
+                && !matches!(
+                    result.reason,
+                    Some(OutcomeReason::QuotaLimit | OutcomeReason::ProviderRefusal)
+                )
             {
                 result.reason = Some(OutcomeReason::ProviderFailure);
             }
@@ -306,6 +313,33 @@ mod tests {
         assert_eq!(turn.result().reason, Some(OutcomeReason::ProviderFailure));
         assert_eq!(turn.result().kind, TurnResultKind::Failed);
         assert_eq!(turn.result().stop_reason.as_deref(), Some("provider_error"));
+    }
+
+    #[test]
+    fn a_provider_refusal_is_not_an_unrecognized_stop() {
+        let turn = MaterializedTurnOutcome {
+            work_facts: None,
+            answered_through: None,
+            command_id: "opaque".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(2),
+            completed_ordinal: 3,
+            completed_at_ms: 4,
+            outcome: TurnOutcomeKind::Completed {
+                stop_reason: "Refusal".into(),
+            },
+            usage: None,
+            diagnostic: Some(crate::diagnostic::TurnDiagnostic {
+                message: "blocked by a content filter".into(),
+                code: None,
+                http_status: None,
+                reset_at: None,
+                login_fingerprint: None,
+            }),
+        };
+        let result = turn.result();
+        assert_eq!(result.kind, TurnResultKind::Failed);
+        assert_eq!(result.reason, Some(OutcomeReason::ProviderRefusal));
     }
 
     #[test]
