@@ -241,7 +241,21 @@ impl DurableRelay {
                 barrier_command_id,
                 cut,
             } => match self.checkpoint_mailbox(barrier_command_id, cut)? {
-                Ok(mailbox) => RelayResponsePayload::CheckpointMailbox { mailbox },
+                Ok(mailbox) => {
+                    if envelope.protocol_version < RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL
+                        && (!self.snapshot.quota_interrupted_input.is_empty()
+                            || !self.snapshot.quota_prompt_contexts.is_empty()
+                            || !self.snapshot.frozen_prompt_contexts.is_empty())
+                    {
+                        return Ok(relay_error(
+                            RelayErrorCode::InvalidState,
+                            "controller cannot preserve quota-interrupted input at this checkpoint",
+                            false,
+                            None,
+                        ));
+                    }
+                    RelayResponsePayload::CheckpointMailbox { mailbox }
+                }
                 Err(message) => {
                     return Ok(relay_error(
                         RelayErrorCode::InvalidState,
@@ -251,6 +265,75 @@ impl DurableRelay {
                     ));
                 }
             },
+            RelayRequest::ReadCheckpointQuotaInput {
+                barrier_command_id,
+                cut,
+                offset,
+            } => {
+                if self.checkpoint_native_use(barrier_command_id, cut).is_err() {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidState,
+                        "the relay is no longer at this checkpoint cut",
+                        false,
+                        None,
+                    ));
+                }
+                let text = serde_json::to_string(&serde_json::json!({
+                    "pending": self.snapshot.quota_interrupted_input,
+                    "claimed": self.snapshot.quota_prompt_contexts,
+                    "frozen_prompt_contexts": self.snapshot.frozen_prompt_contexts,
+                }))?;
+                let Some(offset) = usize::try_from(*offset)
+                    .ok()
+                    .filter(|&offset| offset <= text.len() && text.is_char_boundary(offset))
+                else {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidRequest,
+                        "invalid checkpoint quota input offset",
+                        false,
+                        None,
+                    ));
+                };
+                let page = |end: usize| RelayResponsePayload::CheckpointQuotaInput {
+                    page: text[offset..end].to_owned(),
+                    next_offset: (end < text.len()).then_some(end as u64),
+                };
+                let fits = |payload: &RelayResponsePayload| -> Result<bool> {
+                    let response = RelayResponseEnvelope {
+                        request_id: envelope.request_id.clone(),
+                        protocol_version: envelope.protocol_version,
+                        body: RelayResponseBody::Ok {
+                            payload: payload.clone(),
+                        },
+                    };
+                    Ok(serde_json::to_vec(&response)?.len().saturating_add(1) <= MAX_FRAME_BYTES)
+                };
+                let mut low = offset;
+                let mut high = offset.saturating_add(MAX_FRAME_BYTES).min(text.len());
+                let mut best = offset;
+                while low < high {
+                    let mid = low + (high - low).div_ceil(2);
+                    let mut boundary = mid;
+                    while !text.is_char_boundary(boundary) {
+                        boundary -= 1;
+                    }
+                    if fits(&page(boundary))? {
+                        low = mid;
+                        best = boundary;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+                if best == offset && offset != text.len() {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidState,
+                        "checkpoint quota input page cannot fit in a relay response frame",
+                        false,
+                        None,
+                    ));
+                }
+                page(best)
+            }
             RelayRequest::ReadCheckpointNativeUse {
                 barrier_command_id,
                 cut,

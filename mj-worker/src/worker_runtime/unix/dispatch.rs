@@ -2052,6 +2052,14 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
             if let Some(context) = &claimed.hidden_prompt_context {
                 prompt.insert(0, crate::acp::hidden_context_block(context.clone()));
             }
+            if !claimed.quota_interrupted_input.is_empty() {
+                let mut retained = vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                    mj_core::continuation::QUOTA_REPLAY_NOTE,
+                )];
+                retained.extend(claimed.quota_interrupted_input.iter().cloned());
+                retained.extend(prompt);
+                prompt = retained;
+            }
             Some(CommandRequest::Prompt { request_id, prompt })
         }
         RelayCommand::SetConfig { key, value } => Some(CommandRequest::SetConfig {

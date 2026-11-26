@@ -230,7 +230,9 @@ pub const RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL: u32 = 93;
 pub const RELAY_READ_SESSION_V2_PROTOCOL: u32 = 94;
 /// The cut-checked checkpoint native-use reply also carries pending prompt context.
 pub const RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL: u32 = 95;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL;
+/// 96 pages retained quota input at a checkpoint cut.
+pub const RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL: u32 = 96;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -279,7 +281,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // or replay a PostToolUse lease that claims the non-parent partition.
 // Revision 33 is breaking: older readers reject `accepted_launch`, and older
 // writers would drop it, so a later start could restore another harness's model.
-pub const RELAY_STATE_VERSION: u32 = 33;
+// Revision 34 is breaking: older workers cannot preserve quota-interrupted input.
+pub const RELAY_STATE_VERSION: u32 = 34;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

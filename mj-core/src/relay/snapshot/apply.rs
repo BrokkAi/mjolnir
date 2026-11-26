@@ -925,6 +925,59 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .get_mut(command_id)
                 .ok_or_else(|| anyhow!("started unknown relay command {command_id}"))?;
             dispatch.state = RelayDispatchState::Pending;
+            let eligible = dispatch.command.accepts_prompt_context();
+            if eligible {
+                if !snapshot.quota_interrupted_input.is_empty() {
+                    snapshot
+                        .quota_prompt_contexts
+                        .entry(command_id.clone())
+                        .or_default()
+                        .append(&mut snapshot.quota_interrupted_input);
+                }
+                let mut frozen = Vec::new();
+                if snapshot
+                    .pending_prompt_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context.attached_command_id.is_none()
+                            || context.attached_command_id.as_deref() == Some(command_id.as_str())
+                    })
+                {
+                    frozen.push(
+                        snapshot
+                            .pending_prompt_context
+                            .take()
+                            .expect("checked context")
+                            .text,
+                    );
+                }
+                let accepted = snapshot
+                    .handled_commands
+                    .get(command_id)
+                    .ok_or_else(|| anyhow!("started unaccepted relay command {command_id}"))?
+                    .accepted_ordinal;
+                snapshot.pending_user_shell_contexts.retain(|context| {
+                    if context.accepted_ordinal < accepted
+                        && (context.attached_command_id.is_none()
+                            || context.attached_command_id.as_deref() == Some(command_id.as_str()))
+                    {
+                        frozen.push(context.text.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if !frozen.is_empty() {
+                    let context = snapshot
+                        .frozen_prompt_contexts
+                        .entry(command_id.clone())
+                        .or_default();
+                    if !context.is_empty() {
+                        context.push_str("\n\n");
+                    }
+                    context.push_str(&frozen.join("\n\n"));
+                }
+            }
             match &dispatch.command {
                 RelayCommand::Prompt { .. }
                 | RelayCommand::HandbackReminder { .. }
@@ -1059,6 +1112,64 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.capacity_retry = None;
                 }
             }
+            if matches!(outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
+                if crate::state::classify_prompt_completion(stop_reason) == crate::state::PromptCompletion::QuotaLimit)
+                && command.prompt_blocks().is_some()
+            {
+                let mut input = snapshot
+                    .quota_prompt_contexts
+                    .remove(command_id)
+                    .unwrap_or_default();
+                let mut hidden = Vec::new();
+                if let Some(context) = snapshot.mailbox_prompt_contexts.get(command_id) {
+                    hidden.push(context.clone());
+                }
+                if let Some(context) = snapshot.frozen_prompt_contexts.get(command_id) {
+                    hidden.push(context.clone());
+                }
+                if let Some(context) = snapshot.pending_prompt_context.as_ref()
+                    && context.attached_command_id.as_deref() == Some(command_id.as_str())
+                {
+                    hidden.push(context.text.clone());
+                }
+                hidden.extend(
+                    snapshot
+                        .pending_user_shell_contexts
+                        .iter()
+                        .filter(|context| {
+                            context.attached_command_id.as_deref() == Some(command_id.as_str())
+                        })
+                        .map(|context| context.text.clone()),
+                );
+                if !hidden.is_empty() {
+                    use agent_client_protocol::v1::schema::{
+                        EmbeddedResource, EmbeddedResourceResource, TextResourceContents,
+                    };
+                    input.push(ContentBlock::Resource(EmbeddedResource::new(
+                        EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                            hidden.join("\n\n"),
+                            crate::relay::HIDDEN_PROMPT_CONTEXT_URI,
+                        )),
+                    )));
+                }
+                let generated_retry =
+                    matches!(
+                        command,
+                        RelayCommand::ResumeAfterQuota { .. }
+                            | RelayCommand::ContinueAuthorizedWork { .. }
+                    ) || crate::continuation::GeneratedPrompt::of(
+                        crate::continuation::carried_command(command_id),
+                    ) == Some(crate::continuation::GeneratedPrompt::QuotaRetry);
+                if !generated_retry
+                    && let Some(blocks) = command.prompt_blocks_for_command(command_id)
+                {
+                    input.extend(blocks.iter().cloned());
+                }
+                snapshot.quota_interrupted_input.extend(input);
+            } else {
+                snapshot.quota_prompt_contexts.remove(command_id);
+            }
+            snapshot.frozen_prompt_contexts.remove(command_id);
             match (command, outcome) {
                 (
                     RelayCommand::Prompt { .. }
@@ -1371,6 +1482,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .collect::<Vec<_>>();
                     retain_delivered_mailbox_event_keys(snapshot, discarded_keys, event.ordinal);
                     snapshot.mailbox_prompt_contexts.clear();
+                    snapshot.frozen_prompt_contexts.clear();
                     snapshot.activity_turn_started_at_ms = None;
                     snapshot.harness_turn = None;
                     snapshot.capacity_retry = None;
@@ -1586,6 +1698,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .queued_prompts
                 .retain(|queued| queued.command_id != *command_id);
             let mailbox_context = snapshot.mailbox_prompt_contexts.remove(command_id);
+            let quota_context = snapshot.quota_prompt_contexts.remove(command_id);
+            let frozen_context = snapshot.frozen_prompt_contexts.remove(command_id);
             snapshot.active_user_shells.remove(command_id);
             if let RelayCommand::RunUserShell { command } = &command {
                 let accepted_ordinal = snapshot
@@ -1712,6 +1826,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .mailbox_prompt_contexts
                         .insert(recovery_id.to_owned(), context);
                 }
+                if let Some(context) = frozen_context {
+                    snapshot
+                        .frozen_prompt_contexts
+                        .insert(recovery_id.to_owned(), context);
+                }
+                if let Some(context) = quota_context {
+                    snapshot
+                        .quota_prompt_contexts
+                        .insert(recovery_id.to_owned(), context);
+                }
                 // This is the same accepted turn, not a fresh mailbox claim.
                 // Keep its acceptance and the actual latest input unchanged:
                 // input already queued after this turn still supersedes it.
@@ -1719,6 +1843,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.capacity_retry = None;
                 snapshot.retry_assessment = None;
                 snapshot.continuation.quota_recovery = None;
+            } else if let Some(context) = frozen_context {
+                match snapshot.pending_prompt_context.as_mut() {
+                    Some(pending) => pending.text = format!("{context}\n\n{}", pending.text),
+                    None => {
+                        snapshot.pending_prompt_context = Some(PendingPromptContext {
+                            text: context,
+                            attached_command_id: None,
+                        })
+                    }
+                }
             }
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
@@ -2305,6 +2439,8 @@ fn terminalize_removed_prompts(
         // A removed entry never starts, so nothing else will release the
         // mailbox context it holds (a restart continuation inherits one).
         snapshot.mailbox_prompt_contexts.remove(command_id);
+        snapshot.frozen_prompt_contexts.remove(command_id);
+        snapshot.quota_prompt_contexts.remove(command_id);
     }
     snapshot.queued_prompts.retain(|queued| {
         !removed_command_ids

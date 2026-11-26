@@ -966,6 +966,27 @@ impl DurableRelay {
                     snapshot.pending_mailbox_events = mailbox.pending_events;
                     snapshot.delivered_mailbox_event_keys = mailbox.delivered_event_keys;
                     snapshot.mailbox_prompt_contexts = mailbox.prompt_contexts;
+                    snapshot.quota_interrupted_input = mailbox
+                        .quota_input
+                        .pending
+                        .into_iter()
+                        .map(serde_json::from_value)
+                        .collect::<serde_json::Result<_>>()?;
+                    snapshot.frozen_prompt_contexts = mailbox.quota_input.frozen_prompt_contexts;
+                    snapshot.quota_prompt_contexts = mailbox
+                        .quota_input
+                        .claimed
+                        .into_iter()
+                        .map(|(id, blocks)| {
+                            Ok((
+                                id,
+                                blocks
+                                    .into_iter()
+                                    .map(serde_json::from_value)
+                                    .collect::<serde_json::Result<_>>()?,
+                            ))
+                        })
+                        .collect::<serde_json::Result<_>>()?;
                 }
             }
             snapshot

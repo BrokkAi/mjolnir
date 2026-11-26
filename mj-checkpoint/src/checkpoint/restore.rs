@@ -74,6 +74,19 @@ pub fn relay_seed_for_restore(
                     mailbox.pending_events.clone()
                 },
                 delivered_event_keys: mailbox.delivered_event_keys.clone(),
+                quota_input: mj_core::archive::CanonicalQuotaInput {
+                    pending: mailbox.quota_input.pending.clone(),
+                    frozen_prompt_contexts: if queue_policy.keeps_queue() {
+                        mailbox.quota_input.frozen_prompt_contexts.clone()
+                    } else {
+                        Default::default()
+                    },
+                    claimed: if queue_policy.keeps_queue() {
+                        mailbox.quota_input.claimed.clone()
+                    } else {
+                        Default::default()
+                    },
+                },
                 prompt_contexts: if queue_policy.keeps_queue() {
                     mailbox.prompt_contexts.clone()
                 } else {

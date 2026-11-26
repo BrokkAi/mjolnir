@@ -12257,14 +12257,13 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
     let mut recovered =
         DurableRelay::open_for_checkpoint(recovered_root.path(), SESSION, "checkpoint-only")
             .unwrap();
+    assert!(recovered.snapshot.pending_prompt_context.is_none());
     assert!(
         recovered
             .snapshot
-            .pending_prompt_context
-            .as_ref()
-            .unwrap()
-            .attached_command_id
-            .is_none()
+            .frozen_prompt_contexts
+            .values()
+            .any(|text| text == "interrupted handoff")
     );
     submit_relay(
         &mut recovered,
@@ -12281,8 +12280,39 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
             pending_context_offset: None,
         },
     ));
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CheckpointNativeUse {
+                pending_prompt_context: None,
+                ..
+            }
+        }
+    ));
+    let response = recovered.handle(envelope(
+        "read-recovered-frozen-context",
+        RelayRequest::ReadCheckpointQuotaInput {
+            barrier_command_id: "recovered-barrier".into(),
+            cut: recovered.operational_state().checkpoint_ready.unwrap(),
+            offset: 0,
+        },
+    ));
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::CheckpointQuotaInput {
+                page,
+                next_offset: None,
+            },
+    } = response.body
+    else {
+        panic!("missing frozen context page")
+    };
+    let input: mj_core::archive::CanonicalQuotaInput = serde_json::from_str(&page).unwrap();
     assert!(
-        matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::CheckpointNativeUse { pending_prompt_context: Some(text), .. } } if text == "interrupted handoff")
+        input
+            .frozen_prompt_contexts
+            .values()
+            .any(|text| text == "interrupted handoff")
     );
 }
 

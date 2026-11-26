@@ -3133,6 +3133,7 @@ fn a_claimed_prompt_carries_its_hidden_context_first() {
             prompt: vec![user.clone()],
         },
         hidden_prompt_context: hidden_prompt_context.map(str::to_owned),
+        quota_interrupted_input: Vec::new(),
         steering_prompt: None,
     };
     let prompt_of = |claimed| match unix::acp_command(&claimed) {
@@ -11368,7 +11369,7 @@ fn parked_move_launch_queues_quota_first_with_handoff_and_replays_once() {
             .contains_key("parked-move:quota-move")
     );
     assert_eq!(
-        stored.pending_prompt_context.as_ref().unwrap().text,
+        stored.frozen_prompt_contexts["quota-continuation"],
         "pre-existing context\n\nsource native prior handoff"
     );
     let claimed = relay.claim_pending_commands_up_to(true, 1).unwrap();
@@ -11658,7 +11659,7 @@ fn parked_move_launch_failed_prefix_retains_destination_ownership_and_recovers()
             .contains_key("parked-move:failed-prefix")
     );
     assert_eq!(
-        completed.pending_prompt_context.unwrap().text,
+        completed.frozen_prompt_contexts["recover-quota-prompt"],
         "source context\n\ndestination handoff"
     );
     drop(destination);
@@ -11726,4 +11727,324 @@ fn parked_move_launch_started_receipt_failure_prevents_destination_identity() {
     assert_eq!(boot.operational_state().native_session_id, None);
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();
+}
+
+// Hard-won: d3fd6f01e: quota-failed mailbox wake lost its peer message.
+#[test]
+fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(
+        &mut relay,
+        "deliver-peer-message",
+        RelayCommand::DeliverMailboxEvent {
+            event: mj_core::mailbox::MailboxEvent {
+                key: "peer-message-key".into(),
+                source: "peer".into(),
+                wake: true,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::PlainText {
+                    text: "peer task: review the migration".into(),
+                },
+            },
+        },
+    );
+    let wake = relay.claim_pending_commands(true).unwrap().remove(0);
+    assert!(matches!(wake.command, RelayCommand::MailboxWake { .. }));
+    let finish = |relay: &mut DurableRelay, id: &str, stop: &str| {
+        relay
+            .record_command_completed(
+                id,
+                mj_core::relay::RelayCommandOutcome::Prompt {
+                    stop_reason: stop.into(),
+                    usage: None,
+                    work_facts: None,
+                    diagnostic: None,
+                },
+            )
+            .unwrap();
+    };
+    finish(
+        &mut relay,
+        &wake.command_id,
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    assert!(
+        relay
+            .operational_state()
+            .undelivered_mailbox_event_keys
+            .is_empty()
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    drop(relay);
+    std::fs::remove_file(temp.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    for (id, command) in [
+        ("compact-command", "/compact"),
+        ("slash-command", "/review"),
+    ] {
+        submit(&mut relay, id, prompt(command));
+        let claimed = relay.claim_pending_commands(true).unwrap().remove(0);
+        let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&claimed) else {
+            panic!("not a prompt")
+        };
+        assert!(
+            !serde_json::to_string(&prompt)
+                .unwrap()
+                .contains("peer task")
+        );
+        finish(&mut relay, id, "end_turn");
+    }
+    submit(
+        &mut relay,
+        "quota-retry-first",
+        RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    );
+    let first = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&first) else {
+        panic!("not a prompt")
+    };
+    assert_eq!(
+        serde_json::to_string(&prompt)
+            .unwrap()
+            .matches("peer task")
+            .count(),
+        1
+    );
+    finish(
+        &mut relay,
+        &first.command_id,
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    submit(
+        &mut relay,
+        "quota-retry-second",
+        RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    );
+    let second = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&second) else {
+        panic!("not a prompt")
+    };
+    assert_eq!(
+        serde_json::to_string(&prompt)
+            .unwrap()
+            .matches("peer task")
+            .count(),
+        1
+    );
+    relay
+        .record_command_interrupted(
+            &second.command_id,
+            mj_core::event_outcome::OutcomeReason::WorkerRestarted,
+            "test restart",
+        )
+        .unwrap();
+    drop(relay);
+    std::fs::remove_file(temp.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    let recovered = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&recovered) else {
+        panic!("not a prompt")
+    };
+    assert_eq!(
+        serde_json::to_string(&prompt)
+            .unwrap()
+            .matches("peer task")
+            .count(),
+        1
+    );
+    finish(&mut relay, &recovered.command_id, "end_turn");
+    assert!(
+        relay
+            .operational_state()
+            .undelivered_mailbox_event_keys
+            .is_empty()
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+}
+
+#[test]
+fn quota_replay_preserves_hidden_context_and_user_blocks_in_dispatch_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    let installed = relay.handle(RelayRequestEnvelope {
+        request_id: "install-context".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::InstallPromptContext {
+            text: "hidden handoff".into(),
+        },
+    });
+    assert!(matches!(installed.body, RelayResponseBody::Ok { .. }));
+    submit(
+        &mut relay,
+        "deliver-context",
+        RelayCommand::DeliverMailboxEvent {
+            event: mj_core::mailbox::MailboxEvent {
+                key: "pending-context".into(),
+                source: "peer".into(),
+                wake: false,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::PlainText {
+                    text: "hidden peer message".into(),
+                },
+            },
+        },
+    );
+    submit(
+        &mut relay,
+        "user-prompt",
+        prompt("explicit user instruction"),
+    );
+    let original = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt {
+        prompt: original_prompt,
+        ..
+    }) = unix::acp_command(&original)
+    else {
+        panic!("not a prompt")
+    };
+    relay
+        .record_command_completed(
+            "user-prompt",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                stop_reason: mj_core::diagnostic::QUOTA_STOP_REASON.into(),
+                usage: None,
+                work_facts: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    submit(
+        &mut relay,
+        "quota-retry-prompt",
+        RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    );
+    let replay = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt {
+        prompt: replay_prompt,
+        ..
+    }) = unix::acp_command(&replay)
+    else {
+        panic!("not a prompt")
+    };
+    assert_eq!(
+        &replay_prompt[1..1 + original_prompt.len()],
+        original_prompt
+    );
+    let text = serde_json::to_string(&replay_prompt).unwrap();
+    assert_eq!(text.matches("hidden handoff").count(), 1);
+    assert_eq!(text.matches("hidden peer message").count(), 1);
+    assert_eq!(text.matches("explicit user instruction").count(), 1);
+}
+
+#[test]
+fn prompt_context_arriving_after_start_waits_for_next_turn_and_replays() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut relay, "started-prompt", prompt("first"));
+    submit(
+        &mut relay,
+        "late-shell",
+        RelayCommand::RunUserShell {
+            command: "printf late".into(),
+        },
+    );
+    assert_eq!(
+        relay.claim_pending_user_shell_commands_up_to(1).unwrap()[0].command_id,
+        "late-shell"
+    );
+    relay
+        .record_command_completed(
+            "late-shell",
+            mj_core::relay::RelayCommandOutcome::UserShell {
+                result: mj_core::relay::UserShellResult {
+                    command: "printf late".into(),
+                    stdout: "late hidden input".into(),
+                    stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    exit_code: Some(0),
+                    signal: None,
+                    duration_ms: 1,
+                    status: mj_core::relay::UserShellStatus::Exited,
+                    error: None,
+                },
+            },
+        )
+        .unwrap();
+    let first = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt {
+        prompt: first_prompt,
+        ..
+    }) = unix::acp_command(&first)
+    else {
+        panic!("not a prompt")
+    };
+    assert!(
+        !serde_json::to_string(&first_prompt)
+            .unwrap()
+            .contains("late hidden input")
+    );
+    relay
+        .record_command_completed(
+            "started-prompt",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                work_facts: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    drop(relay);
+    std::fs::remove_file(temp.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut relay, "next-prompt", prompt("second"));
+    let second = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&second) else {
+        panic!("not a prompt")
+    };
+    assert_eq!(
+        serde_json::to_string(&prompt)
+            .unwrap()
+            .matches("late hidden input")
+            .count(),
+        1
+    );
 }

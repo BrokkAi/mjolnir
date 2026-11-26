@@ -122,6 +122,7 @@ impl DurableRelay {
             pending_events,
             delivered_event_keys: self.snapshot.delivered_mailbox_event_keys.clone(),
             prompt_contexts: self.snapshot.mailbox_prompt_contexts.clone(),
+            quota_input: Default::default(),
         };
         // The answer travels in one relay frame, which the relay snapshot that
         // holds these fields may exceed. Refuse with an answer rather than a

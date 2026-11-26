@@ -1325,6 +1325,38 @@ impl RelayClient {
         }
     }
 
+    pub async fn read_checkpoint_quota_input(
+        &mut self,
+        barrier_command_id: String,
+        cut: mj_core::relay::RelayCursor,
+    ) -> Result<mj_core::archive::CanonicalQuotaInput> {
+        let mut offset = 0u64;
+        let mut json = String::new();
+        loop {
+            let RelayResponsePayload::CheckpointQuotaInput { page, next_offset } = self
+                .call(RelayRequest::ReadCheckpointQuotaInput {
+                    barrier_command_id: barrier_command_id.clone(),
+                    cut: cut.clone(),
+                    offset,
+                })
+                .await?
+            else {
+                bail!("relay returned an unexpected checkpoint quota input response")
+            };
+            json.push_str(&page);
+            match next_offset {
+                None => return Ok(serde_json::from_str(&json)?),
+                Some(next) => {
+                    anyhow::ensure!(
+                        next > offset && usize::try_from(next).ok() == Some(json.len()),
+                        "checkpoint quota input page returned an invalid next offset"
+                    );
+                    offset = next;
+                }
+            }
+        }
+    }
+
     pub async fn read_checkpoint_native_use(
         &mut self,
         barrier_command_id: String,

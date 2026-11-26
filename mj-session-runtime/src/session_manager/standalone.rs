@@ -969,6 +969,16 @@ impl StandaloneSession {
             .await
     }
 
+    pub async fn read_checkpoint_quota_input(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+    ) -> Result<mj_core::archive::CanonicalQuotaInput> {
+        self.client
+            .read_checkpoint_quota_input(barrier_command_id, cut)
+            .await
+    }
+
     /// The command the worker's relay holds for a queued entry. Not tied to a
     /// checkpoint cut; a caller that needs one proves it with a cut-bound read.
     pub async fn read_queued_command(

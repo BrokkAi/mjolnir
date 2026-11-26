@@ -662,11 +662,16 @@ impl Controller {
                     .map(serde_json::to_value)
                     .collect::<serde_json::Result<_>>()?;
             }
-            let mailbox = relay
+            let mut mailbox = relay
                 .connection_mut()
                 .read_checkpoint_mailbox(barrier_command_id.clone(), cursor.clone())
                 .await
                 .context("read the worker's mail at the checkpoint cut")?;
+            if relay.connection_mut().protocol_version() >= mj_core::relay::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL {
+                mailbox.quota_input = relay.connection_mut()
+                    .read_checkpoint_quota_input(barrier_command_id.clone(), cursor.clone()).await
+                    .context("read the worker's quota-interrupted input at the checkpoint cut")?;
+            }
             canonical_session.mailbox = (!mailbox.is_empty()).then_some(mailbox);
         } else {
             if !wakes.is_empty() && !barrier.operational.checkpoint_only {
