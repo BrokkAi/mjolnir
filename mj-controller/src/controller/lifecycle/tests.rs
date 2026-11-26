@@ -6681,7 +6681,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
             container: ConfigContainer {
                 memory_hard_limit: None,
                 build_cache: None,
-                image: "agent-dev:latest".into(),
+                image: "session-base:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
                 cpus: None,
@@ -6836,7 +6836,7 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
             container: ConfigContainer {
                 memory_hard_limit: None,
                 build_cache: None,
-                image: "agent-dev:latest".into(),
+                image: "session-base:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
                 cpus: None,

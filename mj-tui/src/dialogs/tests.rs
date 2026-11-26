@@ -1908,10 +1908,10 @@ fn golden_tui_container_editor_details() {
         session_id: "session-1".into(),
         source_container_id: "existing-container".into(),
         warning: mj_core::state::CONTAINER_UPGRADE_WARNING.into(),
-        current_image: "ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into(),
+        current_image: "ghcr.io/brokkai/mjolnir/session-base:2.51.0".into(),
         current_image_id: "sha256:previous".into(),
         target_image_id: Some("sha256:selected".into()),
-        target_image: "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0".into(),
+        target_image: "ghcr.io/brokkai/mjolnir/session-base:2.52.0".into(),
         available: true,
         retained_mounts: vec!["/workspace".into(), "/cache".into(), "/tmp".into()],
     };

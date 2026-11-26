@@ -317,7 +317,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
-    parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/agent-dev:latest")
+    parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/session-base:latest")
     parser.add_argument("--instance", default="adoption-quiescent-test")
     parser.add_argument("--run-ignored", action="store_true",
                         help="Run the ignored regression after brokkai/mjolnir#1603 is fixed")

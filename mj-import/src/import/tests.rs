@@ -7,7 +7,7 @@ use super::test_fixtures::{grok_session, native_cwd, native_fixture};
 fn container_template() -> mj_core::config::ContainerTemplate {
     mj_core::config::ContainerTemplate {
         build_cache: None,
-        image: "agent-dev:latest".into(),
+        image: "session-base:latest".into(),
         pull_policy: Default::default(),
         platform: None,
         cpus: None,

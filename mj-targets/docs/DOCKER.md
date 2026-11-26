@@ -150,7 +150,9 @@ or another OverlayFS, to read-only and reports that change during launch.
 
 ## Verify Docker and the image
 
-Session targets default to `docker.io/library/buildpack-deps:noble`. Use
+Session targets default to `ghcr.io/brokkai/mjolnir/session-base:latest`,
+Mjolnir's Ubuntu 24.04-based default session image with pinned Node.js and
+agent harnesses preinstalled. Use
 `mj image build` to build a per-bundle image from the project's mise recipe.
 Daemon-container mode uses `ghcr.io/brokkai/mjolnir/daemon`.
 
@@ -159,14 +161,14 @@ image. The examples use the default session image:
 
 ```console
 docker info
-docker pull docker.io/library/buildpack-deps:noble
+docker pull ghcr.io/brokkai/mjolnir/session-base:latest
 ```
 
 For an SSH target, run the equivalent checks on the configured host:
 
 ```console
 ssh builder docker info
-ssh builder docker pull docker.io/library/buildpack-deps:noble
+ssh builder docker pull ghcr.io/brokkai/mjolnir/session-base:latest
 ```
 
 Then run Mjolnir's checks:

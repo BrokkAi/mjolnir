@@ -845,12 +845,12 @@ kind = "bare"
 # dashboard's footer. The lab never runs a container, so it never pulls.
 [targets.podman]
 kind = "podman"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+image = "ghcr.io/brokkai/mjolnir/session-base:latest"
 pull_policy = "never"
 
 [targets.docker]
 kind = "docker"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+image = "ghcr.io/brokkai/mjolnir/session-base:latest"
 pull_policy = "never"
 '''
         (self.config / "config.toml").write_text(config)

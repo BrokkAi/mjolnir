@@ -47,7 +47,7 @@ For a target such as:
 ```toml
 [targets.podman]
 kind = "podman"
-image = "docker.io/library/buildpack-deps:noble"
+image = "ghcr.io/brokkai/mjolnir/session-base:latest"
 ```
 
 Mjolnir invokes the `podman` CLI as the user running Mjolnir; it does not use
@@ -230,7 +230,9 @@ sshd if provisioning sees dropped connections. Doctor reads the files rather
 than running `sshd -T`, which needs root, so it says when a drop-in was
 unreadable instead of guessing sshd's default.
 
-Session targets default to `docker.io/library/buildpack-deps:noble`. Use
+Session targets default to `ghcr.io/brokkai/mjolnir/session-base:latest`,
+Mjolnir's Ubuntu 24.04-based default session image with pinned Node.js and
+agent harnesses preinstalled. Use
 `mj image build` to build a per-bundle image from the project's mise recipe.
 
 For daemon-container mode, Mjolnir publishes `ghcr.io/brokkai/mjolnir/daemon`
@@ -351,7 +353,7 @@ exact remediations" below.
 Set `IMAGE` to the image used by the target. The example uses the default:
 
 ```console
-IMAGE=docker.io/library/buildpack-deps:noble
+IMAGE=ghcr.io/brokkai/mjolnir/session-base:latest
 podman pull "$IMAGE"
 podman image exists "$IMAGE"
 ```
@@ -365,7 +367,7 @@ Set `IMAGE` to the configured target's image. The commands below work as
 written with the default session image:
 
 ```console
-IMAGE=docker.io/library/buildpack-deps:noble
+IMAGE=ghcr.io/brokkai/mjolnir/session-base:latest
 CHECK_NAME="mj-podman-check-$$"
 podman run --init --detach --name "$CHECK_NAME" "$IMAGE" sleep infinity
 podman exec "$CHECK_NAME" /bin/sh -c 'printf "Mjolnir Podman exec works\n"'

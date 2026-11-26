@@ -2375,7 +2375,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
             container: mj_core::config::ContainerTemplate {
                 memory_hard_limit: None,
                 build_cache: None,
-                image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".into(),
+                image: "ghcr.io/brokkai/mjolnir/session-base:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
                 cpus: None,

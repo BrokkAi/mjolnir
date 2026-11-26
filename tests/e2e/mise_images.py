@@ -130,15 +130,15 @@ class Images(Lab):
             except OSError:
                 return False
         self.wait(ready, "local registry readiness")
-        # Milestone 1 owns creating HOME on plain buildpack-deps. This
+        # Milestone 1 owns the HOME assumption on session-base. This
         # independent image-build regression supplies that base requirement.
         self.base_image = f"{self.repository}/base:fixture"
         self.images.add(self.base_image)
         self.podman("build", "-t", self.base_image, "-f", "-",
-                    input="FROM docker.io/library/buildpack-deps:noble\nRUN mkdir -p /home/hel\n")
+                    input="FROM ghcr.io/brokkai/mjolnir/session-base:latest\nRUN mkdir -p /home/hel\n")
         self.podman("push", self.base_image)
         fixture_bin = self.runtime_root / "bin"
-        # The fixture uses the real Python already present in buildpack-deps.
+        # The fixture uses the real Python already present in session-base.
         (fixture_bin / "python3").unlink()
         (fixture_bin / "python3").symlink_to("/usr/bin/python3")
         git_port = self.free_port()
@@ -150,7 +150,7 @@ class Images(Lab):
         self.git_output(["remote", "add", "origin",
                          f"git://host.containers.internal:{git_port}/project"], self.project)
         body = (self.config / "config.toml").read_text()
-        body = body.replace('image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"',
+        body = body.replace('image = "ghcr.io/brokkai/mjolnir/session-base:latest"',
                             f'image = "{self.base_image}"', 1)
         body = body.replace('[targets.podman]\nkind = "podman"',
                             '[targets.podman]\nkind = "podman"\nplatform = "linux/amd64"')

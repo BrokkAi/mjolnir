@@ -5052,7 +5052,7 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
         container: mj_core::config::ContainerTemplate {
             memory_hard_limit: None,
             build_cache: None,
-            image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+            image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
             pull_policy: Default::default(),
             platform: None,
             cpus: None,

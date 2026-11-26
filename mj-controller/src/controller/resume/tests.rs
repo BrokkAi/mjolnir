@@ -3609,7 +3609,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
             "podman".into(),
             serde_json::from_value(serde_json::json!({
                 "kind": "local-podman",
-                "image": "agent-dev:latest"
+                "image": "session-base:latest"
             }))
             .unwrap(),
         );
@@ -3949,7 +3949,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
         "podman".into(),
         serde_json::from_value(serde_json::json!({
             "kind": "local-podman",
-            "image": "agent-dev:latest"
+            "image": "session-base:latest"
         }))
         .unwrap(),
     );
@@ -4114,7 +4114,7 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
         "podman".into(),
         serde_json::from_value(serde_json::json!({
             "kind": "local-podman",
-            "image": "agent-dev:latest"
+            "image": "session-base:latest"
         }))
         .unwrap(),
     );

@@ -488,12 +488,6 @@ impl RetainedContainer {
         })
     }
 
-    pub fn image_changed(&self) -> bool {
-        self.prepared_image.as_deref().is_some_and(|id| {
-            id.trim_start_matches("sha256:") != self.current_image_id.trim_start_matches("sha256:")
-        })
-    }
-
     pub fn apply_settings(
         &mut self,
         applied: &[AdditionalMount],
@@ -1280,9 +1274,9 @@ pub fn container_upgrade_test_plan(session_id: &str) -> RetainedContainer {
         source_id: "source-container".into(),
         name: name.clone(),
         backup_name: format!("{name}-upgrade-upgrade-test"),
-        current_image: "agent-dev:2.51.0".into(),
+        current_image: "session-base:2.51.0".into(),
         current_image_id: "sha256:source".into(),
-        target_image: "agent-dev:2.52.0".into(),
+        target_image: "session-base:2.52.0".into(),
         prepared_image: Some("sha256:target".into()),
         image_pin_reserved: false,
         selected_image_id: Some("sha256:target".into()),
@@ -1859,7 +1853,7 @@ mod tests {
             .map(|index| format!("MJ_UPGRADE_ENV_{index}={}", "e".repeat(4096)))
             .collect::<Vec<_>>();
         let mut template = ContainerTemplate {
-            image: "ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into(),
+            image: "ghcr.io/brokkai/mjolnir/session-base:2.51.0".into(),
             pull_policy: ImagePullPolicy::Never,
             extra_run_args: vec![
                 "--mount".into(),
@@ -1941,7 +1935,7 @@ mod tests {
         let error = inspect_retained_container(
             &locator,
             &session,
-            "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0",
+            "ghcr.io/brokkai/mjolnir/session-base:2.52.0",
             "unsupported",
             Path::new(&workspace),
             Path::new(&root),
@@ -2022,7 +2016,7 @@ mod tests {
         let mut plan = inspect_retained_container(
             &locator,
             &session,
-            "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0",
+            "ghcr.io/brokkai/mjolnir/session-base:2.52.0",
             "test-operation",
             Path::new(&workspace),
             Path::new(&root),

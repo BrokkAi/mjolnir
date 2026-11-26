@@ -43,7 +43,7 @@ from ssh_docker_lab import (  # noqa: E402
 
 
 DEFAULT_ARTIFACT_DIR = pathlib.Path("target/ssh-docker-e2e/acceptance")
-DEFAULT_IMAGE = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+DEFAULT_IMAGE = "ghcr.io/brokkai/mjolnir/session-base:latest"
 DEFAULT_TIMEOUT = 300.0
 CONTAINER_WORKSPACE = "/workspace"
 

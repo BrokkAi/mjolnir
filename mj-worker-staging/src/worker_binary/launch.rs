@@ -521,7 +521,7 @@ pub fn worker_launch_config_with_checkout(
         // told the process is already running in an isolated sandbox. Every
         // container engine can run the session as root. Podman and Nitro
         // always do. Docker and Apple container do when the image user is
-        // root, as on the default buildpack-deps image.
+        // root, as on the default session-base image.
         environment.insert("IS_SANDBOX".into(), "1".into());
     }
     // Placement owns this directive; profile/target environment cannot enable
