@@ -22,6 +22,7 @@ A switch between agent harnesses (the programs running models, such as Antigravi
 - [x] Push v2.76.0 at ae3157fad and cancel its failed first CI run before publication.
 - [x] Repair inherited Rust formatting and viewer VM fixtures; affected viewer files pass 4 and 41 tests.
 - [x] (2026-11-25 23:47Z) Move existing CLI logging into mj-client; CLI is 49,626 lines, client 20,362, workspace format check passes, 11 focused logging tests and affected-crate clippy pass.
+- [x] (2026-11-26 00:33Z) Repair third-run fixture/Windows failures: all seven controller and ten daemon failures pass individually, saved quota continuation passes, and ten-package clippy passes.
 - [ ] Review and push CI repairs, replace the unpublished tag, and monitor publication.
 - [x] Commit the initial validated fix and prepare version 2.76.0; request review of the combined deliverable.
 - [x] (2026-11-25 23:15Z) Address first review: multi-frame pending-context transfer, old checkpoint-only worker replacement, and avoiding combined context installation frames; seven focused tests and ten-package clippy pass.
@@ -161,3 +162,17 @@ Plan updated 2026-11-25 23:47Z: all three observed release blockers are repaired
 CI-repair review identified implicit tracing metadata changed by the logger module move. Preserve the original mj::logging target explicitly on both emitted events, so existing RUST_LOG filters retain the startup record and invalid-filter warning. Changed-file formatting and final client/CLI all-target clippy pass; unchanged logging tests were not repeated.
 
 The second release run, 45724647758, was cancelled before publication after two demonstrated failures. The server active-stop test successfully fetched preflight but its FakeNode lacked native replaceChildren, so rendering threw. Add that API using the fixture's existing remove/append linkage; the exact server regression now passes 1/1 with 319 others filtered, and active/idle diagnostic renders complete. No timeout or production behavior changed. The notice generator pinned libsqlite3-sys 0.39.1 although the locked graph resolves 0.40.0; select the unique resolved wrapper while retaining the audited SQLite 3.54.1 content/version and inventory checks. A full generator run on the locked offline graph succeeds and cites 0.40.0/3.54.1. These two small repairs require commit/review/push and another unpublished-tag retry; earlier successful checks were not repeated.
+
+
+## Third release attempt repair
+
+
+Run 45725719000 was cancelled before publication after controller tests (7 failures), daemon tests (10), and Windows test compilation (4 errors). Its server tests, notices, formatting, viewer checks, dependency budget and other completed gates passed. The tag remains unpublished.
+
+The lifecycle failures came from current DurableRelay stand-ins advertising their default protocol 58. Configure only affected current-worker cases using RELAY_PROTOCOL_VERSION; retain deliberately older-worker cases and the global stand-in default. Current archive fixtures must include the stand-in's open-request checkpoint, notification stack and native-use evidence, centralized in controller/checkpoint/stand_in.rs::current_latch_archive_metadata. Reused copies now match actual same-cut metadata. A cross-target export and resumed clone supply the real native rollout claimed by Used evidence. Stand-ins without the project-memory transport explicitly opt out where memory transfer is not under test. Assertions preserving session/checkout state, child lifecycle, cancellation, mail and archive reuse remain.
+
+The listing fixture now pairs its session with a same-profile spawn relation, preserving its existing model assertion while respecting current metadata ownership. The quota provenance test now expects Obsolete for stale profiles for every session kind. This matches unified Move ownership: accepted Moves persist their continuation and recover it; an assessment from profile A must not replan using profile B. The previous exemption belonged to the removed nondurable ChildSwitch. The existing recovered_parked_move_submits_saved_quota_continuation_before_completion regression passes; this does not prove recovery of an interrupted legacy ChildSwitch across upgrade.
+
+Windows fixture compilation is repaired with portable read-only permissions and correctly scoped imports, preserving the cross-platform rollback test and existing POSIX-only ignore. Actual Windows compilation remains the next release run's responsibility.
+
+Validation: all seven controller failure filters plus saved continuation passed individually. All ten daemon failure filters passed individually with nonzero counts; only failed attempts were rerun after fixture repair. Ten-package dev all-target clippy passes after the final source edits. No product behavior changed in these repairs. Parent reviewed the fixture changes; next commit/review/push them and retry the still-unpublished v2.76.0 tag. Status recorded 2026-11-26 00:33Z.

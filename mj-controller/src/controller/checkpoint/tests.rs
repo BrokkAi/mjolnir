@@ -14,8 +14,8 @@ use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::Context;
 use anyhow::Result;
 
-#[cfg(unix)]
 use crate::controller::restore_session_after_persistence_failure;
+#[cfg(unix)]
 use crate::controller::test_support::IsolatedTest;
 use crate::controller::test_support::{
     RefusingExecutor, checkpoint_test_session, write_checkpoint_gate_archive,
@@ -2017,6 +2017,10 @@ fn a_move_checkpoint_can_verify_its_archive_without_source_harness_readiness() {
     IsolatedTest::new(name)
         .env(REUSE_TEST_CHILD, "1")
         .env(LATCH_CHECKPOINT_ONLY, "1")
+        .env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        )
         .env("MJ_DATA_DIR", directory.path())
         .run();
 }
@@ -2435,6 +2439,10 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         );
         IsolatedTest::new(test_name)
             .env(REUSE_TEST_CHILD, "1")
+            .env(
+                LATCH_RELAY_MAX_PROTOCOL,
+                mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+            )
             // Longer than the normal checkpoint barrier deadline. The
             // controller must wait for startup rather than restart it.
             .env(LATCH_RELAY_STARTUP_DELAY_MS, "31000")
@@ -2581,6 +2589,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         Vec::new(),
         Vec::new(),
     );
+    current_latch_archive_metadata(&mut input);
     if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_none() {
         input.canonical_session.session.configuration.goal = Some(Box::new(
             serde_json::from_value(serde_json::json!({
@@ -2788,10 +2797,8 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         .unwrap();
     handle.sync_now().await.unwrap();
 
-    // Real session content, and the same policy has to export again. This
-    // stand-in speaks a protocol older than checkpoint mail, so a message it
-    // accepted but has not handed to the agent cannot be saved; the export
-    // says nothing about it and the person is told (#1616).
+    // Real session content makes the same policy export again. A current
+    // worker preserves accepted mail that has not reached the agent (#1616).
     let waiting = mj_core::mailbox::MailboxEvent {
         key: "waiting-message".into(),
         source: "parent".into(),
@@ -2864,21 +2871,20 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         format!("{error:#}").contains("no target is provisioned for this test"),
         "{error:#}"
     );
-    assert_eq!(
-        executor
-            .exported_mailbox
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("the export spec was not read"),
-        None
-    );
+    let mailbox = executor
+        .exported_mailbox
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the export spec was not read")
+        .expect("pending mail was not archived");
+    assert_eq!(mailbox.pending_events, vec![waiting]);
     let notices = executor.notices.lock().unwrap().clone();
     assert!(
-        notices
+        !notices
             .iter()
             .any(|notice| notice.starts_with("1 accepted message not yet delivered")),
-        "the unsaved message went unreported: {notices:?}"
+        "saved mail was reported missing: {notices:?}"
     );
     assert!(
         executor.observed_stages().iter().any(|(purpose, stages)| {
@@ -3409,6 +3415,10 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
         );
         IsolatedTest::new(name)
             .env(IN_PLACE_CLOSE_CHILD, "1")
+            .env(
+                LATCH_RELAY_MAX_PROTOCOL,
+                mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+            )
             // Checkpoint-only mode advances the lifecycle commands itself, so
             // the sealed Close reaches `Closed` without an ACP harness.
             .env(LATCH_CHECKPOINT_ONLY, "1")
@@ -3435,8 +3445,8 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
             latch_relay_proxy_command(&relay_root)
         ),
     );
-    // The archive covers exactly the two observations seeded below, so the
-    // close latch reuses it instead of exporting a new one.
+    // The existing checkpoint represents the seeded observations; a cross-target
+    // Move still exports a new archive onto the source target.
     let mut seed =
         mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
     seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
@@ -3451,11 +3461,31 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
     })
     .unwrap();
     drop(seed);
-    let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
+    let native_sessions = relay_root.join("profile/sessions/2026/08/14");
+    std::fs::create_dir_all(&native_sessions).unwrap();
+    std::fs::write(
+        native_sessions.join("rollout-native-session.jsonl"),
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-session\"}}\n",
+    )
+    .unwrap();
+    let mut input = crate::controller::test_support::checkpoint_archive_input(
+        LATCH_RELAY_SESSION,
+        2,
+        Vec::new(),
+        Vec::new(),
+    );
+    current_latch_archive_metadata(&mut input);
+    let checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
+        &archive_directory,
+        LATCH_RELAY_SESSION,
+        &input,
+    );
 
     let repository = crate::controller::test_support::committed_repository();
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "local".into();
+    // This stand-in has no connection-owned project-memory transfer endpoint.
+    session.no_project_memory = true;
     session.project_directory = Some(repository.path().to_owned());
     session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
@@ -3701,17 +3731,30 @@ fn in_close_cut_child(test_name: &str, late_write: &str) -> bool {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
+    let needs_current_worker = matches!(
+        test_name,
+        "a_suspend_seals_when_the_worker_journals_after_the_close_cut"
+            | "an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn"
+            | "a_refused_close_returns_the_session_to_running_and_releases_its_barrier"
+            | "suspended_archive_serializes_compact_tool_and_terminal_bodies"
+    );
     let test_name = format!(
         "{}::{test_name}",
         module_path!()
             .strip_prefix("mj_controller::")
             .unwrap_or(module_path!())
     );
-    IsolatedTest::new(test_name)
+    let mut test = IsolatedTest::new(test_name)
         .env(CLOSE_CUT_TEST_CHILD, "1")
         .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, late_write)
-        .env("MJ_DATA_DIR", directory.path())
-        .run();
+        .env("MJ_DATA_DIR", directory.path());
+    if needs_current_worker {
+        test = test.env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        );
+    }
+    test.run();
     false
 }
 

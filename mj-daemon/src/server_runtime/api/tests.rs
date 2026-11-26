@@ -9655,6 +9655,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
                 child_session_id: id.into(),
                 parent_session_id: parent.into(),
                 request_key: id.into(),
+                profile_id: "profile".into(),
                 model: Some("spawn-model".into()),
                 effort: Some("low".into()),
                 orchestrator,

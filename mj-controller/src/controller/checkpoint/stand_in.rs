@@ -33,6 +33,31 @@ pub enum ReleaseSupport {
     Rejected,
 }
 
+/// Metadata reported at the cut by this stand-in's current resumed relay.
+#[cfg(unix)]
+pub fn current_latch_archive_metadata(input: &mut mj_checkpoint::archive::ArchiveInput) {
+    let canonical = &mut input.canonical_session;
+    let mut assessment = mj_core::assessment::Checkpoint::decode(
+        canonical
+            .assessment_state
+            .as_ref()
+            .expect("fixture assessment"),
+    )
+    .expect("valid fixture assessment");
+    assessment.open_request = Some(mj_core::assessment::CheckpointOpenRequest {
+        request: None,
+        person_input_through: 0,
+    });
+    canonical.assessment_state = Some(serde_json::to_value(assessment).unwrap());
+    canonical.notification_stack = Some(Default::default());
+    canonical.native_use_evidence = Some(mj_core::relay::NativeSessionUseEvidence {
+        version: 1,
+        native_session_id: "native-session".into(),
+        opened_ordinal: Some(1),
+        usage: mj_core::relay::NativeSessionUse::Used,
+    });
+}
+
 /// The shell command a stand-in `hel` runs for `worker proxy`: one more
 /// connection to the stand-in relay over `relay_root`. A checkpoint opens such
 /// a connection for its project-memory transaction from the worker root, not
@@ -191,6 +216,13 @@ pub async fn close_cut_controller_for_child(
         }))
         .unwrap(),
     ));
+    if std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+        .ok()
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL)
+    {
+        current_latch_archive_metadata(&mut input);
+    }
     let checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
         &archive_directory,
         LATCH_RELAY_SESSION,

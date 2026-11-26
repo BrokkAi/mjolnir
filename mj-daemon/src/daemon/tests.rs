@@ -410,22 +410,33 @@ where
 fn in_held_close_child(test: &str, held: &str) -> bool {
     use mj_controller::controller::checkpoint::stand_in::{
         LATCH_RELAY_HOLD_COMMAND, LATCH_RELAY_HOLD_PATH, LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
-        LATE_HARNESS_NOTIFICATION,
+        LATCH_RELAY_MAX_PROTOCOL, LATE_HARNESS_NOTIFICATION,
     };
     const CHILD: &str = "MJ_TEST_HELD_CLOSE_CHILD";
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
-    mj_controller::controller::test_support::IsolatedTest::new(
+    let mut child = mj_controller::controller::test_support::IsolatedTest::new(
         mj_controller::controller::test_support::test_name(module_path!(), test),
     )
     .env(CHILD, "1")
     .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, LATE_HARNESS_NOTIFICATION)
     .env(LATCH_RELAY_HOLD_COMMAND, held)
     .env(LATCH_RELAY_HOLD_PATH, directory.path().join("relay-hold"))
-    .isolated_store(directory.path())
-    .run();
+    .isolated_store(directory.path());
+    if matches!(
+        test,
+        "a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes"
+            | "a_cancel_before_the_close_commits_leaves_the_session_running"
+            | "suspend_acceptance_survives_client_disconnect_during_checkpoint"
+    ) {
+        child = child.env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        );
+    }
+    child.run();
     false
 }
 
@@ -9940,7 +9951,7 @@ fn in_isolated_live_parent_test(name: &str) -> bool {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    mj_controller::controller::test_support::IsolatedTest::new(
+    let mut child = mj_controller::controller::test_support::IsolatedTest::new(
         mj_controller::controller::test_support::test_name(module_path!(), name),
     )
     .env(LIVE_PARENT_CHILD, "1")
@@ -9955,8 +9966,21 @@ fn in_isolated_live_parent_test(name: &str) -> bool {
     )
     .env("HOME", &home)
     .env("XDG_DATA_HOME", home.join(".local/share"))
-    .env("XDG_CONFIG_HOME", home.join(".config"))
-    .run();
+    .env("XDG_CONFIG_HOME", home.join(".config"));
+    if matches!(
+        name,
+        "suspend_recovery_preserves_a_clones_unpushed_work"
+            | "suspend_recovery_preserves_a_published_clones_durable_review_refs"
+            | "a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running"
+            | "a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified"
+            | "accepted_suspend_failure_is_published_without_an_observer"
+    ) {
+        child = child.env(
+            mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        );
+    }
+    child.run();
     false
 }
 
@@ -10023,7 +10047,9 @@ fn relay_sealed(relay_root: &Path) -> bool {
 /// `hel` in the parent's worker root, which fails the way a full disk does.
 #[cfg(unix)]
 async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy) -> LiveParent {
-    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+    use mj_controller::controller::checkpoint::stand_in::{
+        LATCH_RELAY_MAX_PROTOCOL, LATCH_RELAY_SESSION, current_latch_archive_metadata,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -10054,6 +10080,12 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     let workspace = mj_controller::database::create_workspace("Parent suspension").unwrap();
     let mut parent =
         mj_controller::controller::test_support::checkpoint_test_session(LATCH_RELAY_SESSION);
+    let current_relay = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+        .ok()
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL);
+    // The stand-in does not implement the project-memory transfer transport.
+    parent.no_project_memory = current_relay;
     parent.workspace_id = workspace.id.clone();
     parent.target_template_id = "removed-local".into();
     parent.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
@@ -10071,11 +10103,20 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     }));
     parent.project_directory = Some(checkout);
     if recovery_copy == ParentRecoveryCopy::Installed {
+        let mut input = mj_controller::controller::test_support::checkpoint_archive_input(
+            LATCH_RELAY_SESSION,
+            2,
+            Vec::new(),
+            Vec::new(),
+        );
+        if current_relay {
+            current_latch_archive_metadata(&mut input);
+        }
         parent.checkpoint = Some(Box::new(
-            mj_controller::controller::test_support::write_checkpoint_gate_archive(
+            mj_controller::controller::test_support::write_checkpoint_archive_input(
                 &archives,
                 LATCH_RELAY_SESSION,
-                2,
+                &input,
             ),
         ));
     }
@@ -10292,7 +10333,9 @@ impl LiveClone {
 /// is a stand-in, while capture runs the real worker exporter.
 #[cfg(unix)]
 async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
-    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+    use mj_controller::controller::checkpoint::stand_in::{
+        LATCH_RELAY_MAX_PROTOCOL, LATCH_RELAY_SESSION,
+    };
     use mj_controller::controller::test_support::{committed_repository, test_git};
     use mj_core::worker_suspend as wire;
     use std::os::unix::fs::PermissionsExt;
@@ -10306,6 +10349,21 @@ async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
         std::fs::create_dir_all(path).unwrap();
     }
     seed_live_session(directory.path(), &relay_root);
+    let current_relay = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+        .ok()
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL);
+    if current_relay {
+        // The resumed stand-in says its native session was used, so the real
+        // exporter must find that session's rollout.
+        let native_sessions = worker_root.join("profile/sessions/2026/08/14");
+        std::fs::create_dir_all(&native_sessions).unwrap();
+        std::fs::write(
+            native_sessions.join("rollout-native-session.jsonl"),
+            b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-session\"}}\n",
+        )
+        .unwrap();
+    }
     let hel = worker_root.join("hel");
     std::fs::write(
         &hel,
@@ -10362,6 +10420,8 @@ async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
 
     let workspace = mj_controller::database::create_workspace("Clone suspension").unwrap();
     session.workspace_id = workspace.id.clone();
+    // The stand-in does not implement the project-memory transfer transport.
+    session.no_project_memory = current_relay;
     session.state = SessionState::Closing;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());

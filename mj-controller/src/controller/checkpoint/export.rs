@@ -874,7 +874,6 @@ mod tests {
         ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
     )]
     fn an_export_leaves_the_source_repositorys_exclude_file_alone() {
-        use std::os::unix::fs::PermissionsExt;
         let fixture = fixture(false);
         let mut record = stopped_session(&fixture, origin_delta_repository(&fixture, ""));
         record.managed_worktree = Some(Box::new(ManagedWorktree {
@@ -889,7 +888,9 @@ mod tests {
         let exclude = fixture.source.join(".git/info/exclude");
         let before = std::fs::read(&exclude).unwrap();
         // A write would fail outright, not just change the file.
-        std::fs::set_permissions(&exclude, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let mut permissions = std::fs::metadata(&exclude).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&exclude, permissions).unwrap();
 
         checkpoint_patch(&record, &ProcessExecutor).unwrap();
         assert_eq!(std::fs::read(&exclude).unwrap(), before);
