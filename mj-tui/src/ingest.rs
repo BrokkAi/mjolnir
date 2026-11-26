@@ -547,6 +547,41 @@ impl DashboardState {
             mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
         >,
     ) {
+        if self.published_cards == cards {
+            return;
+        }
+        self.published_cards = cards;
+        self.refresh_notification_cards();
+    }
+
+    /// Derives the cards every reader sees from the published ones and this
+    /// client's read frontier. The daemon drops an Important entry once the
+    /// session's receipt passes it; this client's receipt is usually ahead of
+    /// the daemon's, so it applies the same rule (`NotificationStackEntry::
+    /// is_unread`) to its own frontier instead of showing a card for a
+    /// conversation it has already read. Call after anything that changes
+    /// either input.
+    pub(crate) fn refresh_notification_cards(&mut self) {
+        let cards = self.published_cards.as_ref().map(|published| {
+            let mut cards = published.clone();
+            for (id, card) in published.iter() {
+                let viewed_through = self
+                    .state
+                    .sessions
+                    .get(id)
+                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                match card.unread_through(viewed_through) {
+                    Some(std::borrow::Cow::Borrowed(_)) => {}
+                    Some(std::borrow::Cow::Owned(card)) => {
+                        cards.insert(id.clone(), card);
+                    }
+                    None => {
+                        cards.remove(id);
+                    }
+                }
+            }
+            cards
+        });
         if self.notification_cards == cards {
             return;
         }
@@ -788,6 +823,7 @@ impl DashboardState {
         self.clamp_selections();
         self.leave_subagents_stopped_by_suspend(stopped_by_suspend);
         self.presented_records = self.state.sessions.clone();
+        self.refresh_notification_cards();
     }
 
     /// Replace the daemon's complete durable Move projection. Active intents
@@ -1381,7 +1417,10 @@ impl DashboardState {
         target: mj_core::attention::NotificationDismissal,
         result: Result<u64, String>,
     ) {
-        match self.apply_notification_dismissal(session_id, target, result) {
+        let applied = self.apply_notification_dismissal(session_id, target, result);
+        // A read dismissal advanced the local receipt.
+        self.refresh_notification_cards();
+        match applied {
             Some(Ok(())) => self.set_notice("Notification dismissed."),
             Some(Err(error)) => {
                 self.set_notice(format!("Could not dismiss notification: {error}"));
@@ -1410,6 +1449,8 @@ impl DashboardState {
                 None => {}
             }
         }
+        // A read dismissal advanced local receipts.
+        self.refresh_notification_cards();
         let count = |n| crate::widgets::counted(n, "notification", "notifications");
         match failures.as_slice() {
             [] if cleared == 0 => {}

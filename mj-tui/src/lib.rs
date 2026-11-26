@@ -968,6 +968,12 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    /// The daemon's cards as published. Readers use `notification_cards`.
+    published_cards: Option<
+        mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
+    >,
+    /// `published_cards` read through this client's own read frontier (see
+    /// `refresh_notification_cards`). Every reader of cards uses this map.
     pub(crate) notification_cards: Option<
         mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
     >,
@@ -1390,6 +1396,7 @@ impl DashboardState {
             stopped_records: Default::default(),
             unread_frontiers: Default::default(),
             notification_dismissals: Default::default(),
+            published_cards: None,
             notification_cards: None,
             form_holders: Default::default(),
             session_verdicts: Default::default(),

@@ -2678,6 +2678,94 @@ pub(crate) mod tests {
         dashboard
     }
 
+    // The daemon keeps publishing an Important entry until it has saved the
+    // receipt this client already holds; a card for a conversation the user is
+    // reading must not appear in that gap, and a republished stale card must
+    // not bring it back.
+    #[test]
+    fn published_card_hides_entries_the_local_receipt_has_passed() {
+        use mj_client::runtime_feed::NotificationCard;
+        use mj_core::attention::NotificationStackEntry;
+        let entry = |ordinal, kind, at| NotificationStackEntry {
+            completed_at_ms: at,
+            completed_ordinal: ordinal,
+            kind,
+            message: EntryMessage::None,
+        };
+        let cards = || {
+            [
+                (
+                    "i1".to_owned(),
+                    NotificationCard {
+                        since_ms: 10,
+                        badge: NotificationKind::Important,
+                        entries: vec![entry(7, NotificationKind::Important, 10)],
+                        dismissal: Some(NotificationDismissal::ReadThrough(7)),
+                        holder: None,
+                        form: None,
+                    },
+                ),
+                (
+                    "q1".to_owned(),
+                    NotificationCard {
+                        since_ms: 10,
+                        badge: NotificationKind::NeedsInput,
+                        entries: vec![
+                            entry(4, NotificationKind::Important, 10),
+                            entry(9, NotificationKind::NeedsInput, 20),
+                        ],
+                        dismissal: Some(NotificationDismissal::Stack { revision: 9 }),
+                        holder: None,
+                        form: None,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect::<mj_core::snapshot_map::SnapshotMap<_, _>>()
+        };
+        let shown = |dashboard: &DashboardState| {
+            dashboard
+                .notification_entries()
+                .into_iter()
+                .map(|entry| {
+                    let card = entry.published.as_ref().unwrap();
+                    (entry.session_id.clone(), card.entries.len(), card.since_ms)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut dashboard = dashboard();
+        dashboard.set_notification_cards(Some(cards()));
+        assert_eq!(
+            shown(&dashboard),
+            [("i1".to_owned(), 1, 10), ("q1".to_owned(), 2, 10)]
+        );
+
+        // The user reads both conversations; the receipts reach this client first.
+        let mut state = (*dashboard.state).clone();
+        state
+            .sessions
+            .get_mut("i1")
+            .unwrap()
+            .viewed_through_event_ordinal = 7;
+        state
+            .sessions
+            .get_mut("q1")
+            .unwrap()
+            .viewed_through_event_ordinal = 5;
+        dashboard.set_state(state.clone());
+        let expected = [("q1".to_owned(), 1, 20)];
+        assert_eq!(
+            shown(&dashboard),
+            expected,
+            "the read Important entry is gone, the NeedsInput entry stays, and since_ms follows the entry that stays"
+        );
+
+        // The daemon has not saved the receipt yet and republishes the old cards.
+        dashboard.set_notification_cards(Some(cards()));
+        dashboard.set_state(state);
+        assert_eq!(shown(&dashboard), expected);
+    }
+
     // Hard-won: dc77f11c1: an id-less question skipped its bounded text read.
     // Hard-won: 1f62bc101: changing card items retained a hidden form's armed click.
     #[tokio::test]
@@ -2952,10 +3040,14 @@ pub(crate) mod tests {
                 target: NotificationDismissal::Stack { revision: 52 },
             }
         );
-        dashboard.handle_key(alt(KeyCode::Char('s')));
-        let bounded = dashboard.wanted_notification_message().unwrap();
-        assert_eq!(bounded.session_id, "i1");
-        assert_eq!(bounded.source, NotificationReadSource::Through(8));
+        // The read dismissal advanced the local receipt past the card's entry,
+        // so its card is gone before the daemon withdraws it.
+        assert!(
+            dashboard
+                .notification_entries()
+                .iter()
+                .all(|entry| entry.session_id != "i1")
+        );
 
         dashboard.set_notification_cards(Some(Default::default()));
         assert!(dashboard.notification_entries().is_empty());

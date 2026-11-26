@@ -454,6 +454,36 @@ pub struct NotificationCard {
 }
 
 impl NotificationCard {
+    /// Time of the oldest entry or form on the card; 0 when it has none.
+    pub fn oldest_item_ms(&self) -> i64 {
+        self.entries
+            .iter()
+            .map(|entry| entry.completed_at_ms)
+            .chain(self.form.iter().map(|form| form.raised_at_ms))
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// The card as seen by a reader whose receipt is `viewed_through`: entries
+    /// that reader no longer owes are dropped. `None` when that leaves no entry
+    /// and no form. A card that loses nothing is returned borrowed.
+    pub fn unread_through(&self, viewed_through: u64) -> Option<std::borrow::Cow<'_, Self>> {
+        if self
+            .entries
+            .iter()
+            .all(|entry| entry.is_unread(viewed_through))
+        {
+            return Some(std::borrow::Cow::Borrowed(self));
+        }
+        let mut card = self.clone();
+        card.entries.retain(|entry| entry.is_unread(viewed_through));
+        if card.entries.is_empty() && card.form.is_none() {
+            return None;
+        }
+        card.since_ms = card.oldest_item_ms();
+        Some(std::borrow::Cow::Owned(card))
+    }
+
     /// Stack messages belong to the card session; only the live form uses its holder.
     /// `item` is the oldest-first entry index, with the form after the entries.
     pub fn item_destination<'a>(&'a self, session: &'a str, item: usize) -> &'a str {
