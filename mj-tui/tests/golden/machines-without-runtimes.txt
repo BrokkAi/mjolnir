@@ -9,16 +9,10 @@
 │  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
 │  │ No messages yet  │ No runtime: it did not answer. `ssh nas true` failed: Connection timed out. Check            │                     │
 │  │                  │ that nas is up.                                                                              │                     │
-│                     │   local                           1 setting  ›                                               │                     │
-│                     │   builder                         No runtime  ›                                              │                     │
+│                     │   local                           1 setting  ›                                               │  ───────────────────╯
+│                     │   builder                         No runtime  ›                                              │  ───────────────────╮
 │                     │ Save it; opening New session then finds what it can run and adds those runtimes.             │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
@@ -29,7 +23,13 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -45,13 +45,7 @@ Enter open · / searc                                                           
 │  Stopped  podman    │   podman                          11 settings  ›                         Add                 │                     │
 │  │ No messages yet  │   builder                         4 settings  ›                          Detect runtimes     │                     │
 │  │                  │   builder-docker                  11 settings  ›                         Machines            │                     │
-│                     │                                                                          Detection results   │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                          Detection results   │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -63,9 +57,15 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │ Added runtimes: builder, builder-docker. 2 were left out; Detection results says why. Review │                     │
-│                     │ them, then Save.                                                                             │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │ them, then Save.                                                                             │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -81,14 +81,8 @@ Enter open · / searc                                                           
 │  Stopped  podman    │ Podman is not installed.                                                                     │                     │
 │  │ No messages yet  │                                                                                              │                     │
 │  │                  │ nas                                                                                          │                     │
-│                     │ `ssh dev@nas.example.test true` failed: Connection timed out                                 │                     │
-│                     │   Fix: Check that nas.example.test is up.                                                    │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
+│                     │ `ssh dev@nas.example.test true` failed: Connection timed out                                 │  ───────────────────╯
+│                     │   Fix: Check that nas.example.test is up.                                                    │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
@@ -101,7 +95,13 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ scroll · PgUp/PgDn · Home/End · Esc back ────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -117,13 +117,7 @@ Enter open · / searc                                                           
 │  Stopped  podman    │   podman                          11 settings  ›                         Add                 │                     │
 │  │ No messages yet  │   builder                         4 settings  ›                          Detect runtimes     │                     │
 │  │                  │   builder-docker                  11 settings  ›                         Machines            │                     │
-│                     │                                                                          Detection results   │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                          Detection results   │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -135,9 +129,15 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │ Added runtimes: builder, builder-docker. 2 were left out; Detection results says why. Review │                     │
-│                     │ them, then Save.                                                                             │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │ them, then Save.                                                                             │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -153,14 +153,8 @@ Enter open · / searc                                                           
 │  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
 │  │ No messages yet  │ No runtime: it did not answer. `ssh nas true` failed: Connection timed out. Check            │                     │
 │  │                  │ that nas is up.                                                                              │                     │
-│                     │   local                           1 setting  ›                                               │                     │
-│                     │   builder                         7 settings  ›                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
+│                     │   local                           1 setting  ›                                               │  ───────────────────╯
+│                     │   builder                         7 settings  ›                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
@@ -173,7 +167,13 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette

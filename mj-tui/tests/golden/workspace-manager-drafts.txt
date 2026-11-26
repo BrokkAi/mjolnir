@@ -4,225 +4,9 @@ action: SelectWorkspace { workspace_id: "alpha" }
 === dashboard after selecting the next workspace (110x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Echo  Foxtrot             ≡ ││                                                                    │
-╰──────────────────────────────────────╯│                                                                    │
+╰──────────────────────────────────────╯│                          ✦  M J O L N I R                          │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
-│ Create   Open   Filter: _____________││                                                                    │
-│No sessions yet                       ││                          ✦  M J O L N I R                          │
-│Create new work or open a session.    ││                                                                    │
-│                                      ││                 Create a session to start building.                │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No live session ───────────────────────────────────────────────────╮
-│                                      ││No live session in this workspace.                                  │
-│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
-╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│  Host / fleet  Targets  CPU  RAM                                                                           │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│ANTHROPIC                                                                                                   │
-│ + refreshing…                                                                                              │
-│OPENAI                                                                                                      │
-│ + 2 refreshing…                                                                                            │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Nothing needs you                                                                                           │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-action: SelectWorkspace { workspace_id: "beta" }
-
-=== dashboard after selecting a numbered workspace (110x32) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Echo  Foxtrot             ≡ ││                                                                    │
-╰──────────────────────────────────────╯│                                                                    │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
-│ Create   Open   Filter: _____________││                                                                    │
-│No sessions yet                       ││                          ✦  M J O L N I R                          │
-│Create new work or open a session.    ││                                                                    │
-│                                      ││                 Create a session to start building.                │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No live session ───────────────────────────────────────────────────╮
-│                                      ││No live session in this workspace.                                  │
-│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
-╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│  Host / fleet  Targets  CPU  RAM                                                                           │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│ANTHROPIC                                                                                                   │
-│ + refreshing…                                                                                              │
-│OPENAI                                                                                                      │
-│ + 2 refreshing…                                                                                            │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Nothing needs you                                                                                           │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-action: LoadWorkspaceManagement { generation: 1 }
-
-=== workspace manager list (110x32) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Echo  Foxtrot             ≡ ││                                                                    │
-╰────────────                                                                                                │
-╭ Sessions ──                                                                                                │
-│ Create   Op  ╭ × Workspaces ───────────────────────────────────────────────────────────────╮               │
-│No sessions   │Enter opens the selected workspace · Tab moves between controls              │               │
-│Create new w  │Alpha  1 session                                              New workspace  │               │
-│              │Beta  Current  2 sessions  2 drafts                           Rename         │               │
-│              │Default  0 sessions                                           Delete…        │               │
-│              │                                                              Drafts         │               │
-│              │                                                              Open           │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ─────────────╮
-│              │                                                                             │               │
-│              │                                                                             │  one.         │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
-│  Host / fle  │                                                                             │               │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
-│ANTHROPIC     │                                                                             │               │
-│ + refreshin  │                                                                             │               │
-│OPENAI        │                                                                             │               │
-│ + 2 refresh  │                                                                             │               │
-╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-╭ Notificatio                                                                                   ────── ▁   ▄ ╮
-│Nothing need                                                                                                │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-action: None
-
-=== drafts for the selected workspace (110x32) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Echo  Foxtrot             ≡ ││                                                                    │
-╰────────────                                                                                                │
-╭ Sessions ──                                                                                                │
-│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
-│No sessions   │Select a draft to recover or discard · Esc returns to the list               │               │
-│Create new w  │Draft session · 2026-10-01 12:00 · Detached draft preview       Back         │               │
-│              │unattached · 2026-10-02 09:30 · Unattached draft preview        Discard      │               │
-│              │                                                                Discard all  │               │
-│              │                                                                Recover      │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ─────────────╮
-│              │                                                                             │               │
-│              │                                                                             │  one.         │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
-│  Host / fle  │                                                                             │               │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Profiles ▾   │Draft session · terminal composer (PID 4100)                                 │  ────── ▁   ▄ ╮
-│ANTHROPIC     │Detached draft preview                                                       │               │
-│ + refreshin  │                                                                             │               │
-│OPENAI        │                                                                             │               │
-│ + 2 refresh  │                                                                             │               │
-╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-╭ Notificatio                                                                                   ────── ▁   ▄ ╮
-│Nothing need                                                                                                │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-action: None
-
-=== second draft selected (110x32) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Echo  Foxtrot             ≡ ││                                                                    │
-╰────────────                                                                                                │
-╭ Sessions ──                                                                                                │
-│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
-│No sessions   │Select a draft to recover or discard · Esc returns to the list               │               │
-│Create new w  │Draft session · 2026-10-01 12:00 · Detached draft preview       Back         │               │
-│              │unattached · 2026-10-02 09:30 · Unattached draft preview        Discard      │               │
-│              │                                                                Discard all  │               │
-│              │                                                                Recover      │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ─────────────╮
-│              │                                                                             │               │
-│              │                                                                             │  one.         │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
-│  Host / fle  │                                                                             │               │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Profiles ▾   │unattached · web viewer                                                      │  ────── ▁   ▄ ╮
-│ANTHROPIC     │Unattached draft preview                                                     │               │
-│ + refreshin  │                                                                             │               │
-│OPENAI        │                                                                             │               │
-│ + 2 refresh  │                                                                             │               │
-╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-╭ Notificatio                                                                                   ────── ▁   ▄ ╮
-│Nothing need                                                                                                │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-action: DiscardWorkspaceDrafts { generation: 1, workspace_id: "beta", draft_id: None }
-action: DiscardWorkspaceDrafts { generation: 1, workspace_id: "beta", draft_id: Some("draft-terminal") }
-
-=== draft discard completed (110x32) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Echo  Foxtrot             ≡ ││                                                                    │
-╰────────────                                                                                                │
-╭ Sessions ──                                                                                                │
-│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
-│No sessions   │Draft discarded.                                                             │               │
-│Create new w  │No detached drafts.                                                 Back     │               │
-│              │                                                                    Discard  │               │
-│              │                                                                    Recover  │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ─────────────╮
-│              │                                                                             │               │
-│              │                                                                             │  one.         │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
-│  Host / fle  │                                                                             │               │
-╰────────────  │                                                                             │  ─────────────╯
-╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
-│ANTHROPIC     │                                                                             │               │
-│ + refreshin  │                                                                             │               │
-│OPENAI        │                                                                             │               │
-│ + 2 refresh  │                                                                             │               │
-╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-╭ Notificatio                                                                                   ────── ▁   ▄ ╮
-│Nothing need                                                                                                │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-
-=== seven workspace rows in Standard sidebar (110x32) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Project 00 界   Project 01 界      ▐ ≡ ││                                                                    │
-│ Project 02 界   Project 03 界      ▐   ││                                                                    │
-│ Project 04 界   Project 05 界      ▐   ││                                                                    │
-│ Project 06 界   Project 07 界      ▐   ││                                                                    │
-│ Project 08 界   Project 09 界      │   ││                          ✦  M J O L N I R                          │
-│ Project 10 界   Project 11 界      │   ││                                                                    │
-│ Project 12 界   Project 13 界      │   ││                 Create a session to start building.                │
-╰──────────────────────────────────────╯│                                                                    │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
-│ Create   Open   Filter: _____________││                                                                    │
+│ Create   Open   Filter: _____________││                 Create a session to start building.                │
 │No sessions yet                       ││                                                                    │
 │Create new work or open a session.    ││                                                                    │
 │                                      ││                                                                    │
@@ -242,28 +26,238 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
+action: SelectWorkspace { workspace_id: "beta" }
+
+=== dashboard after selecting a numbered workspace (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Echo  Foxtrot             ≡ ││                                                                    │
+╰──────────────────────────────────────╯│                          ✦  M J O L N I R                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
+│ Create   Open   Filter: _____________││                 Create a session to start building.                │
+│No sessions yet                       ││                                                                    │
+│Create new work or open a session.    ││                                                                    │
+│                                      ││                                                                    │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ───────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                  │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                                   │
+│ + refreshing…                                                                                              │
+│OPENAI                                                                                                      │
+│ + 2 refreshing…                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
+action: LoadWorkspaceManagement { generation: 1 }
+
+=== workspace manager list (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Echo  Foxtrot             ≡ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces ───────────────────────────────────────────────────────────────╮               │
+│No sessions   │Enter opens the selected workspace · Tab moves between controls              │               │
+│Create new w  │Alpha  1 session                                              New workspace  │               │
+│              │Beta  Current  2 sessions  2 drafts                           Rename         │               │
+│              │Default  0 sessions                                           Delete…        │  ─────────────╯
+│              │                                                              Drafts         │  ─────────────╮
+│              │                                                              Open           │               │
+│              │                                                                             │  one.         │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│ + refreshin  │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│ + 2 refresh  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Notificatio  │                                                                             │  ────── ▁   ▄ ╮
+│Nothing need  │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
+action: None
+
+=== drafts for the selected workspace (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Echo  Foxtrot             ≡ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
+│No sessions   │Select a draft to recover or discard · Esc returns to the list               │               │
+│Create new w  │Draft session · 2026-10-01 12:00 · Detached draft preview       Back         │               │
+│              │unattached · 2026-10-02 09:30 · Unattached draft preview        Discard      │               │
+│              │                                                                Discard all  │  ─────────────╯
+│              │                                                                Recover      │  ─────────────╮
+│              │                                                                             │               │
+│              │                                                                             │  one.         │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│ + refreshin  │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│ + 2 refresh  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Notificatio  │Draft session · terminal composer (PID 4100)                                 │  ────── ▁   ▄ ╮
+│Nothing need  │Detached draft preview                                                       │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
+action: None
+
+=== second draft selected (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Echo  Foxtrot             ≡ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
+│No sessions   │Select a draft to recover or discard · Esc returns to the list               │               │
+│Create new w  │Draft session · 2026-10-01 12:00 · Detached draft preview       Back         │               │
+│              │unattached · 2026-10-02 09:30 · Unattached draft preview        Discard      │               │
+│              │                                                                Discard all  │  ─────────────╯
+│              │                                                                Recover      │  ─────────────╮
+│              │                                                                             │               │
+│              │                                                                             │  one.         │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│ + refreshin  │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│ + 2 refresh  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Notificatio  │unattached · web viewer                                                      │  ────── ▁   ▄ ╮
+│Nothing need  │Unattached draft preview                                                     │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
+action: DiscardWorkspaceDrafts { generation: 1, workspace_id: "beta", draft_id: None }
+action: DiscardWorkspaceDrafts { generation: 1, workspace_id: "beta", draft_id: Some("draft-terminal") }
+
+=== draft discard completed (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Echo  Foxtrot             ≡ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
+│No sessions   │Draft discarded.                                                             │               │
+│Create new w  │No detached drafts.                                                 Back     │               │
+│              │                                                                    Discard  │               │
+│              │                                                                    Recover  │  ─────────────╯
+│              │                                                                             │  ─────────────╮
+│              │                                                                             │               │
+│              │                                                                             │  one.         │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│ + refreshin  │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│ + 2 refresh  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Notificatio  │                                                                             │  ────── ▁   ▄ ╮
+│Nothing need  │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
+
+=== seven workspace rows in Standard sidebar (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Project 00 界   Project 01 界      ▐ ≡ ││                                                                    │
+│ Project 02 界   Project 03 界      ▐   ││                          ✦  M J O L N I R                          │
+│ Project 04 界   Project 05 界      ▐   ││                                                                    │
+│ Project 06 界   Project 07 界      ▐   ││                 Create a session to start building.                │
+│ Project 08 界   Project 09 界      │   ││                                                                    │
+│ Project 10 界   Project 11 界      │   ││                                                                    │
+│ Project 12 界   Project 13 界      │   ││                                                                    │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╭ Sessions ───────────────── ▁   ▄   □ ╮╭ No live session ───────────────────────────────────────────────────╮
+│ Create   Open   Filter: _____________││No live session in this workspace.                                  │
+│No sessions yet                       ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                                   │
+│ + refreshing…                                                                                              │
+│OPENAI                                                                                                      │
+│ + 2 refreshing…                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === seven workspace rows in Maximized sidebar (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
 │ Project 00 界   Project 01 界   Project 02 界      ▐ ≡ ││                                                     │
-│ Project 03 界   Project 04 界   Project 05 界      ▐   ││                                                     │
+│ Project 03 界   Project 04 界   Project 05 界      ▐   ││                  ✦  M J O L N I R                   │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
-│ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 09 界   Project 10 界   Project 11 界      ▐   ││         Create a session to start building.         │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
 │ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
-│ Project 18 界   Project 19 界   Project 20 界      │   ││         Create a session to start building.         │
-╰─────────────────────────────────────────────────────╯│                                                     │
-╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││                                                     │
-│No sessions yet                                      ││                                                     │
-│Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     │╰─────────────────────────────────────────────────────╯
-│                                                     │╭ No live session ────────────────────────────────────╮
-│                                                     ││No live session in this workspace.                   │
-│                                                     ││Press ctrl+b c to create a session or ctrl+b g to    │
+│ Project 18 界   Project 19 界   Project 20 界      │   ││                                                     │
+╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
+╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮╭ No live session ────────────────────────────────────╮
+│ Create   Open   Filter: ________________________    ││No live session in this workspace.                   │
+│No sessions yet                                      ││Press ctrl+b c to create a session or ctrl+b g to    │
 ╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                                                           │
@@ -276,28 +270,28 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === wheel scrolls without switching workspaces (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
 │ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
-│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
+│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                  ✦  M J O L N I R                   │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││         Create a session to start building.         │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
 │ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
-╰─────────────────────────────────────────────────────╯│                                                     │
-╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││                                                     │
-│No sessions yet                                      ││                                                     │
-│Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     │╰─────────────────────────────────────────────────────╯
-│                                                     │╭ No live session ────────────────────────────────────╮
-│                                                     ││No live session in this workspace.                   │
-│                                                     ││Press ctrl+b c to create a session or ctrl+b g to    │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
+╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
+╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮╭ No live session ────────────────────────────────────╮
+│ Create   Open   Filter: ________________________    ││No live session in this workspace.                   │
+│No sessions yet                                      ││Press ctrl+b c to create a session or ctrl+b g to    │
 ╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                                                           │
@@ -310,28 +304,28 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === scrollbar seeks to the final workspace rows (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
 │ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
-│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
+│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                  ✦  M J O L N I R                   │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││         Create a session to start building.         │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
 │ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
-╰─────────────────────────────────────────────────────╯│                                                     │
-╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││                                                     │
-│No sessions yet                                      ││                                                     │
-│Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     │╰─────────────────────────────────────────────────────╯
-│                                                     │╭ No live session ────────────────────────────────────╮
-│                                                     ││No live session in this workspace.                   │
-│                                                     ││Press ctrl+b c to create a session or ctrl+b g to    │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
+╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
+╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮╭ No live session ────────────────────────────────────╮
+│ Create   Open   Filter: ________________________    ││No live session in this workspace.                   │
+│No sessions yet                                      ││Press ctrl+b c to create a session or ctrl+b g to    │
 ╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                                                           │
@@ -344,28 +338,28 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === selecting the final workspace reveals it (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
 │ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
-│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
+│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                  ✦  M J O L N I R                   │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││         Create a session to start building.         │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
 │ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
-╰─────────────────────────────────────────────────────╯│                                                     │
-╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││                                                     │
-│No sessions yet                                      ││                                                     │
-│Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     │╰─────────────────────────────────────────────────────╯
-│                                                     │╭ No live session ────────────────────────────────────╮
-│                                                     ││No live session in this workspace.                   │
-│                                                     ││Press ctrl+b c to create a session or ctrl+b g to    │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
+╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
+╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮╭ No live session ────────────────────────────────────╮
+│ Create   Open   Filter: ________________________    ││No live session in this workspace.                   │
+│No sessions yet                                      ││Press ctrl+b c to create a session or ctrl+b g to    │
 ╰─────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                                                           │
@@ -378,24 +372,24 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === tiny workspace selector (110x32) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ──────────────────────────────────────────────────────── ◇   ⋯───╮
 │ Project 23… ▾  ≡ ││                                                                                        │
-╰──────────────────╯│                                                                                        │
+╰──────────────────╯│                                    ✦  M J O L N I R                                    │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                        │
-│ Create   Open    ││                                                                                        │
-│No sessions yet   ││                                    ✦  M J O L N I R                                    │
+│ Create   Open    ││                           Create a session to start building.                          │
+│No sessions yet   ││                                                                                        │
 │Create new work or││                                                                                        │
-│open a session.   ││                           Create a session to start building.                          │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
+│open a session.   ││                                                                                        │
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ No live session ───────────────────────────────────────────────────────────────────────╮
 │                  ││No live session in this workspace.                                                      │
@@ -412,40 +406,46 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                       │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
 ╰──────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === tiny selector opens the workspace dropdown (110x32) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ──────────────────────────────────────────────────────── ◇   ⋯───╮
 │ Project 23… ▾  ≡ ││                                                                                        │
-╰╭Workspaces───────────────╮                                                                                 │
+╰╭Workspaces───────────────╮                             ✦  M J O L N I R                                    │
 ╭│Project 00 界             │                                                                                 │
-││Project 01 界             │                                                                                 │
-││Project 02 界             │                             ✦  M J O L N I R                                    │
+││Project 01 界             │                    Create a session to start building.                          │
+││Project 02 界             │                                                                                 │
 ││Project 03 界             │                                                                                 │
-││Project 04 界             │                    Create a session to start building.                          │
-││Project 05 界             │                                                                                 │
-││Project 06 界             │                                                                                 │
-││Project 07 界             │                                                                                 │
-││Project 08 界             │                                                                                 │
-││Project 09 界             │                                                                                 │
-││Project 10 界             │                                                                                 │
-││Project 11 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 12 界             │e session ───────────────────────────────────────────────────────────────────────╮
-││Project 13 界             │ session in this workspace.                                                      │
-││Project 14 界             │trl+b c to create a session or ctrl+b g to find one.                             │
-││Project 15 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 16 界             │s ▾ ────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-││Project 17 界             │/ fleet  Targets  CPU  RAM                                                       │
+││Project 04 界             │                                                                                 │
+││Project 05 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 06 界             │e session ───────────────────────────────────────────────────────────────────────╮
+││Project 07 界             │ session in this workspace.                                                      │
+││Project 08 界             │trl+b c to create a session or ctrl+b g to find one.                             │
+││Project 09 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 10 界             │s ▾ ────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+││Project 11 界             │/ fleet  Targets  CPU  RAM                                                       │
+││Project 12 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 13 界             │es ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
+││Project 14 界             │IC                                                                               │
+││Project 15 界             │eshing…                                                                          │
+││Project 16 界             │                                                                                 │
+││Project 17 界             │freshing…                                                                        │
 ││Project 18 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 19 界             │es ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
-││Project 20 界             │IC                                                                               │
-││Project 21 界             │eshing…                                                                          │
+││Project 19 界             │cations (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
+││Project 20 界             │ needs you                                                                       │
+││Project 21 界             │                                                                                 │
 ││Project 22 界             │                                                                                 │
-││Project 23 界  (current)  │freshing…                                                                        │
-│╰─────────────────────────╯─────────────────────────────────────────────────────────────────────────────────╯
-│                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                  ││Nothing needs you                                                                       │
+││Project 23 界  (current)  │                                                                                 │
+│╰─────────────────────────╯                                                                                 │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
 ╰──────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
@@ -453,18 +453,12 @@ dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
 === tiny selector after choosing a workspace (110x32) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ──────────────────────────────────────────────────────── ◇   ⋯───╮
 │ Project 00… ▾  ≡ ││                                                                                        │
-╰──────────────────╯│                                                                                        │
+╰──────────────────╯│                                    ✦  M J O L N I R                                    │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                        │
-│ Create   Open    ││                                                                                        │
-│No sessions yet   ││                                    ✦  M J O L N I R                                    │
+│ Create   Open    ││                           Create a session to start building.                          │
+│No sessions yet   ││                                                                                        │
 │Create new work or││                                                                                        │
-│open a session.   ││                           Create a session to start building.                          │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
-│                  ││                                                                                        │
+│open a session.   ││                                                                                        │
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ No live session ───────────────────────────────────────────────────────────────────────╮
 │                  ││No live session in this workspace.                                                      │
@@ -481,6 +475,12 @@ dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                       │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
+│                  ││                                                                                        │
 ╰──────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Escape dismisses the dropdown without switching workspace

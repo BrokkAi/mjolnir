@@ -1,20 +1,14 @@
 === grouped session summary (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default ✓1                         ≡ ││                                                                              │
+│ default ✓1                         ≡ ││                               ✦  M J O L N I R                               │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                  Select a session to open its conversation.                  │
+│ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› ✓ ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
-│  Idle [Q 1]  podman  codex-1         ││                                                                              │
-│  │ answer 1                          ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
-│                                      ││No conversation open.                                                         │
-│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│› ✓ ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
+│  Idle [Q 1]  podman  codex-1         │╭ No conversation open ────────────────────────────────────────────────────────╮
+│  │ answer 1                          ││No conversation open.                                                         │
+│  │                                   ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
@@ -27,6 +21,12 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Unicode unfiltered Sessions title (120x40) ===
@@ -35,18 +35,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -68,6 +61,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Unicode working filter (120x40) ===
@@ -76,19 +76,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions · working × ───── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │  Outside filter                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -109,6 +102,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Unicode blocked filter at wide size (240x40) ===
@@ -117,19 +117,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                                                                                                                                              │
 ╭ Sessions · blocked × ───────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                                              │
 │ Create   Open   Filter: ________________________                             ││                                                                                                                                                              │
-│hel ──────────────────────────────────────────────────────────────────────────││                                                                                                                                                              │
+│hel ──────────────────────────────────────────────────────────────────────────││                                                                       ✦  M J O L N I R                                                                       │
 │› · ACP pretty name                                                       ◇ ⋯ ││                                                                                                                                                              │
-│  Idle  podman  codex-1                                                       ││                                                                                                                                                              │
+│  Idle  podman  codex-1                                                       ││                                                          Select a session to open its conversation.                                                          │
 │  │ No messages yet                                                           ││                                                                                                                                                              │
-│  │                                                                           ││                                                                       ✦  M J O L N I R                                                                       │
+│  │                                                                           ││                                                                                                                                                              │
 │  Outside filter                                                              ││                                                                                                                                                              │
-│                                                                              ││                                                          Select a session to open its conversation.                                                          │
-│                                                                              ││                                                                                                                                                              │
-│                                                                              ││                                                                                                                                                              │
-│                                                                              ││                                                                                                                                                              │
-│                                                                              ││                                                                                                                                                              │
-│                                                                              ││                                                                                                                                                              │
-│                                                                              ││                                                                                                                                                              │
 │                                                                              ││                                                                                                                                                              │
 │                                                                              ││                                                                                                                                                              │
 │                                                                              ││                                                                                                                                                              │
@@ -150,6 +143,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                              ││Nothing needs you                                                                                                                                             │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 === Unicode cleared filter (120x40) ===
@@ -158,18 +158,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -191,6 +184,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 Unicode title markers: ('×', '·')
@@ -200,18 +200,11 @@ Unicode title markers: ('×', '·')
 +--------------------------------------+|                                                                              |
 + Sessions ----------------- -   =   + +|                                                                              |
 | Create   Open   Filter: _____________||                                                                              |
-|hel ----------------------------------||                                                                              |
+|hel ----------------------------------||                               *  M J O L N I R                               |
 |> . ACP pretty name               + . ||                                                                              |
-|  Idle  podman  codex-1               ||                                                                              |
+|  Idle  podman  codex-1               ||                  Select a session to open its conversation.                  |
 |  | No messages yet                   ||                                                                              |
-|  |                                   ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
-|                                      ||                  Select a session to open its conversation.                  |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
+|  |                                   ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -233,6 +226,13 @@ Unicode title markers: ('×', '·')
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 === ASCII working filter (120x40) ===
@@ -241,19 +241,12 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 +--------------------------------------+|                                                                              |
 + Sessions - working x ----- -   =   + +|                                                                              |
 | Create   Open   Filter: _____________||                                                                              |
-|hel ----------------------------------||                                                                              |
+|hel ----------------------------------||                               *  M J O L N I R                               |
 |> . ACP pretty name               + . ||                                                                              |
-|  Idle  podman  codex-1               ||                                                                              |
+|  Idle  podman  codex-1               ||                  Select a session to open its conversation.                  |
 |  | No messages yet                   ||                                                                              |
-|  |                                   ||                               *  M J O L N I R                               |
+|  |                                   ||                                                                              |
 |  Outside filter                      ||                                                                              |
-|                                      ||                  Select a session to open its conversation.                  |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -274,6 +267,13 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 === ASCII blocked filter at wide size (240x40) ===
@@ -282,19 +282,12 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 +------------------------------------------------------------------------------+|                                                                                                                                                              |
 + Sessions - blocked x --------------------------------------------- -   =   + +|                                                                                                                                                              |
 | Create   Open   Filter: ________________________                             ||                                                                                                                                                              |
-|hel --------------------------------------------------------------------------||                                                                                                                                                              |
+|hel --------------------------------------------------------------------------||                                                                       *  M J O L N I R                                                                       |
 |> . ACP pretty name                                                       + . ||                                                                                                                                                              |
-|  Idle  podman  codex-1                                                       ||                                                                                                                                                              |
+|  Idle  podman  codex-1                                                       ||                                                          Select a session to open its conversation.                                                          |
 |  | No messages yet                                                           ||                                                                                                                                                              |
-|  |                                                                           ||                                                                       *  M J O L N I R                                                                       |
+|  |                                                                           ||                                                                                                                                                              |
 |  Outside filter                                                              ||                                                                                                                                                              |
-|                                                                              ||                                                          Select a session to open its conversation.                                                          |
-|                                                                              ||                                                                                                                                                              |
-|                                                                              ||                                                                                                                                                              |
-|                                                                              ||                                                                                                                                                              |
-|                                                                              ||                                                                                                                                                              |
-|                                                                              ||                                                                                                                                                              |
-|                                                                              ||                                                                                                                                                              |
 |                                                                              ||                                                                                                                                                              |
 |                                                                              ||                                                                                                                                                              |
 |                                                                              ||                                                                                                                                                              |
@@ -315,6 +308,13 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Notifications (0) ------------------------------------------------------------------------------------------------------------------------------------ -   = +
 |                                                                              ||Nothing needs you                                                                                                                                             |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
 +------------------------------------------------------------------------------++--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - q detach - u web - shift+r refresh - s settings - t rendering - : / ? palette
 === ASCII cleared filter (120x40) ===
@@ -323,18 +323,11 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 +--------------------------------------+|                                                                              |
 + Sessions ----------------- -   =   + +|                                                                              |
 | Create   Open   Filter: _____________||                                                                              |
-|hel ----------------------------------||                                                                              |
+|hel ----------------------------------||                               *  M J O L N I R                               |
 |> . ACP pretty name               + . ||                                                                              |
-|  Idle  podman  codex-1               ||                                                                              |
+|  Idle  podman  codex-1               ||                  Select a session to open its conversation.                  |
 |  | No messages yet                   ||                                                                              |
-|  |                                   ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
-|                                      ||                  Select a session to open its conversation.                  |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
+|  |                                   ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -356,6 +349,13 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 ASCII title markers: ('x', '-')
@@ -365,18 +365,11 @@ ASCII title markers: ('x', '-')
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││                                      │
-│hel ──────────────────────────────────││                                      │
+│hel ──────────────────────────────────││           ✦  M J O L N I R           │
 │› · ACP pretty name               ◇ ⋯ ││                                      │
-│  Idle [Q 1]  podman  codex-1         ││                                      │
+│  Idle [Q 1]  podman  codex-1         ││Select a session to open its conversat│
 │  │ No messages yet                   ││                                      │
-│  │                                   ││           ✦  M J O L N I R           │
-│                                      ││                                      │
-│                                      ││Select a session to open its conversat│
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│  │                                   ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
@@ -398,6 +391,13 @@ ASCII title markers: ('x', '-')
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === expanded rows, 80 right (80x40) ===
@@ -406,18 +406,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      │╰──────────────────────────────────────╯
 │                                      │╭ Sessions ───────────────────── ▁   ▄ ╮
 │                                      ││ Create   Open   Filter: _____________│
-│                                      ││hel ──────────────────────────────────│
+│           ✦  M J O L N I R           ││hel ──────────────────────────────────│
 │                                      ││› · ACP pretty name               ◇ ⋯ │
-│                                      ││  Idle [Q 1]  podman  codex-1         │
+│Select a session to open its conversat││  Idle [Q 1]  podman  codex-1         │
 │                                      ││  │ No messages yet                   │
-│           ✦  M J O L N I R           ││  │                                   │
-│                                      ││                                      │
-│Select a session to open its conversat││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│                                      ││  │                                   │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
@@ -439,6 +432,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === expanded rows, 120 left (120x40) ===
@@ -447,18 +447,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle [Q 1]  podman  codex-1         ││                                                                              │
+│  Idle [Q 1]  podman  codex-1         ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -480,6 +473,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === expanded rows, 120 right (120x40) ===
@@ -488,18 +488,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              │╰──────────────────────────────────────╯
 │                                                                              │╭ Sessions ───────────────── ▁   ▄   □ ╮
 │                                                                              ││ Create   Open   Filter: _____________│
-│                                                                              ││hel ──────────────────────────────────│
+│                               ✦  M J O L N I R                               ││hel ──────────────────────────────────│
 │                                                                              ││› · ACP pretty name               ◇ ⋯ │
-│                                                                              ││  Idle [Q 1]  podman  codex-1         │
+│                  Select a session to open its conversation.                  ││  Idle [Q 1]  podman  codex-1         │
 │                                                                              ││  │ No messages yet                   │
-│                               ✦  M J O L N I R                               ││  │                                   │
-│                                                                              ││                                      │
-│                  Select a session to open its conversation.                  ││                                      │
-│                                                                              ││                                      │
-│                                                                              ││                                      │
-│                                                                              ││                                      │
-│                                                                              ││                                      │
-│                                                                              ││                                      │
+│                                                                              ││  │                                   │
 │                                                                              ││                                      │
 │                                                                              ││                                      │
 │                                                                              ││                                      │
@@ -521,6 +514,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮│                                      │
 │Nothing needs you                                                             ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === expanded rows, 180 left (180x40) ===
@@ -529,18 +529,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────╯│                                                                                                                      │
 ╭ Sessions ───────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                      │
 │ Create   Open   Filter: ________________________         ││                                                                                                                      │
-│hel ──────────────────────────────────────────────────────││                                                                                                                      │
+│hel ──────────────────────────────────────────────────────││                                                   ✦  M J O L N I R                                                   │
 │› · ACP pretty name                                   ◇ ⋯ ││                                                                                                                      │
-│  Idle [Q 1]  podman  codex-1                             ││                                                                                                                      │
+│  Idle [Q 1]  podman  codex-1                             ││                                      Select a session to open its conversation.                                      │
 │  │ No messages yet                                       ││                                                                                                                      │
-│  │                                                       ││                                                   ✦  M J O L N I R                                                   │
-│                                                          ││                                                                                                                      │
-│                                                          ││                                      Select a session to open its conversation.                                      │
-│                                                          ││                                                                                                                      │
-│                                                          ││                                                                                                                      │
-│                                                          ││                                                                                                                      │
-│                                                          ││                                                                                                                      │
-│                                                          ││                                                                                                                      │
+│  │                                                       ││                                                                                                                      │
 │                                                          ││                                                                                                                      │
 │                                                          ││                                                                                                                      │
 │                                                          ││                                                                                                                      │
@@ -562,6 +555,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                          ││Nothing needs you                                                                                                     │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
 ╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : / ? palette
 === expanded rows, 180 right (180x40) ===
@@ -570,18 +570,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                      │╰──────────────────────────────────────────────────────────╯
 │                                                                                                                      │╭ Sessions ───────────────────────────────────── ▁   ▄   □ ╮
 │                                                                                                                      ││ Create   Open   Filter: ________________________         │
-│                                                                                                                      ││hel ──────────────────────────────────────────────────────│
+│                                                   ✦  M J O L N I R                                                   ││hel ──────────────────────────────────────────────────────│
 │                                                                                                                      ││› · ACP pretty name                                   ◇ ⋯ │
-│                                                                                                                      ││  Idle [Q 1]  podman  codex-1                             │
+│                                      Select a session to open its conversation.                                      ││  Idle [Q 1]  podman  codex-1                             │
 │                                                                                                                      ││  │ No messages yet                                       │
-│                                                   ✦  M J O L N I R                                                   ││  │                                                       │
-│                                                                                                                      ││                                                          │
-│                                      Select a session to open its conversation.                                      ││                                                          │
-│                                                                                                                      ││                                                          │
-│                                                                                                                      ││                                                          │
-│                                                                                                                      ││                                                          │
-│                                                                                                                      ││                                                          │
-│                                                                                                                      ││                                                          │
+│                                                                                                                      ││  │                                                       │
 │                                                                                                                      ││                                                          │
 │                                                                                                                      ││                                                          │
 │                                                                                                                      ││                                                          │
@@ -603,6 +596,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮│                                                          │
 │Nothing needs you                                                                                                     ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : / ? palette
 === minimized rows at 80 columns (80x40) ===
@@ -611,16 +611,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────╯│                                                          │
 ╭ Sessions ─ ▁   ▄ ╮│                                                          │
 │ Create   Open    ││                                                          │
-│hel ──────────────││                                                          │
+│hel ──────────────││                     ✦  M J O L N I R                     │
 │› · ACP pretty…◇  ││                                                          │
-│  Idle            ││                                                          │
-│                  ││                                                          │
-│                  ││                     ✦  M J O L N I R                     │
-│                  ││                                                          │
-│                  ││        Select a session to open its conversation.        │
-│                  ││                                                          │
-│                  ││                                                          │
-│                  ││                                                          │
+│  Idle            ││        Select a session to open its conversation.        │
 │                  ││                                                          │
 │                  ││                                                          │
 │                  ││                                                          │
@@ -644,6 +637,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === expanded session row (120x44) ===
@@ -654,17 +654,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -689,6 +681,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Sessions filter sync progress (120x44) ===
@@ -699,18 +699,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open   Filter: quokka ______││                                                                              │
 │Syncing Codex 2/3 ▕█████░░░░░▏ 50/100 ││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
 │  Outside filter                      ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -734,6 +726,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Queued Sessions filter sync (120x44) ===
@@ -744,18 +744,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open   Filter: quokka ______││                                                                              │
 │? Waiting for session index sync…     ││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
 │  Outside filter                      ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -779,6 +771,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Minimized queued Sessions filter sync (120x44) ===
@@ -789,17 +789,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open    ││                                                                                                  │
 │? Waiting for ses…││                                                                                                  │
 │› · ACP pretty…◇  ││                                                                                                  │
-│  Idle            ││                                                                                                  │
+│  Idle            ││                                         ✦  M J O L N I R                                         │
 │  Outside filter  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                         ✦  M J O L N I R                                         │
-│                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
@@ -824,6 +816,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Minimized Sessions filter sync progress (120x44) ===
@@ -834,17 +834,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open    ││                                                                                                  │
 │▕████░░░░░▏ 50/100││                                                                                                  │
 │› · ACP pretty…◇  ││                                                                                                  │
-│  Idle            ││                                                                                                  │
+│  Idle            ││                                         ✦  M J O L N I R                                         │
 │  Outside filter  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                         ✦  M J O L N I R                                         │
-│                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
@@ -869,6 +861,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Minimized Sessions filter sync failure (120x44) ===
@@ -879,17 +879,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open    ││                                                                                                  │
 │database is locked││                                                                                                  │
 │› · ACP pretty…◇  ││                                                                                                  │
-│  Idle            ││                                                                                                  │
+│  Idle            ││                                         ✦  M J O L N I R                                         │
 │  Outside filter  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                         ✦  M J O L N I R                                         │
-│                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
@@ -914,6 +906,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Minimized Sessions filter final read (120x44) ===
@@ -924,17 +924,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open    ││                                                                                                  │
 │Searching…        ││                                                                                                  │
 │› · ACP pretty…◇  ││                                                                                                  │
-│  Idle            ││                                                                                                  │
+│  Idle            ││                                         ✦  M J O L N I R                                         │
 │  Outside filter  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                         ✦  M J O L N I R                                         │
-│                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
@@ -959,6 +951,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Minimized Sessions filter final read failure (120x44) ===
@@ -969,17 +969,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open    ││                                                                                                  │
 │final index read… ││                                                                                                  │
 │› · ACP pretty…◇  ││                                                                                                  │
-│  Idle            ││                                                                                                  │
+│  Idle            ││                                         ✦  M J O L N I R                                         │
 │  Outside filter  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                         ✦  M J O L N I R                                         │
-│                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
@@ -1004,6 +996,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Conversation search failed: final index read failed
 === minimized session summaries (120x44) ===
@@ -1017,26 +1017,18 @@ Conversation search failed: final index read failed
 │  Idle            ││                                                                                                  │
 │  · ACP pretty…◇  ││                                                                                                  │
 │  Idle            ││                                                                                                  │
-│                  ││                                                                                                  │
+│                  ││                                         ✦  M J O L N I R                                         │
 │[2] proj01 ───────││                                                                                                  │
+│  · ACP pretty…◇  ││                            Select a session to open its conversation.                            │
+│  Idle            ││                                                                                                  │
 │  · ACP pretty…◇  ││                                                                                                  │
 │  Idle            ││                                                                                                  │
-│  · ACP pretty…◇  ││                                         ✦  M J O L N I R                                         │
-│  Idle            ││                                                                                                  │
-│                  ││                            Select a session to open its conversation.                            │
+│                  ││                                                                                                  │
 │[3] proj02 ───────││                                                                                                  │
 │  · ACP pretty…◇  ││                                                                                                  │
 │  Idle            ││                                                                                                  │
 │  · ACP pretty…◇  ││                                                                                                  │
 │  Idle            ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
@@ -1049,6 +1041,14 @@ Conversation search failed: final index read failed
 │                  │─ Profiles ▾ ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ───────────── ▁   ▄ ─
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === minimized CPU and weekly quota (120x44) ===
@@ -1062,17 +1062,9 @@ Conversation search failed: final index read failed
 │  Idle            ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                         ✦  M J O L N I R                                         │
 │                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
-│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
@@ -1094,6 +1086,14 @@ Conversation search failed: final index read failed
 │                  │─ Profiles ▾ ── Anthropic ~63%, codex-1 refreshing…, codex-2 refreshing… ─────────────────── ▁   ▄ ─
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === paired weekly and five-hour quota (160x44) ===
@@ -1107,17 +1107,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle            ││                                                                                                                                          │
 │                  ││                                                                                                                                          │
 │                  ││                                                                                                                                          │
-│                  ││                                                                                                                                          │
-│                  ││                                                                                                                                          │
-│                  ││                                                                                                                                          │
-│                  ││                                                                                                                                          │
 │                  ││                                                             ✦  M J O L N I R                                                             │
 │                  ││                                                                                                                                          │
 │                  ││                                                Select a session to open its conversation.                                                │
-│                  ││                                                                                                                                          │
-│                  ││                                                                                                                                          │
-│                  ││                                                                                                                                          │
-│                  ││                                                                                                                                          │
 │                  ││                                                                                                                                          │
 │                  ││                                                                                                                                          │
 │                  ││                                                                                                                                          │
@@ -1139,5 +1131,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │─ Profiles ▾ ── Anthropic ~96%, OpenAI ~82% ──────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                                                         │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
