@@ -36,9 +36,9 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
 - [x] (2026-11-26 02:52Z) User decisions: cut the `SshBare.worker_root` milestone (replaced by notes), cut `CONFIG_VERSION` 25 (migrate rewrites managed homes instead), cut `HostKey`, accept that local-bare sessions lose a working `mj` CLI after a migration. Plan rewritten into four milestones.
 - [x] (2026-11-26 03:50Z) Milestone 1: path manifest `mj-core/src/config/layout.rs` and clippy ban on raw `data_dir()` / `config_dir()` (89 files across 17 crates; reviewed clean).
 - [x] (2026-11-26 03:50Z) Milestone 3: relative managed checkpoint archive paths (schema revision 160; two review rounds, then clean).
-- [x] (2026-11-26 04:22Z) Milestone 4: `machine_id` on `session_targets` and `environment_workers` with backfill (schema revision 161), and machine-first SSH option refresh (one review round fixed; second review pending).
-- [x] (2026-11-26 04:22Z) Milestone 2: durable `instance-identity` resolved once by the daemon; store fence (schema revision 162) with `mj daemon fence` / `unfence` (review pending).
-- [ ] Push all four milestones after review.
+- [x] (2026-11-26 04:22Z) Milestone 4: `machine_id` on `session_targets` and `environment_workers` with backfill (schema revision 161), and machine-first SSH option refresh (three review rounds fixed, fourth overridden).
+- [x] (2026-11-26 04:22Z) Milestone 2: durable `instance-identity` resolved once by the daemon; store fence (schema revision 162) with `mj daemon fence` / `unfence` (one review round fixed).
+- [x] (2026-11-26 04:47Z) Pushed all four milestones to origin/master (`a30e83083`).
 
 
 ## Surprises & Discoveries
@@ -178,11 +178,12 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
 
 ## Outcomes & Retrospective
 
-All four milestones are implemented. Milestones 1 and 3 passed review; Milestones 2 and 4 are in review.
+All four milestones are implemented, reviewed, and pushed (`a30e83083`).
 
 - The manifest and clippy ban hold: workspace clippy fails on a raw `data_dir()` or `config_dir()` call outside `layout.rs`.
 - A copied data directory keeps its ownership identity and its managed checkpoint archives, and a fenced store refuses daemon startup before any migration, with a separate message for a copy. The end-to-end test in `mj-cli/tests/daemon_startup.rs` runs fence, copy, and unfence with a real binary in isolated directories.
 - Placements record their machine where it can be proved; SSH rows whose template is gone or was repointed stay NULL and are listed for `mj migrate` to map by hand.
+- Declined review findings, left as follow-ups: (1) the existing `backfill_target_runtime` fills a missing session runtime from the current template, and the machine backfill then trusts it, so a legacy SSH placement whose template was repointed to another user or port on the same host can take the template's machine; (2) `SessionRecord.machine_id` is not serialized, so a Move recovery snapshot restored after a daemon restart loses a known machine until the next load can prove it again.
 - Gaps: no controller-level test resumes a session from a copied data directory (the store-level relocation test covers read and swap); the orphan-adoption `machine_id` line has no test (adoption tests need a live worker).
 
 
