@@ -24,8 +24,8 @@ from test_hook_chaos import wait_hook
 
 
 WAIT = 120
-OLD_IMAGE = "ghcr.io/brokkai/mjolnir/agent-dev:2.51.0"
-NEW_IMAGE = "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0"
+OLD_IMAGE = "ghcr.io/brokkai/mjolnir/session-base:2.51.0"
+NEW_IMAGE = "ghcr.io/brokkai/mjolnir/session-base:2.52.0"
 SOURCE_HOOK = "container_upgrade_source_retained_before_replacement"
 READY_HOOK = "container_upgrade_worker_ready_before_retirement"
 
@@ -255,13 +255,13 @@ def unused_timer_wait():
         self.git_output(["remote", "add", "origin", origin], self.project)
         config = self.config / "config.toml"
         body = config.read_text()
-        body = body.replace(f'image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"', f'image = "{image}"', 1)
+        body = body.replace(f'image = "ghcr.io/brokkai/mjolnir/session-base:latest"', f'image = "{image}"', 1)
         body = body.replace('[targets.podman]\nkind = "podman"', '[targets.podman]\nkind = "podman"\nworkspace_storage = { kind = "podman-volume" }')
         body = body.replace('environment = { MJ_FAKE_ACP_LOG', f'environment = {{ MJ_FAKE_ACP_RELEASE_ROOT = {json.dumps(str(self.runtime_root / "releases"))}, MJ_FAKE_ACP_LOG')
         config.write_text(body + '\n[github.watch]\nenabled = false\n[machines.local]\nkind = "local"\nbuild_cache = { enabled = false }\n')
 
     def run_settings_replacement(self):
-        self.prepare_container_fixture("ghcr.io/brokkai/mjolnir/agent-dev:latest")
+        self.prepare_container_fixture("ghcr.io/brokkai/mjolnir/session-base:latest")
         config = self.config / "config.toml"
         config.write_text(config.read_text().replace("[targets.podman]\n", '[targets.podman]\ncpus = "2.5"\nmemory = "5g"\n'))
         self.cli("workspaces", "create", "Container settings replacement")

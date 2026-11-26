@@ -153,7 +153,7 @@ kind = "codex"
 home = {json.dumps(str(profile))}
 [targets.podman]
 kind = "podman"
-image = "docker.io/library/buildpack-deps:noble"
+image = "ghcr.io/brokkai/mjolnir/session-base:latest"
 pull_policy = "never"
 workspace_storage = {{ kind = "podman-volume" }}
 [targets.docker]

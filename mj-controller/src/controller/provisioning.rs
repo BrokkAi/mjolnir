@@ -1119,14 +1119,9 @@ impl Controller {
             }
             Ok((locator, remainder, bundle, build_cache, observed)) => {
                 created_container = observed;
-                let resolved_template = super::backend::session_target(&self.config, &session.bundle_id, &session.target_template_id, executor)?;
-                let image = resolved_template.container().map(|container| container.image.as_str());
                 let container_settings = backend_locator(&locator, &self.state.sessions[session_id], &self.config)?
                     .container_engine()
-                    .map(|_| match image {
-                        Some(image) => mj_core::state::ContainerSettings::applied(&session, image),
-                        None => mj_core::state::ContainerSettings::requested(&session),
-                    });
+                    .map(|_| mj_core::state::ContainerSettings::requested(&session));
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
                 // Holds a create after its target exists, so a test can restart
                 // the daemon in the middle of it.

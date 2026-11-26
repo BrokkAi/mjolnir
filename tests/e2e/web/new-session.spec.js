@@ -391,7 +391,7 @@ test('golden_viewer_new_session', async ({ context }) => {
     // change sent before that snapshot would be overwritten by it.
     await expect.poll(() => page.evaluate(() => window.fixtureEventSources.length)).toBe(sourcesBeforeSave + 1);
     state.snapshot.sessions[0].container_upgrade_supported = true;
-    state.upgradePreview = { session_id: 'mounted', source_container_id: 'old-container', current_image: 'agent-dev:2.51.0', current_image_id: 'sha256:previous', target_image: 'agent-dev:2.52.0', target_image_id: 'sha256:selected', available: true, retained_mounts: ['/workspace', '/cache', '/tmp'], warning: 'Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.' };
+    state.upgradePreview = { session_id: 'mounted', source_container_id: 'old-container', current_image: 'session-base:2.51.0', current_image_id: 'sha256:previous', target_image: 'session-base:2.52.0', target_image_id: 'sha256:selected', available: true, retained_mounts: ['/workspace', '/cache', '/tmp'], warning: 'Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.' };
     await refresh(page, state);
     await page.locator('.session-menu-trigger').click();
     await expect(page.getByRole('menuitem', { name: 'Upgrade container and restart…', exact: true })).toBeVisible();

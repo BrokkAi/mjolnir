@@ -1220,17 +1220,7 @@ pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/daemon";
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
 pub const RELEASE_CONTAINER_IMAGE: &str = env!("MJ_DAEMON_IMAGE");
 /// The session image used when neither its project nor target selects one.
-pub const DEFAULT_SESSION_IMAGE: &str = "docker.io/library/buildpack-deps:noble";
-/// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
-/// wrote into a container target a user had touched.
-///
-/// Loading such a file replaces this literal with [`DEFAULT_SESSION_IMAGE`],
-/// so an upgraded install follows the current default session image instead
-/// of pinning whatever was current when the file was written.
-pub const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
-/// The last configuration version that wrote the default image into a file.
-const LEGACY_DEFAULT_IMAGE_LAST_VERSION: u32 = 14;
-
+pub const DEFAULT_SESSION_IMAGE: &str = "ghcr.io/brokkai/mjolnir/session-base:latest";
 /// The rule [`RELEASE_CONTAINER_IMAGE`] is resolved from.
 ///
 /// It is a function so one test build can exercise both channels; a single
@@ -1241,19 +1231,6 @@ pub fn container_image_for(version: &str, release: bool) -> String {
         format!("{CONTAINER_IMAGE_REPOSITORY}:{version}")
     } else {
         format!("{CONTAINER_IMAGE_REPOSITORY}:latest")
-    }
-}
-
-/// Move a container target still carrying the historical default image onto
-/// `default_image`.
-///
-/// A target the user customized -- any other image -- is left alone. Split from
-/// [`TryFrom<StoredConfig>`] to exercise legacy config migration directly.
-fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str) {
-    if let Some(container) = target.container_mut()
-        && container.image == LEGACY_DEFAULT_CONTAINER_IMAGE
-    {
-        container.image = default_image.to_owned();
     }
 }
 
@@ -1813,14 +1790,6 @@ impl TryFrom<StoredConfig> for Config {
         let mut resolved = BTreeMap::new();
         for (id, runtime) in &runtimes {
             resolved.insert(id.clone(), resolve_target(id, runtime, &machines)?);
-        }
-        // Up to version 14, a container target the user had touched carried
-        // the then-current default image in the file. Move that literal back
-        // onto the current session default; a customized image is left alone.
-        if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION {
-            for target in resolved.values_mut() {
-                migrate_legacy_default_image(target, DEFAULT_SESSION_IMAGE);
-            }
         }
         Ok(Self {
             sessions_side,
