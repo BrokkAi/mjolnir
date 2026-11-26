@@ -5,16 +5,9 @@
 ╭ Sessions ────────────────────────────── ▁   ▄   □ ╮│                                                                                                         │
 │ Create   Open   Filter: ________________________  ││                                                                                                         │
 │No sessions yet                                    ││                                                                                                         │
-│Create new work or open a session.                 ││                                                                                                         │
-│                                                   ││                                                                                                         │
-│                                                   ││                                                                                                         │
-│                                                   ││                                                                                                         │
-│                                                   ││                                            ✦  M J O L N I R                                             │
+│Create new work or open a session.                 ││                                            ✦  M J O L N I R                                             │
 │                                                   ││                                                                                                         │
 │                                                   ││                                   Create a session to start building.                                   │
-│                                                   ││                                                                                                         │
-│                                                   ││                                                                                                         │
-│                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
@@ -37,6 +30,13 @@
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Notifications (0) ─────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                   ││Nothing needs you                                                                                        │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 === grouped host load without sample clock (120x40) ===
@@ -45,16 +45,9 @@
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                                                                              │
+│No sessions yet                       ││                               ✦  M J O L N I R                               │
 │Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
 │                                      ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -78,6 +71,13 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === stale reading notice under the Targets column (100x40) ===
@@ -85,16 +85,9 @@
 │ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
-│ Create   Open   Filter: _____________││                                                          │
+│ Create   Open   Filter: _____________││                     ✦  M J O L N I R                     │
 │No sessions yet                       ││                                                          │
-│Create new work or open a session.    ││                                                          │
-│                                      ││                                                          │
-│                                      ││                     ✦  M J O L N I R                     │
-│                                      ││                                                          │
-│                                      ││            Create a session to start building.           │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
+│Create new work or open a session.    ││            Create a session to start building.           │
 │                                      ││                                                          │
 │                                      ││                                                          │
 │                                      ││                                                          │
@@ -119,22 +112,23 @@
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                 │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === quota error with refresh age (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
-│ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                      Create a session to start building.                     │
-│Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
-│                                      ││No live session in this workspace.                                            │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________│╰──────────────────────────────────────────────────────────────────────────────╯
+│No sessions yet                       │╭ No live session ─────────────────────────────────────────────────────────────╮
+│Create new work or open a session.    ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
@@ -148,22 +142,22 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === expired login quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
-│ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                      Create a session to start building.                     │
-│Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
-│                                      ││No live session in this workspace.                                            │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________│╰──────────────────────────────────────────────────────────────────────────────╯
+│No sessions yet                       │╭ No live session ─────────────────────────────────────────────────────────────╮
+│Create new work or open a session.    ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
@@ -177,22 +171,22 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === usage-priced API quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
-│ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                      Create a session to start building.                     │
-│Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
-│                                      ││No live session in this workspace.                                            │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________│╰──────────────────────────────────────────────────────────────────────────────╯
+│No sessions yet                       │╭ No live session ─────────────────────────────────────────────────────────────╮
+│Create new work or open a session.    ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
@@ -206,22 +200,22 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === quota a harness never shares (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
-│No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
-│                                      ││No live session in this workspace.                                            │
-│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: _____________│╭ No live session ─────────────────────────────────────────────────────────────╮
+│No sessions yet                       ││No live session in this workspace.                                            │
+│Create new work or open a session.    ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
@@ -235,22 +229,22 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Claude Fable weekly quota (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                      ✦  M J O L N I R                                      │
-│ Create   Open   Filter: ___________________││                                                                                            │
-│No sessions yet                             ││                             Create a session to start building.                            │
-│Create new work or open a session.          ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
-│                                            ││No live session in this workspace.                                                          │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________│╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│No sessions yet                             │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
+│Create new work or open a session.          ││No live session in this workspace.                                                          │
 │                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
@@ -264,22 +258,22 @@
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === weekly and five-hour quota columns (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                      ✦  M J O L N I R                                      │
-╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
-│ Create   Open   Filter: ___________________││                             Create a session to start building.                            │
-│No sessions yet                             ││                                                                                            │
-│Create new work or open a session.          ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
-│                                            ││No live session in this workspace.                                                          │
-│                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: ___________________│╭ No live session ───────────────────────────────────────────────────────────────────────────╮
+│No sessions yet                             ││No live session in this workspace.                                                          │
+│Create new work or open a session.          ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
@@ -293,22 +287,22 @@
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === weekly and five-hour quota at 80 columns (80x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ≡ ││                                      │
-╰──────────────────────────────────────╯│           ✦  M J O L N I R           │
-╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
-│ Create   Open   Filter: _____________││  Create a session to start building. │
-│No sessions yet                       ││                                      │
-│Create new work or open a session.    ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      │╰──────────────────────────────────────╯
-│                                      │╭ No live session ─────────────────────╮
-│                                      ││No live session in this workspace.    │
-│                                      ││Press ctrl+b c to create a session or │
+╰──────────────────────────────────────╯│                                      │
+╭ Sessions ───────────────────── ▁   ▄ ╮╰──────────────────────────────────────╯
+│ Create   Open   Filter: _____________│╭ No live session ─────────────────────╮
+│No sessions yet                       ││No live session in this workspace.    │
+│Create new work or open a session.    ││Press ctrl+b c to create a session or │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                             │
@@ -322,22 +316,22 @@
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Antigravity Gemini and Claude quota pools (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                      ✦  M J O L N I R                                      │
-╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
-│ Create   Open   Filter: ___________________││                             Create a session to start building.                            │
-│No sessions yet                             ││                                                                                            │
-│Create new work or open a session.          ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
-│                                            ││No live session in this workspace.                                                          │
-│                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: ___________________│╭ No live session ───────────────────────────────────────────────────────────────────────────╮
+│No sessions yet                             ││No live session in this workspace.                                                          │
+│Create new work or open a session.          ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
@@ -351,5 +345,11 @@
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter expand/collapse · e rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : / ? palette

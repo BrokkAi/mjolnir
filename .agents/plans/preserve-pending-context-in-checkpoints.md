@@ -7,6 +7,12 @@ This ExecPlan is maintained according to `.agents/PLANS.md`. Its living sections
 
 A switch between agent harnesses (the programs running models, such as Antigravity and Claude) creates a new native conversation and gives its worker hidden context for the first prompt. Suspending before that prompt currently omits the context from the checkpoint, so another resume can lose it. Preserve the existing pending text in the saved session and restore it through the existing worker delivery mechanism. The visible result is that switching harness, suspending before prompting, and resuming still supplies the exact handoff to the first prompt once.
 
+## Delivery status
+
+The checkpoint fix and reviewed CI repairs are committed and pushed to origin/master through b4593441e. Targeted dev tests and affected-crate lint checks pass. Full release CI did not pass.
+
+On 2026-11-26 the user postponed the release and requested only completion and push of the fixes. Release run 45751489325 is completed/cancelled, and the unpublished v2.76.0 tag has been removed locally and remotely. The workspace's 2.76.0 version preparation remains committed; no release was published. Release publication is outside the remaining acceptance scope, and all workers are closed. Known deferred limitations remain #1703, #1296 and the literal-backslash target-path edge under #1293.
+
 ## Progress
 
 
@@ -18,13 +24,13 @@ A switch between agent harnesses (the programs running models, such as Antigravi
 - [x] (2026-11-25 22:58Z) Finish mechanical snapshot constructor updates in dependent crates after the first compiler failure.
 - [x] (2026-11-25 22:58Z) Run focused regression tests and affected-crate clippy under mbx: 10 tests passed; ten-package all-target clippy passed.
 - [x] Review, commit, and push the checkpoint fix and version preparation. Fourth review recorded the transitional queued legacy-close finding as follow-up #1703.
-- [ ] Prepare and review the next workspace release, push its version commit and tag, and follow the normal release workflow through publication.
+- [x] Prepare and review workspace version 2.76.0 and push its preparation. Publication was postponed by the user.
 - [x] Push v2.76.0 at ae3157fad and cancel its failed first CI run before publication.
 - [x] Repair inherited Rust formatting and viewer VM fixtures; affected viewer files pass 4 and 41 tests.
 - [x] (2026-11-25 23:47Z) Move existing CLI logging into mj-client; CLI is 49,626 lines, client 20,362, workspace format check passes, 11 focused logging tests and affected-crate clippy pass.
 - [x] (2026-11-26 00:33Z) Repair third-run fixture/Windows failures: all seven controller and ten daemon failures pass individually, saved quota continuation passes, and ten-package clippy passes.
 - [x] (2026-11-26 01:37Z) Repair the remaining Windows worker helper guards; Linux worker all-target clippy passes. Verify the repaired Windows lane using the existing manual nightly workflow after review and push.
-- [ ] Review and push CI repairs, replace the unpublished tag, and monitor publication.
+- [x] Review and push CI repairs. At the user's request, stop release retries, cancel the active workflow and withdraw the unpublished tag.
 - [x] Commit the initial validated fix and prepare version 2.76.0; request review of the combined deliverable.
 - [x] (2026-11-25 23:15Z) Address first review: multi-frame pending-context transfer, old checkpoint-only worker replacement, and avoiding combined context installation frames; seven focused tests and ten-package clippy pass.
 - [x] (2026-11-25 23:23:42 UTC) Address second review: unsupported-schema fixture selects 17, and checkpoint-only preparation/readiness release daemon admission using the existing resumable-work boundary; three affected tests and ten-package clippy pass.

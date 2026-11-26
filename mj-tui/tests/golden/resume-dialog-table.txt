@@ -9,18 +9,18 @@
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ───────────────────────────────────────────────────╮ │           │
-│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │codex-1         localhost/bifrost-fird    Aug 9, 2026     ACP pretty name                                      │ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │  ─────────╯
+│          │ │codex-1         localhost/bifrost-fird    Aug 9, 2026     ACP pretty name                                      │ │  ─────────╮
 │          │ │codex-1         precision-3260/bifrost    Aug 9, 2026     ACP pretty name                                      │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
-│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -28,8 +28,8 @@
 │          │                                                                                                                   │           │
 │          │                                                   bifrost-fird                                                    │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Destroy     Resume                                                                                   │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Destroy     Resume                                                                                   │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -44,18 +44,18 @@
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Importable sessions · newest first · ? Syncing session index… ────────────────────────────────────────────────╮ │           │
-│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │codex-1         local/hel                 just now        Native project                                       │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │  ─────────╯
+│          │ │codex-1         local/hel                 just now        Native project                                       │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -63,8 +63,8 @@
 │          │                                                                                                                   │           │
 │          │                                          master · 1.0KB · ~/Projects/hel                                          │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Import                                                                                               │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Import                                                                                               │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -79,18 +79,18 @@
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         retired-target            Aug 9, 2026     ? ACP pretty name                   │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         retired-target            Aug 9, 2026     ? ACP pretty name                   │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -98,8 +98,8 @@
 │         │                                                                                                  │         │
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Destroy     Resume                                                                  │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -115,18 +115,18 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ───────────────────────────────────────────────────╮ │           │
-│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │codex-1         podman                    Jun 1, 2026     ? Newest record                                      │ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │  ─────────╯
+│          │ │codex-1         podman                    Jun 1, 2026     ? Newest record                                      │ │  ─────────╮
 │          │ │codex-1         podman                    Jan 1, 2026     ? ACP pretty name                                    │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
-│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -134,8 +134,8 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │          │                                                                                                                   │           │
 │          │                                         hel · Publication status unknown                                          │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Destroy     Resume                                                                                   │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Destroy     Resume                                                                                   │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -150,18 +150,18 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 9, 2026     ? Archived record                   │ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         podman                    Aug 9, 2026     ? Archived record                   │ │  ───────╮
 │         │ │codex-1         podman                    Aug 9, 2026     ? Current record                    │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -169,8 +169,8 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │         │                                                                                                  │         │
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Destroy     Resume                                                                  │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -186,18 +186,18 @@ native archive metadata: true
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -205,8 +205,8 @@ native archive metadata: true
 │         │                                                                                                  │         │
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Import                                                                              │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Import                                                                              │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -222,18 +222,18 @@ archive shortcut action: None
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -241,8 +241,8 @@ archive shortcut action: None
 │         │                                                                                                  │         │
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Import                                                                              │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Import                                                                              │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -258,18 +258,18 @@ d key action: None
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -277,8 +277,8 @@ d key action: None
 │         │                                                                                                  │         │
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Destroy     Resume                                                                  │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -287,35 +287,35 @@ Destroy button action: None
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
 │ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                               ✦  M J O L N I R                               │
+│No sessions yet                       ││                      Create a session to start building.                     │
+│Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
-│                ╭ × Destroy suspended session? ──────────────────────────────────────────────────────╮                │
-│                │Session: ACP pretty name                                                            │                │
+│                ╭ × Destroy suspended session? ──────────────────────────────────────────────────────╮  ──────────────╯
+│                │Session: ACP pretty name                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │Mjolnir will permanently destroy the recovery archive and session record.           │                │
-│                │The managed clone and any unpublished work in its recovery copy will be removed.    │                │
-│                │                                                                                    │                │
-│                │c Cancel  ·  d Destroy session                                                      │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │                                                                                    │                │
-│                │                                                                                    │                │
+│                │The managed clone and any unpublished work in its recovery copy will be removed.    │  ──────────────╯
+│                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │c Cancel  ·  d Destroy session                                                      │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Cancel     Destroy session                                                        │  ─────── ▁   ▄ ╮
+│                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │  Cancel     Destroy session                                                        │                │
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                        ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││ANTHROPIC                                                                     │
-│                                      ││ + refreshing…                                                                │
-│                                      ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 archived row archived bare profile/origin: ("codex-2", "localhost/project")
@@ -340,29 +340,29 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │          │ ╭ Archived sessions · newest first · ? Syncing session index… ──────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            ▐ │           │
 │          │ │codex-2         localhost/project         Sep 1, 2026     archived bare                                        ▐ │           │
-│          │ │codex-2         podman                    Sep 1, 2026     archived container                                   ▐ │           │
-│          │ │codex-2         local/sub                 Sep 1, 2026     archived nested                                      ▐ │           │
+│          │ │codex-2         podman                    Sep 1, 2026     archived container                                   ▐ │  ─────────╯
+│          │ │codex-2         local/sub                 Sep 1, 2026     archived nested                                      ▐ │  ─────────╮
 │          │ │codex-2         was-a-target              Sep 1, 2026     archived retired                                     ▐ │           │
 │          │ │mjolnir         local/project             Sep 1, 2026     archived untagged                                    │ │           │
-│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
-│          │                                                                                                                   │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ─────────╯
+│          │                                                                                                                   │  ── ▁   ▄ ╮
 │          │ ╭ Archived transcript ──────────────────────────────────────────────────────────────────────────────────────────╮ │           │
 │          │ │Loading the archived transcript…                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
-│          │                                                                                                                   │           │
+│          │ │                                                                                                               │ │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
 │          │                                                                                                                   │  ─────────╯
-│          │                                  archived · 7 messages · the last thing it said                                   │  ── ▁   ▄ ╮
+│          │                                                                                                                   │  ── ▁   ▄ ╮
+│          │                                  archived · 7 messages · the last thing it said                                   │           │
 │          │                                                                                                                   │           │
 │          │   Cancel     Restore                                                                                              │           │
 │          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
-│                                                                                                                                 ─────────╯
-│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││Nothing needs you                                                                           │
+│                                                                                                                                          │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === Hel tab (120x34) ===
@@ -376,18 +376,18 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -395,8 +395,8 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │                                                                                                  │         │
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Destroy     Resume                                                                  │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -411,18 +411,18 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         local/hel                 just now        Native                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         local/hel                 just now        Native                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -430,8 +430,8 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │                                                                                                  │         │
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Import                                                                              │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Import                                                                              │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -446,18 +446,18 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -465,8 +465,8 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │                                                                                                  │         │
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Destroy     Resume                                                                  │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -481,18 +481,18 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -500,8 +500,8 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │                                                                                                  │         │
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Destroy     Resume                                                                  │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -518,18 +518,18 @@ mode after selecting Hel row: "Resume wizard"
 │                 │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
 │                 │   claude-1  Claude Code  refreshing      (lossy: text-only transcript)           │                 │
 │                 │   codex-1   Codex        refreshing                                              │                 │
-│                 │   codex-2   Codex        refreshing                                              │                 │
-│                 │                                                                                  │                 │
-│                 │ Same agent: the conversation continues natively.                                 │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   codex-2   Codex        refreshing                                              │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
-│                 │                                                                                  │                 │
+│                 │ Same agent: the conversation continues natively.                                 │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
@@ -537,9 +537,9 @@ mode after selecting Hel row: "Resume wizard"
 │                 │                                                                                  │                 │
 │                 │   Cancel     Next                                                                │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
-│                                                                                                       ───────────────╯
-│                                                                                                       ──────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === select importable native row (120x34) ===
@@ -553,18 +553,18 @@ mode after selecting Hel row: "Resume wizard"
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
 │         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
-│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         local/hel                 just now        Native                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │  ───────╯
+│         │ │codex-1         local/hel                 just now        Native                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
@@ -572,8 +572,8 @@ mode after selecting Hel row: "Resume wizard"
 │         │                                                                                                  │         │
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
 │         │                                                                                                  │         │
-│         │   Cancel     Import                                                                              │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│         │   Cancel     Import                                                                              │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
 ╰───────                                                                                                        ───────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -582,16 +582,10 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
 │ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│No sessions yet                       ││                      Create a session to start building.                     │
+│Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -611,6 +605,12 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Live tab across workspaces (120x40) ===
@@ -629,29 +629,29 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │  Idle   │ ╭ Live sessions · every workspace · newest first · ? Syncing session index… ───────────────────╮ │         │
 │  │ No   │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
 │  │      │ │Default                   Aug 9, 2026     ? Sweep the hearth                                  │ │         │
-│         │ │Default                   Aug 9, 2026     ? Count the coins                                   │ │         │
-│         │ │Other                     Aug 9, 2026     ? Raise the mast                                    │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
+│         │ │Default                   Aug 9, 2026     ? Count the coins                                   │ │  ───────╯
+│         │ │Other                     Aug 9, 2026     ? Raise the mast                                    │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
-│         │ │                                                                                              │ │  ───────╮
-│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
-│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
-│         │                                                                                                  │         │
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
-│         │                                 hel · Publication status unknown                                 │   ▁   ▄ ╮
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
 │         │   Cancel     Open                                                                                │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
-│                                                                                                               ───────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                                                                                                      │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === left wraps to Archived tab (120x40) ===
@@ -670,29 +670,29 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │  Idle   │ ╭ Archived sessions · newest first · ? Syncing session index… ─────────────────────────────────╮ │         │
 │  │ No   │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │  │      │ │No archived sessions                                                                          │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
-│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
-│         │                                                                                                  │         │
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
 │         │                                                                                                  │         │
 │         │   Cancel     Restore                                                                             │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
-│                                                                                                               ───────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                                                                                                      │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 focus Live search action: None
@@ -716,29 +716,29 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │  Idle   │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
 │  │ No   │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
 │  │      │ │Other                     Aug 9, 2026     ? Raise the mast                                    │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
-│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │   ▁   ▄ ╮
-│         │                                                                                                  │         │
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
-│         │                                 hel · Publication status unknown                                 │   ▁   ▄ ╮
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │         │
 │         │   Cancel     Open                                                                                │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                                      │
-│                                                                                                               ───────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                                                                                                      │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === session index sync progress (140x34) ===
@@ -752,18 +752,18 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Live sessions · every workspace · newest first · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ──────────────╮ │           │
-│          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
-│          │ │No live sessions                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │  ─────────╯
+│          │ │No live sessions                                                                                               │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -771,8 +771,8 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Open                                                                                                 │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Open                                                                                                 │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -782,33 +782,33 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ─────────────╮ │      │
-│     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │      │
-│     │ │No live sessions                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No live sessions                                             │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Open                                               │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Open                                               │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === session index sync failure (140x34) ===
@@ -822,18 +822,18 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Live sessions · every workspace · newest first · Index sync failed: database is locked ───────────────────────╮ │           │
-│          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
-│          │ │No live sessions                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │  ─────────╯
+│          │ │No live sessions                                                                                               │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -841,8 +841,8 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Open                                                                                                 │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Open                                                                                                 │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -852,33 +852,33 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ Index sync failed: database is locked ──────────────────────╮ │      │
-│     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │      │
-│     │ │No live sessions                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No live sessions                                             │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Open                                               │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Open                                               │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Hel history loading with sync progress (140x34) ===
@@ -892,18 +892,18 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ ? Loading suspended sessions… · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ───────────────────────────────╮ │           │
-│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │No stopped Mjolnir sessions                                                                                    │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │  ─────────╯
+│          │ │No stopped Mjolnir sessions                                                                                    │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -911,8 +911,8 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Destroy     Resume                                                                                   │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Destroy     Resume                                                                                   │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -927,18 +927,18 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Could not list suspended sessions: history lookup failed · Index sync failed: index unavailable ──────────────╮ │           │
-│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │No stopped Mjolnir sessions                                                                                    │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │  ─────────╯
+│          │ │No stopped Mjolnir sessions                                                                                    │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -946,8 +946,8 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Destroy     Resume                                                                                   │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Destroy     Resume                                                                                   │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -957,33 +957,33 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ History failed · Sync: Index sync failed: index unavailable ╮ │      │
-│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
-│     │ │No stopped Mjolnir sessions                                  │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No stopped Mjolnir sessions                                  │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Destroy     Resume                                 │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Destroy     Resume                                 │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Hel history loading during final search (80x34) ===
@@ -992,33 +992,33 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ ? Loading suspended sessions… · Searching… ─────────────────╮ │      │
-│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
-│     │ │No stopped Mjolnir sessions                                  │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No stopped Mjolnir sessions                                  │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Destroy     Resume                                 │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Destroy     Resume                                 │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Hel history failure during final search (80x34) ===
@@ -1027,33 +1027,33 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ History failed · Sync: Searching… ──────────────────────────╮ │      │
-│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
-│     │ │No stopped Mjolnir sessions                                  │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No stopped Mjolnir sessions                                  │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Destroy     Resume                                 │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Destroy     Resume                                 │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Import history loading with sync progress (140x34) ===
@@ -1067,18 +1067,18 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ ? Loading suspended sessions… · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ───────────────────────────────╮ │           │
-│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │No importable sessions                                                                                         │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │  ─────────╯
+│          │ │No importable sessions                                                                                         │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -1086,8 +1086,8 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Import                                                                                               │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Import                                                                                               │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -1102,18 +1102,18 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Could not list suspended sessions: history lookup failed · Index sync failed: index unavailable ──────────────╮ │           │
-│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │No importable sessions                                                                                         │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │  ─────────╯
-│          │ │                                                                                                               │ │  ─────────╮
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │  ─────────╯
+│          │ │No importable sessions                                                                                         │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
@@ -1121,8 +1121,8 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Import                                                                                               │  ─────────╯
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│          │   Cancel     Import                                                                                               │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 ╰────────                                                                                                                         ─────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -1132,33 +1132,33 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ History failed · Sync: Index sync failed: index unavailable ╮ │      │
-│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
-│     │ │No importable sessions                                       │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No importable sessions                                       │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Import                                             │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Import                                             │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Import history loading during final search (80x34) ===
@@ -1167,33 +1167,33 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ ? Loading suspended sessions… · Searching… ─────────────────╮ │      │
-│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
-│     │ │No importable sessions                                       │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No importable sessions                                       │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Import                                             │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Import                                             │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Import history failure during final search (80x34) ===
@@ -1202,32 +1202,32 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 ╰───                                                                           │
 ╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
 │ Cr  │                                                                 │      │
-│No   │  Live   Mjolnir   Import   Archived                             │      │
+│No   │  Live   Mjolnir   Import   Archived                             │  ng. │
 │Cre  │                                                                 │      │
 │     │ Search:                                                         │      │
-│     │                                                                 │  ng. │
+│     │                                                                 │      │
 │     │ ╭ History failed · Sync: Searching… ──────────────────────────╮ │      │
-│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
-│     │ │No importable sessions                                       │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │      │
-│     │ │                                                             │ │  ────╯
-│     │ │                                                             │ │  ────╮
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │  ────╯
+│     │ │No importable sessions                                       │ │  ────╮
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │   or │
 ╰───  │ │                                                             │ │  ────╯
 ╭ Ta  │ │                                                             │ │    ▄ ╮
 │  H  │ │                                                             │ │      │
 ╰───  │ │                                                             │ │  ────╯
-╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
-│ANT  │                                                                 │      │
-│ +   │                                                                 │      │
-│OPE  │                                                                 │      │
-│ +   │                                                                 │      │
-╰───  │   Cancel     Import                                             │  ────╯
-╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
-│Not                                                                           │
+╭ Pr  │ │                                                             │ │    ▄ ╮
+│ANT  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+│OPE  │ │                                                             │ │      │
+│ +   │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ No  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│Not  │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │                                                                 │      │
+│     │   Cancel     Import                                             │      │
+│     ╰─────────────────────────────────────────────────────────────────╯      │
+│                                                                              │
 ╰───                                                                       ────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette

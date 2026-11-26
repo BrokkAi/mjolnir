@@ -289,6 +289,50 @@ pub fn undeliverable_dsh_instructions(
     }))
 }
 
+/// The native DSH state directory beneath dsh-acp's data directory.
+pub const DSH_HOME_DIRECTORY: &str = "dsh-home";
+
+/// The home-level patch layer DSH applies over every profile's composition.
+pub const DSH_HOME_PATCH_FILE: &str = "cordis.patch.yml";
+
+/// The DSH base-bundle rows that provide native sub-agents, their tools, the
+/// identity prompt and the delegation features built on them. DSH loads them
+/// for every profile, so a session that must not delegate natively removes
+/// them with [`dsh_native_subagents_patch`]. The ids are the pinned DSH
+/// base bundle's; `tests/e2e/dsh_native_subagent_patch.py` checks them against
+/// the pinned dsh-acp installation.
+pub const DSH_NATIVE_SUBAGENT_PLUGIN_ROWS: &[&str] = &[
+    "subagent",
+    "agent-team",
+    "tool-agent-team",
+    "subagent-spawn-in-process",
+    "subagent-fork-in-process",
+    "tool-subagent-control",
+    "tool-subagent",
+    "tool-subagent-fork",
+    "workflow-ptc",
+    "tool-workflow",
+];
+
+/// The DSH home patch for one launch. `suppress_native_subagents` comes from
+/// the session's effective delegation policy ([`crate::subagent::SubagentPolicy::suppresses_native`]),
+/// so this file applies exactly the decision the harness-neutral launchers
+/// make. A native session gets an empty patch rather than no file, so a
+/// retained home cannot keep an older launch's suppression.
+pub fn dsh_native_subagents_patch(suppress_native_subagents: bool) -> String {
+    if !suppress_native_subagents {
+        return "[]\n".to_owned();
+    }
+    let mut patch = String::from(
+        "# Mjolnir suppresses DSH's own delegation plugins for this session.\n\
+         # The ids are the pinned DSH base bundle's native-delegation rows.\n",
+    );
+    for id in DSH_NATIVE_SUBAGENT_PLUGIN_ROWS {
+        patch.push_str(&format!("- id: {id}\n  disabled: true\n"));
+    }
+    patch
+}
+
 /// The shell commands that start dsh-acp, which the positional arguments
 /// name (`"$@"`), for bare and container targets alike.
 ///
@@ -304,8 +348,9 @@ pub fn undeliverable_dsh_instructions(
 pub fn dsh_acp_script() -> String {
     let kind = HarnessKind::Dsh;
     format!(
-        "if [ -z \"${{{data}:-}}\" ]; then echo 'Mjolnir requires {data} to keep dsh-acp sessions outside the workspace' >&2; exit 1; fi; DSH_ACP_DSH_HOME=\"${{{data}}}/dsh-home\"; export DSH_ACP_DSH_HOME; DSH_ACP_SYSTEM_PROMPT=; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
+        "if [ -z \"${{{data}:-}}\" ]; then echo 'Mjolnir requires {data} to keep dsh-acp sessions outside the workspace' >&2; exit 1; fi; DSH_ACP_DSH_HOME=\"${{{data}}}/{home}\"; export DSH_ACP_DSH_HOME; DSH_ACP_SYSTEM_PROMPT=; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
         data = kind.home_env(),
+        home = DSH_HOME_DIRECTORY,
     )
 }
 

@@ -1,50 +1,50 @@
 === no agent found (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
-│ Create   Open   Filter: _____________││            Create a session to start building.           │
-│No sessions yet                       ││                                                          │
-│Create                                                                                            │
-│                                                                                                  │
-│         ╭ ×  Welcome to Mjolnir  ──────────────────────────────────────────────────────╮         │
-│         │No coding agent found yet. Mjolnir can install one and sign you in.           │  ───────╯
-│         │                                                                              │  ───────╮
-│         │Already have an account? Choose Continue and add it in Settings (ctrl+b s).   │         │
-│         │                                                                              │  ind    │
-╰───────  │  Set up a managed agent     Continue                                         │  ───────╯
-╭ Target  ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
-│  Host                                                                                            │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: _____________│╭ No live session ─────────────────────────────────────────╮
+│No sessions yet                       ││No live session in this workspace.                        │
+│Create                                                                                     ind    │
 ╰───────                                                                                    ───────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Add an agent profile in Settings.                                                                 │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Nothing needs you                                                                                 │
+╭ Target  ╭ ×  Welcome to Mjolnir  ──────────────────────────────────────────────────────╮   ▁   ▄ ╮
+│  Host   │No coding agent found yet. Mjolnir can install one and sign you in.           │         │
+╰───────  │                                                                              │  ───────╯
+╭ Profil  │Already have an account? Choose Continue and add it in Settings (ctrl+b s).   │   ▁   ▄ ╮
+│Add an   │                                                                              │         │
+╰───────  │  Set up a managed agent     Continue                                         │  ───────╯
+╭ Notifi  ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│Nothing                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · : / ? palette
 === agents found (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
-│ Create   Open   Filter: _____________││            Create a session to start building.           │
-│No sessions yet                       ││                                                          │
-│Create                                                                                            │
-│                                                                                                  │
-│         ╭ ×  Welcome to Mjolnir  ──────────────────────────────────────────────────────╮         │
-│         │Agents: Codex, Claude Code.                                                   │  ───────╯
-│         │                                                                              │  ───────╮
-│         │Press ctrl+b c to create a session.                                           │         │
-│         │                                                                              │  ind    │
-╰───────  │  Continue                                                                    │  ───────╯
-╭ Target  ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
-│  Host                                                                                            │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮╰──────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: _____________│╭ No live session ─────────────────────────────────────────╮
+│No sessions yet                       ││No live session in this workspace.                        │
+│Create                                                                                     ind    │
 ╰───────                                                                                    ───────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Add an agent profile in Settings.                                                                 │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Nothing needs you                                                                                 │
+╭ Target  ╭ ×  Welcome to Mjolnir  ──────────────────────────────────────────────────────╮   ▁   ▄ ╮
+│  Host   │Agents: Codex, Claude Code.                                                   │         │
+╰───────  │                                                                              │  ───────╯
+╭ Profil  │Press ctrl+b c to create a session.                                           │   ▁   ▄ ╮
+│Add an   │                                                                              │         │
+╰───────  │  Continue                                                                    │  ───────╯
+╭ Notifi  ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│Nothing                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · : / ? palette

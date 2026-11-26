@@ -46,11 +46,12 @@ use the shared choices.
 **Create** and **Move…** offer **Native** (the harness's own sub-agents),
 **Mjolnir** (children Mjolnir starts and tracks), and **None**. Mjolnir
 requires a Claude, Codex, DSH, OpenCode, or Antigravity profile and a configured
-Straightforward choice. DSH and Antigravity offer **Mjolnir** and **None**.
+Straightforward choice. Antigravity offers **Mjolnir** and **None**; the other
+harnesses offer all three.
 
 On a profile without a remembered choice, **Create** defaults to Mjolnir
 when available. If Mjolnir is unavailable, it uses Native on harnesses with
-their own sub-agents and None on DSH and Antigravity. **Move…** carries forward
+their own sub-agents and None on Antigravity. **Move…** carries forward
 the session's delegation choice by default.
 OpenCode has no steering, so a child's report reaches an OpenCode parent when
 its current turn ends, not between its tool calls. An OpenCode older than 2.2.6
@@ -1333,9 +1334,10 @@ handoffs; see
   SessionWiki search do not support DSH yet. A DSH session can use Mjolnir's
   sub-agents, and a DSH profile can run them: it reads the delegation policy
   from its staged `AGENTS.md` and receives the `mj-agents` tools over ACP.
-  dsh-acp has no sub-agents of its own, so DSH offers Mjolnir and None but
-  not Native. A DSH session stored with Native keeps working and behaves as
-  None. It serves DeepSeek-family
+  DSH also has sub-agents of its own, so Native is offered. Mjolnir stages a
+  DSH home patch that omits DSH's native delegation plugins unless the session
+  keeps Native, so a Mjolnir child cannot mistake itself for DSH's root agent.
+  It serves DeepSeek-family
   utility inference with its flash model only when its base URL is DeepSeek's
   own `api.deepseek.com` and its key is set.
 - A custom bridge must speak the ACP version and features Mjolnir expects.

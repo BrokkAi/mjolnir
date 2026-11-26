@@ -240,18 +240,33 @@ fn support_bands(
     notification_minimum: Option<u16>,
 ) -> [PaneBand; 4] {
     std::array::from_fn(|index| {
-        let (_, dimensions) = dimensions[index];
+        let (pane, dimensions) = dimensions[index];
         let mut band = sized_band(
             sizes[index].1,
             dimensions.minimized,
             dimensions.full,
             dimensions.standard_cap,
         );
-        if sizes[index].0 == SupportPane::Notifications
-            && sizes[index].1 != PaneSize::Minimized
-            && let Some(minimum) = notification_minimum
-        {
-            band.minimum = minimum;
+        if pane == SupportPane::Notifications {
+            match sizes[index].1 {
+                // A Standard Notifications band is content-independent: cards
+                // and forms appear and vanish without moving any other band.
+                PaneSize::Standard => {
+                    band = PaneBand {
+                        minimum: dimensions.standard_cap,
+                        full: dimensions.standard_cap,
+                        cap: dimensions.standard_cap,
+                    };
+                }
+                // Maximized still grows to the content, with the form's
+                // readable minimum reserved.
+                PaneSize::Maximized => {
+                    if let Some(minimum) = notification_minimum {
+                        band.minimum = minimum;
+                    }
+                }
+                PaneSize::Minimized => {}
+            }
         }
         band
     })
@@ -785,10 +800,11 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: notification_full,
-                // Nine rows fit one line of notification text and the reply controls.
-                standard_cap: proportional_support_height
-                    .clamp(9, STANDARD_SUPPORT_PANE_HEIGHT)
-                    .max(notification_minimum.unwrap_or_default()),
+                // Nine rows fit one line of notification text and the reply
+                // controls. Standard is fixed at this cap (its minimum, full
+                // and cap in `support_bands`), so a card or form appearing
+                // never resizes the band or moves the transcript.
+                standard_cap: proportional_support_height.clamp(9, STANDARD_SUPPORT_PANE_HEIGHT),
             },
         ),
     ];
@@ -2363,6 +2379,95 @@ mod tests {
                 cap: 40,
             }
         );
+    }
+
+    /// The Standard Notifications band is content-independent: no card, a
+    /// one-line card, a long card and a form card all leave the band — and
+    /// therefore the transcript and every other band — at the same height.
+    #[tokio::test]
+    async fn standard_notifications_height_does_not_depend_on_cards() {
+        let plain_chat = || {
+            let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
+            ActiveChat::open(
+                fixture.stopped,
+                "hel",
+                None,
+                fixture.control,
+                mj_chat::chat::SessionHeaderIdentity::default(),
+                String::new(),
+                mj_chat::chat::Notices::default(),
+            )
+        };
+        let geometry = |dashboard: &mut DashboardState, chat: ActiveChat| -> (u16, u16) {
+            let mut chats = BTreeMap::from([("session-1".to_owned(), chat)]);
+            let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_combined_for_test(frame, dashboard, &mut chats, &BTreeMap::new(), false);
+                })
+                .unwrap();
+            (
+                dashboard
+                    .notifications_area
+                    .expect("rendered notifications pane")
+                    .height,
+                dashboard
+                    .focused_transcript_area()
+                    .expect("rendered transcript")
+                    .height,
+            )
+        };
+        let mut no_cards = dashboard_with_session(running_session());
+        let empty = geometry(&mut no_cards, plain_chat());
+
+        let mut one_line = dashboard_with_session(running_session());
+        serve_attention(
+            &mut one_line,
+            &["session-1"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        one_line
+            .session_details
+            .entry("session-1".into())
+            .or_default()
+            .last_agent_message = Some("Ship it?".into());
+        assert_eq!(geometry(&mut one_line, plain_chat()), empty);
+
+        let mut long = dashboard_with_session(running_session());
+        serve_attention(
+            &mut long,
+            &["session-1"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        long.session_details
+            .entry("session-1".into())
+            .or_default()
+            .last_agent_message = Some(
+            (1..=30)
+                .map(|index| format!("Question line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        );
+        assert_eq!(geometry(&mut long, plain_chat()), empty);
+
+        let mut form = dashboard_with_session(running_session());
+        serve_attention(
+            &mut form,
+            &["session-1"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        let request = crate::test_support::question("session-1");
+        form.session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![request.clone()];
+        crate::test_support::serve_form_card(&mut form, "session-1", None, &request);
+        let (chat, _answers) = crate::notifications_pane::tests::form_chat("session-1", request);
+        assert_eq!(geometry(&mut form, chat), empty);
+
+        // The fixed band is the clamped proportional cap.
+        assert_eq!(empty.0, 44 / 4);
     }
 
     #[test]

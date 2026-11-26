@@ -4,7 +4,7 @@
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman                                                                                                        │
 │  │ No messages                                                                                                       │
@@ -14,29 +14,29 @@
 │                 │                                                                                  │                 │
 │                 │CPUs: 4                                                                           │                 │
 │                 │Memory (GiB): 8                                                                   │                 │
-│                 │Empty keeps the target's value.                                                   │                 │
-│                 │                                                                                  │                 │
+│                 │Empty keeps the target's value.                                                   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │Attached directories                                                              │                 │
 │                 │  none                                                                            │                 │
-│                 │                                                                                  │                 │
-│                 │Attach host directory:                                                            │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │Attach host directory:                                                            │  ──────── ▁   ▄ ╮
 │                 │Container destination:                                                            │                 │
 │                 │Access: ro · read-only ▾                                                          │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │Build cache                                                                       │                 │
 │                 │  /mnt/nvme/mbx                                                                   │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ──────── ▁   ▄ ╮
-│                 │  Cancel     Save                                                                 │                 │
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
-│                                                                                                       ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │  Cancel     Save                                                                 │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      ││ + refreshing…                                                                │
-│                                      ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                                                                                                      │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -46,7 +46,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman                                                                                                        │
 │  │ No messages                                                                                                       │
@@ -56,29 +56,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │                                                                                  │                 │
 │                 │CPUs: 1.5                                                                         │                 │
 │                 │Memory (GiB): 8                                                                   │                 │
-│                 │Empty keeps the target's value.                                                   │                 │
-│                 │                                                                                  │                 │
+│                 │Empty keeps the target's value.                                                   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │Attached directories                                                              │                 │
 │                 │  none                                                                            │                 │
-│                 │                                                                                  │                 │
-│                 │Attach host directory:                                                            │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │Attach host directory:                                                            │  ──────── ▁   ▄ ╮
 │                 │Container destination:                                                            │                 │
 │                 │Access: ro · read-only ▾                                                          │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │Build cache                                                                       │                 │
 │                 │  /mnt/nvme/mbx                                                                   │                 │
-│                 │CPU must be a positive whole number.                                              │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▄ ╮
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
-│                 │  Cancel     Save                                                                 │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │CPU must be a positive whole number.                                              │                 │
+│                 │                                                                                  │                 │
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ───────────────╯
+│                 │  Cancel     Save                                                                 │  ──────── ▁   ▄ ╮
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -88,7 +88,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman                                                                                                        │
 │  │ No messages                                                                                                       │
@@ -98,29 +98,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │                                                                                  │                 │
 │                 │CPUs:                                                                             │                 │
 │                 │Memory (GiB):                                                                     │                 │
-│                 │Empty keeps the target's value.                                                   │                 │
-│                 │                                                                                  │                 │
+│                 │Empty keeps the target's value.                                                   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │Attached directories                                                              │                 │
 │                 │  none                                                                            │                 │
-│                 │                                                                                  │                 │
-│                 │Attach host directory:                                                            │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │Attach host directory:                                                            │  ──────── ▁   ▄ ╮
 │                 │Container destination:                                                            │                 │
 │                 │Access: ro · read-only ▾                                                          │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │Build cache                                                                       │                 │
 │                 │  none for this session                                                           │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ──────── ▁   ▄ ╮
-│                 │  Cancel     Save                                                                 │                 │
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
-│                                                                                                       ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │  Cancel     Save                                                                 │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      ││ + refreshing…                                                                │
-│                                      ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                                                                                                      │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -130,63 +130,63 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
-│hel ──────────────────────────────────││                                                          │
+│hel ──────────────────────────────────││                     ✦  M J O L N I R                     │
 │› · ACP pret                                                                                      │
-│  Idle  podm                                                                                      │
+│  Idle  podm                                                                          ion.        │
 │  │ No messa  ╭ × Edit container size and mounts ──────────────────────────────────╮              │
 │  │           │Session: ACP pretty name                                            │              │
 │              │Replace the container where supported, or save for its next creation│              │
-│              │                                                                    │  ion.        │
+│              │                                                                    │              │
 │              │CPUs:                                                               │              │
 │              │Memory (GiB):                                                       │              │
 │              │Empty keeps the target's value.                                     │              │
-│              │                                                                    │              │
-│              │Attached directories                                                │              │
-│              │/srv/data -> /mnt/data · cow                                        │              │
-│              │                                                                    │              │
-│              │Attach host directory:                                              │              │
-│              │Container destination:                                              │              │
-│              │Access: ro · read-only ▾                                            │              │
 │              │                                                                    │  ────────────╯
-│              │Remembered directories                                              │  ────────────╮
-│              │/srv/models                                                         │              │
+│              │Attached directories                                                │  ────────────╮
+│              │/srv/data -> /mnt/data · cow                                        │              │
 │              │                                                                    │  to open.    │
-╰────────────  │Build cache                                                         │  ────────────╯
-╭ Targets ▾ ─  │  none for this session                                             │  ───── ▁   ▄ ╮
-│  Host / fle  │                                                                    │              │
-╰────────────  │Enter attaches/accepts · Space edits · d removes · Tab moves        │  ────────────╯
-╭ Profiles ▾   │  Cancel     Save                                                   │  ───── ▁   ▄ ╮
-│ANTHROPIC     ╰────────────────────────────────────────────────────────────────────╯              │
-│ + refreshin                                                                                      │
-│OPENAI                                                                                            │
-│ + 2 refreshing…                                                                                  │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Nothing needs you                                                                                 │
+╰────────────  │Attach host directory:                                              │  ────────────╯
+╭ Targets ▾ ─  │Container destination:                                              │  ───── ▁   ▄ ╮
+│  Host / fle  │Access: ro · read-only ▾                                            │              │
+╰────────────  │                                                                    │  ────────────╯
+╭ Profiles ▾   │Remembered directories                                              │  ───── ▁   ▄ ╮
+│ANTHROPIC     │/srv/models                                                         │              │
+│ + refreshin  │                                                                    │              │
+│OPENAI        │Build cache                                                         │              │
+│ + 2 refresh  │  none for this session                                             │              │
+╰────────────  │                                                                    │  ────────────╯
+╭ Notificatio  │Enter attaches/accepts · Space edits · d removes · Tab moves        │  ───── ▁   ▄ ╮
+│Nothing need  │  Cancel     Save                                                   │              │
+│              ╰────────────────────────────────────────────────────────────────────╯              │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === Restart keeps its environment; container upgrade is a separate choice (120x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
+│ Create   Open   Filter: _____________││                  Select a session to open its conversation.                  │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
 │  Idle  podman  ╭ × Restart agent ───────────────────────────────────────────────────────────────────╮                │
-│  │ No message  │Session: session-1                                                                  │                │
-│  │             │                                                                                    │                │
+│  │ No message  │Session: session-1                                                                  │  ──────────────╯
+│  │             │                                                                                    │  ──────────────╮
 │                │Current image: ghcr.io/brokkai/mjolnir/session-base:2.51.0 (sha256:previous)        │                │
 │                │Target image: ghcr.io/brokkai/mjolnir/session-base:2.52.0 (sha256:selected)         │                │
-│                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
-│                │running turn.                                                                       │                │
-│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
-│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╮
-│                │A checkpoint does not preserve the whole environment.                               │                │
+│                │Restart agent keeps the current container and its filesystem; it interrupts any     │  ──────────────╯
+│                │running turn.                                                                       │  ─────── ▁   ▄ ╮
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │                │
+│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╯
+│                │A checkpoint does not preserve the whole environment.                               │  ─────── ▁   ▄ ╮
 │                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │                │
-│                │                                                                                    │  ──────────────╯
-│                │c Cancel  ·  r Restart agent  ·  u Upgrade container and restart…                   │  ─────── ▁   ▄ ╮
+│                │                                                                                    │                │
+│                │c Cancel  ·  r Restart agent  ·  u Upgrade container and restart…                   │                │
 │                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ─────── ▁   ▄ ╮
@@ -194,33 +194,33 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
 === Explicit upgrade discloses image versions, retained storage, and writable-layer loss (120x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
+│ Create   Open   Filter: _____________││                  Select a session to open its conversation.                  │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
 │  Idle  podman  ╭ × Upgrade container and restart? ──────────────────────────────────────────────────╮                │
-│  │ No message  │Session: session-1                                                                  │                │
-│  │             │                                                                                    │                │
+│  │ No message  │Session: session-1                                                                  │  ──────────────╯
+│  │             │                                                                                    │  ──────────────╮
 │                │Current image: ghcr.io/brokkai/mjolnir/session-base:2.51.0 (sha256:previous)        │                │
 │                │Target image: ghcr.io/brokkai/mjolnir/session-base:2.52.0 (sha256:selected)         │                │
-│                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
-│                │running turn.                                                                       │                │
-│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
-│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╮
-│                │A checkpoint does not preserve the whole environment.                               │                │
+│                │Restart agent keeps the current container and its filesystem; it interrupts any     │  ──────────────╯
+│                │running turn.                                                                       │  ─────── ▁   ▄ ╮
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │                │
+│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╯
+│                │A checkpoint does not preserve the whole environment.                               │  ─────── ▁   ▄ ╮
 │                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │                │
-│                │                                                                                    │  ──────────────╯
-│                │c Cancel  ·  u Upgrade container and restart…                                       │  ─────── ▁   ▄ ╮
+│                │                                                                                    │                │
+│                │c Cancel  ·  u Upgrade container and restart…                                       │                │
 │                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ─────── ▁   ▄ ╮
@@ -228,8 +228,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette

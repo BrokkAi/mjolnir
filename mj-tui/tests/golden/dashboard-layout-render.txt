@@ -6,10 +6,10 @@
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │  ! Important update              ◇ ⋯ ││                                                                              │
-│  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
+│  Idle  podman [1]  codex-1           ││                               ✦  M J O L N I R                               │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
 │  ? Newest question               ◇ ⋯ ││                                                                              │
 │  Question  podman [2]  codex-1       ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
@@ -17,10 +17,8 @@
 │                                      ││                                                                              │
 │  ? Older question                ◇ ⋯ ││                                                                              │
 │  Question  podman [3]  codex-1       ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│  │ No messages yet                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   │╭ No conversation open ────────────────────────────────────────────────────────╮
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -37,6 +35,8 @@
 │                                      ││! Important update · hel · age unknown                                  1 of 1│
 │                                      ││                                                                              │
 │                                      ││ Important update                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
@@ -62,9 +62,8 @@ Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+↑ scroll �
 │                                      ││                                                                              │
 │  ? Older question                ◇ ⋯ ││                                                                              │
 │  Question  podman [3]  codex-1       ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│  │ No messages yet                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   │╭ No conversation open ────────────────────────────────────────────────────────╮
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -85,6 +84,7 @@ Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+↑ scroll �
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+n next · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?1) · : / ? palette
@@ -92,69 +92,69 @@ notification header color: Rgb(158, 194, 238)
 open Rename action: None
 === Rename modal over dashboard (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ≡ ││                                                                              │
+│ default                            ≡ ││                               ✦  M J O L N I R                               │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                  Select a session to open its conversation.                  │
+│ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
+│› · ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
+│  Idle  podman  codex-1               │╭ No conversation open ────────────────────────────────────────────────────────╮
+│  │ No messages yet                   ││No conversation open.                                                         │
 │  │                                                                                                                   │
-│                                                                                                                      │
-│                       ╭ × Rename session ────────────────────────────────────────────────────╮                       │
-│                       │Session: ACP pretty name                                              │  ─────────────────────╯
-│                       │                                                                      │  ─────────────────────╮
-│                       │ACP pretty name                                                       │                       │
-│                       │                                                                      │                       │
+│                                                                                                 ─────────────────────╯
+│                       ╭ × Rename session ────────────────────────────────────────────────────╮  ────────────── ▁   ▄ ╮
+│                       │Session: ACP pretty name                                              │                       │
 │                       │                                                                      │  ─────────────────────╯
-│                       │  Cancel     Save                                                     │  ────────────── ▁   ▄ ╮
+│                       │ACP pretty name                                                       │  ────────────── ▁   ▄ ╮
+│                       │                                                                      │                       │
+│                       │                                                                      │                       │
+│                       │  Cancel     Save                                                     │                       │
 │                       ╰──────────────────────────────────────────────────────────────────────╯                       │
 │                                                                                                 ─────────────────────╯
 │                                                                                                 ────────────── ▁   ▄ ╮
-│                                      ││ANTHROPIC                                                                     │
-│                                      ││ + refreshing…                                                                │
-│                                      ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === standard panes at height 32 (120x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________▐│                                                                              │
-│[1] proj00 ───────────────────────────▐│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________▐│                  Select a session to open its conversation.                  │
+│[1] proj00 ───────────────────────────▐│                                                                              │
 │  · ACP pretty name               ◇ ⋯ ▐│                                                                              │
-│  Idle  podman [1]  codex-1           ▐│                  Select a session to open its conversation.                  │
-│  │ No messages yet                   ▐│                                                                              │
-│  │                                   ▐│                                                                              │
-│                                      ▐│                                                                              │
-│  · ACP pretty name               ◇ ⋯ ▐│                                                                              │
-│  Idle  podman [2]  codex-1           ▐│                                                                              │
-│  │ No messages yet                   ▐│                                                                              │
-│  │                                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      ▐╭ No conversation open ────────────────────────────────────────────────────────╮
-│[2] proj01 ───────────────────────────▐│No conversation open.                                                         │
+│  Idle  podman [1]  codex-1           ▐│                                                                              │
+│  │ No messages yet                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   ▐╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ▐│No conversation open.                                                         │
 │  · ACP pretty name               ◇ ⋯ ▐│Press Tab for Sessions, then Enter on the one to open.                        │
-│  Idle  podman [1]  codex-1           ▐╰──────────────────────────────────────────────────────────────────────────────╯
+│  Idle  podman [2]  codex-1           ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │  │ No messages yet                   ▐╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  │                                   ▐│  Host / fleet  Targets  CPU  RAM                                             │
 │                                      ▐╰──────────────────────────────────────────────────────────────────────────────╯
-│  · ACP pretty name               ◇ ⋯ ▐╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│  Idle  podman [2]  codex-1           ▐│ANTHROPIC                                                                     │
-│  │ No messages yet                   ▐│ + refreshing…                                                                │
-│  │                                   ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│[3] proj02 ───────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
-│  · ACP pretty name               ◇ ⋯ │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│  Idle  podman [1]  codex-1           ││Nothing needs you                                                             │
+│[2] proj01 ───────────────────────────▐╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│  · ACP pretty name               ◇ ⋯ ▐│ANTHROPIC                                                                     │
+│  Idle  podman [1]  codex-1           ▐│ + refreshing…                                                                │
+│  │ No messages yet                   ▐│OPENAI                                                                        │
+│  │                                   ▐│ + 2 refreshing…                                                              │
+│                                      ▐╰──────────────────────────────────────────────────────────────────────────────╯
+│  · ACP pretty name               ◇ ⋯ ▐╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│  Idle  podman [2]  codex-1           ▐│Nothing needs you                                                             │
+│  │ No messages yet                   ▐│                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                                                                              │
+│[3] proj02 ───────────────────────────││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman [1]  codex-1           ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
-standard transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 15 }
+standard transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 9 }
 compact pane preset action: None
 === compact panes at height 32 (120x32) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -194,37 +194,37 @@ restore pane preset action: None
 === restored panes at height 32 (120x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________▐│                                                                              │
-│[1] proj00 ───────────────────────────▐│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________▐│                  Select a session to open its conversation.                  │
+│[1] proj00 ───────────────────────────▐│                                                                              │
 │  · ACP pretty name               ◇ ⋯ ▐│                                                                              │
-│  Idle  podman [1]  codex-1           ▐│                  Select a session to open its conversation.                  │
-│  │ No messages yet                   ▐│                                                                              │
-│  │                                   ▐│                                                                              │
-│                                      ▐│                                                                              │
-│  · ACP pretty name               ◇ ⋯ ▐│                                                                              │
-│  Idle  podman [2]  codex-1           ▐│                                                                              │
-│  │ No messages yet                   ▐│                                                                              │
-│  │                                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      ▐╭ No conversation open ────────────────────────────────────────────────────────╮
-│[2] proj01 ───────────────────────────▐│No conversation open.                                                         │
+│  Idle  podman [1]  codex-1           ▐│                                                                              │
+│  │ No messages yet                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   ▐╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ▐│No conversation open.                                                         │
 │  · ACP pretty name               ◇ ⋯ ▐│Press Tab for Sessions, then Enter on the one to open.                        │
-│  Idle  podman [1]  codex-1           ▐╰──────────────────────────────────────────────────────────────────────────────╯
+│  Idle  podman [2]  codex-1           ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │  │ No messages yet                   ▐╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  │                                   ▐│  Host / fleet  Targets  CPU  RAM                                             │
 │                                      ▐╰──────────────────────────────────────────────────────────────────────────────╯
-│  · ACP pretty name               ◇ ⋯ ▐╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│  Idle  podman [2]  codex-1           ▐│ANTHROPIC                                                                     │
-│  │ No messages yet                   ▐│ + refreshing…                                                                │
-│  │                                   ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│[3] proj02 ───────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
-│  · ACP pretty name               ◇ ⋯ │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│  Idle  podman [1]  codex-1           ││Nothing needs you                                                             │
+│[2] proj01 ───────────────────────────▐╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│  · ACP pretty name               ◇ ⋯ ▐│ANTHROPIC                                                                     │
+│  Idle  podman [1]  codex-1           ▐│ + refreshing…                                                                │
+│  │ No messages yet                   ▐│OPENAI                                                                        │
+│  │                                   ▐│ + 2 refreshing…                                                              │
+│                                      ▐╰──────────────────────────────────────────────────────────────────────────────╯
+│  · ACP pretty name               ◇ ⋯ ▐╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│  Idle  podman [2]  codex-1           ▐│Nothing needs you                                                             │
+│  │ No messages yet                   ▐│                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                                                                              │
+│[3] proj02 ───────────────────────────││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman [1]  codex-1           ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
-restored transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 15 }
+restored transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 9 }
 === standard panes at height 44 (120x44) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -233,44 +233,44 @@ restored transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 15
 │ Create   Open   Filter: _____________││                                                                              │
 │[1] proj00 ───────────────────────────││                                                                              │
 │  · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman [1]  codex-1           ││                                                                              │
+│  Idle  podman [1]  codex-1           ││                               ✦  M J O L N I R                               │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
-│  · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
+│  · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [2]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │[2] proj01 ───────────────────────────││                                                                              │
 │  · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                                                                              │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman [1]  codex-1           │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │ No messages yet                   │╭ No conversation open ────────────────────────────────────────────────────────╮
+│  │                                   ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│  · ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
+│  Idle  podman [2]  codex-1           │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  │ No messages yet                   ││  Host / fleet  Targets  CPU  RAM                                             │
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│[3] proj02 ───────────────────────────││ANTHROPIC                                                                     │
+│  · ACP pretty name               ◇ ⋯ ││ + refreshing…                                                                │
+│  Idle  podman [1]  codex-1           ││OPENAI                                                                        │
+│  │ No messages yet                   ││ + 2 refreshing…                                                              │
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│  · ACP pretty name               ◇ ⋯ ││Nothing needs you                                                             │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│[3] proj02 ───────────────────────────│╭ No conversation open ────────────────────────────────────────────────────────╮
-│  · ACP pretty name               ◇ ⋯ ││No conversation open.                                                         │
-│  Idle  podman [1]  codex-1           ││Press Tab for Sessions, then Enter on the one to open.                        │
-│  │ No messages yet                   │╰──────────────────────────────────────────────────────────────────────────────╯
-│  │                                   │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│  · ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
-│  Idle  podman [2]  codex-1           │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│  │ No messages yet                   ││ANTHROPIC                                                                     │
-│  │                                   ││ + refreshing…                                                                │
-│                                      ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
-standard transcript area at height 44: Rect { x: 40, y: 0, width: 80, height: 27 }
+standard transcript area at height 44: Rect { x: 40, y: 0, width: 80, height: 19 }
 compact pane preset action: None
 === compact panes at height 44 (120x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -327,44 +327,44 @@ restore pane preset action: None
 │ Create   Open   Filter: _____________││                                                                              │
 │[1] proj00 ───────────────────────────││                                                                              │
 │  · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman [1]  codex-1           ││                                                                              │
+│  Idle  podman [1]  codex-1           ││                               ✦  M J O L N I R                               │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
-│  · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
+│  · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [2]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │[2] proj01 ───────────────────────────││                                                                              │
 │  · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                                                                              │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman [1]  codex-1           │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │ No messages yet                   │╭ No conversation open ────────────────────────────────────────────────────────╮
+│  │                                   ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│  · ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
+│  Idle  podman [2]  codex-1           │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  │ No messages yet                   ││  Host / fleet  Targets  CPU  RAM                                             │
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│[3] proj02 ───────────────────────────││ANTHROPIC                                                                     │
+│  · ACP pretty name               ◇ ⋯ ││ + refreshing…                                                                │
+│  Idle  podman [1]  codex-1           ││OPENAI                                                                        │
+│  │ No messages yet                   ││ + 2 refreshing…                                                              │
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│  · ACP pretty name               ◇ ⋯ ││Nothing needs you                                                             │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│[3] proj02 ───────────────────────────│╭ No conversation open ────────────────────────────────────────────────────────╮
-│  · ACP pretty name               ◇ ⋯ ││No conversation open.                                                         │
-│  Idle  podman [1]  codex-1           ││Press Tab for Sessions, then Enter on the one to open.                        │
-│  │ No messages yet                   │╰──────────────────────────────────────────────────────────────────────────────╯
-│  │                                   │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│  · ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
-│  Idle  podman [2]  codex-1           │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│  │ No messages yet                   ││ANTHROPIC                                                                     │
-│  │                                   ││ + refreshing…                                                                │
-│                                      ││OPENAI                                                                        │
-│                                      ││ + 2 refreshing…                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
-restored transcript area at height 44: Rect { x: 40, y: 0, width: 80, height: 27 }
+restored transcript area at height 44: Rect { x: 40, y: 0, width: 80, height: 19 }
 === dashboard at 59 columns (59x30) ===
                     Terminal too small
                  Need at least 60 columns.
@@ -412,37 +412,31 @@ dashboard geometry at 59 columns: (None, None, false)
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ No conversation open ──────────────────────────────────────────────╮
 │No conversation open.                                               │
-│Press Tab for Sessions, then Enter on the one to open.              │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▄ ╮
-│  Host / fleet  Targets  CPU          RAM                           │
-│  local         podman   unavailable                                │
+│  Host / fleet  Targets  CPU          RAM                           ▐
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
-│ANTHROPIC                                                           │
-│ + refreshing…                                                      │
-│OPENAI                                                              │
-│ + 2 refreshing…                                                    │
+│ANTHROPIC                                                           ▐
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                   │
+│                                                                    │
+│                                                                    │
+│                                                                    │
+│                                                                    │
+│                                                                    │
 ╰────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
-dashboard geometry at 70 columns: (Some([Rect { x: 0, y: 3, width: 70, height: 6 }, Rect { x: 0, y: 16, width: 70, height: 4 }, Rect { x: 0, y: 20, width: 70, height: 6 }]), Some(Rect { x: 0, y: 9, width: 70, height: 7 }), true)
+dashboard geometry at 70 columns: (Some([Rect { x: 0, y: 3, width: 70, height: 6 }, Rect { x: 0, y: 15, width: 70, height: 3 }, Rect { x: 0, y: 18, width: 70, height: 3 }]), Some(Rect { x: 0, y: 9, width: 70, height: 6 }), true)
 === dashboard at 80 columns (80x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
-╭ Sessions ───────────────────── ▁   ▄ ╮│           ✦  M J O L N I R           │
+╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││                                      │
-│hel ──────────────────────────────────││Select a session to open its conversat│
-│› · ACP pretty name               ◇ ⋯ ││                                      │
-│  Idle  podman  codex-1               ││                                      │
-│  │ No messages yet                   ││                                      │
-│  │                                   ││                                      │
-│                                      ││                                      │
 │                                      │╰──────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────╮
+│                                  ◇ ⋯ │╭ No conversation open ────────────────╮
 │                                      ││No conversation open.                 │
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
@@ -458,6 +452,12 @@ dashboard geometry at 70 columns: (Some([Rect { x: 0, y: 3, width: 70, height: 6
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
-dashboard geometry at 80 columns: (Some([Rect { x: 0, y: 3, width: 40, height: 13 }, Rect { x: 0, y: 16, width: 80, height: 4 }, Rect { x: 0, y: 20, width: 80, height: 6 }]), Some(Rect { x: 40, y: 0, width: 40, height: 16 }), false)
+dashboard geometry at 80 columns: (Some([Rect { x: 0, y: 3, width: 40, height: 7 }, Rect { x: 0, y: 10, width: 80, height: 4 }, Rect { x: 0, y: 14, width: 80, height: 6 }]), Some(Rect { x: 40, y: 0, width: 40, height: 10 }), false)
