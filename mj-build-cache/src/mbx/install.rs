@@ -551,14 +551,18 @@ fn canonical_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<P
     let command = host.shell_command(
         r#"cd -- "$1" && pwd -P"#,
         "hel-mbx-home",
-        [home.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(&home)],
         "resolve the container host's physical home directory",
     );
     let output = checked(executor.execute(&command)?, &command)?;
     let text = String::from_utf8(output.stdout).context("host home directory is not UTF-8")?;
     let home = PathBuf::from(text.trim());
     ensure!(
-        home.is_absolute(),
+        if host.ssh().is_some() {
+            mj_core::target_path::is_absolute(&home)
+        } else {
+            home.is_absolute()
+        },
         "container host home is not an absolute path"
     );
     Ok(home)
@@ -583,15 +587,18 @@ fn host_architecture(host: &CacheHost, executor: &impl CommandExecutor) -> Resul
 fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<InstallDestination> {
     let Some(existing) = existing else {
         return Ok(InstallDestination::Supported {
-            program: home.join(".local/bin/mbx"),
+            program: mj_core::target_path::join(home, Path::new(".local/bin/mbx")),
             kind: MbxInstallKind::Install,
         });
     };
     ensure!(
-        existing.program.is_absolute(),
+        mj_core::target_path::is_absolute(&existing.program),
         "native mbx probe returned a non-absolute path"
     );
-    let allowed = [home.join(".local/bin"), home.join(".cargo/bin")];
+    let allowed = [
+        mj_core::target_path::join(home, Path::new(".local/bin")),
+        mj_core::target_path::join(home, Path::new(".cargo/bin")),
+    ];
     if allowed
         .iter()
         .any(|directory| existing.program.strip_prefix(directory).is_ok())
@@ -758,7 +765,7 @@ fn inspect_profile_selection(
     let command = host.shell_command(
         PROFILE_SCRIPT,
         "hel-mbx-profile",
-        ["preview".into(), binary_dir.to_string_lossy().into_owned()],
+        ["preview".into(), mj_core::target_path::text(binary_dir)],
         "resolve the host login profile for the mbx PATH block",
     );
     let output = checked(executor.execute(&command)?, &command)?;
@@ -859,7 +866,7 @@ fn selection_from_lines(lines: &mut impl Iterator<Item = String>) -> Result<Prof
         .next()
         .context("profile selection returned no mbx shim directory")?;
     ensure!(
-        Path::new(&shim_dir).is_absolute(),
+        mj_core::target_path::is_absolute(Path::new(&shim_dir)),
         "host selected a non-absolute mbx shim directory: {shim_dir:?}"
     );
     ensure!(
@@ -875,7 +882,7 @@ fn selection_from_lines(lines: &mut impl Iterator<Item = String>) -> Result<Prof
 
 fn validate_profile_file(file: &str) -> Result<()> {
     ensure!(
-        file.starts_with("~/") || Path::new(file).is_absolute(),
+        file.starts_with("~/") || mj_core::target_path::is_absolute(Path::new(file)),
         "host selected a non-absolute login profile path: {file:?}"
     );
     Ok(())
@@ -883,7 +890,11 @@ fn validate_profile_file(file: &str) -> Result<()> {
 
 fn profile_details(selection: &ProfileSelection, binary_dir: &Path) -> MbxProfileDetails {
     let manual_path_line = (selection.shell_kind == "unknown").then(|| {
-        let directories = format!("{}:{}", selection.shim_dir.display(), binary_dir.display());
+        let directories = format!(
+            "{}:{}",
+            mj_core::target_path::text(&selection.shim_dir),
+            mj_core::target_path::text(binary_dir)
+        );
         format!(
             "export PATH={}{}",
             shell_quote(&directories),

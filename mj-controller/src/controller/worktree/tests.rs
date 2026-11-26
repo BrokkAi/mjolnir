@@ -4300,8 +4300,10 @@ fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_
     assert!(clone_out.status.success());
     test_git(&source, &["config", "user.name", "Test"]);
     test_git(&source, &["config", "user.email", "test@example.com"]);
+    // Keep the fixture's committed and checked-out bytes identical on every host.
+    std::fs::write(source.join(".gitattributes"), "README.md text eol=lf\n").unwrap();
     std::fs::write(source.join("README.md"), "base\n").unwrap();
-    test_git(&source, &["add", "README.md"]);
+    test_git(&source, &["add", ".gitattributes", "README.md"]);
     test_git(&source, &["commit", "-m", "initial"]);
     test_git(&source, &["push", "-u", "origin", "main"]);
     let base_commit = test_git(&source, &["rev-parse", "HEAD"]);
