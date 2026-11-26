@@ -361,6 +361,7 @@ impl ViewerSnapshot {
                     given_title: session.given_name().map(str::to_owned),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
                     subagent_task_name: subagent.map(|child| child.task_name.clone()),
+                    subagent_orchestrator: subagent.is_some_and(|child| child.orchestrator),
                     subagent_session_ids,
                     reviewer_session_ids,
                     harness_kind: session.harness_kind.id().into(),
@@ -741,6 +742,10 @@ pub struct ViewerSession {
     /// The stable task label chosen by the parent when it spawned this child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_task_name: Option<String>,
+    /// Whether this child is a depth-1 orchestrator that may delegate to its
+    /// own workers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subagent_orchestrator: bool,
     /// Direct children of this parent, workers and reviewers alike. Children
     /// are deliberately never nested.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

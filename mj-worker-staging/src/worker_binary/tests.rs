@@ -5621,6 +5621,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        parked_move: None,
         accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
@@ -5797,6 +5798,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        parked_move: None,
         accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
@@ -7261,6 +7263,38 @@ fn a_container_mbx_that_reports_another_version_never_replaces_the_stable_path()
 
 #[test]
 fn reload_candidate_install_and_cleanup_leave_live_files_intact() {
+    // The target is POSIX even when the controller runs on Windows. Verify
+    // its cleanup boundary without using the controller's host filesystem.
+    let target_root = "/var/lib/hel/workers/test-session";
+    let target = targets::TargetLocator::LocalBare {
+        worker_root: target_root.into(),
+    };
+    let recorder = MbxStagingRecorder::new("unused");
+    for unsafe_id in ["..", "/", "", "../worker", "a/b", "a\\b"] {
+        assert!(remove_reload_candidate(&recorder, &target, target_root, unsafe_id).is_err());
+    }
+    assert!(recorder.commands.lock().unwrap().is_empty());
+    remove_reload_candidate(&recorder, &target, target_root, "candidate").unwrap();
+    let commands = recorder.commands.lock().unwrap();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].program, "rm");
+    assert_eq!(
+        commands[0].args,
+        [
+            "-rf",
+            "--",
+            "/var/lib/hel/workers/test-session/reload-candidates/candidate"
+        ]
+    );
+    drop(commands);
+
+    // A real LocalBare worker runs POSIX commands and is not a Windows target.
+    #[cfg(unix)]
+    check_local_reload_candidate_files();
+}
+
+#[cfg(unix)]
+fn check_local_reload_candidate_files() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("test-session");
     let home = dir.path().join("home");
@@ -7313,9 +7347,6 @@ fn reload_candidate_install_and_cleanup_leave_live_files_intact() {
         std::fs::read(home.join("config.toml")).unwrap(),
         b"live profile"
     );
-    for unsafe_id in ["..", "/", "", "../worker", "a/b", "a\\b"] {
-        assert!(remove_reload_candidate(&ProcessExecutor, &locator, root_text, unsafe_id).is_err());
-    }
     remove_reload_candidate(&ProcessExecutor, &locator, root_text, "candidate").unwrap();
     assert!(!candidate.exists());
     assert_eq!(std::fs::read(root.join("launch.json")).unwrap(), b"live");

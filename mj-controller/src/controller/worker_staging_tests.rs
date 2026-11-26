@@ -496,6 +496,7 @@ fn cache_test_launch(
 
     WorkerLaunchConfig {
         accepted_reload_operation_id: None,
+        parked_move: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,

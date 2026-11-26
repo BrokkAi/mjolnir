@@ -1505,3 +1505,83 @@ def test_engine_saved_results_are_read_only_and_disallow_search(tmp_path, saved_
     report = audit_engine_result(tmp_path, saved_engine_result)
     assert not report["passed"]
     assert any(hit["seq"] == 2 for hit in report["hits"])
+
+
+def clean_writer_inventory(tmp_path, tracked_paths=("src/lib.rs",), tracked_symlinks=()):
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "tracked_paths": list(tracked_paths),
+        "tracked_symlinks": list(tracked_symlinks),
+        "head": PIN,
+    }))
+    return f"/workspace/{OWN}/repo"
+
+
+def test_read_only_inline_python_preserves_subsequent_structured_edit(tmp_path):
+    cwd = clean_writer_inventory(tmp_path)
+    check = (
+        "python3 - <<'PY'\n"
+        "import pathlib, re, subprocess\n"
+        "text = pathlib.Path('brief.md').read_text().replace('foo', 'bar')\n"
+        f"diff = subprocess.check_output(['git', 'diff', '--unified=0', '{PIN}', 'HEAD'], text=True)\n"
+        "print(len(re.findall(r'\\w+', text)), len(diff.splitlines()))\n"
+        "PY"
+    )
+    edit = {"name": "Edit", "kind": "edit", "rawInput": {"file_path": "brief.md", "old_string": "a", "new_string": "b"}}
+    report = audit_calls(tmp_path, [edit, shell(check), shell(check), edit], cwd=cwd, allow_in_place_edits=True)
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize("snippet", [
+    "import pathlib; pathlib.os.symlink('/tmp/a', 'brief.md')",
+    "import pathlib; P = pathlib.Path; P.replace(P('x'), 'brief.md')",
+    "from pathlib import Path; Path('x').copy('brief.md')",
+    "from pathlib import Path; Path('brief.md').write_text('x')",
+    "from pathlib import Path; Path('brief.md').symlink_to('/tmp/a')",
+    "from pathlib import Path; Path('x').replace('brief.md')",
+    "open('brief.md', 'w')",
+    "import pathlib; getattr(pathlib, 'os')",
+    "print(().__class__)",
+    "class C: pass",
+    f"import subprocess; subprocess.check_output(['git', 'diff', '--output=re.py', '{PIN}', 'HEAD'])",
+    "import subprocess; subprocess.check_output(['ln', '-s', '/tmp', 'alias'])",
+    "import subprocess; subprocess.run('git status', shell=True)",
+    "import subprocess; co = subprocess.check_output; co(['git', 'status'])",
+])
+def test_non_read_only_inline_python_still_blocks_subsequent_structured_edit(tmp_path, snippet):
+    cwd = clean_writer_inventory(tmp_path)
+    edit = {"name": "Edit", "kind": "edit", "rawInput": {"file_path": "brief.md", "old_string": "a", "new_string": "b"}}
+    report = audit_calls(tmp_path, [shell(f"python3 -c {snippet!r}"), edit], cwd=cwd, allow_in_place_edits=True)
+    assert not report["passed"]
+    assert any(hit["seq"] == 2 and "link handling" in hit["snippet"] for hit in report["hits"]), report["hits"]
+
+
+@pytest.mark.parametrize(("tracked_paths", "setup_calls", "snippet"), [
+    (("re.py",), (), "import re; print(re.escape('a'))"),
+    (("re/__init__.py",), (), "import re; print(re.escape('a'))"),
+    (("src/lib.rs",), (shell("cat > re.py <<'EOF'\nprint(1)\nEOF"),), "import re; print(re.escape('a'))"),
+    # Transitive stdlib imports (pathlib->fnmatch, subprocess->selectors, json->re, lazy encodings).
+    (("fnmatch.py",), (), "import pathlib; print(pathlib.Path('brief.md').exists())"),
+    (("selectors.py",), (), "import subprocess; print(subprocess.PIPE)"),
+    (("re.py",), (), "import json; print(json.loads('{}'))"),
+    (("encodings/__init__.py",), (), "print(b'a'.decode('ascii'))"),
+    (("_internal.py",), (), "import pathlib; print(pathlib.Path('brief.md').exists())"),
+    (("src/lib.rs",), (shell("cat > selectors.py <<'EOF'\nprint(1)\nEOF"),), "import subprocess; print(subprocess.PIPE)"),
+    (("src/lib.rs",), (shell(f"git show --output=selectors.py {PIN}"),), "import subprocess; print(subprocess.PIPE)"),
+])
+def test_shadowed_python_import_blocks_subsequent_structured_edit(tmp_path, tracked_paths, setup_calls, snippet):
+    cwd = clean_writer_inventory(tmp_path, tracked_paths=tracked_paths)
+    edit = {"name": "Edit", "kind": "edit", "rawInput": {"file_path": "brief.md", "old_string": "a", "new_string": "b"}}
+    calls = [*setup_calls, shell(f"python3 -c {snippet!r}"), edit]
+    report = audit_calls(tmp_path, calls, cwd=cwd, allow_in_place_edits=True)
+    assert not report["passed"]
+    assert any(hit["seq"] == len(calls) and "link handling" in hit["snippet"] for hit in report["hits"]), report["hits"]
+
+
+def test_python_cwd_with_parent_traversal_blocks_subsequent_structured_edit(tmp_path):
+    cwd = clean_writer_inventory(tmp_path, tracked_paths=("nested/re.py",), tracked_symlinks=("alias",))
+    py = {"name": "exec_command", "kind": "execute",
+          "rawInput": {"command": "python3 -c 'import re; print(1)'", "cwd": f"{cwd}/alias/.."}}
+    edit = {"name": "Edit", "kind": "edit", "rawInput": {"file_path": "brief.md", "old_string": "a", "new_string": "b"}}
+    report = audit_calls(tmp_path, [py, edit], cwd=cwd, allow_in_place_edits=True)
+    assert not report["passed"]
+    assert any(hit["seq"] == 2 and "link handling" in hit["snippet"] for hit in report["hits"]), report["hits"]

@@ -19,17 +19,17 @@ pub fn begin_worker_restart(session_id: &str, intent: &WorkerRestartIntent) -> R
 pub fn begin_subagent_unpark(
     session_id: &str,
     intent: &WorkerRestartIntent,
-    profile_change: Option<(&str, &str)>,
+    destination: Option<&SessionRecord>,
     staged_aws_profile: Option<Option<&str>>,
 ) -> Result<()> {
-    begin_worker_restart_for(session_id, intent, true, profile_change, staged_aws_profile)
+    begin_worker_restart_for(session_id, intent, true, destination, staged_aws_profile)
 }
 
 fn begin_worker_restart_for(
     session_id: &str,
     intent: &WorkerRestartIntent,
     unpark: bool,
-    profile_change: Option<(&str, &str)>,
+    destination: Option<&SessionRecord>,
     staged_aws_profile: Option<Option<&str>>,
 ) -> Result<()> {
     let _owner = crate::worker_lifecycle::require(session_id)?;
@@ -42,8 +42,7 @@ fn begin_worker_restart_for(
     let staged_aws_profile = staged_aws_profile.map(|profile| profile.map(str::to_owned));
     let session_id = session_id.to_owned();
     let intent = intent.clone();
-    let profile_change =
-        profile_change.map(|(previous, next)| (previous.to_owned(), next.to_owned()));
+    let destination = destination.cloned();
     submit_database_write("begin_worker_restart", move |connection| {
         let tx = connection.transaction()?;
         let record = state_io::load_session_with(&tx, &session_id)?;
@@ -66,26 +65,53 @@ fn begin_worker_restart_for(
             "another worker replacement already owns session {session_id}"
         );
         if unpark {
-            let (previous, next) = profile_change
-                .as_ref()
-                .map_or((None, None), |(previous, next)| {
-                    (Some(previous), Some(next))
-                });
             ensure!(
                 tx.execute(
                     "UPDATE sessions SET state='running', last_error=NULL, updated_at=?2,
                          last_profile=COALESCE(?3, last_profile)
                      WHERE session_id=?1 AND state='parked'
-                       AND (?4 IS NULL OR last_profile=?4)
                        AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
-                    params![session_id, chrono::Utc::now().to_rfc3339(), next, previous,],
+                    params![
+                        session_id,
+                        chrono::Utc::now().to_rfc3339(),
+                        destination.as_ref().map(|record| &record.last_profile)
+                    ],
                 )? == 1,
                 "only a parked sub-agent can accept a wake"
             );
         }
+        if let Some(destination) = destination.as_ref() {
+            update_unpark_destination(&tx, destination)?;
+        }
         tx.commit()?;
         Ok(())
     })
+}
+
+fn update_unpark_destination(tx: &Transaction<'_>, record: &SessionRecord) -> Result<()> {
+    tx.execute(
+        "UPDATE sessions SET last_profile=?2, harness_kind=?3, target_template_id=?4,
+         native_session_id=?5, subagents=?6, oracle=?7, oracle_choice=?8 WHERE session_id=?1",
+        params![
+            record.id,
+            record.last_profile,
+            record.harness_kind.id(),
+            record.target_template_id,
+            record.native_session_id,
+            record
+                .subagents
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            record.oracle,
+            record
+                .oracle_choice
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+        ],
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +290,16 @@ pub fn fail_subagent_unpark(
     operation_id: &str,
     failure: SubagentUnparkFailure<'_>,
 ) -> Result<()> {
+    fail_subagent_unpark_with_rollback(session_id, operation_id, failure, None)
+}
+
+pub fn fail_subagent_unpark_with_rollback(
+    session_id: &str,
+    operation_id: &str,
+    failure: SubagentUnparkFailure<'_>,
+    rollback: Option<&SessionRecord>,
+) -> Result<()> {
+    let rollback = rollback.cloned();
     let owner = crate::worker_lifecycle::require(session_id)?;
     ensure!(
         owner.operation_id() == operation_id,
@@ -292,6 +328,11 @@ pub fn fail_subagent_unpark(
              AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
             params![session_id, operation_id, detail, chrono::Utc::now().to_rfc3339(), state.as_str()],
         )? == 1, "failed wake no longer owns the running child");
+        if state == SessionState::Parked
+            && let Some(record) = rollback.as_ref()
+        {
+            update_unpark_destination(&tx, record)?;
+        }
         finish_worker_restart_with(&tx, &session_id, &operation_id)?;
         tx.commit()?;
         Ok(())

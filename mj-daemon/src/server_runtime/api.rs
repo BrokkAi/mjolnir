@@ -1991,7 +1991,7 @@ impl ApiBackend {
                         {
                             entry["report_dir"] = report_dir.clone().into();
                         }
-                        let selection = live_agent_selection(projection.as_ref(), &detail);
+                        let selection = live_agent_selection(projection.as_ref(), &detail, record.as_ref().map(|record| record.last_profile.as_str()));
                         entry["model"] = serde_json::json!(selection.model);
                         entry["effort"] = serde_json::json!(selection.effort);
                         inputs.annotate(&relation.child_session_id, &mut entry);
@@ -4195,6 +4195,7 @@ fn agent_repo_urls(
 fn live_agent_selection(
     projection: Option<&RuntimeProjection>,
     detail: &mj_controller::database::SubagentListingDetails,
+    current_profile: Option<&str>,
 ) -> mj_core::storage::UsageSelection {
     let live = projection
         .and_then(|projection| projection.sessions.get(&detail.relation.child_session_id))
@@ -4209,10 +4210,18 @@ fn live_agent_selection(
     mj_core::storage::UsageSelection {
         model: current("model")
             .or_else(|| detail.selection.model.clone())
-            .or_else(|| detail.relation.model.clone()),
+            .or_else(|| {
+                (current_profile == Some(detail.relation.profile_id.as_str()))
+                    .then(|| detail.relation.model.clone())
+                    .flatten()
+            }),
         effort: current("effort")
             .or_else(|| detail.selection.effort.clone())
-            .or_else(|| detail.relation.effort.clone()),
+            .or_else(|| {
+                (current_profile == Some(detail.relation.profile_id.as_str()))
+                    .then(|| detail.relation.effort.clone())
+                    .flatten()
+            }),
     }
 }
 
@@ -4933,11 +4942,12 @@ impl SubagentBackend for ApiBackend {
             };
             let models = mj_controller::profile_config::advertised_models();
             mj_core::runtime::spawn_blocking(move || {
-                let mut report = mj_controller::database::load_session_usage_report(&query, models)?;
+                let mut report =
+                    mj_controller::database::load_session_usage_report(&query, models)?;
+                // The store clipped the last selected interval to its snapshot time.
                 report.quota_usage = mj_controller::quota_telemetry::weekly_quota_usage(
                     profiles,
-                    report.since_ms,
-                    report.until_ms,
+                    &query.selected_intervals(report.until_ms),
                 );
                 Ok::<_, anyhow::Error>(report)
             })

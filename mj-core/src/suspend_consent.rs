@@ -269,6 +269,26 @@ impl SuspendPreflight {
         self.blockers.iter().any(SuspendBlocker::is_auto_fixable)
     }
 }
+/// Human-readable refusal for a direct `mj suspend` that still has blockers.
+pub fn format_suspend_blockers(blockers: &[SuspendBlocker]) -> String {
+    let mut text = String::from("Cannot suspend until these blockers are resolved:\n");
+    for (index, blocker) in blockers.iter().enumerate() {
+        text.push('\n');
+        let number = index + 1;
+        let title = blocker.title();
+        match blocker.paths.len() {
+            0 => text.push_str(&format!("{number}. {title}\n")),
+            1 => text.push_str(&format!("{number}. {title} (1 item)\n")),
+            count => text.push_str(&format!("{number}. {title} ({count} items)\n")),
+        }
+        for path in &blocker.paths {
+            text.push_str(&format!("  - {path}\n"));
+        }
+        text.push_str(&format!("  Fix: {}\n", blocker.remedy));
+    }
+    text
+}
+
 pub fn format_blocker_cleanup_prompt(blockers: &[SuspendBlocker]) -> String {
     let mut text = String::from(
         "Inspect and resolve these suspend blockers. Preserve or push wanted work, then report when ready to suspend.\n",
@@ -609,6 +629,20 @@ mod tests {
         .unwrap();
         assert_eq!(unknown.title(), "future_custom_blocker");
         assert!(!unknown.is_auto_fixable());
+        let formatted = format_suspend_blockers(&[
+            blocker,
+            SuspendBlocker {
+                kind: "missing_managed_origin".into(),
+                paths: Vec::new(),
+                remedy: "set an origin".into(),
+            },
+        ]);
+        assert!(formatted.starts_with("Cannot suspend until these blockers are resolved:\n"));
+        assert!(formatted.contains(
+            "\n1. Hidden tracked edits (1 item)\n  - linked/file\n  Fix: preserve work\n"
+        ));
+        assert!(formatted.contains("\n2. Missing Git origin\n  Fix: set an origin\n"));
+        assert!(!formatted.contains("(0 "));
         assert!(
             serde_json::from_str::<SuspendBlocker>(
                 r#"{"kind":"hidden_tracked_edits","paths":[],"remedy":"","extra":true}"#

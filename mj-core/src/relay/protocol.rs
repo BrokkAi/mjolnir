@@ -358,6 +358,10 @@ pub enum RelayRequest {
     ReadCheckpointNativeUse {
         barrier_command_id: String,
         cut: super::snapshot::RelayCursor,
+        /// UTF-8 byte offset into pending context; absent starts at zero. Each
+        /// page uses the same barrier and cut.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_context_offset: Option<u64>,
     },
     ReadPendingElicitation {
         elicitation_id: String,
@@ -1134,6 +1138,14 @@ pub enum RelayResponsePayload {
     },
     CheckpointNativeUse {
         native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
+        /// A UTF-8 page, present at protocol 95 when context is pending at the cut.
+        /// An empty string remains distinct from absent context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_prompt_context: Option<String>,
+        /// Absolute UTF-8 byte offset of the next page, at a character boundary
+        /// and strictly greater than the requested offset; absent when complete.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_context_offset: Option<u64>,
     },
     PendingElicitation {
         request: Option<crate::elicitation::ElicitationRequest>,

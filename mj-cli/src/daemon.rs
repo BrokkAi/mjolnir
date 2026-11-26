@@ -1861,7 +1861,7 @@ fn launch_diagnostics(
     directory: &Path,
     pid: u32,
 ) -> Result<(Option<PathBuf>, Option<DaemonExitRecord>)> {
-    use crate::logging::daemon_log_path;
+    use mj_client::logging::daemon_log_path;
 
     if let Some(path) = daemon_log_path(directory, pid)? {
         return Ok((Some(path), None));

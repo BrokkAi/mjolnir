@@ -14,8 +14,8 @@ use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::Context;
 use anyhow::Result;
 
-#[cfg(unix)]
 use crate::controller::restore_session_after_persistence_failure;
+#[cfg(unix)]
 use crate::controller::test_support::IsolatedTest;
 use crate::controller::test_support::{
     RefusingExecutor, checkpoint_test_session, write_checkpoint_gate_archive,
@@ -2017,6 +2017,10 @@ fn a_move_checkpoint_can_verify_its_archive_without_source_harness_readiness() {
     IsolatedTest::new(name)
         .env(REUSE_TEST_CHILD, "1")
         .env(LATCH_CHECKPOINT_ONLY, "1")
+        .env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        )
         .env("MJ_DATA_DIR", directory.path())
         .run();
 }
@@ -2028,15 +2032,20 @@ const QUEUED_WAKE_TEST_CHILD: &str = "MJ_TEST_QUEUED_WAKE_CHILD";
 /// restart continuation, and saving the failed session checkpoints that queue
 /// without a harness. The daemon's projection keeps no payload for a wake, so
 /// the latch archives the prompt the worker's queue holds at the cut. A
-/// checkpoint-only worker too old to report it saves the rest and says so: it
-/// never starts the wake, so waiting for it would never end.
+/// checkpoint-only worker too old to report pending context must first be
+/// replaced, and a failed replacement leaves its launch and relay intact.
 // Hard-won: #1594: a queued mailbox wake failed every checkpoint export with "has no content".
+// Hard-won: pending handoff text was absent from suspend checkpoints.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     let reads_queue = mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL;
     let Some(protocol) = std::env::var_os(QUEUED_WAKE_TEST_CHILD) else {
-        for protocol in [mj_core::relay::RELAY_PROTOCOL_VERSION, reads_queue - 1] {
+        for protocol in [
+            mj_core::relay::RELAY_PROTOCOL_VERSION,
+            mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL - 1,
+            reads_queue - 1,
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let test_name = format!(
                 "{}::a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue",
@@ -2048,12 +2057,17 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                 .env(QUEUED_WAKE_TEST_CHILD, protocol.to_string())
                 .env(LATCH_RELAY_MAX_PROTOCOL, protocol.to_string())
                 .env(LATCH_CHECKPOINT_ONLY, "1")
+                .env(
+                    "MJ_WORKER_BINARY",
+                    mj_core::test_hooks::fake_worker_dispatcher(),
+                )
                 .env("MJ_DATA_DIR", directory.path())
                 .run();
         }
         return;
     };
     let protocol: u32 = protocol.to_str().unwrap().parse().unwrap();
+    let pending_context = "東京".repeat(mj_core::relay::MAX_FRAME_BYTES / 6 + 1_000);
     let _writer = crate::database::install_isolated_test_writer();
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(120));
@@ -2067,6 +2081,8 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     struct ExportRecorder {
         exported: std::sync::Mutex<Option<CheckpointExportSpec>>,
         notices: std::sync::Mutex<Vec<String>>,
+        purposes: std::sync::Mutex<Vec<String>>,
+        resumable: std::sync::atomic::AtomicBool,
     }
 
     impl CommandExecutor for ExportRecorder {
@@ -2090,7 +2106,32 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             self.execute_with_stdin(command, input)
         }
 
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            if self.resumable.load(std::sync::atomic::Ordering::SeqCst) {
+                if matches!(
+                    command.purpose.as_str(),
+                    "stop Mjolnir worker daemon" | "install the prepared Mjolnir worker"
+                ) {
+                    assert!(
+                        crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == "checkpoint-only worker swap")
+                    );
+                    if command.purpose == "install the prepared Mjolnir worker" {
+                        return targets::ProcessExecutor.execute(command);
+                    }
+                } else {
+                    assert!(
+                        !crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == "checkpoint-only worker swap"),
+                        "worker preparation must not hold swap admission: {}",
+                        command.purpose
+                    );
+                    return targets::ProcessExecutor.execute(command);
+                }
+            }
             Ok(CommandOutput {
                 status: 1,
                 stdout: Vec::new(),
@@ -2111,6 +2152,18 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
 
         fn notify_notice(&self, notice: &str) {
             self.notices.lock().unwrap().push(notice.to_owned());
+        }
+
+        fn begin_resumable_work(&self) -> Result<()> {
+            self.resumable
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn end_resumable_work(&self, _: &'static str) -> Result<()> {
+            self.resumable
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -2139,6 +2192,17 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                 config_options: Vec::new(),
             })
             .unwrap();
+        let installed = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "install-context".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::InstallPromptContext {
+                text: pending_context.clone(),
+            },
+        });
+        assert!(
+            matches!(installed.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+            "install pending prompt context: {installed:?}"
+        );
         let delivered = relay.handle(mj_core::relay::RelayRequestEnvelope {
             request_id: "deliver-parent-task".into(),
             protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
@@ -2173,8 +2237,12 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
+    let worker_root = data_directory.join("workers").join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let launch = br#"{"run_mode":"checkpoint_only","suspend_capture":{"operation":"preserve-me"}}"#;
+    std::fs::write(worker_root.join("launch.json"), launch).unwrap();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
+        worker_root: worker_root.clone(),
     }));
     crate::database::save_session(&session).unwrap();
     let mut config = Config::default();
@@ -2242,6 +2310,58 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     let Err(error) = result else {
         panic!("a checkpoint exported to a target that refuses every command");
     };
+    if protocol < mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL {
+        assert!(
+            format!("{error:#}")
+                .contains("upgrade the checkpoint-only worker without starting its harness"),
+            "{error:#}"
+        );
+        assert!(executor.exported.lock().unwrap().is_none());
+        assert_eq!(
+            std::fs::read(worker_root.join("launch.json")).unwrap(),
+            launch
+        );
+        let retained: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+            &std::fs::read(relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            retained
+                .pending_prompt_context
+                .as_ref()
+                .is_some_and(|context| context.text == pending_context),
+            "failed replacement lost the pending context"
+        );
+        {
+            let purposes = executor.purposes.lock().unwrap();
+            assert!(
+                purposes
+                    .iter()
+                    .any(|purpose| purpose == "stop Mjolnir worker daemon"),
+                "{purposes:?}"
+            );
+            assert!(
+                purposes
+                    .iter()
+                    .any(|purpose| purpose == "detect target platform"),
+                "{purposes:?}"
+            );
+            assert!(
+                purposes
+                    .iter()
+                    .any(|purpose| purpose == "install the prepared Mjolnir worker"),
+                "{purposes:?}"
+            );
+            assert!(
+                !purposes
+                    .iter()
+                    .any(|purpose| purpose == "start detached Mjolnir worker"),
+                "{purposes:?}"
+            );
+        }
+        channels.shutdown.shutdown().await.unwrap();
+        return;
+    }
     assert!(
         format!("{error:#}").contains("no target is provisioned for this test"),
         "{error:#}"
@@ -2253,6 +2373,11 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         .take()
         .expect("the checkpoint never reached its export");
     spec.canonical_session.validate().unwrap();
+    assert!(
+        spec.canonical_session.pending_prompt_context.as_deref() == Some(pending_context.as_str()),
+        "checkpoint did not preserve the {} byte pending context",
+        pending_context.len()
+    );
     let notices = executor.notices.lock().unwrap().clone();
     if protocol < reads_queue {
         assert!(
@@ -2314,6 +2439,10 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         );
         IsolatedTest::new(test_name)
             .env(REUSE_TEST_CHILD, "1")
+            .env(
+                LATCH_RELAY_MAX_PROTOCOL,
+                mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+            )
             // Longer than the normal checkpoint barrier deadline. The
             // controller must wait for startup rather than restart it.
             .env(LATCH_RELAY_STARTUP_DELAY_MS, "31000")
@@ -2460,6 +2589,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         Vec::new(),
         Vec::new(),
     );
+    current_latch_archive_metadata(&mut input);
     if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_none() {
         input.canonical_session.session.configuration.goal = Some(Box::new(
             serde_json::from_value(serde_json::json!({
@@ -2667,10 +2797,8 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         .unwrap();
     handle.sync_now().await.unwrap();
 
-    // Real session content, and the same policy has to export again. This
-    // stand-in speaks a protocol older than checkpoint mail, so a message it
-    // accepted but has not handed to the agent cannot be saved; the export
-    // says nothing about it and the person is told (#1616).
+    // Real session content makes the same policy export again. A current
+    // worker preserves accepted mail that has not reached the agent (#1616).
     let waiting = mj_core::mailbox::MailboxEvent {
         key: "waiting-message".into(),
         source: "parent".into(),
@@ -2743,21 +2871,20 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         format!("{error:#}").contains("no target is provisioned for this test"),
         "{error:#}"
     );
-    assert_eq!(
-        executor
-            .exported_mailbox
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("the export spec was not read"),
-        None
-    );
+    let mailbox = executor
+        .exported_mailbox
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the export spec was not read")
+        .expect("pending mail was not archived");
+    assert_eq!(mailbox.pending_events, vec![waiting]);
     let notices = executor.notices.lock().unwrap().clone();
     assert!(
-        notices
+        !notices
             .iter()
             .any(|notice| notice.starts_with("1 accepted message not yet delivered")),
-        "the unsaved message went unreported: {notices:?}"
+        "saved mail was reported missing: {notices:?}"
     );
     assert!(
         executor.observed_stages().iter().any(|(purpose, stages)| {
@@ -3087,6 +3214,7 @@ fn an_installed_archive_is_reused_when_only_relay_bookkeeping_moved() {
     // The reused archive is still the gate close destroys through.
     verify_installed_checkpoint_gate(session_id, &artifact.metadata).unwrap();
 }
+// Hard-won: pending handoff installation does not advance the archive frontier.
 #[test]
 fn archive_reuse_falls_back_to_a_full_export_for_anything_but_bookkeeping() {
     let directory = tempfile::tempdir().unwrap();
@@ -3117,6 +3245,17 @@ fn archive_reuse_falls_back_to_a_full_export_for_anything_but_bookkeeping() {
         },
     });
     assert!(reuse(Some(&checkpoint), latched.event_frontier, &with_new_content).is_none());
+
+    let mut with_pending_context = latched.clone();
+    with_pending_context.pending_prompt_context = Some("hidden context".repeat(8_000));
+    assert!(
+        reuse(
+            Some(&checkpoint),
+            latched.event_frontier,
+            &with_pending_context
+        )
+        .is_none()
+    );
 
     // An archive the latch has not reached yet cannot describe the session.
     assert!(reuse(Some(&checkpoint), checkpoint.event_frontier - 1, &latched).is_none());
@@ -3276,6 +3415,10 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
         );
         IsolatedTest::new(name)
             .env(IN_PLACE_CLOSE_CHILD, "1")
+            .env(
+                LATCH_RELAY_MAX_PROTOCOL,
+                mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+            )
             // Checkpoint-only mode advances the lifecycle commands itself, so
             // the sealed Close reaches `Closed` without an ACP harness.
             .env(LATCH_CHECKPOINT_ONLY, "1")
@@ -3302,8 +3445,8 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
             latch_relay_proxy_command(&relay_root)
         ),
     );
-    // The archive covers exactly the two observations seeded below, so the
-    // close latch reuses it instead of exporting a new one.
+    // The existing checkpoint represents the seeded observations; a cross-target
+    // Move still exports a new archive onto the source target.
     let mut seed =
         mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
     seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
@@ -3318,11 +3461,31 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
     })
     .unwrap();
     drop(seed);
-    let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
+    let native_sessions = relay_root.join("profile/sessions/2026/08/14");
+    std::fs::create_dir_all(&native_sessions).unwrap();
+    std::fs::write(
+        native_sessions.join("rollout-native-session.jsonl"),
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-session\"}}\n",
+    )
+    .unwrap();
+    let mut input = crate::controller::test_support::checkpoint_archive_input(
+        LATCH_RELAY_SESSION,
+        2,
+        Vec::new(),
+        Vec::new(),
+    );
+    current_latch_archive_metadata(&mut input);
+    let checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
+        &archive_directory,
+        LATCH_RELAY_SESSION,
+        &input,
+    );
 
     let repository = crate::controller::test_support::committed_repository();
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "local".into();
+    // This stand-in has no connection-owned project-memory transfer endpoint.
+    session.no_project_memory = true;
     session.project_directory = Some(repository.path().to_owned());
     session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
@@ -3568,17 +3731,30 @@ fn in_close_cut_child(test_name: &str, late_write: &str) -> bool {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
+    let needs_current_worker = matches!(
+        test_name,
+        "a_suspend_seals_when_the_worker_journals_after_the_close_cut"
+            | "an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn"
+            | "a_refused_close_returns_the_session_to_running_and_releases_its_barrier"
+            | "suspended_archive_serializes_compact_tool_and_terminal_bodies"
+    );
     let test_name = format!(
         "{}::{test_name}",
         module_path!()
             .strip_prefix("mj_controller::")
             .unwrap_or(module_path!())
     );
-    IsolatedTest::new(test_name)
+    let mut test = IsolatedTest::new(test_name)
         .env(CLOSE_CUT_TEST_CHILD, "1")
         .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, late_write)
-        .env("MJ_DATA_DIR", directory.path())
-        .run();
+        .env("MJ_DATA_DIR", directory.path());
+    if needs_current_worker {
+        test = test.env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        );
+    }
+    test.run();
     false
 }
 

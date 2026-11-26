@@ -2990,6 +2990,7 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     .unwrap();
     let archive_path = temp.path().join("origin-seed.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -3577,6 +3578,7 @@ fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
 
         let archive_path = temp.path().join("worktree-origin-delta.hel.zip");
         let canonical = mj_core::archive::CanonicalSessionSnapshot {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
@@ -3849,6 +3851,7 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
 
     let archive_path = temp.path().join("legacy-worktree.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -4078,6 +4081,7 @@ fn legacy_clone_restore_repairs_nested_linked_worktree_after_publish_and_preserv
 
     let archive_path = temp.path().join("legacy-nested.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -4350,6 +4354,7 @@ fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_
     assert!(snapshot.linked_worktrees.is_empty());
     let archive_path = temp.path().join("history.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -4421,7 +4426,22 @@ fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_
 
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Stopped;
-    session.managed_worktree = Some(Box::new(worktree.clone()));
+    // Windows is a controller, not a local POSIX target. Keep the host paths
+    // above for real Git I/O, and use a target path in the persisted record.
+    #[cfg(windows)]
+    let persisted_worktree = {
+        let mut persisted = worktree.clone();
+        persisted.source_repository = PathBuf::from("/fixture/source");
+        persisted.source_project_directory = persisted.source_repository.clone();
+        persisted.worktree_root = persisted
+            .source_repository
+            .join(".mj/clones")
+            .join(session_id);
+        persisted
+    };
+    #[cfg(not(windows))]
+    let persisted_worktree = worktree.clone();
+    session.managed_worktree = Some(Box::new(persisted_worktree.clone()));
     crate::database::save_session(&session).unwrap();
     let mut controller = Controller {
         config: Config::default(),
@@ -4457,13 +4477,17 @@ fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_
     let persisted = crate::database::load_session_record(session_id)
         .unwrap()
         .unwrap();
+    let persisted_checkout = persisted.managed_worktree.as_ref().unwrap();
     assert_eq!(
-        persisted
-            .managed_worktree
-            .as_ref()
-            .unwrap()
-            .base_commit
-            .as_deref(),
+        persisted_checkout.source_repository,
+        persisted_worktree.source_repository
+    );
+    assert_eq!(
+        persisted_checkout.worktree_root,
+        persisted_worktree.worktree_root
+    );
+    assert_eq!(
+        persisted_checkout.base_commit.as_deref(),
         Some(fresh_head.as_str())
     );
     mj_checkpoint::archive::restore_git_snapshot(

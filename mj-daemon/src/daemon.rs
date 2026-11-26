@@ -318,6 +318,10 @@ pub struct RuntimeState {
     projects: Arc<mj_controller::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     session_gate: Arc<RecoveryGate>,
+    /// Per-workspace-owner gate serializing borrower sub-agent registration
+    /// against checkout-mutating blocker remediation. Weak references reclaim
+    /// entries automatically once no caller holds the gate.
+    borrower_registration_gates: Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::RwLock<()>>>>,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.

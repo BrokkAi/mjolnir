@@ -148,6 +148,7 @@ impl RuntimeState {
             projects: Arc::new(mj_controller::project_catalog::Catalog::default()),
             profile_catalog,
             session_gate,
+            borrower_registration_gates: Mutex::new(BTreeMap::new()),
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),
             next_notice_id: AtomicU64::new(1),
@@ -170,6 +171,30 @@ impl RuntimeState {
 
     pub(crate) fn projects(&self) -> Arc<mj_controller::project_catalog::Catalog> {
         self.projects.clone()
+    }
+
+    pub(crate) fn borrower_registration_gate(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<tokio::sync::RwLock<()>>> {
+        let owner_id = self
+            .owner()
+            .controller()
+            .state
+            .workspace_owner(session_id)
+            .ok()
+            .map(|owner| owner.id.clone())?;
+        let mut gates = self
+            .borrower_registration_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = gates.get(&owner_id).and_then(std::sync::Weak::upgrade) {
+            return Some(existing);
+        }
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        gates.insert(owner_id, Arc::downgrade(&gate));
+        Some(gate)
     }
 
     pub(crate) async fn stop_viewer_background_task(

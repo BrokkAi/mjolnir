@@ -354,8 +354,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     );
     let accepted_config = {
         let relay = relay.lock().expect("relay lock poisoned");
-        let state = relay.operational_state();
-        acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
+        accepted_config_for_boot(&config, &relay, resume_session.as_deref())
     };
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
@@ -1844,12 +1843,13 @@ pub async fn run_daemon_owned(
             &config.initial_commands,
         )?
     } else {
-        DurableRelay::open_for_harness(
+        DurableRelay::open_for_harness_with_parked_move(
             &root,
             &config.session_id,
             env!("CARGO_PKG_VERSION"),
             config.harness,
             &config.initial_commands,
+            config.parked_move.as_ref(),
         )?
     };
     if let Some(operation_id) = config.accepted_reload_operation_id.as_deref() {

@@ -412,6 +412,19 @@ impl RuntimeState {
         request: mj_controller::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = mj_controller::upgrade::activity("subagent admission")?;
+        let borrower_gate = if request.orchestrator {
+            None
+        } else {
+            self.borrower_registration_gate(&request.parent_session_id)
+        };
+        let _borrower_guard = match borrower_gate.as_ref() {
+            Some(gate) => Some(gate.try_read().map_err(|_| {
+                mj_core::refusal::Refusal::precondition(
+                    "Cannot start a sub-agent while suspend blockers are being repaired on its workspace.",
+                )
+            })?),
+            None => None,
+        };
         let manager = self.session_manager.clone();
         let (relation, needs_provisioning, registered_here) = blocking(move || {
             let mut controller = Controller::load()?;
@@ -451,6 +464,9 @@ impl RuntimeState {
                 .map(|relation| (relation, true, true))
         })
         .await?;
+        // Keep `_borrower_guard` held through `finish_subagent_registration`,
+        // which publishes the child via `reload_controller` and cleans up
+        // newly registered children on any failure.
         self.finish_subagent_registration(&relation, needs_provisioning, registered_here)
             .await?;
         Ok(relation)

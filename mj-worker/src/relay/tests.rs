@@ -2387,22 +2387,30 @@ fn legacy_idle_snapshot_does_not_invent_an_idle_start() {
     );
 }
 
+// Hard-won: 6c4e6adcf: checkpoint restore lost a pending parked Move handoff before its first prompt.
 #[test]
-fn hidden_context_waits_for_a_prompt_and_survives_an_interruption() {
+fn restored_prompt_context_waits_for_a_prompt_and_survives_an_interruption() {
     let temp = tempfile::tempdir().unwrap();
+    let text = "<hel-background>memory</hel-background>";
+    let seed = mj_core::relay::RestoredRelaySeed {
+        pending_prompt_context: Some(text.into()),
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 0,
+        event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        queued_prompts: Vec::new(),
+        accepted_config: Default::default(),
+        native_session_unused: false,
+        mailbox: None,
+        native_use_evidence: None,
+    };
+    fs::write(
+        mj_core::relay::restored_relay_seed_path(temp.path()),
+        serde_json::to_vec(&seed).unwrap(),
+    )
+    .unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    let installed = relay.handle(relay_request(
-        "install-context",
-        RelayRequest::InstallPromptContext {
-            text: "<hel-background>memory</hel-background>".into(),
-        },
-    ));
-    assert!(matches!(
-        installed.body,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::PromptContextInstalled
-        }
-    ));
 
     submit_relay(
         &mut relay,
@@ -2426,6 +2434,12 @@ fn hidden_context_waits_for_a_prompt_and_survives_an_interruption() {
         Some("<hel-background>memory</hel-background>")
     );
     assert_eq!(first[0].command, prompt("do it"));
+    submit_relay(
+        &mut relay,
+        "during-prompt-barrier",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     relay
         .record_command_interrupted(
             "first-prompt",
@@ -2433,6 +2447,24 @@ fn hidden_context_waits_for_a_prompt_and_survives_an_interruption() {
             "restart",
         )
         .unwrap();
+    let barrier = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(barrier[0].command_id, "during-prompt-barrier");
+    relay
+        .record_checkpoint_ready("during-prompt-barrier")
+        .unwrap();
+    let cut = relay.operational_state().checkpoint_ready.unwrap();
+    assert_eq!(
+        relay
+            .checkpoint_native_use("during-prompt-barrier", &cut)
+            .unwrap()
+            .1,
+        Some(text)
+    );
+
+    // Reopening recovers the ownerless barrier and uses the live snapshot,
+    // even with the old seed still on disk.
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 
     submit_relay(&mut relay, "second-prompt", prompt("continue"));
     let second = relay.claim_pending_commands(true).unwrap();
@@ -2451,6 +2483,9 @@ fn hidden_context_waits_for_a_prompt_and_survives_an_interruption() {
             },
         )
         .unwrap();
+
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 
     submit_relay(&mut relay, "third-prompt", prompt("again"));
     let third = relay.claim_pending_commands(true).unwrap();
@@ -10456,6 +10491,7 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
     drop(repeated);
     let seed_root = tempfile::tempdir().unwrap();
     let seed = mj_core::relay::RestoredRelaySeed {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -12131,6 +12167,9 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
             replaced_unused_native_session_id: None,
         })
         .unwrap();
+    let context = "escaped \"hidden\" notes\n".repeat(4096);
+    assert!(context.len() > 64 * 1024);
+    relay.install_prompt_context(context.clone()).unwrap();
     let barrier_id = "barrier-native-use".to_owned();
     let cut = ready_checkpoint(&mut relay, &barrier_id);
     let envelope = |request_id: &str, request: RelayRequest| RelayRequestEnvelope {
@@ -12143,6 +12182,7 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
         RelayRequest::ReadCheckpointNativeUse {
             barrier_command_id: barrier_id.clone(),
             cut: cut.clone(),
+            pending_context_offset: None,
         },
     ));
     match response.body {
@@ -12150,12 +12190,16 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
             payload:
                 RelayResponsePayload::CheckpointNativeUse {
                     native_use_evidence,
+                    pending_prompt_context,
+                    next_context_offset,
                 },
         } => {
             let evidence = native_use_evidence.expect("worker owns native-use evidence");
             assert_eq!(evidence.version, 1);
             assert_eq!(evidence.native_session_id, "native-cut-1");
             assert_eq!(evidence.usage, NativeSessionUse::Unused);
+            assert_eq!(pending_prompt_context.as_deref(), Some(context.as_str()));
+            assert_eq!(next_context_offset, None);
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -12165,10 +12209,81 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
         "read-native-use-refused",
         RelayRequest::ReadCheckpointNativeUse {
             barrier_command_id: "other-barrier".into(),
-            cut,
+            cut: cut.clone(),
+            pending_context_offset: None,
         },
     ));
     assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
+
+    let refused = relay.handle(envelope(
+        "invalid-offset",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: barrier_id.clone(),
+            cut: cut.clone(),
+            pending_context_offset: Some(context.len() as u64 + 1),
+        },
+    ));
+    assert!(
+        matches!(refused.body, RelayResponseBody::Error { error } if error.code == RelayErrorCode::InvalidRequest)
+    );
+
+    // Native-use evidence also changes without a journal event.
+    relay.mark_native_session_used().unwrap();
+    let refused = relay.handle(envelope(
+        "evidence-changed",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: barrier_id,
+            cut,
+            pending_context_offset: None,
+        },
+    ));
+    assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
+
+    // A checkpoint-only worker first recovers an interrupted in-flight
+    // prompt, detaching its context before it can make a fresh cut.
+    let recovered_root = tempfile::tempdir().unwrap();
+    let mut source = DurableRelay::open(recovered_root.path(), SESSION, "source").unwrap();
+    source
+        .install_prompt_context("interrupted handoff".into())
+        .unwrap();
+    submit_relay(&mut source, "interrupted-prompt", prompt("start"));
+    assert_eq!(
+        source.claim_pending_commands(true).unwrap()[0]
+            .hidden_prompt_context
+            .as_deref(),
+        Some("interrupted handoff")
+    );
+    drop(source);
+    let mut recovered =
+        DurableRelay::open_for_checkpoint(recovered_root.path(), SESSION, "checkpoint-only")
+            .unwrap();
+    assert!(
+        recovered
+            .snapshot
+            .pending_prompt_context
+            .as_ref()
+            .unwrap()
+            .attached_command_id
+            .is_none()
+    );
+    submit_relay(
+        &mut recovered,
+        "recovered-barrier",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    recovered.dispatch_checkpoint_only().unwrap();
+    let recovered_cut = recovered.operational_state().checkpoint_ready.unwrap();
+    let response = recovered.handle(envelope(
+        "read-recovered-context",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: "recovered-barrier".into(),
+            cut: recovered_cut,
+            pending_context_offset: None,
+        },
+    ));
+    assert!(
+        matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::CheckpointNativeUse { pending_prompt_context: Some(text), .. } } if text == "interrupted handoff")
+    );
 }
 
 #[test]
@@ -12178,6 +12293,7 @@ fn restored_schema_15_seed_preserves_load_before_replace_and_used_or_unknown_evi
     //    record replaced_unused_native_session_id and reset evidence to the fresh ID.
     let temp = tempfile::tempdir().unwrap();
     let unused_seed = mj_core::relay::RestoredRelaySeed {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -12229,6 +12345,7 @@ fn restored_schema_15_seed_preserves_load_before_replace_and_used_or_unknown_evi
     for usage in [NativeSessionUse::Unknown, NativeSessionUse::Used] {
         let dir = tempfile::tempdir().unwrap();
         let seed = mj_core::relay::RestoredRelaySeed {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,

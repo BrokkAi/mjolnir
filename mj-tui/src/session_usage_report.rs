@@ -4,7 +4,7 @@ use crate::{
     DashboardAction, DashboardState, Mode,
     widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells},
 };
-use crossterm::event::Event;
+use crossterm::event::{Event, KeyModifiers};
 use mj_chat::components::PopupSide;
 use mj_chat::{
     components::{Checkbox, ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, Interaction},
@@ -21,7 +21,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UsageControl {
@@ -54,6 +54,8 @@ pub(crate) struct SessionUsageDialog {
     hours: Vec<HourlyUsage>,
     /// How many of the oldest `hours` the last frame had no room to draw.
     hidden_hours: Cell<usize>,
+    hour_anchor: Option<i64>,
+    hour_cursor: Option<i64>,
     selected_key: RefCell<Option<UsageRow>>,
     row_keys: RefCell<Vec<UsageRow>>,
     selected_row: Cell<usize>,
@@ -76,6 +78,8 @@ impl DashboardState {
             profiles: self.config.profiles.keys().cloned().collect(),
             hours: Vec::new(),
             hidden_hours: Cell::new(0),
+            hour_anchor: None,
+            hour_cursor: None,
             selected_key: RefCell::new(None),
             row_keys: RefCell::new(Vec::new()),
             selected_row: Cell::new(0),
@@ -106,6 +110,30 @@ impl DashboardState {
         if let Mode::SessionUsageReport(dialog) = &mut self.mode {
             if let Ok(report) = &result {
                 dialog.hours = report.hours.clone();
+                let graph_hours: BTreeSet<_> =
+                    report.hours.iter().map(|hour| hour.start_ms).collect();
+                if dialog
+                    .hour_anchor
+                    .is_some_and(|hour| !graph_hours.contains(&hour))
+                {
+                    dialog.hour_anchor = None;
+                }
+                if dialog
+                    .hour_cursor
+                    .is_some_and(|hour| !graph_hours.contains(&hour))
+                {
+                    dialog.hour_cursor = None;
+                }
+                let visible_hours =
+                    &dialog.hours[dialog.hidden_hours.get().min(dialog.hours.len())..];
+                let cursor = visible_hours
+                    .iter()
+                    .position(|hour| Some(hour.start_ms) == dialog.hour_cursor)
+                    .unwrap_or(visible_hours.len().saturating_sub(1));
+                dialog
+                    .form
+                    .get_mut()
+                    .set_selected(UsageControl::Hours, cursor);
                 dialog.profiles = dialog
                     .profiles
                     .iter()
@@ -114,6 +142,17 @@ impl DashboardState {
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
+                if let Some(selected) = &mut dialog.query.hour_starts_ms {
+                    let before = selected.len();
+                    selected.retain(|hour| graph_hours.contains(hour));
+                    if selected.len() != before {
+                        self.usage_request_generation =
+                            self.usage_request_generation.wrapping_add(1);
+                        dialog.generation = self.usage_request_generation;
+                        dialog.report = None;
+                        return;
+                    }
+                }
             }
             dialog.report = Some(result);
         }
@@ -124,9 +163,10 @@ impl DashboardState {
         event: Event,
         mut dialog: SessionUsageDialog,
     ) -> DashboardAction {
-        // Arrow keys at either end of the graph repeat the selected hour; only a
-        // click on the selected bar goes back to all hours.
-        let clicked = matches!(event, Event::Mouse(_));
+        let modifiers = match event {
+            Event::Mouse(mouse) => Some(mouse.modifiers),
+            _ => None,
+        };
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let action = dialog.combo.route(result.action);
@@ -152,20 +192,61 @@ impl DashboardState {
                     .cloned();
                 reload = true;
             }
-            // Clicking the hour that is already shown goes back to all hours.
             Some(Interaction::Select(UsageControl::Hours, index)) => {
                 if let Some(bar) = dialog.hours.get(dialog.hidden_hours.get() + index) {
-                    let hour = Some(bar.start_ms);
-                    dialog.query.hour_start_ms = if clicked && dialog.query.hour_start_ms == hour {
-                        None
+                    let hour = bar.start_ms;
+                    let modifiers = modifiers.unwrap_or(KeyModifiers::NONE);
+                    let shift = modifiers.contains(KeyModifiers::SHIFT);
+                    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+                    let selected = if shift {
+                        let anchor = *dialog.hour_anchor.get_or_insert(hour);
+                        let range = dialog.hours.iter().filter_map(|bar| {
+                            (anchor.min(hour)..=anchor.max(hour))
+                                .contains(&bar.start_ms)
+                                .then_some(bar.start_ms)
+                        });
+                        let mut selected = if ctrl {
+                            dialog.query.hour_starts_ms.clone().unwrap_or_else(|| {
+                                dialog.hours.iter().map(|bar| bar.start_ms).collect()
+                            })
+                        } else {
+                            BTreeSet::new()
+                        };
+                        selected.extend(range);
+                        selected
+                    } else if ctrl {
+                        dialog.hour_anchor = Some(hour);
+                        let mut selected =
+                            dialog.query.hour_starts_ms.clone().unwrap_or_else(|| {
+                                dialog.hours.iter().map(|bar| bar.start_ms).collect()
+                            });
+                        if !selected.remove(&hour) {
+                            selected.insert(hour);
+                        }
+                        selected
                     } else {
-                        hour
+                        dialog.hour_anchor = Some(hour);
+                        BTreeSet::from([hour])
                     };
+                    dialog.hour_cursor = Some(hour);
+                    dialog.query.hour_start_ms = None;
+                    dialog.query.hour_starts_ms = Some(selected);
                     reload = true;
                 }
             }
             Some(Interaction::Activate(UsageControl::Hours)) => {
-                reload = dialog.query.hour_start_ms.take().is_some();
+                let had_selection = dialog.query.hour_starts_ms.take().is_some();
+                let had_legacy_hour = dialog.query.hour_start_ms.take().is_some();
+                reload = had_selection || had_legacy_hour;
+                dialog.hour_anchor = None;
+                dialog.hour_cursor = None;
+                dialog.form.get_mut().set_selected(
+                    UsageControl::Hours,
+                    dialog
+                        .hours
+                        .len()
+                        .saturating_sub(dialog.hidden_hours.get() + 1),
+                );
             }
             Some(Interaction::Toggle(UsageControl::Suspended)) => {
                 dialog.query.include_suspended = !dialog.query.include_suspended;
@@ -375,9 +456,12 @@ pub(crate) fn render(
         &mut form,
         UsageControl::Suspended,
     );
-    let window = dialog.query.hour_start_ms.map_or_else(
-        || "last 24 clock hours".to_owned(),
-        |ms| {
+    let window = match dialog.query.hour_starts_ms.as_ref() {
+        None => "last 24 clock hours".to_owned(),
+        Some(hours) if hours.is_empty() => "no hours selected".to_owned(),
+        Some(hours) if hours.len() > 1 => format!("{} hours selected", hours.len()),
+        Some(hours) => {
+            let ms = *hours.first().expect("one selected hour");
             let zone = |ms| {
                 chrono::DateTime::from_timestamp_millis(ms)
                     .unwrap_or_default()
@@ -388,8 +472,8 @@ pub(crate) fn render(
                 zone(ms).format("%a %b %-d %H:%M"),
                 zone(ms + HOUR_MS).format("%H:%M")
             )
-        },
-    );
+        }
+    };
     // A short terminal keeps the rows and drops the graph.
     let bar_rows = if inner.height >= 24 {
         5
@@ -402,8 +486,8 @@ pub(crate) fn render(
     // The chart label row occupies one of these rows; normal mode adds a gap.
     let row_gap = if compact { 1 } else { 2 };
     let hints = [
-        "Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models",
-        "Sub-agents included · profile filters turns · + partial · base rates",
+        "Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all",
+        "Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates",
     ];
     let visible_hints = &hints[usize::from(compact)..];
     let footer_height = visible_hints.len() as u16 + 1;
@@ -690,10 +774,17 @@ fn render_hour_chart(
     let hidden = dialog.hours.len() - shown;
     dialog.hidden_hours.set(hidden);
     let hours = &dialog.hours[hidden..];
-    let selected = hours
+    let selected = |hour: &HourlyUsage| {
+        dialog
+            .query
+            .hour_starts_ms
+            .as_ref()
+            .is_some_and(|selected| selected.contains(&hour.start_ms))
+    };
+    let cursor = hours
         .iter()
-        .position(|hour| Some(hour.start_ms) == dialog.query.hour_start_ms);
-    let cursor = selected.unwrap_or(hours.len().saturating_sub(1));
+        .position(|hour| Some(hour.start_ms) == dialog.hour_cursor)
+        .unwrap_or(hours.len().saturating_sub(1));
     let focused = form.is_focused(UsageControl::Hours);
     let eighths = |hour: &HourlyUsage| {
         if hour.known_cost_usd_ticks == 0 {
@@ -722,14 +813,14 @@ fn render_hour_chart(
             theme::muted(),
         )];
         let level_below = (bar_rows - 1 - row) * 8;
-        for (index, hour) in hours.iter().enumerate() {
+        for hour in hours {
             let level = eighths(hour).saturating_sub(level_below).min(8);
             let glyph = match (level, hour.has_unknown_cost) {
                 (0, _) => ' ',
                 (_, true) => '░',
                 (level, false) => BLOCKS[usize::from(level) - 1],
             };
-            let style = if selected == Some(index) {
+            let style = if selected(hour) {
                 theme::active_control()
             } else {
                 theme::actionable()
@@ -755,7 +846,10 @@ fn render_hour_chart(
             .with_timezone(&DisplayZone::now().timezone());
         let covers =
             |bar: Option<usize>| bar.is_some_and(|bar| (index..index + stride).contains(&bar));
-        let mut style = if covers(selected) {
+        let mut style = if hours[index..(index + stride).min(hours.len())]
+            .iter()
+            .any(selected)
+        {
             theme::active_control()
         } else {
             theme::muted()

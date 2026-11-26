@@ -364,8 +364,18 @@ impl DashboardState {
             return DashboardAction::None;
         };
         self.want_availability_check();
+        let is_subagent = self.state.subagents.contains_key(&session.id);
+        let locked_target = self
+            .config
+            .targets
+            .keys()
+            .position(|id| id == &session.target_template_id);
         if self.compatible_profiles(&session.id).is_empty()
-            || self.offered_target_indices().is_empty()
+            || if is_subagent {
+                locked_target.is_none()
+            } else {
+                self.offered_target_indices().is_empty()
+            }
         {
             self.notices.set(
                 self.missing_profiles_notice()
@@ -378,7 +388,11 @@ impl DashboardState {
             .iter()
             .position(|(profile_id, _)| profile_id.as_str() == session.last_profile)
             .unwrap_or(0);
-        let target = self.offered_target_index_or_first(&session.target_template_id);
+        let target = if is_subagent {
+            locked_target.expect("subagent target was checked above")
+        } else {
+            self.offered_target_index_or_first(&session.target_template_id)
+        };
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(
                 subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
@@ -459,6 +473,7 @@ impl DashboardState {
             self.set_failure_notice(format!("Move target {target_id} is no longer configured."));
             return;
         };
+        let is_subagent = self.state.subagents.contains_key(&session.id);
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(subagents::SubagentDraft::new(
                 operation
@@ -486,18 +501,26 @@ impl DashboardState {
             profile_step_skipped: false,
             mounts: MountWizard::with_mounts(
                 Vec::new(),
-                operation
-                    .selection
-                    .additional_mounts
-                    .clone()
-                    .unwrap_or_else(|| session.additional_mounts.clone()),
+                if is_subagent {
+                    session.additional_mounts.clone()
+                } else {
+                    operation
+                        .selection
+                        .additional_mounts
+                        .clone()
+                        .unwrap_or_else(|| session.additional_mounts.clone())
+                },
             ),
 
-            resource_allocation: operation
-                .selection
-                .resource_allocation
-                .clone()
-                .or(session.resource_allocation),
+            resource_allocation: if is_subagent {
+                session.resource_allocation
+            } else {
+                operation
+                    .selection
+                    .resource_allocation
+                    .clone()
+                    .or(session.resource_allocation)
+            },
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,

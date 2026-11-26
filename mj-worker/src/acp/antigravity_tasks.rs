@@ -167,7 +167,7 @@ impl AntigravityStateFollower {
             busy_timeout: ANTIGRAVITY_SQLITE_BUSY_TIMEOUT,
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_busy_timeout(&mut self, timeout: Duration) {
         self.busy_timeout = timeout;
         if let Some(tasks) = &self.tasks {

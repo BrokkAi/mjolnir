@@ -16,6 +16,29 @@ impl DashboardState {
         let profiles = self.resume_wizard_profiles(&wizard);
         match wizard.step {
             WizardStep::Profile => {
+                if wizard.moving && self.state.subagents.contains_key(&wizard.session_id) {
+                    let target = self.session_record(&wizard.session_id).and_then(|session| {
+                        self.config
+                            .targets
+                            .keys()
+                            .position(|id| id == &session.target_template_id)
+                    });
+                    let Some(target) = target else {
+                        self.notices
+                            .set("The sub-agent's current target is no longer configured.");
+                        self.mode = Mode::Resume(wizard);
+                        return DashboardAction::None;
+                    };
+                    wizard.target = target;
+                    wizard.target_step_skipped = true;
+                    wizard.step = WizardStep::Review;
+                    wizard.form.get_mut().focus(WizardControl::Submit);
+                    let profile_id = profiles
+                        .get(wizard.profile)
+                        .map(|(id, _)| (*id).clone())
+                        .expect("move wizard has a compatible profile");
+                    return self.request_move_preparation_for_review(wizard, profile_id);
+                }
                 wizard.step = WizardStep::Target;
                 if self.skip_target_step(&mut wizard) {
                     return self.advance_resume_wizard(wizard);
@@ -93,10 +116,11 @@ impl DashboardState {
         }
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let mounts = wizard.mounts.mounts.clone();
-        let clear_resource_allocation = matches!(
-            self.config.targets.get(&target_template_id),
-            Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
-        );
+        let clear_resource_allocation = !self.state.subagents.contains_key(&wizard.session_id)
+            && matches!(
+                self.config.targets.get(&target_template_id),
+                Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
+            );
         self.next_move_preparation_request_id =
             self.next_move_preparation_request_id.wrapping_add(1);
         let request_id = self.next_move_preparation_request_id;
@@ -106,9 +130,7 @@ impl DashboardState {
         let subagents = wizard.subagent_change(self);
         let action = DashboardAction::MoveSession {
             subagents,
-            oracle: wizard
-                .subagents
-                .oracle_available()
+            oracle: (wizard.subagent_choice_applies(self) && wizard.subagents.oracle_available())
                 .then(|| self.session_record(&wizard.session_id))
                 .flatten()
                 .and_then(|record| {

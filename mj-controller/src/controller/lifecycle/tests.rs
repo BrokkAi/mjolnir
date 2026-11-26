@@ -4191,10 +4191,12 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
-    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    // Git reports canonical worktree paths, including macOS /private/var.
+    let fixture_root = directory.path().canonicalize().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(&fixture_root, name);
     let worktrees = [
-        directory.path().join("outside/first"),
-        directory.path().join("outside/second"),
+        fixture_root.join("outside/first"),
+        fixture_root.join("outside/second"),
     ];
     for worktree in &worktrees {
         std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
@@ -4214,7 +4216,7 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
     let mut session = checkpoint_test_session(name);
     session.state = SessionState::Running;
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(name),
+        worker_root: fixture_root.join(name),
     }));
     attach_local_managed_clone(&mut session, repo, origin);
     let mut controller = Controller {
@@ -4234,13 +4236,25 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
         )
         .unwrap_err();
     let message = format!("{refusal:#}");
+    assert!(
+        message.contains("Cannot suspend until these blockers are resolved:"),
+        "{message}"
+    );
+    assert!(
+        message.contains("1. External worktrees & Git state (2 items)"),
+        "{message}"
+    );
     for worktree in &worktrees {
         assert!(
-            message.contains(&worktree.display().to_string()),
-            "refusal omitted {}: {message}",
+            message.contains(&format!("\n  - {}", worktree.display())),
+            "refusal omitted bulleted {}: {message}",
             worktree.display()
         );
     }
+    assert!(
+        message.contains("\n  Fix:"),
+        "refusal omitted Fix line: {message}"
+    );
     assert!(
         message.contains("worktree remove --force <path>"),
         "refusal omitted grouped removal command: {message}"
@@ -5068,18 +5082,24 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
 
     const NAME: &str = "origin_delta_move_reuses_the_source_lease_until_quiescence";
     const CHILD: &str = "MJ_TEST_ORIGIN_DELTA_MOVE_LEASE";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(crate::controller::test_support::test_name(
-            module_path!(),
-            NAME,
-        ))
-        .env(CHILD, "1")
-        .env("MJ_INSTANCE", "origin-delta-move-lease")
-        .isolated_store(directory.path())
-        .run();
+    let Some(case) = std::env::var_os(CHILD) else {
+        for case in ["automatic", "explicit"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(crate::controller::test_support::test_name(
+                module_path!(),
+                NAME,
+            ))
+            .env(CHILD, case)
+            .env(
+                mj_core::test_hooks::latch_relay::LATCH_RELAY_MAX_PROTOCOL,
+                "94",
+            )
+            .env("MJ_INSTANCE", "origin-delta-move-lease")
+            .isolated_store(directory.path())
+            .run();
+        }
         return;
-    }
+    };
     let _writer = crate::database::install_isolated_test_writer();
     let data = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
     let (origin, clone) = init_managed_clone_with_origin(&data, LATCH_RELAY_SESSION);
@@ -5150,7 +5170,15 @@ exit 2
         MoveSourceRelay::lease(&admission, &channels.control, LATCH_RELAY_SESSION)
             .await
             .unwrap();
-    let held_relay = source_relay.take().expect("Move holds the live relay");
+    let mut held_relay = source_relay.take().expect("Move holds the live relay");
+    assert_eq!(held_relay.connection_mut().protocol_version(), 94);
+    let pending = "hidden context before origin-delta stop";
+    held_relay
+        .connection_mut()
+        .install_prompt_context(pending.into())
+        .await
+        .unwrap();
+    let automatic = case == "automatic";
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         controller.suspend_session_controlled_with_manager(
@@ -5164,9 +5192,17 @@ exit 2
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
             Some(held_relay),
-            LatchExclusivity::HoldThroughClose,
+            if automatic {
+                LatchExclusivity::HoldThroughQuotaClose
+            } else {
+                LatchExclusivity::HoldThroughClose
+            },
             None,
-            SuspendSettlement::Suspend,
+            if automatic {
+                SuspendSettlement::TemporaryStop
+            } else {
+                SuspendSettlement::Suspend
+            },
         ),
     )
     .await
@@ -5180,6 +5216,11 @@ exit 2
         controller.state.sessions[LATCH_RELAY_SESSION].state,
         SessionState::Running
     );
+    let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &std::fs::read(data.join("relay").join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.pending_prompt_context.unwrap().text, pending);
     handle.lease_connection(&admission).await.unwrap().release();
     channels.shutdown.shutdown().await.unwrap();
 }

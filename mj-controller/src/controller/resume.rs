@@ -1391,13 +1391,10 @@ impl Controller {
                     bail!("ACP loaded native session {native_session_id}, expected {archived}");
                 }
             } else {
-                relay
-                    .install_prompt_context(
-                        utility_handoff
-                            .clone()
-                            .context("a resume into a fresh native session has no handoff")?,
-                    )
-                    .await?;
+                let handoff = utility_handoff
+                    .clone()
+                    .context("a resume into a fresh native session has no handoff")?;
+                relay.install_prompt_context(handoff).await?;
                 if replay_queue {
                     for prompt in &canonical_session.queued_prompts {
                         // A queued configuration change is replayed as itself;
