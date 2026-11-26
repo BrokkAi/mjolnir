@@ -23,7 +23,9 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
         PromptCompletion::Finished => (WaitOutcome::Finished, None),
         PromptCompletion::Cancelled => (WaitOutcome::Cancelled, None),
         PromptCompletion::QuotaLimit => (WaitOutcome::QuotaLimit, None),
-        PromptCompletion::Error => (WaitOutcome::Error, Some(stop_reason.to_owned())),
+        PromptCompletion::Refused | PromptCompletion::Error => {
+            (WaitOutcome::Error, Some(stop_reason.to_owned()))
+        }
     }
 }
 

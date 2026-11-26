@@ -7355,6 +7355,107 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
     );
 }
 
+// Hard-won: #1704: cross-harness Move left the old harness's model in the worker journal
+#[test]
+fn launch_changes_retire_the_accepted_pair_for_later_worker_starts() {
+    let temp = tempfile::tempdir().unwrap();
+    let pair = |model: Option<&str>, effort: Option<&str>| mj_core::acp::AcceptedSessionConfig {
+        model: model.map(Into::into),
+        effort: effort.map(Into::into),
+    };
+    let record = |relay: &mut DurableRelay, key: &str, value: &str| {
+        relay
+            .record_observation(RelayObservation::ConfigurationUpdated {
+                key: key.into(),
+                value: value.into(),
+            })
+            .unwrap();
+    };
+    let open = || DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    // Worker start: adopt the committed launch, then seed the shared view.
+    let start = |relay: &mut DurableRelay, launch: &WorkerLaunchConfig, thread: &str| {
+        relay.adopt_launch(launch).unwrap();
+        let accepted = unix::accepted_config_for_boot(launch, relay, Some(thread));
+        *relay.accepted_config().lock().unwrap() = accepted.clone();
+        accepted
+    };
+
+    let mut launch = launch_config("/var/lib/hel/profiles/session");
+    launch.harness = HarnessKind::Antigravity;
+    let mut relay = open();
+    start(&mut relay, &launch, "gemini-thread");
+    record(&mut relay, "model", "gemini-4-neon");
+    record(&mut relay, "effort", "high");
+    *relay.accepted_config().lock().unwrap() = pair(Some("gemini-4-neon"), Some("high"));
+
+    // A reload that names a new initial model supersedes only the model, in
+    // the journal and in the running worker's view.
+    launch.initial_model = Some("gemini-next".into());
+    relay.adopt_launch(&launch).unwrap();
+    assert_eq!(
+        *relay.accepted_config().lock().unwrap(),
+        pair(None, Some("high"))
+    );
+    assert_eq!(
+        unix::accepted_config_for_boot(&launch, &relay, Some("gemini-thread")),
+        pair(None, Some("high"))
+    );
+    record(&mut relay, "model", "gemini-4-neon");
+    record(&mut relay, "effort", "high");
+    // A later launch that names no initial model keeps the accepted model.
+    launch.initial_model = None;
+    drop(relay);
+    let mut relay = open();
+    assert_eq!(
+        start(&mut relay, &launch, "gemini-thread"),
+        pair(Some("gemini-4-neon"), Some("high"))
+    );
+
+    // The live sequence: an in-place Move to Claude commits its launch, and
+    // the worker exits before adopting it. The next start settles it.
+    launch.harness = HarnessKind::Claude;
+    drop(relay);
+    let mut relay = open();
+    assert_eq!(
+        start(&mut relay, &launch, "gemini-thread"),
+        pair(None, None)
+    );
+    drop(relay);
+    let mut relay = open();
+    assert_eq!(
+        start(&mut relay, &launch, "claude-thread"),
+        pair(None, None)
+    );
+
+    // A parked Move that discards the native thread boots without the pair;
+    // committing the Move retires it for every later start too.
+    record(&mut relay, "model", "opus");
+    record(&mut relay, "effort", "xhigh");
+    relay
+        .apply_parked_move_launch(&mj_core::worker_launch::ParkedMoveLaunch {
+            operation_id: "parked-move".into(),
+            discard_native_session_id: Some("claude-thread".into()),
+            prompt_context: None,
+            discard_queued_prompts: false,
+            quota_continuation: None,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "destination-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    drop(relay);
+    let mut relay = open();
+    assert_eq!(
+        start(&mut relay, &launch, "destination-thread"),
+        pair(None, None)
+    );
+}
+
 #[test]
 fn a_queued_prompt_keeps_the_unused_codex_thread_eligible_for_replacement() {
     let temp = tempfile::tempdir().unwrap();

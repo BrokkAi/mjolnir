@@ -6032,11 +6032,11 @@ sessions.worker.subagent_orchestrator = true;
 assert(moveSubagentChange(draft)?.mode === 'mjolnir', "orchestrators retain delegation controls");
 assert(moveStoppedChildren(sessions.parent, { stops_subagents: true }) === 1, "only a child still at its task is counted; a parked one has handed back");
 assert(moveStoppedChildren(sessions.parent, { in_place: true, stops_subagents: false }) === 0, "an in-place Move that keeps its children stops none");
-// DSH has no sub-agents of its own: a stored Native reads as None and stays.
+// DSH has its own sub-agents, so a stored Native is a real choice it keeps.
 const dsh = { profileId: "dsh", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
-assert(moveSubagentChange(dsh) === null, "a stored Native that DSH shows as None is untouched");
+assert(moveSubagentChange(dsh) === null, "a stored Native on DSH is untouched");
 dsh.subagents = { mode: "none" };
-assert(moveSubagentChange(dsh) === null, "choosing the None DSH already shows changes nothing");
+assert(moveSubagentChange(dsh).mode === "none", "DSH can choose None");
 dsh.subagents = { mode: "mjolnir" };
 assert(moveSubagentChange(dsh).mode === "mjolnir", "DSH can choose Mjolnir");
 dsh.profileId = "codex";
@@ -6068,7 +6068,7 @@ installDocument();
 let newDraft = null;
 function sessionById() {{ return null; }}
 function isSubagentSession(session) {{ return Boolean(session?.subagent_parent_id); }}
-const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
+const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}, {{ id:'antigravity', harness_kind:'antigravity' }}] }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
 {source}
 const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
@@ -6092,9 +6092,16 @@ const dshDraft = {{ profileId:'dsh', storedSubagents:{{mode:'native'}}, subagent
 const dshBody = el('div');
 renderSubagentFields(dshBody, dshDraft, 'move', () => {{}}, () => {{}});
 const dshField = elements(dshBody, 'select')[0];
-checkEqual(dshField.childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'mjolnir,none', 'DSH does not offer Native');
-checkEqual(dshField.value, 'none', 'a stored Native reads as None on DSH');
+checkEqual(dshField.childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'native,mjolnir,none', 'DSH offers Native');
+checkEqual(dshField.value, 'native', 'a stored Native stays Native on DSH');
 checkEqual(moveSubagentChange(dshDraft), null, 'the untouched DSH policy is retained');
+const antigravityDraft = {{ profileId:'antigravity', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
+const antigravityBody = el('div');
+renderSubagentFields(antigravityBody, antigravityDraft, 'move', () => {{}}, () => {{}});
+const antigravityField = elements(antigravityBody, 'select')[0];
+checkEqual(antigravityField.childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'mjolnir,none', 'Antigravity does not offer Native');
+checkEqual(antigravityField.value, 'none', 'a stored Native reads as None on Antigravity');
+checkEqual(moveSubagentChange(antigravityDraft), null, 'the untouched Antigravity policy is retained');
 "#
         ),
     );

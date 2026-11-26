@@ -1393,10 +1393,11 @@ impl HarnessKind {
     }
 
     /// Whether the harness has sub-agents of its own, which the Native
-    /// delegation choice keeps. dsh-acp has none, so Native would do nothing
-    /// for DSH and is not offered there.
+    /// delegation choice keeps. Antigravity has none that Mjolnir offers, so
+    /// Native would do nothing for it. DSH's runtime has its own sub-agents;
+    /// Mjolnir removes their plugins unless the session keeps Native.
     pub const fn has_native_subagents(self) -> bool {
-        !matches!(self, Self::Dsh | Self::Antigravity)
+        !matches!(self, Self::Antigravity)
     }
 
     /// The harness-home-relative directories that hold its native session

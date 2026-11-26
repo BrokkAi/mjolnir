@@ -284,6 +284,9 @@ pub enum PromptCompletion {
     Finished,
     Cancelled,
     QuotaLimit,
+    /// The harness reported ACP `Refusal`, for example a provider content
+    /// filter. The turn failed, but not for an unknown reason.
+    Refused,
     Error,
 }
 
@@ -302,6 +305,7 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
         "inferredfinished" => PromptCompletion::Finished,
         "cancelled" | "canceled" => PromptCompletion::Cancelled,
         "quotalimit" => PromptCompletion::QuotaLimit,
+        "refusal" => PromptCompletion::Refused,
         _ => PromptCompletion::Error,
     }
 }
