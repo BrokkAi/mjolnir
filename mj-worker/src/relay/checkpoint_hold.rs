@@ -230,13 +230,18 @@ impl DurableRelay {
             // without payloads, so the worker supplies the prompt of each one
             // its queue holds, from the same cut as the mailbox.
             let mut wake_prompts = std::collections::BTreeMap::new();
-            for (command_id, dispatch) in &self.snapshot.dispatches {
-                if !dispatch.command.is_queue_entry()
-                    || !mj_core::continuation::carries_mailbox_wake(command_id)
-                {
+            // Only the current queue: `dispatches` also keeps settled commands.
+            for queued in &self.snapshot.queued_prompts {
+                let command_id = &queued.command_id;
+                if !mj_core::continuation::carries_mailbox_wake(command_id) {
                     continue;
                 }
-                let Some(prompt) = dispatch.command.prompt_blocks().filter(|p| !p.is_empty())
+                let Some(prompt) = self
+                    .snapshot
+                    .dispatches
+                    .get(command_id)
+                    .and_then(|dispatch| dispatch.command.prompt_blocks())
+                    .filter(|p| !p.is_empty())
                 else {
                     continue;
                 };
