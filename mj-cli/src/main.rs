@@ -328,6 +328,26 @@ enum DaemonCommand {
     Stop(DaemonStopArgs),
     /// Gracefully replace the daemon with this Mjolnir build.
     Restart,
+    /// Stop the daemon and mark its store as moved to another machine, so no
+    /// daemon starts on it and no client spawns one until `mj daemon unfence`.
+    /// The mark travels with a copy of the database, so a copy refuses to
+    /// start too until it is unfenced there. Fences only this instance's
+    /// store: named instances (`--instance`) are separate stores and are not
+    /// fenced.
+    Fence(DaemonFenceArgs),
+    /// Remove the fence from this instance's store. Does not start a daemon.
+    Unfence,
+}
+
+#[derive(Debug, Args)]
+struct DaemonFenceArgs {
+    /// Where the store is going, for example `ssh://host`. Shown in the
+    /// refusal on this host.
+    #[arg(long)]
+    to: String,
+    /// A note shown with the refusal.
+    #[arg(long)]
+    note: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2513,7 +2533,11 @@ fn suggested_workspace_name(workspaces: &[mj_core::workspace::WorkspaceRecord]) 
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     if matches!(
         args.command,
-        DaemonCommand::Status | DaemonCommand::Stop(_) | DaemonCommand::Restart
+        DaemonCommand::Status
+            | DaemonCommand::Stop(_)
+            | DaemonCommand::Restart
+            | DaemonCommand::Fence(_)
+            | DaemonCommand::Unfence
     ) && daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await?
     {
         return Ok(());
@@ -2557,6 +2581,14 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                             "Mjolnir daemon is stopped (no {}).",
                             stopped.metadata_path.display()
                         );
+                        match daemon::read_store_fence().await {
+                            Ok(Some(fence)) => println!(
+                                "The store is fenced. {}",
+                                fence.refusal(mj_core::config::DataLayout::current().root())
+                            ),
+                            Ok(None) => {}
+                            Err(error) => println!("Could not read the store fence: {error:#}"),
+                        }
                         return Ok(());
                     }
                     return Err(error.context("Mjolnir daemon is not answering"));
@@ -2616,7 +2648,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
         }
         DaemonCommand::Stop(stop) => {
             mj_core::config::ensure_may_control_store(
-                &mj_core::config::data_dir(),
+                mj_core::config::DataLayout::current().root(),
                 "stop the Mjolnir daemon",
             )?;
             if stop.suspend_sessions {
@@ -2643,6 +2675,29 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 mj_command("daemon stop --suspend-sessions")
             );
         }
+        DaemonCommand::Fence(fence) => {
+            let outcome = daemon::fence_store(fence.to, fence.note).await?;
+            if outcome.stopped_daemon {
+                println!("Stopped the Mjolnir daemon.");
+            }
+            if let Some(previous) = &outcome.replaced {
+                println!("Replaced an earlier fence to {}.", previous.destination);
+            }
+            println!(
+                "Fenced the store in {} to {}. No daemon will start on it, and clients will not \
+                 spawn one, until `{}`. Detached workers keep running.",
+                outcome.fence.fenced_data_dir.display(),
+                outcome.fence.destination,
+                mj_command("daemon unfence")
+            );
+        }
+        DaemonCommand::Unfence => match daemon::unfence_store().await? {
+            Some(previous) => println!(
+                "Removed the fence to {}. The next `mj` command starts a daemon on this store.",
+                previous.destination
+            ),
+            None => println!("The store is not fenced."),
+        },
         DaemonCommand::Restart => {
             let restarted = daemon::restart_daemon().await?;
             // A restart onto another build is an error, so reaching here means
@@ -3330,6 +3385,7 @@ mod tests {
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
+                machine_id: None,
                 launch_base: None,
                 launch_branch: None,
                 checkout: None,

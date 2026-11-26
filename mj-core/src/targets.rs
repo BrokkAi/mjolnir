@@ -29,7 +29,7 @@ pub const MANAGED_LABEL: &str = "dev.mj.managed";
 pub const SESSION_TAG: &str = "dev.mj.session";
 pub const MANAGED_TAG: &str = "dev.mj.managed";
 /// Which Mjolnir instance (named `--instance` or data-directory fingerprint)
-/// created a worker; see `config::instance_identity`.
+/// created a worker; see `config::InstanceIdentity`.
 pub const INSTANCE_LABEL: &str = "dev.mj.instance";
 pub const INSTANCE_TAG: &str = "dev.mj.instance";
 /// The shared in-container workspace every container session used before

@@ -691,7 +691,7 @@ pub enum DashboardAction {
         scope: DetectScope,
         /// The SSH and EC2 machines in the Settings draft, whose runtimes a
         /// runtime detection probes as well as this machine's.
-        machines: Vec<(String, mj_core::config::Machine)>,
+        machines: Vec<(mj_core::config::MachineId, mj_core::config::Machine)>,
     },
     SaveSetup {
         generation: u64,

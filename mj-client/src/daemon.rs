@@ -12,7 +12,7 @@ use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
 use anyhow::{Context, Result, bail, ensure};
-use mj_core::config::{Config, data_dir};
+use mj_core::config::{Config, DataLayout};
 use mj_core::credentials::CredentialSyncSignal;
 use mj_core::elicitation::ElicitationResponse;
 use mj_core::relay::{RelayCommand, RelayOperationalState};
@@ -45,7 +45,7 @@ pub enum StartupPromptOutcome {
 }
 
 pub fn metadata_path() -> PathBuf {
-    data_dir().join("daemon.json")
+    DataLayout::current().daemon_json()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -58,11 +58,11 @@ pub struct ApiEndpointMetadata {
 }
 
 pub fn api_endpoint_path() -> PathBuf {
-    api_endpoint_path_in(&data_dir())
+    DataLayout::current().api_endpoint()
 }
 
 pub fn api_endpoint_path_in(dir: &Path) -> PathBuf {
-    dir.join("api-endpoint.json")
+    DataLayout::at(dir).api_endpoint()
 }
 
 pub fn read_api_endpoint() -> Result<Option<ApiEndpointMetadata>> {
@@ -179,7 +179,7 @@ impl ContainerDaemonRecord {
 }
 
 pub fn container_owner_path() -> PathBuf {
-    data_dir().join("daemon-container.json")
+    DataLayout::current().daemon_container()
 }
 
 pub fn read_container_owner() -> Result<Option<ContainerDaemonRecord>> {

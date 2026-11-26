@@ -453,8 +453,8 @@ fn migrate_memory(
     };
     let canonical = project.memory_identity()?.key()?;
     let root = |key: &str| {
-        mj_core::config::data_dir()
-            .join("projects")
+        mj_core::config::DataLayout::current()
+            .projects_dir()
             .join(key)
             .join("memory")
     };
@@ -673,8 +673,8 @@ mod tests {
         )
         .key()
         .unwrap();
-        let legacy_root = mj_core::config::data_dir()
-            .join("projects")
+        let legacy_root = mj_core::config::DataLayout::current()
+            .projects_dir()
             .join(&legacy_key)
             .join("memory");
         let bundle_memory = ProjectMemorySnapshot {
@@ -701,8 +701,8 @@ mod tests {
         .unwrap()
         .key()
         .unwrap();
-        let raw_root = mj_core::config::data_dir()
-            .join("projects")
+        let raw_root = mj_core::config::DataLayout::current()
+            .projects_dir()
             .join(raw_key)
             .join("memory");
         let memory = ProjectMemorySnapshot {
@@ -776,8 +776,8 @@ mod tests {
         );
         let accepted = state.sessions["healthy"].project.as_ref().unwrap();
         assert_eq!(accepted.bundle.primary_repo, "new-name");
-        let canonical_root = mj_core::config::data_dir()
-            .join("projects")
+        let canonical_root = mj_core::config::DataLayout::current()
+            .projects_dir()
             .join(accepted.memory_identity().unwrap().key().unwrap())
             .join("memory");
         assert_eq!(

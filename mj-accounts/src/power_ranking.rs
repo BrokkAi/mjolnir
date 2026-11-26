@@ -134,7 +134,7 @@ pub struct PowerRankingStore {
 impl PowerRankingStore {
     /// Load a fresh same-version disk cache, or the compiled-in baseline.
     /// Does not use the network. `cache_dir` is the directory that holds
-    /// `power-ranking-cache.json` (the daemon passes [`mj_core::config::data_dir`]).
+    /// `power-ranking-cache.json` (the daemon passes the data directory).
     pub fn open(cache_dir: &Path, now_seconds: u64) -> Self {
         let url = std::env::var("MJ_POWER_RANKING_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
         Self::with_url(cache_dir, now_seconds, url)
@@ -142,7 +142,7 @@ impl PowerRankingStore {
 
     /// [`open`] with an explicit fetch URL, for tests that must not read the process environment.
     pub fn with_url(cache_dir: &Path, now_seconds: u64, url: String) -> Self {
-        let cache_path = cache_dir.join("power-ranking-cache.json");
+        let cache_path = mj_core::config::DataLayout::at(cache_dir).power_ranking_cache();
         let state = load_state(&cache_path, now_seconds);
         Self {
             shared: Arc::new(Shared {

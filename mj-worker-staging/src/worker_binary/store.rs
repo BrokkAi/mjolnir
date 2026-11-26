@@ -45,7 +45,7 @@ pub fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
     let command = targets::locator_command(SshTrafficClass::Control, locator, vec!["true".into()]);
     format!(
         "{:?}:{}:{:?}:{root}",
-        data_dir(),
+        DataLayout::current().root(),
         command.program,
         command.args
     )

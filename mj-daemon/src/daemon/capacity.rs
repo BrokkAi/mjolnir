@@ -1254,7 +1254,9 @@ mod tests {
                 legacy_subagents: None,
                 ..mj_core::config::HarnessProfile::new(
                     mj_core::config::HarnessKind::Codex,
-                    mj_core::config::data_dir().join("unused-capacity-profile"),
+                    mj_core::config::DataLayout::current()
+                        .root()
+                        .join("unused-capacity-profile"),
                 )
             },
         );

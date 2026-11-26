@@ -251,8 +251,8 @@ exit "$status""#;
 /// directory rather than the worker root, so closing the session names it
 /// separately.
 pub fn local_nested_profile_root(session_id: &str) -> PathBuf {
-    mj_core::config::data_dir()
-        .join("profiles")
+    mj_core::config::DataLayout::current()
+        .profiles_dir()
         .join(session_id)
 }
 

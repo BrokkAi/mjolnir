@@ -323,6 +323,7 @@ pub(super) fn container_run(
     template: &ContainerTemplate,
     name: &str,
     session_id: &str,
+    instance: &str,
     additional_mounts: &[AdditionalMount],
     workspace_root: &str,
 ) -> Result<CommandSpec> {
@@ -333,6 +334,7 @@ pub(super) fn container_run(
             template,
             name,
             session_id,
+            instance,
             additional_mounts,
             None,
             workspace_root,
@@ -433,6 +435,7 @@ pub(super) fn podman_container_run(
     template: &ContainerTemplate,
     name: &str,
     session_id: &str,
+    instance: &str,
     additional_mounts: &[AdditionalMount],
     ssh: Option<&SshTarget>,
     workspace_root: &str,
@@ -441,6 +444,7 @@ pub(super) fn podman_container_run(
         template,
         name,
         session_id,
+        instance,
         additional_mounts,
         ssh,
         workspace_root,
@@ -475,10 +479,14 @@ fi
 /// downloads it under the exclusive lock and runs the script again. On an
 /// SSH host the script also finishes what a launch needs from the new container
 /// (see [`ssh_podman_started_hook`]).
+// Each argument is an independent input of one container's creation; the
+// owning instance's identity is one more of them.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn podman_container_run_gated(
     template: &ContainerTemplate,
     name: &str,
     session_id: &str,
+    instance: &str,
     additional_mounts: &[AdditionalMount],
     ssh: Option<&SshTarget>,
     workspace_root: &str,
@@ -490,6 +498,7 @@ pub(super) fn podman_container_run_gated(
         template,
         name,
         session_id,
+        instance,
         additional_mounts,
         Some(&workspace),
         workspace_root,
@@ -699,6 +708,7 @@ pub(super) fn docker_container_run(
     template: &ContainerTemplate,
     name: &str,
     session_id: &str,
+    instance: &str,
     additional_mounts: &[AdditionalMount],
     workspace_root: &str,
 ) -> Result<CommandSpec> {
@@ -707,6 +717,7 @@ pub(super) fn docker_container_run(
         template,
         name,
         session_id,
+        instance,
         additional_mounts,
         None,
         workspace_root,
@@ -816,6 +827,7 @@ pub(super) fn container_run_args(
     template: &ContainerTemplate,
     name: &str,
     session_id: &str,
+    instance: &str,
     additional_mounts: &[AdditionalMount],
     podman_workspace: Option<&PodmanWorkspaceLocator>,
     workspace_root: &str,
@@ -843,6 +855,7 @@ pub(super) fn container_run_args(
     args.extend(managed_resource_identity_args(
         ManagedResourceKind::Container,
         session_id,
+        instance,
     ));
     args.extend(template.extra_run_args.clone());
     args.extend(
@@ -1013,6 +1026,7 @@ mod pids_limit_tests {
                 &pids_limit_template(Vec::new()),
                 "mj-test",
                 "0123456789abcdef0123456789abcdef",
+                "test-instance",
                 &[],
                 None,
                 "/workspace",
@@ -1034,6 +1048,7 @@ mod pids_limit_tests {
             &pids_limit_template(vec!["--pids-limit=256".to_owned()]),
             "mj-test",
             "0123456789abcdef0123456789abcdef",
+            "test-instance",
             &[],
             None,
             "/workspace",

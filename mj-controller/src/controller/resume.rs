@@ -2500,6 +2500,7 @@ impl Controller {
                 .context("resume target disappeared")?
                 .into(),
         );
+        record.machine_id = self.config.template_machine_id(target_id);
         record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.target = None;
@@ -2683,7 +2684,7 @@ impl Controller {
                         // straight into the local destination worker root first so
                         // `restore_managed_clone_origin_delta` reads it locally.
                         let local_worker_root =
-                            mj_core::config::data_dir().join("workers").join(session_id);
+                            mj_core::config::DataLayout::current().worker_root(session_id);
                         self.reserve_provisioning_target(
                             session_id,
                             mj_core::state::TargetLocator::LocalBare {

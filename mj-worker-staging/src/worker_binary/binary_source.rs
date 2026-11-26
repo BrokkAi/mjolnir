@@ -404,7 +404,7 @@ pub fn warm_worker_binary_sources() -> Result<()> {
 
 fn capture_worker_binary_sources() -> Result<WorkerBinarySourceSnapshot> {
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    let cache_root = data_dir().join("workers").join("pinned");
+    let cache_root = DataLayout::current().pinned_workers_dir();
     Ok(WorkerBinarySourceSnapshot::capture(
         &cache_root,
         |arch, requirement| {
@@ -722,7 +722,7 @@ pub fn worker_binary_for_arch(
         return resolve_worker_source_again(arch, requirement, pinned.err());
     }
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    let cache_root = data_dir().join("workers").join("pinned");
+    let cache_root = DataLayout::current().pinned_workers_dir();
     worker_binary_prerequisite_with_cache(
         arch,
         requirement,
@@ -759,7 +759,7 @@ fn resolve_worker_source_again(
     pinned_error: Option<anyhow::Error>,
 ) -> Result<WorkerBinaryAvailability> {
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    let cache_root = data_dir().join("workers").join("pinned");
+    let cache_root = DataLayout::current().pinned_workers_dir();
     let resolved = worker_binary_prerequisite_with_cache(
         arch,
         requirement,

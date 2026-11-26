@@ -98,7 +98,6 @@ pub const MAX_WAIT_SECS: u64 = 3_600;
 /// How often a wait re-reads durable state for a session with no live actor.
 const STOPPED_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-const API_TOKEN_FILE: &str = "api-token";
 const API_TOKEN_BYTES: usize = 32;
 
 mod token;

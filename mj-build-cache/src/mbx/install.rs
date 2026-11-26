@@ -1030,15 +1030,15 @@ fn expected_digest(triple: &str) -> Result<&'static str> {
 pub fn pinned_linux_binary(triple: &str, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let expected = expected_digest(triple)?;
     // Keep the original verified cache layout for offline retries and other hosts.
-    let destination = mj_core::config::data_dir()
-        .join("mbx")
+    let destination = mj_core::config::DataLayout::current()
+        .mbx_dir()
         .join(MBX_VERSION)
         .join(triple)
         .join("mbx");
     if destination.is_file() {
         return Ok(destination);
     }
-    let root = mj_core::config::data_dir().join("mbx-download");
+    let root = mj_core::config::DataLayout::current().mbx_download_dir();
     std::fs::create_dir_all(&root).context("create mbx download staging root")?;
     let directory = tempfile::tempdir_in(root).context("create mbx download staging directory")?;
     let url = release_url(triple);
@@ -1658,8 +1658,8 @@ mod tests {
             .run();
             return;
         }
-        let destination = mj_core::config::data_dir()
-            .join("mbx")
+        let destination = mj_core::config::DataLayout::current()
+            .mbx_dir()
             .join(MBX_VERSION)
             .join("x86_64")
             .join("mbx");

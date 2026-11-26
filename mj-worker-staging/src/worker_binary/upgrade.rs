@@ -80,7 +80,10 @@ impl LiveStaging {
     /// Register `name` and return every name live for the session, this one
     /// included, from the same locked view.
     fn register(session_id: &str, name: &str) -> (Self, Vec<String>) {
-        let key = (mj_core::config::data_dir(), session_id.to_owned());
+        let key = (
+            mj_core::config::DataLayout::current().root().to_path_buf(),
+            session_id.to_owned(),
+        );
         let mut live = live_stagings()
             .lock()
             .unwrap_or_else(|error| error.into_inner());

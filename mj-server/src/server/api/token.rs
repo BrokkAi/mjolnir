@@ -4,7 +4,7 @@ use super::*;
 /// variable so it survives daemon restarts and so deleting it is the explicit
 /// revoke gesture.
 pub fn api_token_path() -> PathBuf {
-    mj_core::config::data_dir().join(API_TOKEN_FILE)
+    mj_core::config::DataLayout::current().api_token()
 }
 
 /// Read the API bearer token, minting one on first use.

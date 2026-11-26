@@ -391,6 +391,7 @@ fn a_source_that_cannot_overlay_is_mounted_read_only_and_reported() {
     let plan = targets::provision_plan(
         &podman_target(),
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &mounts,
         None,
@@ -427,6 +428,7 @@ fn a_probe_that_cannot_answer_keeps_the_overlay_and_says_so() {
     let plan = targets::provision_plan(
         &podman_target(),
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &mounts,
         None,
@@ -458,6 +460,7 @@ fn podman_session_runs_as_root_without_image_user_probing_or_keep_id() {
     let plan = targets::provision_plan(
         &target,
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &[],
         None,
@@ -506,6 +509,7 @@ fn credential_free_container_creation_omits_runtime_token_environment() {
     let plan = targets::provision_plan_named(
         &target,
         &session.id,
+        "test-instance",
         &probe_bundle(),
         &[],
         None,
@@ -1030,7 +1034,10 @@ fn failed_owned_child_startup_retires_its_environment_and_keeps_the_relation() {
 
 fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
     startup_cleanup_fixture_on(owns_environment, |id| TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join(id),
+        worker_root: mj_core::config::DataLayout::current()
+            .root()
+            .to_path_buf()
+            .join(id),
     })
 }
 
@@ -1048,14 +1055,14 @@ fn startup_cleanup_fixture_on(
     config.subagents.max_concurrent = 1;
     config.save().unwrap();
     let mut parent = crate::controller::test_support::checkpoint_test_session(PROVISIONED_SESSION);
-    parent.project_directory = Some(mj_core::config::data_dir());
+    parent.project_directory = Some(mj_core::config::DataLayout::current().root().to_path_buf());
     parent.target = Some(Box::new(target(PROVISIONED_SESSION)));
     crate::database::save_session(&parent).unwrap();
     let child_id = "fedcba9876543210fedcba9876543210";
     let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
     child.state = SessionState::StartupCleanup;
     child.last_error = Some("fixture launch failed".into());
-    child.project_directory = Some(mj_core::config::data_dir());
+    child.project_directory = Some(mj_core::config::DataLayout::current().root().to_path_buf());
     child.target = Some(Box::new(target(child_id)));
     crate::database::register_subagent_with_startup(
         &child,
@@ -1217,6 +1224,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
             r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
         ).unwrap()).into()),
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -1888,9 +1896,15 @@ fn container_targets() -> Vec<targets::TargetTemplate> {
 fn a_failure_after_the_container_exists_removes_it_and_keeps_the_original_error() {
     let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
     for target in container_targets() {
-        let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                .unwrap();
+        let plan = targets::provision_plan(
+            &target,
+            PROVISIONED_SESSION,
+            "test-instance",
+            &probe_bundle(),
+            &[],
+            None,
+        )
+        .unwrap();
         let executor = RecordingExecutor::failing("clone app");
 
         let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
@@ -1916,8 +1930,15 @@ fn a_failure_after_the_container_exists_removes_it_and_keeps_the_original_error(
 #[test]
 fn target_creation_returns_repository_setup_without_running_it() {
     let target = podman_target();
-    let plan =
-        targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None).unwrap();
+    let plan = targets::provision_plan(
+        &target,
+        PROVISIONED_SESSION,
+        "test-instance",
+        &probe_bundle(),
+        &[],
+        None,
+    )
+    .unwrap();
     let executor = RecordingExecutor::succeeding();
 
     let (_, repositories) =
@@ -1942,9 +1963,15 @@ fn target_creation_returns_repository_setup_without_running_it() {
 #[test]
 fn a_target_whose_creation_failed_is_never_torn_down() {
     for target in container_targets() {
-        let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                .unwrap();
+        let plan = targets::provision_plan(
+            &target,
+            PROVISIONED_SESSION,
+            "test-instance",
+            &probe_bundle(),
+            &[],
+            None,
+        )
+        .unwrap();
         let creation = plan.split_at_target_creation().unwrap().0;
         let executor =
             RecordingExecutor::failing(creation.commands.last().unwrap().purpose.clone());
@@ -1968,8 +1995,15 @@ fn a_target_whose_creation_failed_is_never_torn_down() {
 #[test]
 fn a_target_whose_locator_cannot_be_discovered_is_removed_again() {
     let target = podman_target();
-    let plan =
-        targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None).unwrap();
+    let plan = targets::provision_plan(
+        &target,
+        PROVISIONED_SESSION,
+        "test-instance",
+        &probe_bundle(),
+        &[],
+        None,
+    )
+    .unwrap();
     let executor = RecordingExecutor::succeeding();
 
     let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
@@ -2367,6 +2401,7 @@ fn container_run_args(target: &targets::TargetTemplate) -> Vec<String> {
     targets::provision_plan(
         target,
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &[],
         None,
@@ -2504,7 +2539,10 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
     let _writer = crate::database::install_isolated_test_writer();
     let source = crate::controller::test_support::committed_repository();
     let root = source.path().canonicalize().unwrap();
-    let home = mj_core::config::data_dir().join("codex-home");
+    let home = mj_core::config::DataLayout::current()
+        .root()
+        .to_path_buf()
+        .join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     let mut config = Config::default();
     config

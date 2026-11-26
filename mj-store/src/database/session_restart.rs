@@ -106,7 +106,7 @@ fn begin_session_restart_with(
             tx.commit()?;
             return Ok(intent);
         }
-        state_io::load_session_with(&tx, &session_id)?
+        state_io::load_session_with(&tx, &session_id, &state_io::configured_sessions_root())?
             .with_context(|| format!("unknown session {session_id}"))?;
         // A Restart never acquires replacement authority from an image or
         // settings mismatch, including an acknowledgment sent by an old client.
@@ -151,8 +151,9 @@ pub fn load_restart_and_session(
     let Some(intent) = load_session_restart_with(&snapshot, session_id)? else {
         return Ok(None);
     };
-    let session = state_io::load_session_with(&snapshot, session_id)?
-        .context("Restart session is missing")?;
+    let session =
+        state_io::load_session_with(&snapshot, session_id, &state_io::configured_sessions_root())?
+            .context("Restart session is missing")?;
     Ok(Some((intent, session)))
 }
 
@@ -280,8 +281,12 @@ pub fn advance_session_restart(
                 current.container_upgrade.is_none(),
                 "explicit replacement requires atomic idle and child admission"
             );
-            let session = state_io::load_session_with(&tx, &session_id)?
-                .context("session disappeared before Restart recreation")?;
+            let session = state_io::load_session_with(
+                &tx,
+                &session_id,
+                &state_io::configured_sessions_root(),
+            )?
+            .context("session disappeared before Restart recreation")?;
             ensure!(
                 current.container_recreation_acknowledged
                     && current.checkpoint_started
@@ -353,8 +358,11 @@ pub fn recover_cancelled_session_restart(session_id: &str, operation_id: &str) -
             intent.operation_id == operation_id
                 && intent.phase == SessionRestartPhase::CancelRequested
         }) {
-            if let Some(mut session) = state_io::load_session_with(&tx, &session_id)?
-                && session.state == SessionState::Closing
+            if let Some(mut session) = state_io::load_session_with(
+                &tx,
+                &session_id,
+                &state_io::configured_sessions_root(),
+            )? && session.state == SessionState::Closing
             {
                 session.state = SessionState::Error;
                 session.last_error = Some("Restart was cancelled; the environment was retained. Restart or suspend to continue.".into());

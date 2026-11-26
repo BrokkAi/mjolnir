@@ -39,8 +39,8 @@ impl UpgradeResume {
 
     /// Called only after the old terminal and runtime have been released.
     pub(crate) fn restart(self, target: &crate::daemon::UpgradeTarget) -> Result<()> {
-        let path = mj_core::config::data_dir()
-            .join("terminal-upgrades")
+        let path = mj_core::config::DataLayout::current()
+            .terminal_upgrades_dir()
             .join(format!("{}.json", std::process::id()));
         mj_core::config::atomic_write(&path, &serde_json::to_vec(&self)?)
             .context("preserve terminal state for upgrade")?;
@@ -238,13 +238,15 @@ mod tests {
         };
         let error = resume
             .restart(&crate::daemon::UpgradeTarget {
-                executable: mj_core::config::data_dir().join("missing-executable"),
+                executable: mj_core::config::DataLayout::current()
+                    .root()
+                    .join("missing-executable"),
                 generation: "test-daemon".into(),
             })
             .unwrap_err();
         assert!(format!("{error:#}").contains("restart upgraded terminal"));
-        let path = mj_core::config::data_dir()
-            .join("terminal-upgrades")
+        let path = mj_core::config::DataLayout::current()
+            .terminal_upgrades_dir()
             .join(format!("{}.json", std::process::id()));
         let saved = std::fs::read(&path).unwrap();
         assert!(saved.len() > 64 * 1024);

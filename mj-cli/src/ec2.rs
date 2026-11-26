@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use clap::{Args, Subcommand, ValueEnum};
 use mj_core::config::{
-    Config, ContainerTemplate, Machine, SshConnection, TargetBuildCache, TargetTemplate,
+    Config, ContainerTemplate, Machine, MachineId, SshConnection, TargetBuildCache, TargetTemplate,
     config_path, mbx_s3_location, validate_id,
 };
 use mj_core::subprocess::run_with_input;
@@ -604,7 +604,7 @@ fn create(mut args: CreateArgs, root: &Path) -> Result<()> {
     let mut lock = Some(lock_target(root, &target)?);
     let config = Config::load()?;
     ensure!(
-        !config.machines.contains_key(&target) && !config.targets.contains_key(&target),
+        !config.machines.contains_key(target.as_str()) && !config.targets.contains_key(&target),
         "machine or target {target:?} already exists"
     );
     ensure!(
@@ -1395,14 +1395,14 @@ fn create_attempt(
     let image = mj_core::config::DEFAULT_SESSION_IMAGE;
     Config::update(|config| {
         ensure!(
-            !config.machines.contains_key(&record.target)
+            !config.machines.contains_key(record.target.as_str())
                 && !config.targets.contains_key(&record.target),
             "machine or target {:?} was added concurrently; the VM is retained",
             record.target
         );
         config
             .machines
-            .insert(record.target.clone(), machine.clone());
+            .insert(MachineId::new(record.target.clone())?, machine.clone());
         let container = ContainerTemplate {
             memory_hard_limit: None,
             image: image.into(),
@@ -1936,7 +1936,7 @@ fn cleanup_record(cloud: &Cloud, record: &Record, root: &Path) -> Result<()> {
 /// that would otherwise retry its address until they expire. Never fails the
 /// destroy: the rows stay for the expiry sweep, which backs off the dead host.
 fn retire_host_snapshot_cache(key: &Path) {
-    let data_dir = mj_core::config::data_dir();
+    let data_dir = mj_core::config::DataLayout::current().root().to_path_buf();
     if mj_core::config::ensure_may_control_store(&data_dir, "retire host snapshot cache").is_err() {
         return;
     }
@@ -1951,18 +1951,19 @@ fn retire_host_snapshot_cache(key: &Path) {
 
 fn remove_configuration(record: &Record, root: &Path, path: &Path) -> Result<()> {
     let key = record.directory(root)?.join("id_ed25519");
+    let machine_id = MachineId::new(record.target.clone())?;
     Config::update_to(path, |config| {
-        let ours = matches!(config.machines.get(&record.target),Some(Machine::Ssh { ssh,.. }) if ssh.identity_file.as_ref() == Some(&key));
+        let ours = matches!(config.machines.get(&machine_id),Some(Machine::Ssh { ssh,.. }) if ssh.identity_file.as_ref() == Some(&key));
         if ours {
             let targets: Vec<_> = config
-                .machine_runtimes(&record.target)
+                .machine_runtimes(&machine_id)
                 .map(|(id, _)| id.to_owned())
                 .collect();
             for target in targets {
                 config.targets.remove(&target);
                 config.disabled_targets.remove(&target);
             }
-            config.machines.remove(&record.target);
+            config.machines.remove(&machine_id);
         }
         Ok(())
     })?;
@@ -1973,7 +1974,7 @@ fn remove_configuration(record: &Record, root: &Path, path: &Path) -> Result<()>
 /// the kernel limits land from the same script, over SSH, with sudo.
 fn tune(args: TuneArgs) -> Result<()> {
     let config = Config::load()?;
-    let Some(Machine::Ssh { ssh, .. }) = config.machines.get(&args.host) else {
+    let Some(Machine::Ssh { ssh, .. }) = config.machines.get(args.host.as_str()) else {
         bail!(
             "no ssh machine named {:?}; check the name with `mj ec2 list`",
             args.host
@@ -2550,7 +2551,7 @@ else:
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         Config::update(|config| {
             config.machines.insert(
-                "builder".into(),
+                MachineId::new("builder").unwrap(),
                 Machine::Ssh {
                     ssh: SshConnection {
                         host: "192.0.2.7".into(),
@@ -3071,7 +3072,7 @@ else:
         // A concurrent, unrelated editor change must survive destruction.
         Config::update(|config| {
             config.machines.insert(
-                "other".into(),
+                MachineId::new("other").unwrap(),
                 Machine::Ssh {
                     ssh: SshConnection {
                         host: "other.example".into(),

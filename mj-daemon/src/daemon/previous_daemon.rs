@@ -40,7 +40,7 @@ fn host_boot_time() -> Option<SystemTime> {
 /// The daemon-kind logs in the log directory, with their parsed names. The
 /// file name format is owned by `mj_core::logging`.
 fn daemon_logs(data_dir: &Path) -> Vec<(PathBuf, mj_core::logging::DaemonLogName)> {
-    fs::read_dir(data_dir.join("logs"))
+    fs::read_dir(mj_core::config::DataLayout::at(data_dir).logs_dir())
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
@@ -97,7 +97,7 @@ fn rfc3339(time: SystemTime) -> String {
 /// while holding the controller store guard, which excludes a live predecessor.
 pub(super) fn report_unclean_previous_daemon() {
     report_unclean_previous_daemon_at(
-        &mj_core::config::data_dir(),
+        mj_core::config::DataLayout::current().root(),
         read_metadata_any(),
         host_boot_time,
     );

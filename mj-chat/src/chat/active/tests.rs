@@ -1055,6 +1055,7 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,

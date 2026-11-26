@@ -32,7 +32,7 @@ fn default_daemon_exit_schema() -> u32 {
 }
 
 pub fn daemon_exits_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("daemon-exits")
+    crate::config::DataLayout::at(data_dir).daemon_exits_dir()
 }
 
 pub fn write_daemon_exit_record(exit_dir: &Path, record: &DaemonExitRecord) -> Result<PathBuf> {

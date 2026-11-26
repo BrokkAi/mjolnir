@@ -13,7 +13,7 @@ use crate::targets::{SshTarget, TargetLocator};
 
 /// Directory holding one `<operation>/resources.json` record per managed host.
 pub fn ec2_records_dir() -> PathBuf {
-    crate::config::config_dir().join("ec2")
+    crate::config::ConfigLayout::current().ec2_dir()
 }
 
 /// The EC2 instance behind a target and where to reach the AWS API for it.

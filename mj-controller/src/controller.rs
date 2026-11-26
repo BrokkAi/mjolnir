@@ -66,13 +66,11 @@ use chrono::Utc;
 
 use mj_core::config::{
     Config, ProjectBundle, ProjectRepository, TargetTemplate, atomic_write, container_size_host,
-    data_dir, is_bare_project_target, mount_history_host,
+    is_bare_project_target, mount_history_host,
 };
 
 use crate::import::{RepositoryIdentity, setup_style_id};
 use mj_core::remote_git::{Shorthand, display_url, project_source};
-
-const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -166,6 +164,7 @@ pub struct Controller {
 #[derive(Debug)]
 pub struct ControllerStoreGuard {
     _file: mj_core::file_lock::FileLock,
+    instance_identity: mj_core::config::InstanceIdentity,
 }
 
 #[derive(Debug)]
@@ -187,8 +186,8 @@ impl std::error::Error for StoreAlreadyOwnedError {}
 
 impl ControllerStoreGuard {
     pub fn acquire() -> Result<Self> {
-        let directory = data_dir();
-        Self::acquire_at(&directory)
+        let directory = mj_core::config::DataLayout::current();
+        Self::acquire_at(directory.root())
     }
 
     fn acquire_at(directory: &Path) -> Result<Self> {
@@ -203,7 +202,7 @@ impl ControllerStoreGuard {
 
     /// Probe exclusivity without treating an owner that is still exiting as an error.
     pub fn try_acquire() -> Result<Option<Self>> {
-        Self::try_acquire_at(&data_dir())
+        Self::try_acquire_at(mj_core::config::DataLayout::current().root())
     }
 
     fn try_acquire_at(directory: &Path) -> Result<Option<Self>> {
@@ -211,7 +210,7 @@ impl ControllerStoreGuard {
         mj_core::config::ensure_may_control_store(directory, "own this data store")?;
         mj_core::config::create_owner_only_directory(directory)
             .with_context(|| format!("create controller data directory {}", directory.display()))?;
-        let path = directory.join("controller.lock");
+        let path = mj_core::config::DataLayout::at(directory).controller_lock();
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
         #[cfg(unix)]
@@ -230,15 +229,27 @@ impl ControllerStoreGuard {
                     .with_context(|| format!("lock controller store {}", directory.display()));
             }
         }
+        // Resolved once, under the lock that serializes every writer of the
+        // file. A corrupt identity fails the acquisition, naming the file.
+        let instance_identity = mj_core::config::ensure_instance_identity_at(
+            mj_core::config::instance_name().as_deref(),
+            directory,
+        )?;
         Ok(Some(Self {
             _file: mj_core::file_lock::FileLock::new(file),
+            instance_identity,
         }))
+    }
+
+    /// The ownership identity of this store, from `<data_dir>/instance-identity`.
+    pub fn instance_identity(&self) -> &mj_core::config::InstanceIdentity {
+        &self.instance_identity
     }
 
     /// Start the sole production SQLite writer after controller exclusivity
     /// has been established by this guard.
     pub fn start_database_writer(&self) -> Result<crate::database::DatabaseWriterOwner> {
-        crate::database::start_database_writer()
+        crate::database::start_database_writer(self.instance_identity.clone())
     }
 }
 
@@ -795,13 +806,15 @@ impl Controller {
                 tracing::warn!(session_id = %session.id, "{issue}");
             }
         }
-        self.backfill_target_runtime()
+        self.backfill_target_runtime()?;
+        self.backfill_machine_ids()
     }
 
     pub fn reload(&mut self) -> Result<()> {
         // Capture legacy settings from the previous config before a manual
         // edit removes them. Only fill missing metadata, never overwrite it.
         self.backfill_target_runtime()?;
+        self.backfill_machine_ids()?;
         *self = Self::load()?;
         Ok(())
     }
@@ -828,6 +841,30 @@ impl Controller {
                 Err(error) => {
                     tracing::warn!(session_id = %session.id, %error, "target access needs configuration repair")
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fill the machine on placements that have none: local placements by
+    /// kind, SSH placements from the machine their target template names,
+    /// when that machine is where the placement recorded itself to be. A
+    /// placement whose template was removed or repointed, and every legacy
+    /// EC2 placement, keeps no machine; migrate maps those by hand.
+    fn backfill_machine_ids(&mut self) -> Result<()> {
+        let templates = self
+            .config
+            .targets
+            .keys()
+            .filter_map(|id| {
+                let machine_id = self.config.template_machine_id(id)?;
+                let machine = self.config.machines.get(&machine_id)?;
+                (!machine_id.is_local()).then(|| (id.clone(), (machine_id, machine.clone())))
+            })
+            .collect();
+        for (session_id, machine_id) in crate::database::backfill_machine_ids(&templates)? {
+            if let Some(session) = self.state.sessions.get_mut(&session_id) {
+                session.machine_id.get_or_insert(machine_id);
             }
         }
         Ok(())
@@ -1181,6 +1218,7 @@ impl Controller {
             notifications_ignored,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
+            machine_id: self.config.template_machine_id(target_id),
             build_cache: None,
             create_managed_worktree,
             launch_base,
@@ -1691,7 +1729,7 @@ impl Controller {
 }
 
 fn config_rename_journal_path() -> PathBuf {
-    data_dir().join(CONFIG_RENAME_JOURNAL)
+    mj_core::config::DataLayout::current().config_rename_journal()
 }
 
 fn write_config_rename_journal(journal: &ConfigRenameJournal) -> Result<()> {
