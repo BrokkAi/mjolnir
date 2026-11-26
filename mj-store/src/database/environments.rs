@@ -123,10 +123,19 @@ fn read_environment_with(
     id: &str,
     machine_column: &str,
 ) -> Result<Option<EnvironmentRecord>> {
+    let extra = if super::legacy_schema::table_has_column(
+        connection,
+        "environment_workers",
+        "data_root",
+    )? {
+        "data_root"
+    } else {
+        "NULL"
+    };
     let row = connection.query_row("SELECT owner_session_id,phase,placement_json,target_lease_id FROM environments WHERE environment_id=?1",[id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?))).optional()?;
     row.map(|(owner_session_id,phase,json,lease)| {
         let mut placement: EnvironmentPlacement = serde_json::from_str(&json).context("read environment placement")?;
-        let lease = lease.map(|lease| connection.query_row(&format!("SELECT kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,{machine_column} FROM environment_workers WHERE lease_id=?1"),[lease],|row|Ok((super::state_io::decode_target(row,0)?,super::state_io::decode_machine(row,8)?)))).transpose()?;
+        let lease = lease.map(|lease| connection.query_row(&format!("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,{extra},{machine_column} FROM environment_workers WHERE lease_id=?1"),[lease],|row|Ok((super::state_io::decode_target(row,1,&row.get::<_, String>(0)?)?,super::state_io::decode_machine(row,10)?)))).transpose()?;
         (placement.target, placement.machine_id) = match lease {
             Some((target, machine_id)) => (Some(target), machine_id),
             None => (None, None),
@@ -226,15 +235,24 @@ fn read_environment_workers_with(
     environment_id: &str,
     machine_column: &str,
 ) -> Result<Vec<EnvironmentWorker>> {
-    let mut query = connection.prepare(&format!("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,target_template_id,runtime_json,lease_id,{machine_column} FROM environment_workers WHERE environment_id=?1 ORDER BY worker_session_id,lease_id"))?;
+    let extra = if super::legacy_schema::table_has_column(
+        connection,
+        "environment_workers",
+        "data_root",
+    )? {
+        "data_root"
+    } else {
+        "NULL"
+    };
+    let mut query = connection.prepare(&format!("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,{extra},target_template_id,runtime_json,lease_id,{machine_column} FROM environment_workers WHERE environment_id=?1 ORDER BY worker_session_id,lease_id"))?;
     let rows = query.query_map([environment_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            super::state_io::decode_target(row, 1)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, Option<String>>(10)?,
-            row.get::<_, String>(11)?,
-            super::state_io::decode_machine(row, 12)?,
+            super::state_io::decode_target(row, 1, &row.get::<_, String>(0)?)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, String>(12)?,
+            super::state_io::decode_machine(row, 13)?,
         ))
     })?;
     rows.map(|row| {
@@ -307,9 +325,10 @@ fn store_worker(
     target: &TargetLocator,
     machine_id: Option<&MachineId>,
 ) -> Result<String> {
+    super::state_io::validate_target_for_store(target, session_id)?;
     let lease = worker_lease(transaction, environment_id, session_id, target)?;
     let fields = super::state_io::stored_target_values(target)?;
-    transaction.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,runtime_json,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,machine_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(lease_id) DO UPDATE SET address=excluded.address,workspace_storage=excluded.workspace_storage,runtime_json=coalesce(environment_workers.runtime_json,excluded.runtime_json),machine_id=coalesce(environment_workers.machine_id,excluded.machine_id)",params![lease,environment_id,session_id,target_template_id,runtime.map(serde_json::to_string).transpose()?,fields.kind,fields.host,fields.resource,fields.address,fields.workspace,fields.worker_id,fields.workspace_storage,fields.borrowed_from,machine_id.map(MachineId::as_str)])?;
+    transaction.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,runtime_json,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,machine_id,data_root) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(lease_id) DO UPDATE SET address=excluded.address,workspace_storage=excluded.workspace_storage,runtime_json=coalesce(environment_workers.runtime_json,excluded.runtime_json),machine_id=coalesce(environment_workers.machine_id,excluded.machine_id)",params![lease,environment_id,session_id,target_template_id,runtime.map(serde_json::to_string).transpose()?,fields.kind,fields.host,fields.resource,fields.address,fields.workspace,fields.worker_id,fields.workspace_storage,fields.borrowed_from,machine_id.map(MachineId::as_str),fields.data_root])?;
     point_environment_at_lease(transaction, environment_id, session_id, &lease)?;
     Ok(lease)
 }
@@ -1155,6 +1174,48 @@ pub fn record_prepared_environment_instance(environment_id: &str, instance_id: &
 mod tests {
     use super::super::tests::{session, test_subagent};
     use super::*;
+
+    #[test]
+    fn host_bare_worker_lease_round_trips_through_live_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection =
+            super::super::schema::open_writer(&directory.path().join("store.sqlite3")).unwrap();
+        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('env','worker','active','{}')", []).unwrap();
+        let target = TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/remote data".into(),
+        };
+        let tx = connection.transaction().unwrap();
+        assert!(
+            store_worker(
+                &tx,
+                "env",
+                "worker",
+                "target",
+                None,
+                &TargetLocator::SshHostBare {
+                    host: "source".into(),
+                    data_root: "/".into()
+                },
+                None
+            )
+            .is_err()
+        );
+        let lease = store_worker(&tx, "env", "worker", "target", None, &target, None).unwrap();
+        tx.commit().unwrap();
+        let workers = read_environment_workers(&connection, "env").unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].lease_id, lease);
+        assert_eq!(workers[0].target, target);
+        let workspace: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT workspace FROM environment_workers WHERE lease_id=?1",
+                [&lease],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(workspace.is_none());
+    }
 
     #[test]
     fn registration_and_placement_keep_owned_environments_separate() {

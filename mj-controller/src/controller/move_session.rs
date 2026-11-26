@@ -5278,7 +5278,9 @@ fn direct_ssh_endpoint<'a>(
 ) -> Option<(&'a mj_core::targets::SshTarget, HostWorker)> {
     use mj_core::targets::TargetLocator;
     match locator {
-        TargetLocator::SshBare { ssh, .. } | TargetLocator::AwsEc2 { ssh, .. } => {
+        TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
+        | TargetLocator::AwsEc2 { ssh, .. } => {
             Some((ssh, HostWorker::Known(format!("{worker_root}/hel"))))
         }
         TargetLocator::SshPodman { ssh, .. } => Some((ssh, HostWorker::FindOnPodmanHost)),

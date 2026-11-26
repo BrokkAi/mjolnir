@@ -23,7 +23,18 @@ pub fn credential_sync_targets_with_auth(
 }
 
 pub fn staged_credential_sessions(controller: &Controller) -> BTreeSet<String> {
-    worker_client::staged_credential_sessions(&controller.state)
+    worker_client::staged_credential_sessions(&controller.config, &controller.state)
+}
+
+pub fn staged_credential_sessions_with_cache(
+    controller: &Controller,
+    wakes: &worker_client::CredentialWakes,
+) -> BTreeSet<String> {
+    worker_client::staged_credential_sessions_with_cache(
+        &controller.config,
+        &controller.state,
+        Some(wakes),
+    )
 }
 
 pub fn credential_sync_targets_from_sources(

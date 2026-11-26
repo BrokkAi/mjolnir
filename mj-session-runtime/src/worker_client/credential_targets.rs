@@ -36,25 +36,71 @@ pub fn credential_sync_targets_with_auth(
     state: &State,
     schemes: &BTreeMap<String, bool>,
 ) -> Vec<CredentialSyncTarget> {
-    credential_sync_targets_from_sources(config, state, schemes, &staged_credential_sessions(state))
+    credential_sync_targets_from_sources(
+        config,
+        state,
+        schemes,
+        &staged_credential_sessions(config, state),
+    )
 }
 
-pub fn staged_credential_sessions(state: &State) -> BTreeSet<String> {
-    state
+pub fn staged_credential_sessions(config: &Config, state: &State) -> BTreeSet<String> {
+    staged_credential_sessions_with_cache(config, state, None)
+}
+
+/// Observe remote homes in parallel on the daemon's background worker. A
+/// caller with an attachment owner can reuse the observation until reconnect.
+pub fn staged_credential_sessions_with_cache(
+    config: &Config,
+    state: &State,
+    wakes: Option<&super::CredentialWakes>,
+) -> BTreeSet<String> {
+    let sessions = state
         .sessions
         .values()
-        // Every session the daemon holds a worker connection for, whatever
-        // its lifecycle state, so a login renewed while one is checkpointing
-        // or closing reaches it too. A disconnected session would only produce
-        // connection errors. A session that is starting, resuming or parked
-        // has no connection yet: its start stages the current login, and a
-        // failure on a renewed one is handled the moment it is reported.
         .filter(|session| {
             session_target_is_pollable(session) && session.state != SessionState::Disconnected
         })
+        .collect::<Vec<_>>();
+    let (remote, local): (Vec<_>, Vec<_>) = sessions.into_iter().partition(|session| {
+        matches!(
+            session.target.as_deref(),
+            Some(mj_core::state::TargetLocator::SshHostBare { .. })
+        ) && !session.harness_kind.nested_home()
+    });
+    let mut staged = local
+        .into_iter()
         .filter(|session| local_profile_homes::session_has_a_staged_home_of_its_own(session))
         .map(|session| session.id.clone())
-        .collect()
+        .collect::<BTreeSet<_>>();
+    std::thread::scope(|scope| {
+        let tasks = remote
+            .into_iter()
+            .map(|session| {
+                scope.spawn(move || {
+                    let owned = match wakes {
+                        Some(wakes) => wakes.observe_profile(session, config),
+                        None => local_profile_homes::session_has_a_staged_home_on_target(
+                            session,
+                            config,
+                            &mj_core::targets::ProcessExecutor,
+                        ),
+                    };
+                    owned.then(|| session.id.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            match task.join() {
+                Ok(Some(id)) => {
+                    staged.insert(id);
+                }
+                Ok(None) => {}
+                Err(_) => tracing::error!("credential profile observation panicked"),
+            }
+        }
+    });
+    staged
 }
 
 pub fn credential_sync_targets_from_sources(

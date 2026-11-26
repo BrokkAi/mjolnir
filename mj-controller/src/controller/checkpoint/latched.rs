@@ -180,6 +180,18 @@ impl Controller {
             )?
             .to_string_lossy()
             .into_owned()
+        } else if matches!(backend, targets::TargetLocator::SshHostBare { .. }) {
+            let launch = crate::controller::lifecycle::origin_delta::read_wire::<serde_json::Value>(
+                &backend, session_id, &worker_root, "launch.json", executor)?;
+            if let Some(installed) = launch.as_ref().and_then(mj_core::worker_launch::installed_harness_home_from_json) {
+                let installed = mj_core::target_path::text(&installed);
+                let command = targets::command_on_locator(mj_core::targets::SshTrafficClass::Control,
+                    &backend, session_id, vec!["sh".into(), "-c".into(),
+                    r#"case "$2" in /*) home=$2 ;; '~') home=$HOME ;; '~/'*) home="$HOME/${2#\~/}" ;; *) home="$HOME/$2" ;; esac; a=$(cd -P "$1" && pwd -P) && b=$(cd -P "$home" && pwd -P) && [ "$a" = "$b" ] && printf %s "$home""#.into(),
+                    "mj-check-home".into(), harness_home.clone(), installed.clone()], "verify remote checkpoint harness home")?;
+                let output = super::super::execute_checked(executor, command)?;
+                String::from_utf8(output.stdout).context("remote checkpoint harness home is not UTF-8")?
+            } else { harness_home }
         } else {
             harness_home
         };
@@ -1142,6 +1154,7 @@ impl Controller {
                     && matches!(
                         backend,
                         targets::TargetLocator::SshBare { .. }
+                            | targets::TargetLocator::SshHostBare { .. }
                             | targets::TargetLocator::AwsEc2 { .. }
                     );
                 if promotes_bare_archive {

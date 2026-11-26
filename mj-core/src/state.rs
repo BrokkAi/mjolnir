@@ -997,6 +997,10 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         address: Option<String>,
     },
+    SshHostBare {
+        host: String,
+        data_root: PathBuf,
+    },
     SshBare {
         host: String,
         workspace: PathBuf,
@@ -1368,7 +1372,10 @@ impl TargetLocator {
             | Self::SshDocker { borrowed_from, .. }
             | Self::SshAppleContainer { borrowed_from, .. }
             | Self::SshNitro { borrowed_from, .. } => borrowed_from.is_none(),
-            Self::LocalBare { .. } | Self::SshBare { .. } | Self::AwsEc2 { .. } => false,
+            Self::LocalBare { .. }
+            | Self::SshBare { .. }
+            | Self::SshHostBare { .. }
+            | Self::AwsEc2 { .. } => false,
         }
     }
 
@@ -1407,6 +1414,12 @@ impl TargetLocator {
             }
             Self::AwsEc2 { instance_id, .. } if instance_id.trim().is_empty() => {
                 bail!("target locator has an empty AWS instance id")
+            }
+            Self::SshHostBare { host, data_root } => {
+                if host.trim().is_empty() || host.starts_with('-') {
+                    bail!("host-bare SSH target locator has an invalid host");
+                }
+                crate::target_path::validate_host_bare(data_root, session_id)?;
             }
             Self::SshBare {
                 host,
@@ -2489,7 +2502,10 @@ impl SessionRecord {
             }
             Checkout::Attached { path } => {
                 let remote = match self.target.as_deref() {
-                    Some(TargetLocator::SshBare { host, .. }) => Some(host.as_str()),
+                    Some(
+                        TargetLocator::SshBare { host, .. }
+                        | TargetLocator::SshHostBare { host, .. },
+                    ) => Some(host.as_str()),
                     _ => None,
                 };
                 ProjectSourceIdentity::path(path, remote)
@@ -3864,6 +3880,18 @@ impl TargetLocator {
                     instance_id: right, ..
                 },
             ) => left == right,
+            (
+                TargetLocator::SshHostBare {
+                    host: left_host,
+                    data_root: left_root,
+                    ..
+                },
+                TargetLocator::SshHostBare {
+                    host: right_host,
+                    data_root: right_root,
+                    ..
+                },
+            ) => left_host == right_host && left_root == right_root,
             (
                 TargetLocator::SshBare {
                     host: left_host,

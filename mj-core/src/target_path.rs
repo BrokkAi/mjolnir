@@ -15,6 +15,27 @@ pub fn is_absolute(path: &Path) -> bool {
     matches!(path.components().next(), Some(Component::RootDir))
 }
 
+/// Validate the recorded root of an SSH host's data layout and a session id.
+pub fn validate_host_bare(data_root: &Path, session_id: &str) -> anyhow::Result<()> {
+    use anyhow::ensure;
+    ensure!(
+        is_absolute(data_root)
+            && !data_root
+                .components()
+                .any(|part| part == Component::ParentDir)
+            && data_root
+                .components()
+                .any(|part| matches!(part, Component::Normal(_))),
+        "invalid host-bare data root"
+    );
+    let mut parts = Path::new(session_id).components();
+    ensure!(
+        matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none(),
+        "invalid host-bare session id"
+    );
+    Ok(())
+}
+
 /// Whether `path` is absolute on this controller or on a session target. For
 /// records and drafts that may name either side, such as a mount source on a
 /// local or an SSH container host; the side that uses the path checks it again.

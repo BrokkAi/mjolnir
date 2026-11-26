@@ -127,6 +127,12 @@ fn link_directory(_target: &Path, _link: &Path) -> std::io::Result<()> {
 /// home is a link to a profile home, or missing because an earlier release
 /// started its worker from a profile home that could not be linked.
 pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRecord) -> bool {
+    if matches!(
+        session.target.as_deref(),
+        Some(TargetLocator::SshHostBare { .. })
+    ) {
+        return session.harness_kind.nested_home();
+    }
     let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
         return true;
     };
@@ -134,6 +140,55 @@ pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRec
         return true;
     }
     std::fs::symlink_metadata(worker_root.join("profile")).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Check ownership on the machine holding the profile, failing closed when it
+/// cannot be reached. Call from supervised background work.
+pub fn session_has_a_staged_home_on_target(
+    session: &mj_core::state::SessionRecord,
+    config: &mj_core::config::Config,
+    executor: &impl CommandExecutor,
+) -> bool {
+    let Some(locator @ TargetLocator::SshHostBare { data_root, .. }) = session.target.as_deref()
+    else {
+        return session_has_a_staged_home_of_its_own(session);
+    };
+    if session.harness_kind.nested_home() {
+        return true;
+    }
+    let Ok(backend) = crate::targets::backend_locator(locator, session, config) else {
+        return false;
+    };
+    let home = mj_core::config::DataLayout::at(data_root)
+        .worker_root(&session.id)
+        .join("profile");
+    let Ok(command) = crate::targets::command_on_locator(
+        mj_core::targets::SshTrafficClass::Control,
+        &backend,
+        &session.id,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "test ! -L \"$1\" && test -d \"$1\"".into(),
+            "mj-profile-ownership".into(),
+            mj_core::target_path::text(&home),
+        ],
+        "check remote profile ownership",
+    ) else {
+        return false;
+    };
+    match executor.execute(&command) {
+        Ok(output) if output.status == 0 => true,
+        Ok(output) if output.status == 1 => false,
+        Ok(output) => {
+            tracing::warn!(session_id = %session.id, status = output.status, "could not check remote profile ownership");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, %error, "could not check remote profile ownership");
+            false
+        }
+    }
 }
 
 /// Whether a local session's login file is a link to its profile's own, which
@@ -406,5 +461,88 @@ mod tests {
 
         // A second daemon start finds the links in place and changes nothing.
         assert!(link_profile_homes_of_earlier_sessions(&state).is_empty());
+    }
+
+    #[test]
+    fn host_bare_profile_probe_runs_on_ssh_and_fails_closed() {
+        struct Probe(i32);
+        impl CommandExecutor for Probe {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                _input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+            fn execute(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                assert_eq!(command.program, "ssh");
+                assert!(command.args.last().unwrap().contains("test ! -L"));
+                assert!(
+                    command
+                        .args
+                        .last()
+                        .unwrap()
+                        .contains("/source data/workers/")
+                );
+                if self.0 < 0 {
+                    anyhow::bail!("SSH unavailable");
+                }
+                Ok(crate::targets::CommandOutput {
+                    status: self.0,
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            }
+        }
+        let id = "0123456789abcdef0123456789abcdef";
+        let mut record = session(id, HarnessKind::Codex, Path::new("/unused"));
+        record.target = Some(Box::new(TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/source data".into(),
+        }));
+        let mut runtime = mj_core::state::TargetRuntimeSettings::from(
+            &mj_core::config::TargetTemplate::LocalBare,
+        );
+        runtime.kind = "ssh-host-bare".into();
+        runtime.connection = mj_core::state::TargetConnection::Ssh {
+            ssh: mj_core::config::SshConnection {
+                host: "source".into(),
+                user: None,
+                identity_file: None,
+                extra_args: vec![],
+            },
+        };
+        record.target_runtime = Some(runtime.into());
+        for status in [0, 1, 255, -1] {
+            assert_eq!(
+                session_has_a_staged_home_on_target(
+                    &record,
+                    &mj_core::config::Config::default(),
+                    &Probe(status)
+                ),
+                status == 0
+            );
+        }
+        record.harness_kind = HarnessKind::OpenCode;
+        assert!(session_has_a_staged_home_on_target(
+            &record,
+            &mj_core::config::Config::default(),
+            &Probe(-1)
+        ));
     }
 }

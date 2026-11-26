@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 162;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 163;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3886,6 +3886,11 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
         )?;
         transaction.commit()?;
     }
+    // Revision 163 is breaking: older readers cannot decode host-bare placements,
+    // and older writers would discard their additional fields.
+    if version < 163 {
+        migrate_host_bare_target_kind(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4010,6 +4015,60 @@ fn migrate_github_watch_followers(connection: &Connection) -> Result<()> {
         deleted = gone_session_rows_sql("OLD"),
         destroyed = gone_session_rows_sql("NEW"),
     ))?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Revision 163 moves evolving target-kind checks into Rust decoding.
+fn migrate_host_bare_target_kind(connection: &Connection) -> Result<()> {
+    struct ForeignKeysGuard<'a>(&'a Connection);
+    impl Drop for ForeignKeysGuard<'_> {
+        fn drop(&mut self) {
+            if let Err(error) = self.0.execute_batch("PRAGMA foreign_keys = ON;") {
+                tracing::error!(%error, "failed to restore foreign key enforcement");
+            }
+        }
+    }
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let _guard = ForeignKeysGuard(connection);
+    let transaction =
+        Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "CREATE TABLE session_targets_v163 (
+             session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+             kind TEXT NOT NULL, host TEXT, resource_id TEXT, address TEXT, workspace BLOB,
+             worker_id TEXT, workspace_storage TEXT, borrowed_from TEXT, machine_id TEXT,
+             data_root BLOB
+         ) STRICT;
+         INSERT INTO session_targets_v163(session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,machine_id)
+             SELECT session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,machine_id FROM session_targets;
+         DROP TABLE session_targets;
+         ALTER TABLE session_targets_v163 RENAME TO session_targets;
+         CREATE TABLE environment_workers_v163 (
+             lease_id TEXT PRIMARY KEY,
+             environment_id TEXT NOT NULL REFERENCES environments(environment_id) ON DELETE CASCADE,
+             worker_session_id TEXT NOT NULL, kind TEXT NOT NULL, host TEXT, resource_id TEXT,
+             address TEXT, workspace BLOB, worker_id TEXT, workspace_storage TEXT, borrowed_from TEXT,
+             target_template_id TEXT NOT NULL, machine_id TEXT, data_root BLOB,
+             runtime_json TEXT CHECK(runtime_json IS NULL OR json_valid(runtime_json))
+         ) STRICT;
+         INSERT INTO environment_workers_v163(lease_id,environment_id,worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,target_template_id,runtime_json,machine_id)
+             SELECT lease_id,environment_id,worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,target_template_id,runtime_json,machine_id FROM environment_workers;
+         DROP TABLE environment_workers;
+         ALTER TABLE environment_workers_v163 RENAME TO environment_workers;
+         CREATE INDEX environment_worker_identity ON environment_workers(worker_session_id);
+         CREATE INDEX environment_workers_environment ON environment_workers(environment_id, worker_session_id, lease_id);"
+    )?;
+    ensure!(
+        !has_foreign_key_violation_for_tables(
+            &transaction,
+            &["session_targets", "environment_workers"]
+        )?,
+        "foreign key violation in host-bare migration"
+    );
+    transaction.execute_batch("UPDATE schema_compatibility SET minimum_compatible_version = 163 WHERE singleton = 1;
+         INSERT INTO schema_migrations(version, applied_at) VALUES (163, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+         PRAGMA user_version=163;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -4836,7 +4895,7 @@ mod reader_tests {
         // placement column revision 161 adds. Revision 152 never reaches 161.
         for table in ["session_targets", "environment_workers"] {
             connection
-                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN machine_id TEXT;"))
+                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN machine_id TEXT; ALTER TABLE {table} ADD COLUMN data_root BLOB;"))
                 .unwrap();
         }
         let mjolnir = serde_json::json!({
@@ -5083,6 +5142,133 @@ mod reader_tests {
     }
 
     #[test]
+    fn host_bare_migration_preserves_leases_and_rejects_invalid_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection.execute_batch("CREATE TRIGGER stop_before_163 BEFORE INSERT ON schema_migrations WHEN NEW.version=163 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;").unwrap();
+        assert!(migrate_schema(&connection, None).is_err());
+        assert_eq!(read_schema_state(&connection).unwrap().revision, 162);
+        for table in ["session_targets", "environment_workers"] {
+            assert!(!legacy_schema::table_has_column(&connection, table, "data_root").unwrap());
+            let sql: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(sql.contains("CHECK(kind IN"), "{sql}");
+        }
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        connection.execute_batch("DROP TRIGGER stop_before_163;
+            INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('old','project','now'),('new','project','now');
+            INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at) VALUES ('old','old','codex','codex','target','stopped','now'),('new','new','codex','codex','target','stopped','now');
+            INSERT INTO session_targets(session_id,kind,workspace) VALUES ('old','local-bare',X'2F746D702F6F6C64');
+            INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('environment','old','active','{}');
+            INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,kind,workspace,target_template_id) VALUES ('lease','environment','old','local-bare',X'2F746D702F6F6C64','target');
+            UPDATE environments SET target_lease_id='lease' WHERE environment_id='environment';").unwrap();
+        migrate_schema(&connection, None).unwrap();
+        assert_eq!(
+            read_schema_state(&connection).unwrap().minimum_compatible,
+            Some(163)
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            !has_foreign_key_violation_for_tables(
+                &connection,
+                &["session_targets", "environment_workers", "environments"]
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT target_lease_id FROM environments WHERE environment_id='environment'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "lease"
+        );
+        for index in [
+            "environment_worker_identity",
+            "environment_workers_environment",
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name=?1",
+                        [index],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+        let columns = connection
+            .prepare("PRAGMA index_info(environment_workers_environment)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(2))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(columns, ["environment_id", "worker_session_id", "lease_id"]);
+        let table_columns = connection
+            .prepare("PRAGMA table_info(environment_workers)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            table_columns.last().map(String::as_str),
+            Some("runtime_json")
+        );
+        let target = mj_core::state::TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/old".into(),
+        };
+        let tx = connection.unchecked_transaction().unwrap();
+        let invalid = mj_core::state::TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/".into(),
+        };
+        assert!(super::super::state_io::insert_target(&tx, "new", &invalid, None).is_err());
+        super::super::state_io::insert_target(&tx, "new", &target, None).unwrap();
+        let f = super::super::state_io::stored_target_values(&target).unwrap();
+        tx.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,kind,host,data_root) VALUES ('new-lease','environment','new','target',?1,?2,?3)", rusqlite::params![f.kind,f.host,f.data_root]).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            super::super::state_io::read_targets(&connection, Some("new")).unwrap()["new"],
+            target
+        );
+        let loaded = connection.query_row("SELECT kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,data_root FROM environment_workers WHERE lease_id='new-lease'", [], |row| super::super::state_io::decode_target(row,0,"new")).unwrap();
+        assert_eq!(loaded, target);
+        for sql in [
+            "UPDATE session_targets SET kind='unknown' WHERE session_id='new'",
+            "UPDATE session_targets SET kind='ssh-host-bare',data_root=NULL WHERE session_id='new'",
+            "UPDATE session_targets SET data_root=X'2f6f6c64',resource_id='unexpected' WHERE session_id='new'",
+        ] {
+            connection.execute(sql, []).unwrap();
+            let error = super::super::state_io::read_targets(&connection, Some("new")).unwrap_err();
+            assert!(format!("{error:#}").contains("new"));
+        }
+    }
+
+    #[test]
     fn nitro_target_kind_migration_keeps_rows_admits_the_kind_and_raises_the_floor() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("upgrade.sqlite3");
@@ -5166,17 +5352,9 @@ mod reader_tests {
                 [],
             )
             .unwrap();
-        // The shape constraint still holds for the new kind: a sandbox names
-        // its host and resource, and carries no workspace path.
-        assert!(
-            connection
-                .execute(
-                    "INSERT INTO session_targets(session_id, kind, resource_id)
-                     VALUES ('no-host', 'ssh-nitro', 'mj-nitro')",
-                    [],
-                )
-                .is_err()
-        );
+        // Revision 163 moves kind-shape validation into the Rust reader.
+        connection.execute("INSERT INTO session_targets(session_id, kind, resource_id) VALUES ('no-host', 'ssh-nitro', 'mj-nitro')", []).unwrap();
+        assert!(super::super::state_io::read_targets(&connection, Some("no-host")).is_err());
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
@@ -7142,6 +7320,37 @@ mod reader_tests {
         );
     }
 
+    fn restore_v162_targets(connection: &Connection) {
+        if !legacy_schema::table_has_column(connection, "session_targets", "data_root").unwrap() {
+            return;
+        }
+        connection.execute_batch("PRAGMA foreign_keys=OFF;
+            CREATE TABLE session_targets_old (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('local-bare','local-podman','local-docker','apple-container','aws-ec2','ssh-bare','ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro')),
+                host TEXT,resource_id TEXT,address TEXT,workspace BLOB,worker_id TEXT,workspace_storage TEXT,borrowed_from TEXT,machine_id TEXT,
+                CHECK((kind='local-bare' AND workspace IS NOT NULL AND host IS NULL AND resource_id IS NULL AND address IS NULL AND worker_id IS NULL)
+                OR (kind IN ('local-podman','local-docker','apple-container') AND resource_id IS NOT NULL AND host IS NULL AND address IS NULL AND workspace IS NULL AND worker_id IS NULL)
+                OR (kind='aws-ec2' AND resource_id IS NOT NULL AND host IS NULL AND workspace IS NULL AND worker_id IS NULL)
+                OR (kind='ssh-bare' AND host IS NOT NULL AND workspace IS NOT NULL AND resource_id IS NULL AND address IS NULL)
+                OR (kind IN ('ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro') AND host IS NOT NULL AND resource_id IS NOT NULL AND address IS NULL AND workspace IS NULL AND worker_id IS NULL))) STRICT;
+            INSERT INTO session_targets_old SELECT session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,machine_id FROM session_targets;
+            DROP TABLE session_targets; ALTER TABLE session_targets_old RENAME TO session_targets;
+            CREATE TABLE environment_workers_old (
+                lease_id TEXT PRIMARY KEY,environment_id TEXT NOT NULL REFERENCES environments(environment_id) ON DELETE CASCADE,
+                worker_session_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('local-bare','local-podman','local-docker','apple-container','aws-ec2','ssh-bare','ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro')),
+                host TEXT,resource_id TEXT,address TEXT,workspace BLOB,worker_id TEXT,workspace_storage TEXT,borrowed_from TEXT,
+                target_template_id TEXT NOT NULL,runtime_json TEXT CHECK(runtime_json IS NULL OR json_valid(runtime_json)),machine_id TEXT,
+                CHECK((kind='local-bare' AND workspace IS NOT NULL) OR (kind='ssh-bare' AND host IS NOT NULL AND workspace IS NOT NULL)
+                OR (kind IN ('local-podman','local-docker','apple-container','aws-ec2') AND resource_id IS NOT NULL)
+                OR (kind IN ('ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro') AND host IS NOT NULL AND resource_id IS NOT NULL))) STRICT;
+            INSERT INTO environment_workers_old SELECT lease_id,environment_id,worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,target_template_id,runtime_json,machine_id FROM environment_workers;
+            DROP TABLE environment_workers; ALTER TABLE environment_workers_old RENAME TO environment_workers;
+            CREATE INDEX environment_worker_identity ON environment_workers(worker_session_id);
+            CREATE INDEX environment_workers_environment ON environment_workers(environment_id, worker_session_id, lease_id);
+            PRAGMA foreign_keys=ON;").unwrap();
+    }
+
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
     fn stamp_schema_version(path: &Path, version: i64) {
@@ -7150,6 +7359,9 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 163 {
+            restore_v162_targets(&connection);
+        }
         if version < 162 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS store_fence;")

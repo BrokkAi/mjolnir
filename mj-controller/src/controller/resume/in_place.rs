@@ -431,7 +431,11 @@ impl Controller {
         let retain_native = mode == InPlaceRestoreMode::Restart
             && native_continuity
             && previous.state == SessionState::Closing
-            && super::super::local_profile_homes::session_has_a_staged_home_of_its_own(previous);
+            && super::super::local_profile_homes::session_has_a_staged_home_on_target(
+                previous,
+                &self.config,
+                executor,
+            );
         if !retain_native {
             let worker_target = crate::controller::backend::session_target(
                 &self.config,
@@ -472,11 +476,21 @@ impl Controller {
                     );
                 }
                 mj_core::state::Checkout::Attached { path } => {
-                    self.validate_project_directory(target_template_id, path, executor)?;
+                    self.validate_existing_project_directory(
+                        previous,
+                        target_template_id,
+                        path,
+                        executor,
+                    )?;
                 }
                 checkout @ mj_core::state::Checkout::Borrowed { .. } => {
                     if let Some(path) = checkout.project_directory() {
-                        self.validate_project_directory(target_template_id, &path, executor)?;
+                        self.validate_existing_project_directory(
+                            previous,
+                            target_template_id,
+                            &path,
+                            executor,
+                        )?;
                     }
                 }
                 mj_core::state::Checkout::ManagedWorkspace => {}

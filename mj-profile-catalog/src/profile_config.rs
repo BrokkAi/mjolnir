@@ -347,6 +347,7 @@ pub fn observation_check(target: &mj_core::state::TargetLocator) -> Option<Obser
         target,
         TargetLocator::LocalBare { .. }
             | TargetLocator::SshBare { .. }
+            | TargetLocator::SshHostBare { .. }
             | TargetLocator::AwsEc2 { .. }
     )
     .then_some(ObservationCheck::ProbeBuild)

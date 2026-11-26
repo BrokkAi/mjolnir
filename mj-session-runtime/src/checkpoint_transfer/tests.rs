@@ -384,6 +384,43 @@ fn local_checkpoint_transfer_and_cleanup_accept_native_paths() {
 }
 
 #[test]
+fn host_bare_checkpoint_paths_preserve_spaces_and_unicode_over_ssh() {
+    let locator = TargetLocator::SshHostBare {
+        ssh: ssh(),
+        data_root: "/source home/資料".into(),
+    };
+    let path = format!("/source home/資料/workers/{SESSION}/quote's.zip");
+    let plan = transfer_plan(
+        &locator,
+        SESSION,
+        &path,
+        Path::new("/tmp/destination"),
+        "safe-stage",
+    )
+    .unwrap();
+    assert_eq!(plan.commands[0].program, "scp");
+    assert!(plan.commands[0].args.iter().any(|arg| arg == "-O"));
+    assert!(
+        plan.commands[0]
+            .args
+            .iter()
+            .any(|arg| arg.contains(&mj_core::targets::posix_quote(&path)))
+    );
+    for invalid in ["/source/../bad", "/source/line\nbreak", "relative"] {
+        assert!(
+            transfer_plan(
+                &locator,
+                SESSION,
+                invalid,
+                Path::new("/tmp/destination"),
+                "safe-stage"
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn transfer_rejects_a_target_checksum_mismatch() {
     let temp = tempfile::tempdir().unwrap();
     let (spec, source) = fixture(temp.path());

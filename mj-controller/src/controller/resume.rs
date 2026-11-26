@@ -901,28 +901,31 @@ impl Controller {
             prompt_contexts.extend(stopped_subagents_context);
             let (backend, worker_root) = self.worker_placement(session_id)?;
             let harness_home = target_profile_home(&backend, session_id, profile);
-            let workspace_root = if let Some(worktree) =
-                self.state.sessions[session_id].managed_worktree.as_ref()
-            {
-                // Use the managed clone's parent rather than `project_directory.parent()`:
-                // a remotely seeded `--no-checkout` clone has not checked out any
-                // subdirectory yet when `ensure_room_for` and `restore_checkpoint`
-                // validate `workspace_root`.
-                worktree
-                    .worktree_root
-                    .parent()
-                    .context("managed worktree has no parent")?
-                    .to_string_lossy()
-                    .into_owned()
-            } else if let Some(project_directory) = &resumed_project_directory {
-                project_directory
-                    .parent()
-                    .context("bare project directory has no parent")?
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                super::network_git::workspace_root(&backend, resumed_container_workspace.as_deref())
-            };
+            let workspace_root =
+                if let Some(worktree) = self.state.sessions[session_id].managed_worktree.as_ref() {
+                    // Use the managed clone's parent rather than `project_directory.parent()`:
+                    // a remotely seeded `--no-checkout` clone has not checked out any
+                    // subdirectory yet when `ensure_room_for` and `restore_checkpoint`
+                    // validate `workspace_root`.
+                    worktree
+                        .worktree_root
+                        .parent()
+                        .context("managed worktree has no parent")?
+                        .to_string_lossy()
+                        .into_owned()
+                } else if let Some(project_directory) = &resumed_project_directory {
+                    project_directory
+                        .parent()
+                        .context("bare project directory has no parent")?
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    super::network_git::workspace_root(
+                        &backend,
+                        resumed_container_workspace.as_deref(),
+                        session_id,
+                    )
+                };
             let target_path = |path: &str| match &backend {
                 targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. }
                     if !path.starts_with('/') =>
@@ -2278,7 +2281,7 @@ impl Controller {
             && matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. })
             && let Some(project_directory) = checkout.project_directory()
         {
-            self.validate_project_directory(target_id, &project_directory, executor)
+            self.validate_existing_project_directory(&previous, target_id, &project_directory, executor)
                 .context("raw project is unavailable for resume")?;
         }
         let conversion = match plan {
@@ -4000,6 +4003,7 @@ impl Controller {
             let workspace = PathBuf::from(super::network_git::workspace_root(
                 backend,
                 source.container_workspace.as_deref(),
+                &source.id,
             ));
             source
                 .project_bundle(&self.config)

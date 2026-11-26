@@ -146,6 +146,7 @@ pub(super) fn container_start_gate(
         | targets::TargetLocator::SshNitro { container_id, .. } => container_id.clone(),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::SshBare { .. }
+        | targets::TargetLocator::SshHostBare { .. }
         | targets::TargetLocator::AwsEc2 { .. } => return None,
     };
     let gates = GATES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -2238,7 +2239,9 @@ pub(super) fn install_inherited_git_settings(
 fn inherits_controller_git_settings(locator: &targets::TargetLocator) -> bool {
     !matches!(
         locator,
-        targets::TargetLocator::LocalBare { .. } | targets::TargetLocator::SshBare { .. }
+        targets::TargetLocator::LocalBare { .. }
+            | targets::TargetLocator::SshBare { .. }
+            | targets::TargetLocator::SshHostBare { .. }
     )
 }
 
@@ -2247,7 +2250,10 @@ fn inherited_git_setting_commands(
     session_id: &str,
     settings: BTreeMap<String, String>,
 ) -> Result<Vec<CommandSpec>> {
-    if matches!(locator, targets::TargetLocator::SshBare { .. }) {
+    if matches!(
+        locator,
+        targets::TargetLocator::SshBare { .. } | targets::TargetLocator::SshHostBare { .. }
+    ) {
         return Ok(Vec::new());
     }
     if settings.is_empty() {

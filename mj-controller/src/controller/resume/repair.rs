@@ -741,6 +741,7 @@ impl Controller {
                             PathBuf::from(super::super::network_git::workspace_root(
                                 &backend,
                                 record.container_workspace.as_deref(),
+                                &record.id,
                             ));
                         super::super::environment::resume_checkout_directories(
                             self, session_id, &backend,

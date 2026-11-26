@@ -6767,3 +6767,53 @@ esac
     assert_eq!(run(&quiesce.commands[0], "empty"), 0);
     assert!(cleanup_statuses("empty").iter().all(|status| *status == 0));
 }
+
+#[test]
+fn host_bare_cleanup_only_removes_owned_roots_and_rejects_unsafe_paths() {
+    let worker = format!("/old/data/workers/{SESSION}");
+    let profile = format!("/old/data/profiles/{SESSION}");
+    let locator = TargetLocator::SshHostBare {
+        ssh: ssh(),
+        data_root: "/old/data".into(),
+    };
+    let plan = close_plan(&locator, SESSION).unwrap();
+    let script = plan.scripts()[0].args.last().unwrap();
+    let deletion = script
+        .lines()
+        .find(|line| line.starts_with("rm -rf -- "))
+        .unwrap();
+    assert_eq!(
+        deletion.replace("'\\''", "'"),
+        format!(
+            "rm -rf -- {} {}",
+            posix_quote(&worker),
+            posix_quote(&profile)
+        )
+    );
+    assert!(script.find("worker stop --kill --root").unwrap() < script.find("rm -rf --").unwrap());
+    assert!(!script.contains("/srv/project"));
+    assert!(
+        reconnect_plan(&locator, SESSION).unwrap().commands[0]
+            .args
+            .last()
+            .unwrap()
+            .contains(&format!("{worker}/hel"))
+    );
+    assert_eq!(workspace_root(&locator, None, SESSION), worker);
+    for invalid in ["relative", "/", "/old/../escape"] {
+        let bad = TargetLocator::SshHostBare {
+            ssh: ssh(),
+            data_root: invalid.into(),
+        };
+        assert!(close_plan(&bad, SESSION).is_err());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = TargetLocator::SshHostBare {
+            ssh: ssh(),
+            data_root: std::ffi::OsString::from_vec(b"/old/\xff".to_vec()).into(),
+        };
+        assert!(close_plan(&bad, SESSION).is_err());
+    }
+}

@@ -502,6 +502,16 @@ pub fn transfer_plan(
                 CommandSpec::new("cp", ["--", remote_archive, local.as_str()])
                     .purpose("copy local bare checkpoint"),
             ],
+            TargetLocator::SshHostBare { ssh, .. } => {
+                // Legacy SCP runs a remote shell, so quote the original path as one argument.
+                let mut command = crate::targets::scp_download(
+                    ssh,
+                    &mj_core::targets::posix_quote(remote_archive),
+                    &local,
+                );
+                command.args.insert(0, "-O".into());
+                vec![command.purpose("download checkpoint over SSH")]
+            }
             TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => vec![
                 crate::targets::scp_download(ssh, remote_archive, &local)
                     .purpose("download checkpoint over SSH"),
@@ -541,6 +551,17 @@ fn remote_staging_path(session_id: &str, operation_id: &str) -> Result<String> {
 }
 
 fn validate_checkpoint_path(locator: &TargetLocator, path: &str) -> Result<()> {
+    if matches!(locator, TargetLocator::SshHostBare { .. }) {
+        ensure!(
+            mj_core::target_path::is_absolute(Path::new(path))
+                && !path.chars().any(char::is_control)
+                && !Path::new(path)
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir),
+            "invalid host-bare checkpoint path {path:?}"
+        );
+        return Ok(());
+    }
     if matches!(locator, TargetLocator::LocalBare { .. }) {
         // Local commands receive argv directly. Their paths never pass through
         // SCP or a remote shell and may contain spaces, Unicode, and punctuation.

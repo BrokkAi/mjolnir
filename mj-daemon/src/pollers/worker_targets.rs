@@ -66,4 +66,5 @@ pub use mj_controller::controller::credential_targets::{
 };
 pub(crate) use mj_controller::controller::credential_targets::{
     credential_sync_targets_from_sources, staged_credential_sessions,
+    staged_credential_sessions_with_cache,
 };

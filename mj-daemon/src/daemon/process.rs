@@ -1676,7 +1676,8 @@ pub(super) fn spawn_manager_target_refresher(
                 .is_some_and(|(current, _)| Arc::ptr_eq(current, &inputs))
             {
                 let staging = inputs.clone();
-                match mj_core::runtime::spawn_blocking(move || staging.staged_credentials()).await {
+                let wakes = state.session_manager.credential_wakes.clone();
+                match mj_core::runtime::spawn_blocking(move || staging.staged_credentials_with_cache(Some(&wakes))).await {
                     Ok(staged) => staged_sources = Some((inputs.clone(), staged)),
                     Err(error) => {
                         tracing::error!(%error, "credential staging observation stopped");
@@ -1743,9 +1744,22 @@ pub(super) fn spawn_manager_target_refresher(
                     if changed.is_err() { return; }
                 }
                 _ = refresh.tick() => {
+                    // A remote ownership check can wait on SSH. Do not hold
+                    // the configuration mutation lock across that probe.
+                    let staging = inputs.clone();
+                    let wakes = state.session_manager.credential_wakes.clone();
+                    let staged = match mj_core::runtime::spawn_blocking(move || {
+                        staging.staged_credentials_with_cache(Some(&wakes))
+                    }).await {
+                        Ok(staged) => staged,
+                        Err(error) => {
+                            tracing::error!(%error, "credential staging observation stopped");
+                            cancellation.cancel();
+                            return;
+                        }
+                    };
                     let mut inactivity = state.config_mutation.lock().await;
                     let mut cache = auth.clone();
-                    let staging = inputs.clone();
                     let preference_owner = state.clone();
                     let refreshed = mj_core::runtime::spawn_blocking(move || {
                         let config = Config::load()?;
@@ -1761,11 +1775,10 @@ pub(super) fn spawn_manager_target_refresher(
                             })
                         };
                         cache.refresh(&config);
-                        let staged = staging.staged_credentials();
-                        Ok::<_, anyhow::Error>((config, cache, staged, recent_changed))
+                        Ok::<_, anyhow::Error>((config, cache, recent_changed))
                     }).await;
                     match refreshed {
-                        Ok(Ok((config, cache, staged, recent_changed))) => {
+                        Ok(Ok((config, cache, recent_changed))) => {
                             state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
                             staged_sources = Some((inputs.clone(), staged));
                             auth = cache;

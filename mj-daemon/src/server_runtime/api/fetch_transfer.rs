@@ -8,7 +8,9 @@ use tokio_util::sync::CancellationToken;
 /// The SSH host a locator's commands run on; `None` for a local target.
 fn remote_ssh(locator: &TargetLocator) -> Option<&SshTarget> {
     match locator {
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => Some(ssh),
+        TargetLocator::AwsEc2 { ssh, .. }
+        | TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. } => Some(ssh),
         other => other.container_endpoint().and_then(|endpoint| endpoint.ssh),
     }
 }
@@ -312,6 +314,17 @@ mod tests {
 
     #[test]
     fn remote_fetch_compresses_the_read_and_only_a_file_store() {
+        let host_bare = TargetLocator::SshHostBare {
+            ssh: SshTarget {
+                destination: "ubuntu@203.0.113.9".into(),
+                ssh_args: vec![],
+            },
+            data_root: "/old".into(),
+        };
+        assert_eq!(
+            remote_ssh(&host_bare).unwrap().destination,
+            "ubuntu@203.0.113.9"
+        );
         let read = read_command(
             ssh_layout("child-session"),
             "child-session",

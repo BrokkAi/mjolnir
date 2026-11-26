@@ -173,33 +173,154 @@ impl Drop for QueuedJob {
 /// coordinator, which reconciles the session from the host's current login.
 /// The wake carries no job, so a long lease cannot hold a profile's pass open.
 #[derive(Debug)]
-pub struct CredentialWakes(watch::Sender<BTreeSet<String>>);
+pub struct CredentialWakes {
+    events: watch::Sender<BTreeSet<String>>,
+    profiles: std::sync::Mutex<BTreeMap<String, ProfileOwnership>>,
+}
+
+#[derive(Debug, Default)]
+struct ProfileOwnership {
+    epoch: u64,
+    observed: Option<(mj_core::targets::TargetLocator, bool)>,
+}
 
 impl Default for CredentialWakes {
     fn default() -> Self {
-        Self(watch::channel(BTreeSet::new()).0)
+        Self {
+            events: watch::channel(BTreeSet::new()).0,
+            profiles: Default::default(),
+        }
     }
 }
 
 impl CredentialWakes {
+    /// Invalidate before a connection can be used again, so a previous
+    /// attachment cannot authorize writes after the home changed.
+    pub fn invalidate_profile(&self, session_id: &str) {
+        let mut profiles = self
+            .profiles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = profiles.entry(session_id.to_owned()).or_default();
+        entry.epoch = entry.epoch.wrapping_add(1);
+        entry.observed = None;
+    }
+
     pub fn wake(&self, session_id: &str) {
-        self.0
+        self.invalidate_profile(session_id);
+        self.events
             .send_if_modified(|sessions| sessions.insert(session_id.to_owned()));
     }
 
     pub fn subscribe(&self) -> watch::Receiver<BTreeSet<String>> {
-        let mut wakes = self.0.subscribe();
+        let mut wakes = self.events.subscribe();
         wakes.mark_changed();
         wakes
     }
 
     pub fn take(&self) -> BTreeSet<String> {
         let mut ready = BTreeSet::new();
-        self.0.send_if_modified(|sessions| {
+        self.events.send_if_modified(|sessions| {
             ready = std::mem::take(sessions);
             false
         });
         ready
+    }
+
+    fn profile_backend(
+        session: &mj_core::state::SessionRecord,
+        config: &mj_core::config::Config,
+    ) -> Option<mj_core::targets::TargetLocator> {
+        let locator = session.target.as_deref()?;
+        if !matches!(locator, mj_core::state::TargetLocator::SshHostBare { .. })
+            || session.harness_kind.nested_home()
+        {
+            return None;
+        }
+        crate::targets::backend_locator(locator, session, config).ok()
+    }
+
+    /// Observe once per attachment, publishing only if no reconnect raced it.
+    pub fn observe_profile(
+        &self,
+        session: &mj_core::state::SessionRecord,
+        config: &mj_core::config::Config,
+    ) -> bool {
+        if !matches!(
+            session.target.as_deref(),
+            Some(mj_core::state::TargetLocator::SshHostBare { .. })
+        ) || session.harness_kind.nested_home()
+        {
+            return mj_worker_launch::local_profile_homes::session_has_a_staged_home_of_its_own(
+                session,
+            );
+        }
+        let Some(backend) = Self::profile_backend(session, config) else {
+            return false;
+        };
+        self.observe_profile_with(&session.id, backend, || {
+            mj_worker_launch::local_profile_homes::session_has_a_staged_home_on_target(
+                session,
+                config,
+                &mj_core::targets::ProcessExecutor,
+            )
+        })
+    }
+
+    fn observe_profile_with(
+        &self,
+        id: &str,
+        backend: mj_core::targets::TargetLocator,
+        probe: impl FnOnce() -> bool,
+    ) -> bool {
+        let epoch = {
+            let mut profiles = self
+                .profiles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = profiles.entry(id.to_owned()).or_default();
+            if let Some((previous, allowed)) = &entry.observed
+                && previous == &backend
+            {
+                return *allowed;
+            }
+            entry.epoch
+        };
+        let allowed = probe();
+        let mut profiles = self
+            .profiles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = profiles.entry(id.to_owned()).or_default();
+        if entry.epoch != epoch {
+            return false;
+        }
+        entry.observed = Some((backend, allowed));
+        allowed
+    }
+
+    /// No I/O under the daemon owner lock; an absent or stale observation fails closed.
+    pub fn profile_is_current(
+        &self,
+        session: &mj_core::state::SessionRecord,
+        config: &mj_core::config::Config,
+    ) -> bool {
+        if !matches!(
+            session.target.as_deref(),
+            Some(mj_core::state::TargetLocator::SshHostBare { .. })
+        ) || session.harness_kind.nested_home()
+        {
+            return true;
+        }
+        let Some(backend) = Self::profile_backend(session, config) else {
+            return false;
+        };
+        self.profiles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session.id)
+            .and_then(|entry| entry.observed.as_ref())
+            .is_some_and(|(previous, allowed)| previous == &backend && *allowed)
     }
 }
 
@@ -4411,5 +4532,47 @@ for line in sys.stdin:
             .unwrap();
             client.detach().await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod host_bare_ownership_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    #[test]
+    fn ownership_probe_is_cached_and_reconnect_discards_inflight_result() {
+        let wakes = Arc::new(CredentialWakes::default());
+        let backend = mj_core::targets::TargetLocator::SshHostBare {
+            ssh: mj_core::targets::SshTarget {
+                destination: "source".into(),
+                ssh_args: vec![],
+            },
+            data_root: "/source".into(),
+        };
+        assert!(wakes.observe_profile_with("s", backend.clone(), || true));
+        assert!(
+            wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated"))
+        );
+        wakes.invalidate_profile("s");
+        assert!(!wakes.observe_profile_with("s", backend.clone(), || false));
+        wakes.invalidate_profile("s");
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let other_wakes = wakes.clone();
+            let other_barrier = barrier.clone();
+            let other_backend = backend.clone();
+            let task = scope.spawn(move || {
+                other_wakes.observe_profile_with("s", other_backend, || {
+                    other_barrier.wait();
+                    other_barrier.wait();
+                    true
+                })
+            });
+            barrier.wait();
+            wakes.invalidate_profile("s");
+            barrier.wait();
+            assert!(!task.join().unwrap());
+        });
+        assert!(wakes.observe_profile_with("s", backend, || true));
     }
 }

@@ -158,7 +158,11 @@ pub fn indexed_project_directory(
                 Some(locator) => {
                     let backend = crate::targets::backend_locator(locator, record, config)
                         .context("resolve the session target for SessionWiki")?;
-                    crate::targets::workspace_root(&backend, record.container_workspace.as_deref())
+                    crate::targets::workspace_root(
+                        &backend,
+                        record.container_workspace.as_deref(),
+                        &record.id,
+                    )
                 }
                 None => mj_core::targets::container_workspace_root(
                     record.container_workspace.as_deref(),

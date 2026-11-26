@@ -198,6 +198,7 @@ impl Controller {
                         PathBuf::from(crate::controller::network_git::workspace_root(
                             &backend,
                             session.container_workspace.as_deref(),
+                            &session.id,
                         ));
                     bundle
                         .repositories
@@ -258,6 +259,7 @@ impl Controller {
                                 PathBuf::from(crate::controller::network_git::workspace_root(
                                     &backend,
                                     session.container_workspace.as_deref(),
+                                    &session.id,
                                 ));
                             bundle
                                 .repositories
@@ -288,7 +290,9 @@ impl Controller {
                                 .and_then(|locator| {
                                     backend_locator(locator, session, &self.config).ok().map(
                                         |backend| {
-                                            PathBuf::from(targets::workspace_root(&backend, None))
+                                            PathBuf::from(targets::workspace_root(
+                                                &backend, None, session_id,
+                                            ))
                                         },
                                     )
                                 })

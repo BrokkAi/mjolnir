@@ -475,6 +475,17 @@ pub(in crate::controller) fn upload_checkpoint_spec(
             .purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
+        targets::TargetLocator::SshHostBare { ssh, .. } => {
+            ensure!(
+                !remote.chars().any(char::is_control),
+                "invalid host-bare checkpoint path"
+            );
+            let mut command =
+                crate::targets::scp_upload(ssh, local, &targets::posix_quote(remote), false);
+            command.args.insert(0, "-O".into());
+            execute_checked(executor, command.purpose("upload checkpoint specification"))
+                .map(|_| ())
+        }
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. } => execute_checked(
             executor,

@@ -810,6 +810,10 @@ fn borrowed_locator(
         TargetLocator::LocalBare { worker_root } => TargetLocator::LocalBare {
             worker_root: sibling_path(worker_root, parent_id, child_id)?,
         },
+        TargetLocator::SshHostBare { host, data_root } => TargetLocator::SshHostBare {
+            host: host.clone(),
+            data_root: data_root.clone(),
+        },
         TargetLocator::SshBare {
             host,
             workspace,
@@ -915,8 +919,11 @@ pub(super) fn subagent_report_root(
             )
         }
         None => {
-            let workspace =
-                super::network_git::workspace_root(backend, parent.container_workspace.as_deref());
+            let workspace = super::network_git::workspace_root(
+                backend,
+                parent.container_workspace.as_deref(),
+                &parent.id,
+            );
             (
                 format!(
                     "{}/{}",

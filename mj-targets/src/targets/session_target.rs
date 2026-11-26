@@ -54,6 +54,7 @@ pub fn recorded_backend_locator(
 pub fn workspace_root(
     backend: &TargetLocator,
     container_workspace: Option<&std::path::Path>,
+    session_id: &str,
 ) -> String {
     match backend {
         TargetLocator::LocalPodman { .. }
@@ -67,5 +68,8 @@ pub fn workspace_root(
             workspace.clone()
         }
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
+        TargetLocator::SshHostBare { data_root, .. } => mj_core::target_path::text(
+            &mj_core::config::DataLayout::at(data_root).worker_root(session_id),
+        ),
     }
 }

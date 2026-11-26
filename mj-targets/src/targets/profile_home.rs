@@ -55,6 +55,15 @@ fn removable_profile_root_for_kind(
             Path::new("profile"),
         ));
     }
+    if let TargetLocator::SshHostBare { data_root, .. } = locator
+        && !kind.nested_home()
+    {
+        return mj_core::target_path::text(
+            &mj_core::config::DataLayout::at(data_root)
+                .worker_root(session_id)
+                .join("profile"),
+        );
+    }
     session_profile_root(locator, session_id)
 }
 
@@ -62,6 +71,11 @@ fn removable_profile_root_for_kind(
 /// Local bare sessions with a non-nested home keep it inside the worker root.
 pub(super) fn session_profile_root(locator: &TargetLocator, session_id: &str) -> String {
     match locator {
+        TargetLocator::SshHostBare { data_root, .. } => mj_core::target_path::text(
+            &mj_core::config::DataLayout::at(data_root)
+                .profiles_dir()
+                .join(session_id),
+        ),
         TargetLocator::LocalBare { .. } => local_nested_profile_root(session_id)
             .to_string_lossy()
             .into_owned(),

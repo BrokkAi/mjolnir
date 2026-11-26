@@ -89,6 +89,7 @@ pub fn host_cache_key(locator: &TargetLocator) -> String {
         | TargetLocator::AppleContainer { .. } => "local".to_owned(),
         TargetLocator::AwsEc2 { ssh, .. }
         | TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
         | TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
         | TargetLocator::SshAppleContainer { ssh, .. }
@@ -676,7 +677,9 @@ fn stage_verified_host_cache_to_target(
             Path::new(cached_path),
             remote_archive,
         ),
-        TargetLocator::SshBare { ssh, .. } | TargetLocator::AwsEc2 { ssh, .. } => {
+        TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
+        | TargetLocator::AwsEc2 { ssh, .. } => {
             let script = "set -eu; src=$1; dst=$2; mkdir -p -- \"$(dirname -- \"$dst\")\"; cp -f -- \"$src\" \"$dst\"";
             let command = mj_core::targets::ssh_command_owned(
                 SshTrafficClass::Control,

@@ -211,16 +211,25 @@ pub(super) fn container_allocations_with(
         |row| row.get(0),
     )?;
     let allocation = resource_allocation(session_id, allocation);
-    let mut query = connection.prepare(
-        "SELECT w.target_template_id, w.kind, w.host, w.resource_id, w.address, w.workspace,
-                w.worker_id, w.workspace_storage, w.borrowed_from
+    let extra = if super::legacy_schema::table_has_column(
+        connection,
+        "environment_workers",
+        "data_root",
+    )? {
+        "w.data_root"
+    } else {
+        "NULL"
+    };
+    let mut query = connection.prepare(&format!(
+        "SELECT w.target_template_id, w.worker_session_id, w.kind, w.host, w.resource_id, w.address, w.workspace,
+                w.worker_id, w.workspace_storage, w.borrowed_from, {extra}
          FROM environments e JOIN environment_workers w ON w.lease_id=e.target_lease_id
-         WHERE e.owner_session_id=?1 AND e.phase<>'reclaimed' ORDER BY e.environment_id",
-    )?;
+         WHERE e.owner_session_id=?1 AND e.phase<>'reclaimed' ORDER BY e.environment_id"
+    ))?;
     let mut rows = query.query([session_id])?;
     let mut containers = Vec::new();
     while let Some(row) = rows.next()? {
-        if state_io::decode_target(row, 1)?.owns_container() {
+        if state_io::decode_target(row, 2, &row.get::<_, String>(1)?)?.owns_container() {
             containers.push((row.get(0)?, allocation.clone()));
         }
     }

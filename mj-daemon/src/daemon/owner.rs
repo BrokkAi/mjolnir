@@ -97,8 +97,21 @@ impl PollableWorkerInputs {
                 })
     }
 
+    #[cfg(test)]
     pub(super) fn staged_credentials(&self) -> BTreeSet<String> {
-        let mut staged = crate::pollers::staged_credential_sessions(&self.controller());
+        self.staged_credentials_with_cache(None)
+    }
+
+    pub(super) fn staged_credentials_with_cache(
+        &self,
+        wakes: Option<&mj_controller::worker_client::CredentialWakes>,
+    ) -> BTreeSet<String> {
+        let mut staged = match wakes {
+            Some(wakes) => {
+                crate::pollers::staged_credential_sessions_with_cache(&self.controller(), wakes)
+            }
+            None => crate::pollers::staged_credential_sessions(&self.controller()),
+        };
         // Ancestors describe command routing, while the owner authorizes IDs.
         staged.retain(|id| {
             self.ids.binary_search(id).is_ok()
@@ -703,6 +716,16 @@ impl RuntimeState {
             .is_some_and(|(prepared, closing)| {
                 !closing.contains(&target.session_id)
                     && prepared.session_is_current(&owner, &target.session_id)
+                    && owner
+                        .controller
+                        .state
+                        .sessions
+                        .get(&target.session_id)
+                        .is_some_and(|session| {
+                            self.session_manager
+                                .credential_wakes
+                                .profile_is_current(session, &owner.controller.config)
+                        })
                     && self.credential_targets.borrow().contains(target)
             }))
     }
