@@ -269,7 +269,12 @@ fn complete_hook_steering(
     steering: &MailboxHookSteering,
     ordinal: u64,
 ) -> Result<()> {
-    hook_steering_prompt(snapshot, steering)?;
+    let prompt = hook_steering_prompt(snapshot, steering)?;
+    snapshot
+        .steered_prompt_contexts
+        .entry(steering.active_prompt_id.clone())
+        .or_default()
+        .extend(prompt);
     let command = snapshot
         .dispatches
         .get_mut(&steering.command_id)
@@ -1160,14 +1165,17 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     ) || crate::continuation::GeneratedPrompt::of(
                         crate::continuation::carried_command(command_id),
                     ) == Some(crate::continuation::GeneratedPrompt::QuotaRetry);
-                if !generated_retry
-                    && let Some(blocks) = command.prompt_blocks_for_command(command_id)
-                {
+                // Restart continuations dispatch only a note; retain the carried payload.
+                if !generated_retry && let Some(blocks) = command.prompt_blocks() {
                     input.extend(blocks.iter().cloned());
+                }
+                if let Some(steered) = snapshot.steered_prompt_contexts.remove(command_id) {
+                    input.extend(steered);
                 }
                 snapshot.quota_interrupted_input.extend(input);
             } else {
                 snapshot.quota_prompt_contexts.remove(command_id);
+                snapshot.steered_prompt_contexts.remove(command_id);
             }
             snapshot.frozen_prompt_contexts.remove(command_id);
             match (command, outcome) {
@@ -1344,7 +1352,32 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     {
                         bail!("steered target is not a queued prompt");
                     }
+                    let steered = target
+                        .command
+                        .prompt_blocks()
+                        .expect("validated prompt")
+                        .into_owned();
+                    let receiver = match &control {
+                        RelayCommand::Steer {
+                            active_prompt_id, ..
+                        } => Some(active_prompt_id.clone()),
+                        RelayCommand::Cancel => snapshot.cancelling_prompt_id.clone(),
+                        _ => unreachable!(),
+                    };
                     target.state = RelayDispatchState::Completed;
+                    if let Some(receiver) = receiver {
+                        if snapshot.dispatches.contains_key(&receiver) {
+                            snapshot.steered_prompt_contexts.entry(receiver).or_default().extend(steered);
+                        } else if snapshot.handled_commands.get(&receiver)
+                            .and_then(|handled| handled.outcome.as_ref())
+                            .is_some_and(|outcome| matches!(outcome,
+                                RelayCommandOutcome::Prompt { stop_reason, .. }
+                                if crate::state::classify_prompt_completion(stop_reason) == crate::state::PromptCompletion::QuotaLimit))
+                        {
+                            // The acknowledgement can follow the quota completion.
+                            snapshot.quota_interrupted_input.extend(steered);
+                        }
+                    }
                     snapshot
                         .handled_commands
                         .get_mut(queued_command_id)
@@ -1483,6 +1516,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     retain_delivered_mailbox_event_keys(snapshot, discarded_keys, event.ordinal);
                     snapshot.mailbox_prompt_contexts.clear();
                     snapshot.frozen_prompt_contexts.clear();
+                    snapshot.quota_interrupted_input.clear();
+                    snapshot.quota_prompt_contexts.clear();
+                    snapshot.steered_prompt_contexts.clear();
                     snapshot.activity_turn_started_at_ms = None;
                     snapshot.harness_turn = None;
                     snapshot.capacity_retry = None;
@@ -1699,6 +1735,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .retain(|queued| queued.command_id != *command_id);
             let mailbox_context = snapshot.mailbox_prompt_contexts.remove(command_id);
             let quota_context = snapshot.quota_prompt_contexts.remove(command_id);
+            let steered_context = snapshot.steered_prompt_contexts.remove(command_id);
             let frozen_context = snapshot.frozen_prompt_contexts.remove(command_id);
             snapshot.active_user_shells.remove(command_id);
             if let RelayCommand::RunUserShell { command } = &command {
@@ -1836,6 +1873,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .quota_prompt_contexts
                         .insert(recovery_id.to_owned(), context);
                 }
+                if let Some(context) = steered_context {
+                    snapshot
+                        .steered_prompt_contexts
+                        .insert(recovery_id.to_owned(), context);
+                }
                 // This is the same accepted turn, not a fresh mailbox claim.
                 // Keep its acceptance and the actual latest input unchanged:
                 // input already queued after this turn still supersedes it.
@@ -1843,14 +1885,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.capacity_retry = None;
                 snapshot.retry_assessment = None;
                 snapshot.continuation.quota_recovery = None;
-            } else if let Some(context) = frozen_context {
-                match snapshot.pending_prompt_context.as_mut() {
-                    Some(pending) => pending.text = format!("{context}\n\n{}", pending.text),
-                    None => {
-                        snapshot.pending_prompt_context = Some(PendingPromptContext {
-                            text: context,
-                            attached_command_id: None,
-                        })
+            } else {
+                let mut retained = quota_context.unwrap_or_default();
+                retained.extend(steered_context.unwrap_or_default());
+                retained.append(&mut snapshot.quota_interrupted_input);
+                snapshot.quota_interrupted_input = retained;
+                if let Some(context) = frozen_context {
+                    match snapshot.pending_prompt_context.as_mut() {
+                        Some(pending) => pending.text = format!("{context}\n\n{}", pending.text),
+                        None => {
+                            snapshot.pending_prompt_context = Some(PendingPromptContext {
+                                text: context,
+                                attached_command_id: None,
+                            })
+                        }
                     }
                 }
             }
@@ -2417,6 +2465,7 @@ fn terminalize_removed_prompts(
     removed_command_ids: &[String],
     terminal_ordinal: u64,
 ) -> Result<()> {
+    let mut retained = Vec::new();
     for command_id in removed_command_ids {
         let dispatch = snapshot
             .dispatches
@@ -2440,8 +2489,21 @@ fn terminalize_removed_prompts(
         // mailbox context it holds (a restart continuation inherits one).
         snapshot.mailbox_prompt_contexts.remove(command_id);
         snapshot.frozen_prompt_contexts.remove(command_id);
-        snapshot.quota_prompt_contexts.remove(command_id);
+        retained.extend(
+            snapshot
+                .quota_prompt_contexts
+                .remove(command_id)
+                .unwrap_or_default(),
+        );
+        retained.extend(
+            snapshot
+                .steered_prompt_contexts
+                .remove(command_id)
+                .unwrap_or_default(),
+        );
     }
+    retained.append(&mut snapshot.quota_interrupted_input);
+    snapshot.quota_interrupted_input = retained;
     snapshot.queued_prompts.retain(|queued| {
         !removed_command_ids
             .iter()

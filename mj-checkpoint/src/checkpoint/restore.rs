@@ -75,7 +75,30 @@ pub fn relay_seed_for_restore(
                 },
                 delivered_event_keys: mailbox.delivered_event_keys.clone(),
                 quota_input: mj_core::archive::CanonicalQuotaInput {
-                    pending: mailbox.quota_input.pending.clone(),
+                    pending: {
+                        let mut retained = Vec::new();
+                        if !queue_policy.keeps_queue() {
+                            for queued in &canonical.queued_prompts {
+                                if let Some(input) =
+                                    mailbox.quota_input.claimed.get(&queued.command_id)
+                                {
+                                    retained.extend(input.iter().cloned());
+                                }
+                                if let Some(input) =
+                                    mailbox.quota_input.steered.get(&queued.command_id)
+                                {
+                                    retained.extend(input.iter().cloned());
+                                }
+                            }
+                        }
+                        retained.extend(mailbox.quota_input.pending.iter().cloned());
+                        retained
+                    },
+                    steered: if queue_policy.keeps_queue() {
+                        mailbox.quota_input.steered.clone()
+                    } else {
+                        Default::default()
+                    },
                     frozen_prompt_contexts: if queue_policy.keeps_queue() {
                         mailbox.quota_input.frozen_prompt_contexts.clone()
                     } else {

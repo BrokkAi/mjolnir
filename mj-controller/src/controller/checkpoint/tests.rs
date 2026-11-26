@@ -2243,6 +2243,13 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             vec![agent_client_protocol::v1::schema::ContentBlock::from(
                 quota_text.clone(),
             )];
+        let queued_id = snapshot.queued_prompts[0].command_id.clone();
+        snapshot.steered_prompt_contexts.insert(
+            queued_id,
+            vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                "saved injected steering",
+            )],
+        );
         std::fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
     }
 
@@ -2401,6 +2408,11 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             block,
             agent_client_protocol::v1::schema::ContentBlock::from(quota_text)
         );
+        assert!(
+            serde_json::to_string(&input.steered)
+                .unwrap()
+                .contains("saved injected steering")
+        );
         let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
             &spec.canonical_session,
             true,
@@ -2408,6 +2420,19 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         )
         .unwrap();
         assert_eq!(seed.mailbox.unwrap().quota_input, *input);
+        let discarded = mj_checkpoint::checkpoint::relay_seed_for_restore(
+            &spec.canonical_session,
+            true,
+            mj_checkpoint::checkpoint::QueueRestorePolicy::Discard,
+        )
+        .unwrap();
+        let input = discarded.mailbox.unwrap().quota_input;
+        assert!(input.steered.is_empty());
+        assert!(
+            serde_json::to_string(&input.pending[0])
+                .unwrap()
+                .contains("saved injected steering")
+        );
     }
     let notices = executor.notices.lock().unwrap().clone();
     if protocol < reads_queue {

@@ -245,7 +245,8 @@ impl DurableRelay {
                     if envelope.protocol_version < RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL
                         && (!self.snapshot.quota_interrupted_input.is_empty()
                             || !self.snapshot.quota_prompt_contexts.is_empty()
-                            || !self.snapshot.frozen_prompt_contexts.is_empty())
+                            || !self.snapshot.frozen_prompt_contexts.is_empty()
+                            || !self.snapshot.steered_prompt_contexts.is_empty())
                     {
                         return Ok(relay_error(
                             RelayErrorCode::InvalidState,
@@ -278,11 +279,16 @@ impl DurableRelay {
                         None,
                     ));
                 }
-                let text = serde_json::to_string(&serde_json::json!({
+                let mut input = serde_json::json!({
                     "pending": self.snapshot.quota_interrupted_input,
                     "claimed": self.snapshot.quota_prompt_contexts,
                     "frozen_prompt_contexts": self.snapshot.frozen_prompt_contexts,
-                }))?;
+                });
+                if !self.snapshot.steered_prompt_contexts.is_empty() {
+                    input["steered"] =
+                        serde_json::to_value(&self.snapshot.steered_prompt_contexts)?;
+                }
+                let text = serde_json::to_string(&input)?;
                 let Some(offset) = usize::try_from(*offset)
                     .ok()
                     .filter(|&offset| offset <= text.len() && text.is_char_boundary(offset))

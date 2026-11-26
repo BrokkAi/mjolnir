@@ -11880,6 +11880,337 @@ fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
             .is_empty()
     );
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+
+    // An interruption or rejection returns its claim to the next prompt.
+    for rejected in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        submit(
+            &mut relay,
+            "quota-original",
+            self::prompt("original interrupted input"),
+        );
+        relay.claim_pending_commands(true).unwrap();
+        finish(
+            &mut relay,
+            "quota-original",
+            mj_core::diagnostic::QUOTA_STOP_REASON,
+        );
+        submit(
+            &mut relay,
+            "quota-retry-interrupted",
+            self::prompt("recovery"),
+        );
+        relay.claim_pending_commands(true).unwrap();
+        if rejected {
+            relay
+                .record_command_rejected(
+                    "quota-retry-interrupted",
+                    mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+                    "refused",
+                )
+                .unwrap();
+        } else {
+            relay
+                .record_command_interrupted(
+                    "quota-retry-interrupted",
+                    mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+                    "interrupted",
+                )
+                .unwrap();
+        }
+        submit(&mut relay, "next-after-interruption", self::prompt("next"));
+        let next = relay.claim_pending_commands(true).unwrap().remove(0);
+        let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+            panic!("not a prompt")
+        };
+        assert_eq!(
+            serde_json::to_string(&prompt)
+                .unwrap()
+                .matches("original interrupted input")
+                .count(),
+            1
+        );
+    }
+
+    // Removing a queued restart continuation returns the input it inherited.
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(
+        &mut relay,
+        "removed-original",
+        self::prompt("input of removed continuation"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    finish(
+        &mut relay,
+        "removed-original",
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    submit(&mut relay, "removed-retry", self::prompt("recovery"));
+    relay.claim_pending_commands(true).unwrap();
+    relay.set_acp_ready(false);
+    relay
+        .record_command_interrupted(
+            "removed-retry",
+            mj_core::event_outcome::OutcomeReason::WorkerRestarted,
+            "restart",
+        )
+        .unwrap();
+    let queued = relay.operational_state().queued_prompts[0]
+        .command_id
+        .clone();
+    submit(
+        &mut relay,
+        "remove-recovery",
+        RelayCommand::RemoveQueuedPrompt {
+            queued_command_id: queued,
+        },
+    );
+    relay.set_acp_ready(true);
+    submit(&mut relay, "after-removal", self::prompt("next"));
+    let next = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+        panic!("not a prompt")
+    };
+    assert_eq!(
+        serde_json::to_string(&prompt)
+            .unwrap()
+            .matches("input of removed continuation")
+            .count(),
+        1
+    );
+
+    // A quota failure in a restart continuation retains its original payload.
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(
+        &mut relay,
+        "restart-original",
+        self::prompt("original restart payload"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_interrupted(
+            "restart-original",
+            mj_core::event_outcome::OutcomeReason::WorkerRestarted,
+            "restart",
+        )
+        .unwrap();
+    let resumed = relay.claim_pending_commands(true).unwrap().remove(0);
+    finish(
+        &mut relay,
+        &resumed.command_id,
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    submit(&mut relay, "after-restart-quota", self::prompt("continue"));
+    let next = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+        panic!("not a prompt")
+    };
+    let text = serde_json::to_string(&prompt).unwrap();
+    assert_eq!(text.matches("original restart payload").count(), 1);
+    assert!(!text.contains(mj_core::continuation::RESTART_RECOVERY_NOTE));
+
+    // Clearing the context retires quota input along with the conversation.
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.mark_native_session_used().unwrap();
+    submit(
+        &mut relay,
+        "pre-clear-prompt",
+        self::prompt("obsolete quota input"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    finish(
+        &mut relay,
+        "pre-clear-prompt",
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    submit(&mut relay, "clear-conversation", self::prompt("/clear"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-conversation",
+            mj_core::relay::RelayCommandOutcome::ContextCleared {
+                native_session_id: "new".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    submit(&mut relay, "post-clear-prompt", self::prompt("new request"));
+    let next = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+        panic!("not a prompt")
+    };
+    assert!(
+        !serde_json::to_string(&prompt)
+            .unwrap()
+            .contains("obsolete quota input")
+    );
+
+    // Each confirmed ACP steer joins the receiving turn's retained input in order.
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay.set_steering_supported(Some(true));
+    relay.set_automatic_steering(true);
+    submit(&mut relay, "steer-receiver", self::prompt("original task"));
+    relay.claim_pending_commands(true).unwrap();
+    for (id, message) in [
+        ("steer-first", "first correction"),
+        ("steer-second", "second correction"),
+    ] {
+        submit(&mut relay, id, self::prompt(message));
+        let steer = relay.claim_pending_commands(true).unwrap().remove(0);
+        assert!(matches!(steer.command, RelayCommand::Steer { .. }));
+        relay
+            .record_command_completed(
+                &steer.command_id,
+                mj_core::relay::RelayCommandOutcome::Steered {
+                    queued_command_id: id.into(),
+                },
+            )
+            .unwrap();
+    }
+    relay
+        .record_command_interrupted(
+            "steer-receiver",
+            mj_core::event_outcome::OutcomeReason::WorkerRestarted,
+            "restart",
+        )
+        .unwrap();
+    relay.set_acp_ready(true);
+    let resumed = relay.claim_pending_commands(true).unwrap().remove(0);
+    finish(
+        &mut relay,
+        &resumed.command_id,
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    submit(&mut relay, "after-steered-quota", self::prompt("continue"));
+    let next = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+        panic!("not a prompt")
+    };
+    let text = serde_json::to_string(&prompt).unwrap();
+    let a = text.find("original task").unwrap();
+    let b = text.find("first correction").unwrap();
+    let c = text.find("second correction").unwrap();
+    assert!(a < b && b < c);
+    assert_eq!(text.matches("first correction").count(), 1);
+    assert_eq!(text.matches("second correction").count(), 1);
+
+    // A failed receiving turn returns confirmed steers for the next prompt.
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay.set_steering_supported(Some(true));
+    relay.set_automatic_steering(true);
+    submit(&mut relay, "failed-steer-receiver", self::prompt("work"));
+    relay.claim_pending_commands(true).unwrap();
+    submit(
+        &mut relay,
+        "failed-steer-input",
+        self::prompt("preserve injected input"),
+    );
+    let steer = relay.claim_pending_commands(true).unwrap().remove(0);
+    relay
+        .record_command_completed(
+            &steer.command_id,
+            mj_core::relay::RelayCommandOutcome::Steered {
+                queued_command_id: "failed-steer-input".into(),
+            },
+        )
+        .unwrap();
+    relay
+        .record_command_interrupted(
+            "failed-steer-receiver",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            "interrupted",
+        )
+        .unwrap();
+    submit(&mut relay, "after-failed-steer", self::prompt("continue"));
+    let next = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+        panic!("not a prompt")
+    };
+    assert_eq!(
+        serde_json::to_string(&prompt)
+            .unwrap()
+            .matches("preserve injected input")
+            .count(),
+        1
+    );
+
+    // Claude's hook acknowledges the same ownership transfer.
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open_for_harness(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Claude,
+        &[],
+    )
+    .unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    relay.set_steering_delivery_mode(mj_core::config::HarnessKind::Claude, true);
+    relay.set_automatic_steering(true);
+    submit(&mut relay, "hook-receiver", self::prompt("hook original"));
+    relay.claim_pending_commands(true).unwrap();
+    submit(
+        &mut relay,
+        "hook-correction",
+        self::prompt("hook correction"),
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    let RelayResponsePayload::MailboxDrained {
+        lease_id: Some(lease),
+        ..
+    } = relay.drain_mailbox("PostToolBatch", None).unwrap()
+    else {
+        panic!("no hook steering lease")
+    };
+    let ack = relay.handle(RelayRequestEnvelope {
+        request_id: "hook-ack".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::AckMailbox { lease_id: lease },
+    });
+    assert!(matches!(ack.body, RelayResponseBody::Ok { .. }));
+    finish(
+        &mut relay,
+        "hook-receiver",
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    submit(&mut relay, "after-hook-quota", self::prompt("continue"));
+    let next = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+        panic!("not a prompt")
+    };
+    let text = serde_json::to_string(&prompt).unwrap();
+    assert!(text.find("hook original").unwrap() < text.find("hook correction").unwrap());
+    assert_eq!(text.matches("hook correction").count(), 1);
 }
 
 #[test]

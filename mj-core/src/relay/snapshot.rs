@@ -2030,6 +2030,9 @@ pub struct RelaySnapshot {
     /// Retained input claimed by a started prompt, until it completes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub quota_prompt_contexts: BTreeMap<String, Vec<ContentBlock>>,
+    /// Inputs confirmed injected into each still-owned turn, in injection order.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub steered_prompt_contexts: BTreeMap<String, Vec<ContentBlock>>,
     /// Prompt and shell context frozen at turn start.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub frozen_prompt_contexts: BTreeMap<String, String>,
@@ -2183,6 +2186,7 @@ impl RelaySnapshot {
             mailbox_prompt_contexts: BTreeMap::new(),
             quota_interrupted_input: Vec::new(),
             quota_prompt_contexts: BTreeMap::new(),
+            steered_prompt_contexts: BTreeMap::new(),
             frozen_prompt_contexts: BTreeMap::new(),
             active_user_shells: BTreeMap::new(),
             command_ledger_seal: None,

@@ -973,6 +973,20 @@ impl DurableRelay {
                         .map(serde_json::from_value)
                         .collect::<serde_json::Result<_>>()?;
                     snapshot.frozen_prompt_contexts = mailbox.quota_input.frozen_prompt_contexts;
+                    snapshot.steered_prompt_contexts = mailbox
+                        .quota_input
+                        .steered
+                        .into_iter()
+                        .map(|(id, blocks)| {
+                            Ok((
+                                id,
+                                blocks
+                                    .into_iter()
+                                    .map(serde_json::from_value)
+                                    .collect::<serde_json::Result<_>>()?,
+                            ))
+                        })
+                        .collect::<serde_json::Result<_>>()?;
                     snapshot.quota_prompt_contexts = mailbox
                         .quota_input
                         .claimed

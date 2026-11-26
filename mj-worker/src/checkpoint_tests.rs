@@ -425,6 +425,7 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     let claimed = "claimed mail for the queued prompt";
     spec.canonical_session.mailbox = Some(CanonicalMailbox {
         quota_input: mj_core::archive::CanonicalQuotaInput {
+            steered: Default::default(),
             frozen_prompt_contexts: [("queued-1".into(), "frozen handoff".into())].into(),
             pending: vec![
                 serde_json::to_value(agent_client_protocol::v1::schema::ContentBlock::from(

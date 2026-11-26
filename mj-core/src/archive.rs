@@ -59,7 +59,7 @@ pub const ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA: u32 = 14;
 pub const ARCHIVE_SCHEMA_VERSION_NATIVE_USE: u32 = 15;
 /// Pending hidden prompt context must survive restore; older readers reject it.
 pub const ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT: u32 = 16;
-/// Quota-interrupted turn input must survive restore.
+/// Quota-interrupted and confirmed steered input must survive restore.
 pub const ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT: u32 = 17;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
@@ -513,13 +513,18 @@ pub struct CanonicalQuotaInput {
     pub pending: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub claimed: BTreeMap<String, Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub steered: BTreeMap<String, Vec<serde_json::Value>>,
     /// Hidden context frozen for queued restart continuations.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub frozen_prompt_contexts: BTreeMap<String, String>,
 }
 impl CanonicalQuotaInput {
     pub fn is_empty(&self) -> bool {
-        self.pending.is_empty() && self.claimed.is_empty() && self.frozen_prompt_contexts.is_empty()
+        self.pending.is_empty()
+            && self.claimed.is_empty()
+            && self.steered.is_empty()
+            && self.frozen_prompt_contexts.is_empty()
     }
 }
 
@@ -539,6 +544,7 @@ impl CanonicalMailbox {
             .pending
             .iter()
             .chain(self.quota_input.claimed.values().flatten())
+            .chain(self.quota_input.steered.values().flatten())
         {
             let _: agent_client_protocol::v1::schema::ContentBlock =
                 serde_json::from_value(block.clone())
@@ -1174,6 +1180,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
             .prompt_contexts
             .keys()
             .chain(mailbox.quota_input.claimed.keys())
+            .chain(mailbox.quota_input.steered.keys())
             .chain(mailbox.quota_input.frozen_prompt_contexts.keys())
         {
             ensure!(
