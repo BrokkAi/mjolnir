@@ -34,11 +34,11 @@ import { useSessionStore } from '../../stores/useSessionStore';
 import { useUiStore } from '../../stores/useUiStore';
 import { MountsEditor } from './MountsEditor';
 import { PathInput } from './PathInput';
+import { GIB, formatGiB, parseGiB } from '../gib';
 
 /** Props the shell passes. Keep this shape when replacing the placeholder. */
 export type NewSessionViewProps = { workspaceId: string };
 
-const GIB = 1024 ** 3;
 const MIN_CPUS = 2;
 const MIN_MEMORY = 4 * GIB;
 
@@ -54,25 +54,6 @@ interface BundleChoice {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-export function formatGiB(bytes: number): string {
-  const value = Number(bytes);
-  if (!Number.isFinite(value) || value <= 0) return '0';
-  const whole = Math.floor(value / GIB);
-  const remainder = value - whole * GIB;
-  if (remainder === 0) return String(whole);
-  const text = (remainder / GIB).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
-  return text === '0' ? String(whole) : `${whole}${text}`;
-}
-
-function parseGiB(text: string): number | null {
-  const match = /^(\d+)(?:\.(\d*))?$/.exec(text.trim());
-  if (!match) return null;
-  const whole = Number(match[1]);
-  const fractionText = (match[2] ?? '').slice(0, 9);
-  const fraction = fractionText ? Number(fractionText) / 10 ** fractionText.length : 0;
-  return Math.round((whole + fraction) * GIB);
 }
 
 function targetAvailability(target: LaunchTarget | undefined): {
@@ -265,7 +246,9 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
     setProfileId(
       preferredProfile && options.profiles.some(profile => profile.id === preferredProfile)
         ? preferredProfile
-        : (options.profiles[0]?.id ?? ''),
+        : options.primary_configured
+          ? ''
+          : (options.profiles[0]?.id ?? ''),
     );
     setTargetId(
       preferredTarget && options.targets.some(target => target.id === preferredTarget)
@@ -292,6 +275,8 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
     () => options?.targets.find(target => target.id === targetId),
     [options, targetId],
   );
+  // An empty profile asks the daemon to pick among the configured primary models.
+  const autoPrimary = options?.primary_configured === true && profileId === '';
   const launchProfile = useMemo(
     () => options?.profiles.find(profile => profile.id === profileId),
     [options, profileId],
@@ -416,7 +401,7 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   /* ---------------------------------------------------------------------- */
 
   const preflightRequest = useMemo<NewSessionPreflightRequest | null>(() => {
-    if (!profileId || !targetId) return null;
+    if ((!profileId && !autoPrimary) || !targetId) return null;
     if (requiresProjectDirectory && !projectDirectory.trim()) return null;
     if (!requiresProjectDirectory && !bundleId) return null;
     const request: NewSessionPreflightRequest = {
@@ -433,6 +418,7 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   }, [
     workspaceId,
     profileId,
+    autoPrimary,
     targetId,
     bundleId,
     projectDirectory,
@@ -1043,7 +1029,11 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
                 onChange={event => setProfileId(event.target.value)}
                 className="rounded-md border border-line bg-bg px-2.5 py-2 text-sm text-fg"
               >
-                {!options?.profiles.length && <option value="">No profiles configured</option>}
+                {options?.primary_configured ? (
+                  <option value="">Auto (Primary)</option>
+                ) : (
+                  !options?.profiles.length && <option value="">No profiles configured</option>
+                )}
                 {options?.profiles.map(profile => (
                   <option key={profile.id} value={profile.id}>
                     {profile.id} ({profile.harness})
@@ -1051,7 +1041,11 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
                 ))}
               </select>
             </Field>
-            <AvailabilityBadge status={profileBadge.status} reason={profileBadge.reason} />
+            {autoPrimary ? (
+              <p className="text-xs text-muted">Load-balanced across configured primary models.</p>
+            ) : (
+              <AvailabilityBadge status={profileBadge.status} reason={profileBadge.reason} />
+            )}
           </div>
           <div className="flex flex-col gap-1">
             <Field label="Target">

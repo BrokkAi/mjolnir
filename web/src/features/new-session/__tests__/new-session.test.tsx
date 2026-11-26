@@ -11,6 +11,7 @@ import type {
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { useUiStore } from '../../../stores/useUiStore';
 import { jsonResponse, mockFetch, snapshot } from '../../../test-utils';
+import { formatGiB } from '../../gib';
 import NewSessionView from '../NewSessionView';
 
 const GIB = 1024 ** 3;
@@ -121,6 +122,39 @@ afterEach(() => {
 });
 
 describe('new session wizard', () => {
+  it('formats fractional GiB without gluing the whole and fraction digits together', () => {
+    expect([4, 4.5, 0.5, 1.25].map(gib => formatGiB(gib * GIB))).toEqual(['4', '4.5', '0.5', '1.25']);
+  });
+
+  it('offers Auto (Primary) when primary models are configured and launches with an empty profile_id', async () => {
+    const preflightBodies: Record<string, unknown>[] = [];
+    const actions: Record<string, unknown>[] = [];
+    mockFetch({
+      '/api/v1/options': () =>
+        jsonResponse({ ...LAUNCH_OPTIONS, primary_configured: true, default: { target_id: 't1' } }),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/preflight/new': (_url, init) => {
+        preflightBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return jsonResponse(preflight());
+      },
+      '/api/v1/actions': (_url, init) => {
+        actions.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response('', { status: 202 });
+      },
+    });
+
+    render(<NewSessionView workspaceId="w1" />);
+    await waitFor(() => expect(launchButton()).toBeEnabled(), { timeout: 3000 });
+    const profile = screen.getByLabelText('Profile') as HTMLSelectElement;
+    expect(profile.value).toBe('');
+    expect(screen.getByRole('option', { name: 'Auto (Primary)' })).toBeInTheDocument();
+    expect(preflightBodies.at(-1)?.profile_id).toBe('');
+
+    fireEvent.click(launchButton());
+    await waitFor(() => expect(actions).toHaveLength(1));
+    expect(actions[0]).toMatchObject({ action: 'new', profile_id: '', target_id: 't1' });
+  });
+
   it('lazy-loads launch options and projects only when the view mounts', async () => {
     const { urls } = mockFetch({
       '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),

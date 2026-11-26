@@ -18,11 +18,11 @@ import { useSessionStore } from '../../stores/useSessionStore';
 import { useUiStore } from '../../stores/useUiStore';
 import { MountsEditor } from '../new-session/MountsEditor';
 import { RawConversionPreview, formatBytes } from '../resume/RawConversionPreview';
+import { GIB, formatGiB, parseGiB } from '../gib';
 
 /** Props the shell passes. Keep this shape when replacing the placeholder. */
 export type MoveViewProps = { workspaceId: string; sessionId: string };
 
-const GIB = 1024 ** 3;
 const MIN_CPUS = 2;
 const MIN_MEMORY = 4 * GIB;
 
@@ -30,22 +30,6 @@ type SubagentMode = 'native' | 'mjolnir' | 'none';
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function formatGiB(bytes: number): string {
-  const whole = Math.floor(bytes / GIB);
-  const remainder = bytes - whole * GIB;
-  if (remainder === 0) return String(whole);
-  return `${whole}${(remainder / GIB).toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`;
-}
-
-function parseGiB(text: string): number | null {
-  const match = /^(\d+)(?:\.(\d*))?$/.exec(text.trim());
-  if (!match) return null;
-  const whole = Number(match[1]);
-  const fractionText = (match[2] ?? '').slice(0, 9);
-  const fraction = fractionText ? Number(fractionText) / 10 ** fractionText.length : 0;
-  return Math.round((whole + fraction) * GIB);
 }
 
 function routeLabel(route: RoutePreview | string | undefined): string {

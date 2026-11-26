@@ -4,6 +4,7 @@ import { useSessionStore } from "../../../stores/useSessionStore";
 import {
   DRAFT_SAVE_DELAY_MS,
   clearAllDraftState,
+  getDraftSaveError,
   getPendingDraft,
   scheduleDraftSave,
   writeDraftNow,
@@ -60,5 +61,62 @@ describe("draft state across sign-out", () => {
     vi.mocked(putDraft).mockResolvedValue(undefined);
     scheduleDraftSave("s1", "one");
     expect(getPendingDraft("s1")).toBe("one");
+  });
+});
+
+describe("failed draft writes", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(putDraft).mockReset();
+    clearAllDraftState();
+  });
+  afterEach(() => {
+    clearAllDraftState();
+    vi.useRealTimers();
+  });
+
+  it("still writes a newer edit made while a failing write was in flight", async () => {
+    let fail: (error: Error) => void = () => {};
+    vi.mocked(putDraft).mockImplementationOnce(
+      () => new Promise<void>((_resolve, reject) => (fail = reject)),
+    );
+    vi.mocked(putDraft).mockResolvedValue(undefined);
+    writeDraftNow("s1", "one");
+    scheduleDraftSave("s1", "two"); // typed while "one" is in flight
+    fail(new Error("offline"));
+    await flushMicrotasks();
+    vi.advanceTimersByTime(DRAFT_SAVE_DELAY_MS * 2);
+    await flushMicrotasks();
+
+    expect(vi.mocked(putDraft).mock.calls.map((call) => call[1])).toEqual(["one", "two"]);
+    expect(getPendingDraft("s1")).toBeNull();
+    expect(getDraftSaveError("s1")).toBeNull();
+  });
+
+  it("keeps the unsaved draft, reports the failure, retries when online, and clears with sign-out state", async () => {
+    vi.mocked(putDraft).mockRejectedValueOnce(new Error("offline"));
+    vi.mocked(putDraft).mockResolvedValue(undefined);
+    writeDraftNow("s1", "kept");
+    await flushMicrotasks();
+
+    expect(getPendingDraft("s1")).toBe("kept");
+    expect(getDraftSaveError("s1")).toBe("offline");
+    expect(putDraft).toHaveBeenCalledTimes(1); // no retry loop
+
+    window.dispatchEvent(new Event("online"));
+    await flushMicrotasks();
+    expect(putDraft).toHaveBeenCalledTimes(2);
+    expect(getPendingDraft("s1")).toBeNull();
+    expect(getDraftSaveError("s1")).toBeNull();
+
+    vi.mocked(putDraft).mockRejectedValue(new Error("offline"));
+    writeDraftNow("s1", "private");
+    await flushMicrotasks();
+    expect(getDraftSaveError("s1")).toBe("offline");
+    clearAllDraftState();
+    window.dispatchEvent(new Event("online"));
+    await flushMicrotasks();
+    expect(putDraft).toHaveBeenCalledTimes(3); // a signed-out viewer's text is not retried
+    expect(getDraftSaveError("s1")).toBeNull();
   });
 });

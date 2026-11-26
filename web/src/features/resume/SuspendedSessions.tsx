@@ -17,32 +17,16 @@ import { useSessionStore } from '../../stores/useSessionStore';
 import { useUiStore } from '../../stores/useUiStore';
 import { MountsEditor } from '../new-session/MountsEditor';
 import { RawConversionPreview } from './RawConversionPreview';
+import { formatGiB, parseGiB } from '../gib';
 
 export interface SuspendedSessionsProps {
   workspaceId: string;
   sessionId?: string;
 }
 
-const GIB = 1024 ** 3;
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function formatGiB(bytes: number): string {
-  const whole = Math.floor(bytes / GIB);
-  const remainder = bytes - whole * GIB;
-  if (remainder === 0) return String(whole);
-  return `${whole}${(remainder / GIB).toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`;
-}
-
-function parseGiB(text: string): number | null {
-  const match = /^(\d+)(?:\.(\d*))?$/.exec(text.trim());
-  if (!match) return null;
-  const whole = Number(match[1]);
-  const fractionText = (match[2] ?? '').slice(0, 9);
-  const fraction = fractionText ? Number(fractionText) / 10 ** fractionText.length : 0;
-  return Math.round((whole + fraction) * GIB);
 }
 
 function availabilityOfTarget(target: ViewerTarget | undefined): {

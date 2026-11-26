@@ -132,6 +132,26 @@ afterEach(() => {
 });
 
 describe('move session', () => {
+  it('shows a fractional GiB allocation as a decimal, not a digit string', () => {
+    const fractional = liveRow('s1', {
+      ...SESSION,
+      resource_allocation: { kind: 'container', cpus: 2, memory_bytes: 4.5 * GIB },
+    });
+    useSessionStore.getState().applySnapshot(
+      snapshot([fractional], {
+        meta: {
+          profiles: [viewerProfile('p1')],
+          targets: [viewerTarget('t1'), viewerTarget('t2')],
+          bundles: [],
+        },
+      }),
+    );
+    mockFetch({});
+    render(<MoveView workspaceId="w1" sessionId="s1" />);
+    expect(screen.getByText(/2 CPUs · 4\.5 GiB RAM/)).toBeInTheDocument();
+    expect((screen.getByLabelText('Memory (GiB)') as HTMLInputElement).value).toBe('4.5');
+  });
+
   it('prepares a move, renders destination checks and previews, and dispatches the confirmed move', async () => {
     const prepareBodies: MoveSelection[] = [];
     const actionBodies: Record<string, unknown>[] = [];

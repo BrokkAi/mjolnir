@@ -185,6 +185,21 @@ describe('Composer', () => {
       await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['keep', 'keep']));
       drafts.gates[1](ok());
     });
+
+    it('tells the reader a draft was not saved, then retries and clears the notice when the browser is online', async () => {
+      const drafts = gatedDrafts();
+      const fetchMock = installRoutes({ '/api/v1/sessions/s1/draft': drafts.handler });
+      render(<Composer session={session()} />);
+      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'offline words' } });
+      await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['offline words']), { timeout: 3000 });
+      drafts.gates[0](new TypeError('network down'));
+      expect(await screen.findByText('Draft not saved — will retry when online')).toHaveAttribute('role', 'status');
+
+      window.dispatchEvent(new Event('online'));
+      await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['offline words', 'offline words']));
+      drafts.gates[1](ok());
+      await waitFor(() => expect(screen.queryByText('Draft not saved — will retry when online')).toBeNull());
+    });
   });
 
   it('runs a !command through run-shell with its own command_id', async () => {

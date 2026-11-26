@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ViewerFrame, ViewerSession, WireSessionRow } from '../../api/types';
+import { isSummaryRow, type ViewerFrame, type ViewerSession, type WireSessionRow } from '../../api/types';
 import {
   FakeEventSource,
   cursor,
@@ -13,7 +13,7 @@ import {
   transcript,
 } from '../../test-utils';
 import { attentionSessions, effectiveRoute } from '../selectors';
-import { useSessionStore } from '../useSessionStore';
+import { DETAIL_RETRY_BACKOFF_MS, useSessionStore } from '../useSessionStore';
 import {
   TRANSCRIPT_CACHE_CAPACITY,
   applyTranscriptResponse,
@@ -167,26 +167,71 @@ describe('session store: snapshot and stream frames', () => {
     expect(sessions().staleDetailIds.s1).toBe(true);
   });
 
-  it('drops a detail answer that arrives after the summary changed and reads the row again', async () => {
-    sessions().applySnapshot(snapshot([summaryRow('s1')], { sequence: 1 }));
-    let release!: () => void;
-    let requests = 0;
-    mockFetch({
-      '/api/v1/sessions/s1/row': () => {
-        requests += 1;
-        if (requests > 1) return jsonResponse({ revision: 2, row: liveRow('s1', { title: 'Fresh' }) });
-        return new Promise<Response>(resolve => {
-          release = () => resolve(jsonResponse({ revision: 1, row: liveRow('s1', { title: 'Stale' }) }));
-        });
-      },
-    });
-    const pending = sessions().ensureSessionDetail('s1');
-    await flush(1);
-    sessions().applyFrame(delta(1, 2, { detail_changed: ['s1'] }));
-    release();
-    await pending;
-    expect(requests).toBe(2);
-    expect(sessions().sessionsById.s1.title).toBe('Fresh');
+  it('mounts the detail row from the first answer even when the stream moved the row mid-fetch, then reads it again once after a backoff', async () => {
+    vi.useFakeTimers();
+    try {
+      sessions().applySnapshot(snapshot([summaryRow('s1')], { sequence: 1 }));
+      let release!: () => void;
+      let requests = 0;
+      mockFetch({
+        '/api/v1/sessions/s1/row': () => {
+          requests += 1;
+          if (requests > 1) return jsonResponse({ revision: 2, row: liveRow('s1', { title: 'Fresh' }) });
+          return new Promise<Response>(resolve => {
+            release = () => resolve(jsonResponse({ revision: 1, row: liveRow('s1', { title: 'Older' }) }));
+          });
+        },
+      });
+      const pending = sessions().ensureSessionDetail('s1');
+      await vi.advanceTimersByTimeAsync(0);
+      sessions().applyFrame(delta(1, 2, { detail_changed: ['s1'] }));
+      release();
+      await pending;
+
+      // The older detail row replaces the summary placeholder at once and is marked stale.
+      expect(isSummaryRow(sessions().sessionsById.s1)).toBe(false);
+      expect(sessions().sessionsById.s1).toMatchObject({ profile_id: 'p1', harness_kind: 'claude' });
+      expect(sessions().staleDetailIds.s1).toBe(true);
+      // No tight loop: nothing else is fetched until the backoff passes.
+      await vi.advanceTimersByTimeAsync(DETAIL_RETRY_BACKOFF_MS - 1);
+      expect(requests).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(requests).toBe(2);
+      expect(sessions().sessionsById.s1.title).toBe('Fresh');
+      expect(sessions().staleDetailIds.s1).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(DETAIL_RETRY_BACKOFF_MS * 3);
+      expect(requests).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending detail retry on sign-out', async () => {
+    vi.useFakeTimers();
+    try {
+      sessions().applySnapshot(snapshot([summaryRow('s1')], { sequence: 1 }));
+      let release!: () => void;
+      let requests = 0;
+      mockFetch({
+        '/api/v1/sessions/s1/row': () => {
+          requests += 1;
+          return new Promise<Response>(resolve => {
+            release = () => resolve(jsonResponse({ revision: 1, row: liveRow('s1') }));
+          });
+        },
+      });
+      const pending = sessions().ensureSessionDetail('s1');
+      await vi.advanceTimersByTimeAsync(0);
+      sessions().applyFrame(delta(1, 2, { detail_changed: ['s1'] }));
+      release();
+      await pending;
+      sessions().handleSignedOut();
+      await vi.advanceTimersByTimeAsync(DETAIL_RETRY_BACKOFF_MS * 3);
+      expect(requests).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

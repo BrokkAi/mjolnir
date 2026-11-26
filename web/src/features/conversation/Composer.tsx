@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -33,7 +34,15 @@ import { useSessionStore } from '../../stores/useSessionStore';
 import { useTranscriptStore } from '../../stores/useTranscriptStore';
 import { CommandPalette, paletteMatches, type PaletteItem } from './CommandPalette';
 import { PromptHistoryModal } from './PromptHistoryModal';
-import { flushDraftSave, getPendingDraft, noteServerDraft, scheduleDraftSave, writeDraftNow } from './draftQueue';
+import {
+  flushDraftSave,
+  getDraftSaveError,
+  getPendingDraft,
+  noteServerDraft,
+  scheduleDraftSave,
+  subscribeDraftSaveError,
+  writeDraftNow,
+} from './draftQueue';
 import { describeError } from './format';
 import { SteeringNotice } from './SteeringNotice';
 import { turnControlView } from './turnControls';
@@ -165,6 +174,11 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
   const [planPending, setPlanPending] = useState(false);
   const [interruptPending, setInterruptPending] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+
+  const draftSaveFailed = useSyncExternalStore(
+    useCallback(listener => subscribeDraftSaveError(session.id, listener), [session.id]),
+    () => getDraftSaveError(session.id) !== null,
+  );
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -550,6 +564,12 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
               <X className="size-3.5" aria-hidden />
             </button>
           </div>
+        )}
+
+        {draftSaveFailed && (
+          <p className="mb-2 text-[11.5px] text-muted" role="status">
+            Draft not saved — will retry when online
+          </p>
         )}
 
         {!canType && (

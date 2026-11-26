@@ -7,8 +7,9 @@
 // snapshot, since neither needs the other.
 //
 // Rows live in `sessionsById`. A summary row (`detail: false`) is replaced by
-// a detail row when `ensureSessionDetail` fetched it and nothing changed the
-// row meanwhile. A later stream change (a new summary row or a `detail_changed`
+// a detail row as soon as `ensureSessionDetail` fetches one, even when the
+// stream moved the row meanwhile (the row then stays stale and is read again
+// after a backoff). A later stream change (a new summary row or a `detail_changed`
 // notice) never takes a detail row away: the row stays in place, marked in
 // `staleDetailIds`, and the next detail fetch replaces it. A mounted
 // conversation therefore keeps its scroll, focus, attachments and open
@@ -85,6 +86,30 @@ interface SessionState {
 
 let stream: ViewerEventStream | undefined;
 const detailRequests = new Map<string, Promise<void>>();
+/** Wait before reading a row again after the stream moved it mid-fetch; one timer per session. */
+export const DETAIL_RETRY_BACKOFF_MS = 1000;
+const detailRetries = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelDetailRetry(id: string): void {
+  const timer = detailRetries.get(id);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  detailRetries.delete(id);
+}
+
+function scheduleDetailRetry(id: string): void {
+  if (detailRetries.has(id)) return;
+  detailRetries.set(
+    id,
+    setTimeout(() => {
+      detailRetries.delete(id);
+      useSessionStore
+        .getState()
+        .ensureSessionDetail(id)
+        .catch(error => console.warn('Could not refresh session detail', error));
+    }, DETAIL_RETRY_BACKOFF_MS),
+  );
+}
 let bootGeneration = 0;
 
 function stopStream(): void {
@@ -152,6 +177,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     bootGeneration += 1;
     stopStream();
     detailRequests.clear();
+    for (const id of [...detailRetries.keys()]) cancelDetailRetry(id);
     // Nothing from the previous viewer survives a sign-out in this tab.
     useTranscriptStore.getState().clearAll();
     clearAllDraftState();
@@ -278,51 +304,65 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   ensureSessionDetail: async id => {
-    for (;;) {
-      const current = get().sessionsById[id];
-      if (!current || (current.detail !== false && !get().staleDetailIds[id])) return current;
-      const active = detailRequests.get(id);
-      if (active) {
-        await active;
-        continue;
-      }
-      const epoch = get().detailEpochs[id] ?? 0;
-      const request = (async () => {
-        set(state => ({ detailLoadingIds: { ...state.detailLoadingIds, [id]: true } }));
-        try {
-          const result = await getSessionRow(id);
-          if (!result?.row || result.row.id !== id) {
-            throw new Error('The server returned an invalid session detail row');
-          }
-          set(state => {
-            // The row changed or was invalidated while fetching: this answer is stale.
-            if (!state.sessionsById[id] || (state.detailEpochs[id] ?? 0) !== epoch) return state;
-            const { [id]: _error, ...detailErrors } = state.detailErrors;
-            const { [id]: _stale, ...staleDetailIds } = state.staleDetailIds;
-            return {
-              sessionsById: { ...state.sessionsById, [id]: result.row },
-              staleDetailIds,
-              detailErrors,
-            };
-          });
-        } catch (error) {
-          if ((get().detailEpochs[id] ?? 0) !== epoch) return;
-          set(state => ({ detailErrors: { ...state.detailErrors, [id]: describe(error) } }));
-          throw error;
-        } finally {
-          set(state => {
-            const { [id]: _done, ...detailLoadingIds } = state.detailLoadingIds;
-            return { detailLoadingIds };
-          });
-        }
-      })();
-      detailRequests.set(id, request);
-      try {
-        await request;
-      } finally {
-        if (detailRequests.get(id) === request) detailRequests.delete(id);
-      }
+    const current = get().sessionsById[id];
+    if (!current || (current.detail !== false && !get().staleDetailIds[id])) return current;
+    const active = detailRequests.get(id);
+    if (active) {
+      await active;
+      return get().sessionsById[id];
     }
+    const epoch = get().detailEpochs[id] ?? 0;
+    const request = (async () => {
+      set(state => ({ detailLoadingIds: { ...state.detailLoadingIds, [id]: true } }));
+      try {
+        const result = await getSessionRow(id);
+        if (!result?.row || result.row.id !== id) {
+          throw new Error('The server returned an invalid session detail row');
+        }
+        const row = result.row;
+        let changedMeanwhile = false;
+        set(state => {
+          const held = state.sessionsById[id];
+          if (!held) return state;
+          changedMeanwhile = (state.detailEpochs[id] ?? 0) !== epoch;
+          const { [id]: _error, ...detailErrors } = state.detailErrors;
+          const { [id]: _stale, ...unstale } = state.staleDetailIds;
+          if (!changedMeanwhile) {
+            return { sessionsById: { ...state.sessionsById, [id]: row }, staleDetailIds: unstale, detailErrors };
+          }
+          // The stream moved while this answer was in flight. A detail row, even an older
+          // one, lets the conversation mount now; the newer summary fields lie over it and
+          // the row stays stale until a later fetch confirms it.
+          if (held.detail !== false) return { detailErrors };
+          return {
+            sessionsById: { ...state.sessionsById, [id]: overlaySummary(row, held) },
+            staleDetailIds: { ...state.staleDetailIds, [id]: true as const },
+            detailErrors,
+          };
+        });
+        if (changedMeanwhile) scheduleDetailRetry(id);
+        else cancelDetailRetry(id);
+      } catch (error) {
+        if ((get().detailEpochs[id] ?? 0) !== epoch) {
+          scheduleDetailRetry(id);
+          return;
+        }
+        set(state => ({ detailErrors: { ...state.detailErrors, [id]: describe(error) } }));
+        throw error;
+      } finally {
+        set(state => {
+          const { [id]: _done, ...detailLoadingIds } = state.detailLoadingIds;
+          return { detailLoadingIds };
+        });
+      }
+    })();
+    detailRequests.set(id, request);
+    try {
+      await request;
+    } finally {
+      if (detailRequests.get(id) === request) detailRequests.delete(id);
+    }
+    return get().sessionsById[id];
   },
 
   dispatchAction: action => postAction(action),
