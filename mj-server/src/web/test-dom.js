@@ -60,6 +60,14 @@ class FakeNode {
     for (const node of nodes) this.appendChild(node);
   }
 
+  replaceChildren(...nodes) {
+    for (const child of [...this.childNodes]) {
+      if (child.parentNode === this && typeof child.remove === 'function') child.remove();
+    }
+    this.childNodes = [];
+    this.append(...nodes);
+  }
+
   appendChild(node) {
     // A fragment contributes its children and not itself, which is what makes
     // `parent.append(renderMarkdown(...))` behave the way a browser does.
