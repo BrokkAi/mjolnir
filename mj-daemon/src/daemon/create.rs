@@ -1479,8 +1479,8 @@ mod delegation_replay_tests {
                 "dsh",
                 None,
                 None,
-                SubagentPolicy::None,
-                Some(("none", "[subagents.straightforward]")),
+                SubagentPolicy::Native,
+                Some(("native", "[subagents.straightforward]")),
                 None,
             ),
             (
