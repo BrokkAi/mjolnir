@@ -5159,10 +5159,6 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         ExecutionPolicy::ConfiguredApprovals
     );
     assert_eq!(launch.environment["INITIAL_AGENT_MODE"], "agent");
-    assert_eq!(
-        profile.kind.guardian(),
-        mj_core::config::GuardianReviewer::Harness
-    );
 }
 
 fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {

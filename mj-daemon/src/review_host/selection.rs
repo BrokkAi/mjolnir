@@ -56,11 +56,6 @@ pub(crate) async fn resolve(
     } else {
         None
     };
-    let execution_policy = if session.is_yolo_target(&controller.config) {
-        mj_core::config::ExecutionPolicy::Unconstrained
-    } else {
-        mj_core::config::ExecutionPolicy::ConfiguredApprovals
-    };
     let mut selections = Vec::with_capacity(choices.len());
     for SubagentChoice { model, effort } in choices {
         let selected = if let Some(profile) = pinned_profile {
@@ -76,7 +71,6 @@ pub(crate) async fn resolve(
                 &backend,
                 &model,
                 effort.as_deref(),
-                execution_policy,
                 "reviewer",
             )
             .await
@@ -101,14 +95,12 @@ pub(crate) async fn resolve(
 pub(crate) async fn resolve_choice(
     backend: &Arc<dyn SubagentBackend>,
     choice: SubagentChoice,
-    execution_policy: mj_core::config::ExecutionPolicy,
 ) -> Result<ResolvedReviewSettings> {
     let SubagentChoice { model, effort } = choice;
     let selected = resolve_reviewer_model_profile_selection(
         backend,
         &model,
         effort.as_deref(),
-        execution_policy,
         "brief_writer",
     )
     .await

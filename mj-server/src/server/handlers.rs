@@ -504,7 +504,6 @@ pub(super) async fn action(
     if let ControllerAction::New {
         remember_launch_choices,
         profile_id,
-        target_id,
         ..
     } = &mut action
     {
@@ -522,24 +521,10 @@ pub(super) async fn action(
                     "primary auto-selection is not configured; set [subagents] primary in config.toml or choose an explicit profile",
                 ));
             }
-            let execution_policy = {
-                let snapshot = state.snapshot_rx.borrow();
-                let yolo = snapshot
-                    .targets
-                    .iter()
-                    .find(|target| target.id == *target_id)
-                    .is_some_and(|target| target.yolo);
-                if yolo {
-                    mj_core::config::ExecutionPolicy::Unconstrained
-                } else {
-                    mj_core::config::ExecutionPolicy::ConfiguredApprovals
-                }
-            };
             let selection = crate::server::api::resolve_primary_session_selection(
                 backend,
                 None,
                 subagents.primary_choices(),
-                execution_policy,
             )
             .await
             .map_err(|failure| ApiError::new(failure.status, failure.message))?;

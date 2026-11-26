@@ -934,7 +934,6 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
         "model",
         candidates,
         1,
-        mj_core::config::ExecutionPolicy::Unconstrained,
         mj_controller::profile_scheduler::Placement::TopLevel,
         Some("primary"),
         &telemetry,
@@ -968,7 +967,7 @@ fn quota_move_request() -> mj_core::state::MoveSessionRequest {
 fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
     use mj_controller::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
     use mj_controller::quota::QuotaWindow;
-    use mj_core::config::{ExecutionPolicy, HarnessKind};
+    use mj_core::config::HarnessKind;
 
     let store = mj_controller::quota_telemetry::QuotaTelemetryStore::new();
     let now = 1_700_000_000;
@@ -1003,7 +1002,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
         let reservation = first_store
             .draw_and_reserve(
                 &mut candidates,
-                ExecutionPolicy::Unconstrained,
                 Placement::TopLevel,
                 Some("primary"),
                 None,
@@ -1023,7 +1021,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
         let reservation = second_store
             .draw_and_reserve(
                 &mut candidates,
-                ExecutionPolicy::Unconstrained,
                 Placement::TopLevel,
                 Some("primary"),
                 None,
@@ -1107,7 +1104,7 @@ async fn automatic_move_settles_before_any_wait_and_releases_failed_placement() 
     use futures::FutureExt;
     use mj_controller::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
     use mj_controller::quota::QuotaWindow;
-    use mj_core::config::{ExecutionPolicy, HarnessKind};
+    use mj_core::config::HarnessKind;
 
     for outcome in [
         "completed",
@@ -1152,7 +1149,6 @@ async fn automatic_move_settles_before_any_wait_and_releases_failed_placement() 
                         },
                         cache_identity: Some("destination".into()),
                     }],
-                    ExecutionPolicy::Unconstrained,
                     Placement::TopLevel,
                     Some("primary"),
                     None,
