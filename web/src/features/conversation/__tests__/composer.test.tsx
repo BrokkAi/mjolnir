@@ -5,7 +5,7 @@ import { emptyTranscript, useTranscriptStore } from '../../../stores/useTranscri
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { jsonResponse, liveRow, mockFetch } from '../../../test-utils';
 import { Composer } from '../Composer';
-import { resetDraftQueueForTests } from '../draftQueue';
+import { clearAllDraftState } from '../draftQueue';
 
 const flushPromises = () => new Promise<void>(resolve => setTimeout(resolve, 20));
 
@@ -32,7 +32,7 @@ function session(overrides: Partial<ViewerSession> = {}): ViewerSession {
 }
 
 beforeEach(() => {
-  resetDraftQueueForTests();
+  clearAllDraftState();
   useSessionStore.getState().handleSignedOut();
   useTranscriptStore.getState().clearAll();
   useTranscriptStore.setState({
@@ -50,7 +50,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  resetDraftQueueForTests();
+  clearAllDraftState();
   useSessionStore.getState().handleSignedOut();
   useTranscriptStore.getState().clearAll();
   vi.unstubAllGlobals();

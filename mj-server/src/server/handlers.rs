@@ -1198,15 +1198,26 @@ pub(super) async fn events(
                     // Observe the wake before reading, so a runtime change
                     // that races the capture remains pending.
                     revisions.borrow_and_update();
-                    let conversation_seqs: std::collections::BTreeMap<String, u64> = conversations
+                    let conversation_versions: std::collections::BTreeMap<
+                        String,
+                        viewer_feed::ConversationVersion,
+                    > = conversations
                         .borrow_and_update()
                         .iter()
-                        .map(|(id, transcript)| (id.clone(), transcript.latest_seq))
+                        .map(|(id, transcript)| {
+                            (
+                                id.clone(),
+                                viewer_feed::ConversationVersion {
+                                    latest_seq: transcript.latest_seq,
+                                    presentation_key: transcript.presentation_key.clone(),
+                                },
+                            )
+                        })
                         .collect();
                     let read = source.views.clone();
                     let encoded = mj_core::runtime::spawn_blocking(move || {
                         let result = read(reconnect.as_ref()).and_then(|views| {
-                            feed.encode(views, reconnect.take(), conversation_seqs)
+                            feed.encode(views, reconnect.take(), conversation_versions)
                         });
                         (feed, result)
                     })

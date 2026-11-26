@@ -115,12 +115,12 @@ test('SSE deltas fetch exactly what changed, and revisits render from cache', as
     expect(server.requests('GET', '/api/v1/snapshot')).toHaveLength(1);
 
     // A delta about another session costs zero conversation fetches.
-    server.publishDelta({ conversationSeqs: { s2: 5 } });
+    server.publishDelta({ conversationVersions: { s2: { latest_seq: 5, presentation_key: 'pk-1' } } });
     await page.waitForTimeout(400);
     expect(conversationFetches()).toHaveLength(1);
 
     // A delta advancing this conversation costs exactly one incremental fetch.
-    server.publishDelta({ conversationSeqs: { s1: 11 } });
+    server.publishDelta({ conversationVersions: { s1: { latest_seq: 11, presentation_key: 'pk-1' } } });
     await expect(page.getByTestId('transcript-rows')).toContainText('incremental chunk arrived');
     expect(conversationFetches()).toHaveLength(2);
     const incremental = conversationFetches()[1];

@@ -27,6 +27,7 @@ import {
   resolveSessionInterned,
   type ActionResult,
   type ControllerAction,
+  type ConversationVersion,
   type InternedTable,
   type RuntimeCursor,
   type SessionRow,
@@ -36,6 +37,7 @@ import {
 } from '../api/types';
 import { parseRoute, useUiStore } from './useUiStore';
 import { useTranscriptStore } from './useTranscriptStore';
+import { clearAllDraftState } from '../features/conversation/draftQueue';
 
 export type AuthState = 'checking' | 'signed_out' | 'signed_in';
 /** `upgrading` overrides the stream status while the daemon hands off. */
@@ -64,20 +66,20 @@ interface SessionState {
   detailErrors: Record<string, string>;
   interned: InternedTable;
   cursor: RuntimeCursor | null;
-  /** Latest server `latest_seq` per session, from stream frames and conversation fetches. */
-  conversationSeqs: Record<string, number>;
+  /** Latest server transcript version per session, from stream frames and conversation fetches. */
+  conversationVersions: Record<string, ConversationVersion>;
 
   boot: () => Promise<void>;
   signIn: (code: string) => Promise<void>;
   signOut: () => Promise<void>;
   /** Install a snapshot and start the stream. Public so tests and re-sync can use it. */
-  applySnapshot: (snapshot: ViewerSnapshotWire, seqs?: Record<string, number>) => void;
+  applySnapshot: (snapshot: ViewerSnapshotWire, versions?: Record<string, ConversationVersion>) => void;
   /** Apply a stream frame. Returns whether state changed. Throws when the frame cannot apply. */
   applyFrame: (frame: ViewerFrame) => boolean;
   ensureSessionDetail: (id: string) => Promise<SessionRow | undefined>;
   dispatchAction: (action: ControllerAction) => Promise<ActionResult>;
-  /** Record a conversation `latest_seq` seen outside the stream; never lowers a known value. */
-  noteConversationSeq: (id: string, seq: number) => void;
+  /** Record a conversation version seen outside the stream; never lowers a known `latest_seq`. */
+  noteConversationVersion: (id: string, version: ConversationVersion) => void;
   handleSignedOut: () => void;
 }
 
@@ -103,7 +105,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   detailErrors: {},
   interned: {},
   cursor: null,
-  conversationSeqs: {},
+  conversationVersions: {},
 
   boot: async () => {
     const generation = ++bootGeneration;
@@ -152,6 +154,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     detailRequests.clear();
     // Nothing from the previous viewer survives a sign-out in this tab.
     useTranscriptStore.getState().clearAll();
+    clearAllDraftState();
     set({
       auth: 'signed_out',
       streamStatus: 'idle',
@@ -165,11 +168,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       detailErrors: {},
       interned: {},
       cursor: null,
-      conversationSeqs: {},
+      conversationVersions: {},
     });
   },
 
-  applySnapshot: (snapshot, seqs) => {
+  applySnapshot: (snapshot, versions) => {
     const interned = snapshot.interned ?? {};
     const rows: Record<string, SessionRow> = {};
     for (const wire of snapshot.sessions) {
@@ -185,7 +188,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       interned,
       cursor,
       // A snapshot frame lists every session; the REST snapshot lists none, so keep what is known.
-      conversationSeqs: seqs ? { ...seqs } : state.conversationSeqs,
+      conversationVersions: versions ? { ...versions } : state.conversationVersions,
     }));
   },
 
@@ -196,23 +199,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return false;
     }
     if (frame.kind === 'snapshot') {
-      get().applySnapshot(frame.snapshot, frame.conversation_seqs ?? {});
+      get().applySnapshot(frame.snapshot, frame.conversation_versions ?? {});
       set({ cursor: frame.cursor });
       return true;
     }
     if (frame.kind !== 'delta') throw new Error('Unknown runtime publication');
     const state = get();
     if (sameCursor(state.cursor, frame.cursor)) {
-      // A transcript-only frame advances conversation sequences without moving the runtime
+      // A transcript-only frame advances conversation versions without moving the runtime
       // cursor (from == cursor). Any other repeat of the current cursor is a duplicate.
-      const seqs = Object.entries(frame.conversation_seqs ?? {});
-      if (seqs.length === 0 || !sameCursor(state.cursor, frame.from)) return false;
+      const versions = Object.entries(frame.conversation_versions ?? {});
+      if (versions.length === 0 || !sameCursor(state.cursor, frame.from)) return false;
       set(current => {
-        const conversationSeqs = { ...current.conversationSeqs };
-        for (const [id, seq] of seqs) {
-          if (current.sessionsById[id]) conversationSeqs[id] = seq;
+        const conversationVersions = { ...current.conversationVersions };
+        for (const [id, version] of versions) {
+          if (current.sessionsById[id]) conversationVersions[id] = version;
         }
-        return { conversationSeqs };
+        return { conversationVersions };
       });
       return true;
     }
@@ -234,14 +237,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const sessionsById = { ...current.sessionsById };
       const attached = { ...current.attached };
       const detailEpochs = { ...current.detailEpochs };
-      const conversationSeqs = { ...current.conversationSeqs };
+      const conversationVersions = { ...current.conversationVersions };
       for (const [id, row] of changes) {
         delete attached[id];
         detailEpochs[id] = (detailEpochs[id] ?? 0) + 1;
         if (row) sessionsById[id] = row;
         else {
           delete sessionsById[id];
-          delete conversationSeqs[id];
+          delete conversationVersions[id];
         }
       }
       for (const id of frame.detail_changed ?? []) {
@@ -252,15 +255,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           if (sessionsById[id] === held.detail) sessionsById[id] = held.summary;
         }
       }
-      for (const [id, seq] of Object.entries(frame.conversation_seqs ?? {})) {
-        if (sessionsById[id]) conversationSeqs[id] = seq;
+      for (const [id, version] of Object.entries(frame.conversation_versions ?? {})) {
+        if (sessionsById[id]) conversationVersions[id] = version;
       }
       const { sessions: _s, cursor: _c, interned: _i, ...metadata } = frame.metadata as Record<string, unknown>;
       return {
         sessionsById,
         attached,
         detailEpochs,
-        conversationSeqs,
+        conversationVersions,
         interned,
         meta: { ...(current.meta as SnapshotMetadata), ...(metadata as Partial<SnapshotMetadata>) },
         cursor: frame.cursor,
@@ -318,12 +321,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   dispatchAction: action => postAction(action),
 
-  noteConversationSeq: (id, seq) =>
-    set(state =>
-      (state.conversationSeqs[id] ?? -1) >= seq
-        ? state
-        : { conversationSeqs: { ...state.conversationSeqs, [id]: seq } },
-    ),
+  noteConversationVersion: (id, version) =>
+    set(state => {
+      const known = state.conversationVersions[id];
+      if (known && known.latest_seq > version.latest_seq) return state;
+      if (known && known.latest_seq === version.latest_seq && known.presentation_key === version.presentation_key) {
+        return state;
+      }
+      return { conversationVersions: { ...state.conversationVersions, [id]: version } };
+    }),
 }));
 
 function describe(error: unknown): string {

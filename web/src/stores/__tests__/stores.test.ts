@@ -16,12 +16,15 @@ import { attentionSessions, effectiveRoute } from '../selectors';
 import { useSessionStore } from '../useSessionStore';
 import {
   TRANSCRIPT_CACHE_CAPACITY,
+  applyTranscriptResponse,
+  emptyTranscript,
   startTranscriptSync,
   useTranscriptStore,
   visibleOlderItems,
 } from '../useTranscriptStore';
 import { installUiListeners, isImplicitRoute, parseRoute, routeHash, useUiStore, type Route } from '../useUiStore';
 
+const v = (latest_seq: number, presentation_key = 'k') => ({ latest_seq, presentation_key });
 const sessions = () => useSessionStore.getState();
 const transcripts = () => useTranscriptStore.getState();
 
@@ -107,10 +110,10 @@ describe('session store: snapshot and stream frames', () => {
     expect(sessions().cursor).toEqual(cursor(2));
   });
 
-  it('replaces everything on a snapshot frame after reset_required, taking its conversation_seqs', () => {
+  it('replaces everything on a snapshot frame after reset_required, taking its conversation_versions', () => {
     sessions().applySnapshot(snapshot([liveRow('s1')], { sequence: 1 }));
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 4 } }));
-    expect(sessions().conversationSeqs).toEqual({ s1: 4 });
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(4) } }));
+    expect(sessions().conversationVersions).toEqual({ s1: v(4) });
 
     expect(sessions().applyFrame({ kind: 'reset_required' })).toBe(false);
     expect(sessions().cursor).toBeNull();
@@ -118,10 +121,10 @@ describe('session store: snapshot and stream frames', () => {
       kind: 'snapshot',
       cursor: cursor(1, 'new'),
       snapshot: snapshot([liveRow('s7')], { sequence: 1 }),
-      conversation_seqs: { s7: 2 },
+      conversation_versions: { s7: v(2) },
     });
     expect(Object.keys(sessions().sessionsById)).toEqual(['s7']);
-    expect(sessions().conversationSeqs).toEqual({ s7: 2 });
+    expect(sessions().conversationVersions).toEqual({ s7: v(2) });
     expect(sessions().cursor).toEqual(cursor(1, 'new'));
   });
 
@@ -175,7 +178,7 @@ describe('boot', () => {
     expect(FakeEventSource.last.url).toContain('since=inc%3A1');
     expect(transcripts().entries.s1.latestSeq).toBe(3);
     // The conversation fetch recorded its sequence so a return visit needs no request.
-    expect(sessions().conversationSeqs.s1).toBe(3);
+    expect(sessions().conversationVersions.s1).toEqual(v(3));
   });
 
   it('shows signed_out on a 401 snapshot and clears state', async () => {
@@ -210,15 +213,35 @@ describe('conversation fetch gating', () => {
     await open('s1');
     expect(conversationCalls()).toEqual(['/api/v1/conversations/s1']);
 
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s2: 99 } }));
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s2: v(99) } }));
     await flush();
     expect(conversationCalls()).toHaveLength(1);
 
     net.impl.mockClear();
     net.calls.length = 0;
-    sessions().applyFrame(delta(2, 3, { conversation_seqs: { s1: 5 } }));
+    sessions().applyFrame(delta(2, 3, { conversation_versions: { s1: v(5) } }));
     await flush();
     expect(conversationCalls()).toEqual(['/api/v1/conversations/s1?after_seq=3&presentation_key=k']);
+  });
+
+  it('refetches and replaces the transcript when only the presentation key changes at the same sequence', async () => {
+    await open('s1');
+    net = mockFetch({
+      '/api/v1/conversations/s1': () =>
+        jsonResponse(
+          transcript({
+            latest_seq: 3,
+            presentation_key: 'regrouped',
+            reset: true,
+            entries: [entry(3, { stable_id: 'thought:3' }), entry(1, { stable_id: 'tool:1' })],
+          }),
+        ),
+    });
+    sessions().applyFrame(delta(1, 1, { conversation_versions: { s1: v(3, 'regrouped') } }));
+    await flush();
+    expect(conversationCalls()).toEqual(['/api/v1/conversations/s1?after_seq=3&presentation_key=k']);
+    expect(transcripts().entries.s1.orderedIds).toEqual(['thought:3', 'tool:1']);
+    expect(transcripts().entries.s1.presentationKey).toBe('regrouped');
   });
 
   it('applies a transcript-only frame whose runtime cursor did not move, and ignores a bare repeat', async () => {
@@ -228,9 +251,9 @@ describe('conversation fetch gating', () => {
     await flush();
     expect(conversationCalls()).toHaveLength(0);
 
-    expect(sessions().applyFrame(delta(1, 1, { conversation_seqs: { s1: 4, gone: 9 } }))).toBe(true);
-    expect(sessions().conversationSeqs.s1).toBe(4);
-    expect(sessions().conversationSeqs.gone).toBeUndefined();
+    expect(sessions().applyFrame(delta(1, 1, { conversation_versions: { s1: v(4), gone: v(9) } }))).toBe(true);
+    expect(sessions().conversationVersions.s1).toEqual(v(4));
+    expect(sessions().conversationVersions.gone).toBeUndefined();
     expect(sessions().cursor).toEqual(cursor(1));
     await flush();
     expect(conversationCalls()).toEqual(['/api/v1/conversations/s1?after_seq=3&presentation_key=k']);
@@ -297,7 +320,7 @@ describe('conversation fetch gating', () => {
           }),
         ),
     });
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 5 } }));
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(5) } }));
     await flush();
     const cached = transcripts().entries.s1;
     expect(cached.orderedIds).toEqual(['ordinal:1', 'ordinal:2', 'ordinal:3', 'tool:1']);
@@ -321,7 +344,7 @@ describe('conversation fetch gating', () => {
   it('fetches only the missing part when a cached session comes back behind the server', async () => {
     await open('s1');
     transcripts().closeConversation();
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 6 } }));
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(6) } }));
     await flush();
     expect(conversationCalls()).toHaveLength(1); // not the active conversation: nothing fetched
     await open('s1');
@@ -340,10 +363,10 @@ describe('conversation fetch gating', () => {
           : jsonResponse(transcript({ latest_seq: 9, entries: [entry(9)] }));
       },
     });
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 6 } }));
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(6) } }));
     await flush(1);
-    sessions().applyFrame(delta(2, 3, { conversation_seqs: { s1: 7 } }));
-    sessions().applyFrame(delta(3, 4, { conversation_seqs: { s1: 8 } }));
+    sessions().applyFrame(delta(2, 3, { conversation_versions: { s1: v(7) } }));
+    sessions().applyFrame(delta(3, 4, { conversation_versions: { s1: v(8) } }));
     release(jsonResponse(transcript({ latest_seq: 6, entries: [entry(6)] })));
     await flush();
     expect(conversationCalls()).toHaveLength(2);
@@ -353,8 +376,8 @@ describe('conversation fetch gating', () => {
   it('does not retry by itself after a failed fetch', async () => {
     await open('s1');
     net = mockFetch({ '/api/v1/conversations/s1': () => new Response('boom', { status: 500 }) });
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 6 } }));
-    sessions().applyFrame(delta(2, 3, { conversation_seqs: { s1: 7 } }));
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(6) } }));
+    sessions().applyFrame(delta(2, 3, { conversation_versions: { s1: v(7) } }));
     await flush();
     expect(transcripts().entries.s1.error).toBe('boom');
     const after = conversationCalls().length;
@@ -366,7 +389,7 @@ describe('conversation fetch gating', () => {
   it('retries a failed fetch when the stream reconnects or the browser comes back online', async () => {
     await open('s1');
     net = mockFetch({ '/api/v1/conversations/s1': () => new Response('boom', { status: 500 }) });
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 6 } }));
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(6) } }));
     await flush();
     expect(transcripts().entries.s1.error).toBe('boom');
     expect(transcripts().entries.s1.latestSeq).toBe(3);
@@ -383,7 +406,7 @@ describe('conversation fetch gating', () => {
 
     // The same recovery on `online`, and nothing when the cache is already current.
     net = mockFetch({ '/api/v1/conversations/s1': () => new Response('boom', { status: 500 }) });
-    sessions().applyFrame(delta(2, 3, { conversation_seqs: { s1: 9 } }));
+    sessions().applyFrame(delta(2, 3, { conversation_versions: { s1: v(9) } }));
     await flush();
     expect(transcripts().entries.s1.error).toBe('boom');
     net = mockFetch({
@@ -443,7 +466,7 @@ describe('conversation fetch gating', () => {
       '/api/v1/conversations/s1': () =>
         jsonResponse(transcript({ latest_seq: 4, entries: [entry(4, { role: 'user', command_id: 'cmd-1' })] })),
     });
-    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 4 } }));
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(4) } }));
     await flush();
     expect(transcripts().entries.s1.pendingLocalPrompts).toHaveLength(0);
   });
@@ -587,5 +610,30 @@ describe('back layers, toasts, theme', () => {
     expect(localStorage.getItem('mj-theme')).toBe('light');
     useUiStore.getState().setTheme('system');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+});
+
+describe('applyTranscriptResponse keeps the server row order', () => {
+  it('does not sort rows by id on reset, and appends new rows in server order on increments', () => {
+    const loaded = applyTranscriptResponse(
+      emptyTranscript('s1'),
+      transcript({ reset: true, entries: [entry(5, { stable_id: 'thought:5' }), entry(2, { stable_id: 'tool:2' })] }),
+    );
+    expect(loaded.orderedIds).toEqual(['thought:5', 'tool:2']);
+
+    const next = applyTranscriptResponse(
+      loaded,
+      transcript({
+        latest_seq: 9,
+        reset: false,
+        entries: [
+          entry(8, { stable_id: 'tool:8' }),
+          entry(5, { stable_id: 'thought:5', updated_seq: 9, lines: ['edited'] }),
+          entry(7, { stable_id: 'thought:7' }),
+        ],
+      }),
+    );
+    expect(next.orderedIds).toEqual(['thought:5', 'tool:2', 'tool:8', 'thought:7']);
+    expect(next.entriesById['thought:5'].lines).toEqual(['edited']);
   });
 });

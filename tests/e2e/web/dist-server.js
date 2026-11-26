@@ -119,7 +119,7 @@ async function createDistServer(options = {}) {
      * (converted to wire form, interned fields included) or `null` to remove
      * it. The cursor advances by one and the served snapshot follows.
      */
-    publishDelta({ sessions = {}, metadata = {}, conversationSeqs, detailChanged = [] } = {}) {
+    publishDelta({ sessions = {}, metadata = {}, conversationVersions, detailChanged = [] } = {}) {
       const from = this.cursor;
       const cursor = { ...from, sequence: from.sequence + 1 };
       const changedRows = Object.values(sessions).filter(Boolean);
@@ -157,7 +157,7 @@ async function createDistServer(options = {}) {
         sessions: frameSessions,
         detail_changed: detailChanged,
         interned: wired.interned,
-        ...(conversationSeqs ? { conversation_seqs: conversationSeqs } : {}),
+        ...(conversationVersions ? { conversation_versions: conversationVersions } : {}),
       };
       broadcast(frame);
       return frame;

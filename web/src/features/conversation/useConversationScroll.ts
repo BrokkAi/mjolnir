@@ -128,6 +128,8 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
   const previousTop = useRef(0);
   const lastObservedContentHeight = useRef(0);
   const lastMarkedSeq = useRef(0);
+  /** The receipt request in flight; replaced on a session change so a stale answer is ignored. */
+  const markingRef = useRef<{ seq: number } | null>(null);
   const streamingKeyRef = useRef(streaming);
   streamingKeyRef.current = streaming;
   /**
@@ -224,6 +226,7 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
     snappedSession.current = null;
     previousContent.current = contentVersion;
     lastMarkedSeq.current = 0;
+    markingRef.current = null;
     tallPauseDismissedFor.current = null;
     update({ ...INITIAL_STATE, hasNew: false });
     return cancelScheduledFollow;
@@ -309,10 +312,21 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
     const seq = latestSeq;
     const timer = setTimeout(() => {
       if (!isPageActive()) return;
-      lastMarkedSeq.current = seq;
-      void markConversationRead(sessionId, seq).catch(() => {
-        // The next stream advance retries; a receipt never blocks reading.
-      });
+      if (markingRef.current && markingRef.current.seq >= seq) return; // already on its way
+      const attempt = { seq };
+      markingRef.current = attempt;
+      // The frontier moves only once the server has the receipt, so a failed
+      // one is retried when the page is next active or the stream advances.
+      markConversationRead(sessionId, seq)
+        .then(() => {
+          if (markingRef.current === attempt) lastMarkedSeq.current = Math.max(lastMarkedSeq.current, seq);
+        })
+        .catch(() => {
+          // A receipt never blocks reading.
+        })
+        .finally(() => {
+          if (markingRef.current === attempt) markingRef.current = null;
+        });
     }, READ_RECEIPT_DELAY_MS);
     return () => clearTimeout(timer);
   }, [enabled, canMarkRead, hasLoaded, state.mode, state.paused, pageActive, latestSeq, sessionId]);

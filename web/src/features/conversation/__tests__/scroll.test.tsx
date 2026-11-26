@@ -342,5 +342,22 @@ describe('useConversationScroll', () => {
       settle();
       expect(markConversationRead).not.toHaveBeenCalled();
     });
+
+    it('retries the same sequence on the next return to the page after a failed receipt', async () => {
+      const apiRef: { current: ConversationScroll | null } = { current: null };
+      vi.mocked(markConversationRead).mockRejectedValueOnce(new Error('offline'));
+      render(<Harness apiRef={apiRef} canMarkRead latestSeq={5} />);
+      await act(async () => void vi.advanceTimersByTime(READ_RECEIPT_DELAY_MS + 1));
+      expect(markConversationRead).toHaveBeenCalledExactlyOnceWith('s1', 5);
+
+      visibility = 'hidden';
+      act(() => void document.dispatchEvent(new Event('visibilitychange')));
+      visibility = 'visible';
+      act(() => void document.dispatchEvent(new Event('visibilitychange')));
+      await act(async () => void vi.advanceTimersByTime(READ_RECEIPT_DELAY_MS + 1));
+
+      expect(markConversationRead).toHaveBeenCalledTimes(2);
+      expect(markConversationRead).toHaveBeenLastCalledWith('s1', 5);
+    });
   });
 });

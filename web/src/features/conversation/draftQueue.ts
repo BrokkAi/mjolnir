@@ -25,6 +25,8 @@ interface SessionDraft {
 }
 
 const drafts = new Map<string, SessionDraft>();
+/** Bumped by `clearAllDraftState`; a write that started under an older epoch is discarded when it lands. */
+let epoch = 0;
 
 function draftOf(sessionId: string): SessionDraft {
   let draft = drafts.get(sessionId);
@@ -57,6 +59,7 @@ async function drain(sessionId: string): Promise<void> {
   const draft = draftOf(sessionId);
   if (draft.inFlight) return; // the running loop picks up the newest text
   draft.inFlight = true;
+  const writeEpoch = epoch;
   try {
     while (draft.pendingText !== null && draft.pendingText !== draft.lastSaved) {
       const text = draft.pendingText;
@@ -66,6 +69,8 @@ async function drain(sessionId: string): Promise<void> {
         // Left pending and unsaved; a lost draft must not block the composer.
         return;
       }
+      // The viewer signed out while this write was in flight: it is not recorded and no follow-up goes out.
+      if (epoch !== writeEpoch) return;
       draft.lastSaved = text;
       if (draft.pendingText === text) draft.pendingText = null;
     }
@@ -103,7 +108,9 @@ export function writeDraftNow(sessionId: string, text: string): void {
   void drain(sessionId);
 }
 
-export function resetDraftQueueForTests(): void {
+/** Drop every session's draft state: nothing typed by one viewer may reach the next (sign-out). */
+export function clearAllDraftState(): void {
+  epoch += 1;
   for (const draft of drafts.values()) cancelTimer(draft);
   drafts.clear();
 }

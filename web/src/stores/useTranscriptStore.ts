@@ -1,8 +1,9 @@
 // Per-session transcript cache.
 //
 // Opening a conversation shows whatever is cached at once. A request goes out
-// only when the server's latest sequence for that session (from the runtime
-// stream) is unknown or ahead of the cache, and then only for what changed:
+// only when the server's version for that session (latest sequence and
+// presentation key, from the runtime stream) is unknown or ahead of the
+// cache, and then only for what changed:
 // `GET /conversations/{id}?after_seq=N&presentation_key=K`. Returning to an
 // unchanged cached session sends nothing, and a stream delta about another
 // session sends nothing.
@@ -17,6 +18,7 @@ import { ApiError, getConversation, getHistory } from '../api/client';
 import type {
   BrowserTranscript,
   BrowserTranscriptEntry,
+  ConversationVersion,
   HistoryEntry,
   SessionRow,
   TranscriptCursor,
@@ -87,15 +89,17 @@ export function applyTranscriptResponse(
   response: BrowserTranscript,
 ): CachedTranscript {
   const replace = response.reset || !cached.hasLoaded;
+  // The server owns row order: grouping can place a newer row before older collapsed ones.
+  // A reset replaces the order with the response's; an increment keeps the cached order and
+  // appends rows it has not seen, in the order the server listed them.
   const entriesById: Record<string, BrowserTranscriptEntry> = replace ? {} : { ...cached.entriesById };
+  const orderedIds: string[] = replace ? [] : [...cached.orderedIds];
   for (const entry of response.entries) {
     const key = entryKey(entry);
     const existing = entriesById[key];
+    if (!existing) orderedIds.push(key);
     if (!existing || entry.updated_seq >= existing.updated_seq) entriesById[key] = entry;
   }
-  const orderedIds = Object.keys(entriesById).sort(
-    (a, b) => entriesById[a].id - entriesById[b].id || a.localeCompare(b),
-  );
   const answered = new Set(response.entries.map(entry => entry.command_id).filter(Boolean));
   return {
     ...cached,
@@ -158,9 +162,14 @@ const queued = new Map<string, { force: boolean }>();
 const epochs = new Map<string, number>();
 const epochOf = (id: string) => epochs.get(id) ?? 0;
 
-function needsSync(cached: CachedTranscript | undefined, serverSeq: number | undefined): boolean {
+function needsSync(cached: CachedTranscript | undefined, serverVersion: ConversationVersion | undefined): boolean {
   if (!cached) return false;
-  return !cached.hasLoaded || serverSeq === undefined || serverSeq > cached.latestSeq;
+  return (
+    !cached.hasLoaded ||
+    !serverVersion ||
+    serverVersion.latest_seq > cached.latestSeq ||
+    (cached.presentationKey !== null && serverVersion.presentation_key !== cached.presentationKey)
+  );
 }
 
 export const useTranscriptStore = create<TranscriptState>((set, get) => {
@@ -227,7 +236,9 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
       if (epochOf(id) !== epoch) return true;
       patch(id, current => applyTranscriptResponse(current, response));
       // After the cache holds this sequence, so recording it triggers no second fetch.
-      useSessionStore.getState().noteConversationSeq(id, response.latest_seq);
+      useSessionStore
+        .getState()
+        .noteConversationVersion(id, { latest_seq: response.latest_seq, presentation_key: response.presentation_key });
       return true;
     } catch (error) {
       if (epochOf(id) !== epoch) return true;
@@ -279,7 +290,7 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
       const row = useSessionStore.getState().sessionsById[id];
       // Stored history of a stopped session never changes: read it once.
       if (!force && isHistoryOnly(row) && cached.hasLoaded) return Promise.resolve();
-      if (!force && !needsSync(cached, useSessionStore.getState().conversationSeqs[id])) {
+      if (!force && !needsSync(cached, useSessionStore.getState().conversationVersions[id])) {
         return Promise.resolve();
       }
       const run = (async () => {
@@ -294,7 +305,7 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
         // A failed fetch is not retried by itself: the next stream change or an explicit retry is.
         if (!ok || !again) return;
         const latest = get().entries[id];
-        if (again.force || needsSync(latest, useSessionStore.getState().conversationSeqs[id])) {
+        if (again.force || needsSync(latest, useSessionStore.getState().conversationVersions[id])) {
           await get().syncConversation(id, { force: again.force });
         }
       })();
@@ -383,7 +394,7 @@ export function startTranscriptSync(): () => void {
     const transcripts = useTranscriptStore.getState();
     const id = transcripts.activeId;
     if (!id) return;
-    if (needsSync(transcripts.entries[id], useSessionStore.getState().conversationSeqs[id])) {
+    if (needsSync(transcripts.entries[id], useSessionStore.getState().conversationVersions[id])) {
       void transcripts.syncConversation(id);
     }
   };
@@ -402,8 +413,8 @@ export function startTranscriptSync(): () => void {
       void transcripts.syncConversation(id, { force: true });
       return;
     }
-    const seq = state.conversationSeqs[id];
-    if (seq !== previous.conversationSeqs[id] && seq !== undefined && seq > cached.latestSeq) {
+    const version = state.conversationVersions[id];
+    if (version !== previous.conversationVersions[id] && version !== undefined && needsSync(cached, version)) {
       void transcripts.syncConversation(id);
       return;
     }

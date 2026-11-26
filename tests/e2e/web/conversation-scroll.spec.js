@@ -69,7 +69,7 @@ function streamMore(count) {
     streamLines.push(`stream chunk ${start + index + 1}: text that keeps arriving while the agent works`);
   }
   streamSeq += 1;
-  server.publishDelta({ conversationSeqs: { s1: streamSeq } });
+  server.publishDelta({ conversationVersions: { s1: { latest_seq: streamSeq, presentation_key: 'pk-1' } } });
 }
 
 async function openConversation(page) {

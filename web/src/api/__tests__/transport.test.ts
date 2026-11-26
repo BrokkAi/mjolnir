@@ -104,7 +104,7 @@ describe('ViewerEventStream', () => {
 
   afterEach(() => stream.stop());
 
-  it('parses snapshot, delta and reset_required frames, including conversation_seqs', () => {
+  it('parses snapshot, delta and reset_required frames, including conversation_versions', () => {
     stream.start();
     const source = FakeEventSource.last;
     expect(source.url).toBe('/api/v1/viewer/events?format=changes');
@@ -117,13 +117,15 @@ describe('ViewerEventStream', () => {
       sessions: [],
       detail_changed: [],
       interned: {},
-      conversation_seqs: { s1: 7 },
+      conversation_versions: { s1: { latest_seq: 7, presentation_key: 'k' } },
     };
     source.emit('runtime', { kind: 'snapshot', cursor: cursor(1), snapshot: snapshot([]) });
     source.emit('runtime', delta);
     source.emit('runtime', { kind: 'reset_required' });
     expect(frames.map(frame => frame.kind)).toEqual(['snapshot', 'delta', 'reset_required']);
-    expect((frames[1] as Extract<ViewerFrame, { kind: 'delta' }>).conversation_seqs).toEqual({ s1: 7 });
+    expect((frames[1] as Extract<ViewerFrame, { kind: 'delta' }>).conversation_versions).toEqual({
+      s1: { latest_seq: 7, presentation_key: 'k' },
+    });
     expect(statuses).toContain('live');
   });
 

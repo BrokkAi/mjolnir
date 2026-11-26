@@ -946,16 +946,22 @@ export interface ViewerSnapshotWire extends SnapshotMetadata {
   interned: InternedTable;
 }
 
+/** What changed in a transcript: new rows move `latest_seq`, regrouping moves `presentation_key`. */
+export interface ConversationVersion {
+  latest_seq: number;
+  presentation_key: string;
+}
+
 /**
- * `mj-server/src/server/viewer_feed.rs` `ViewerFrame`. `conversation_seqs` is
- * additive: older servers omit it.
+ * `mj-server/src/server/viewer_feed.rs` `ViewerFrame`. `conversation_versions`
+ * is additive: older servers omit it.
  */
 export type ViewerFrame =
   | {
       kind: 'snapshot';
       cursor: RuntimeCursor;
       snapshot: ViewerSnapshotWire;
-      conversation_seqs?: Record<string, number>;
+      conversation_versions?: Record<string, ConversationVersion>;
     }
   | {
       kind: 'delta';
@@ -965,7 +971,7 @@ export type ViewerFrame =
       sessions: [string, WireSessionRow | null][];
       detail_changed: string[];
       interned: InternedTable;
-      conversation_seqs?: Record<string, number>;
+      conversation_versions?: Record<string, ConversationVersion>;
     }
   | { kind: 'reset_required' };
 
