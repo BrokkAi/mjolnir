@@ -68,7 +68,11 @@ impl DatabaseWriter {
         let previous = self.committed_state()?;
         committed::begin_operation(&self.path);
         let result = operation(connection);
-        match committed::finish_operation(connection, &previous) {
+        match committed::finish_operation(
+            connection,
+            &previous,
+            &super::state_io::sessions_root_for(&self.path),
+        ) {
             Ok(Some(next)) => {
                 drop(self.committed.send_replace(Ok(Arc::new(next))));
             }
@@ -330,7 +334,8 @@ pub(super) fn start_database_writer_at(
         tracing::warn!(error = %format!("{error:#}"), "could not finish orphaned tool detail sweep");
     }
     let mut observed_revision = schema::read_schema_state(&connection)?.revision;
-    let initial = CommittedState::bootstrap(&mut connection)?;
+    let initial =
+        CommittedState::bootstrap(&mut connection, &super::state_io::sessions_root_for(path))?;
     let (committed, _) = tokio::sync::watch::channel(Ok(Arc::new(initial)));
     let path = path.to_owned();
     let (sender, receiver) = sync_channel(DATABASE_WRITE_QUEUE_CAPACITY);

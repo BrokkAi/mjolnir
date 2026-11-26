@@ -1182,9 +1182,19 @@ mod tests {
             worker_root: directory.path().join(&child.id),
         }));
         let transaction = connection.transaction().unwrap();
-        super::super::state_io::insert_session(&transaction, &parent).unwrap();
-        super::super::state_io::insert_session_with_parent(&transaction, &child, Some(&parent.id))
-            .unwrap();
+        super::super::state_io::insert_session(
+            &transaction,
+            &parent,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap();
+        super::super::state_io::insert_session_with_parent(
+            &transaction,
+            &child,
+            Some(&parent.id),
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap();
         transaction.execute("INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,'fixture','{}')",params![child.id,parent.id]).unwrap();
         transaction.commit().unwrap();
         let mut source = child.clone();
@@ -1222,7 +1232,7 @@ mod tests {
             UPDATE schema_compatibility SET minimum_compatible_version=121;
             PRAGMA user_version=121;
             CREATE TRIGGER interrupt_ownership_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=122 BEGIN SELECT RAISE(ABORT,'fixture interruption'); END;").unwrap();
-        assert!(super::super::schema::migrate_schema(&connection).is_err());
+        assert!(super::super::schema::migrate_schema(&connection, None).is_err());
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -1252,7 +1262,7 @@ mod tests {
         connection
             .execute_batch("DROP TRIGGER interrupt_ownership_migration")
             .unwrap();
-        super::super::schema::migrate_schema(&connection).unwrap();
+        super::super::schema::migrate_schema(&connection, None).unwrap();
         let environment_id: String = connection
             .query_row(
                 "SELECT environment_id FROM environment_bindings WHERE session_id=?1",

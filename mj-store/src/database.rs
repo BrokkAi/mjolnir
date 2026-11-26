@@ -178,7 +178,10 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
         failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
         checkpoint: Some(Box::new(CheckpointMetadata {
-            archive_path: PathBuf::from("/srv/fixture/sessions/test.hel.zip"),
+            archive_path: std::env::temp_dir()
+                .join("fixture")
+                .join("sessions")
+                .join("test.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-12T01:00:00Z".into(),
             event_frontier: 6,

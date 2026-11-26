@@ -119,10 +119,10 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     // Sessions and their relationships must come from the same WAL snapshot.
     // Otherwise a concurrent spawn can look orphaned despite intact foreign keys.
     let connection = reader.transaction()?;
-    load_state_with(&connection)
+    load_state_with(&connection, &sessions_root_for(path))
 }
 
-pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
+pub(super) fn load_state_with(connection: &Connection, sessions_root: &Path) -> Result<State> {
     let mut state = State {
         operator_presence: connection.query_row(
             "SELECT away,revision FROM operator_away WHERE singleton=1",
@@ -215,7 +215,7 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
     }
     load_targets(connection, &mut state)?;
     load_mounts(connection, &mut state)?;
-    load_checkpoints(connection, &mut state)?;
+    load_checkpoints(connection, &mut state, sessions_root)?;
     state.mount_history = read_mount_history(connection)?.into_iter().collect();
     let mut statement = connection
         .prepare("SELECT host, cpus, memory_bytes FROM host_container_sizes ORDER BY host")?;
@@ -337,7 +337,7 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
                 session.workspace_id
             );
         }
-        insert_session(&tx, session)?;
+        insert_session(&tx, session, &sessions_root_for(path))?;
     }
     for subagent in state.subagents.values() {
         // State contains metadata only. New launches must be registered with
@@ -690,14 +690,19 @@ pub(super) fn parse_materialized_execution(
 /// Write every field of a session, including the ones other writers own.
 /// Only a flow that authors the whole record — creation, import, resume, or
 /// orphan adoption — may use this.
-pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
-    insert_session_with_parent(tx, session, None)
+pub(super) fn insert_session(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    sessions_root: &Path,
+) -> Result<()> {
+    insert_session_with_parent(tx, session, None, sessions_root)
 }
 
 pub(super) fn insert_session_with_parent(
     tx: &Transaction<'_>,
     session: &SessionRecord,
     parent: Option<&str>,
+    sessions_root: &Path,
 ) -> Result<()> {
     let previous_error = super::events::previous_session_error(tx, &session.id)?;
     let canonical_bundle =
@@ -850,7 +855,7 @@ pub(super) fn insert_session_with_parent(
     )?;
     replace_targets_with_parent(tx, session, parent)?;
     replace_mounts(tx, &session.id, &session.additional_mounts)?;
-    replace_checkpoint(tx, session)?;
+    replace_checkpoint(tx, session, sessions_root)?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
     super::session_create::settle_create_intent(tx, session)?;
     Ok(())
@@ -1013,13 +1018,20 @@ fn replace_targets_with_parent(
     Ok(())
 }
 
-/// The managed archive directory for the store behind `connection`: the
-/// `sessions/` directory beside the database file, as `tool_details.rs` derives
-/// its root. In-memory databases have no data directory.
-pub(super) fn sessions_root(connection: &Connection) -> Option<PathBuf> {
-    let path = Path::new(connection.path()?);
-    (!path.as_os_str().is_empty())
-        .then(|| super::tool_details::data_dir_from(path).join("sessions"))
+/// The managed archive directory for the store at `db_path`: the `sessions/`
+/// directory beside the database file, derived from the path the store was
+/// opened with, as `tool_details.rs` derives its root. SQLite's own
+/// `Connection::path` is absolute and normalized, so it never matches the
+/// lexical `sessions_dir()` that writers store when the data directory is
+/// relative or reached through a symlink.
+pub(super) fn sessions_root_for(db_path: &Path) -> PathBuf {
+    super::tool_details::data_dir_from(db_path).join("sessions")
+}
+
+/// The root for the process's configured store, for callers that run on the
+/// daemon's writer or reader, which are opened at `database_path()`.
+pub(super) fn configured_sessions_root() -> PathBuf {
+    sessions_root_for(&database_path())
 }
 
 /// Store a direct child of `sessions_root` as its bare file name so the store
@@ -1034,52 +1046,29 @@ pub(super) fn encode_checkpoint_archive_path(path: &Path, sessions_root: &Path) 
 }
 
 /// Inverse of `encode_checkpoint_archive_path`. A bare file name joins onto
-/// `sessions_root`; an absolute path is returned unchanged; any other relative
-/// value is corrupt and rejected.
-pub(super) fn decode_checkpoint_archive_path(
-    stored: &Path,
-    sessions_root: &Path,
-) -> Result<PathBuf> {
-    if stored.is_absolute() {
-        return Ok(stored.to_path_buf());
-    }
+/// `sessions_root`. Every other value, absolute or not, is returned as stored
+/// (the pre-revision-160 behavior): a legacy value must never fail the whole
+/// state load, and resume rejects a non-absolute archive for that one session.
+pub(super) fn decode_checkpoint_archive_path(stored: &Path, sessions_root: &Path) -> PathBuf {
     let mut components = stored.components();
     match (components.next(), components.next()) {
-        (Some(std::path::Component::Normal(name)), None) => Ok(sessions_root.join(name)),
-        _ => bail!(
-            "checkpoint archive path {} is neither absolute nor a bare file name",
-            stored.display()
-        ),
+        (Some(std::path::Component::Normal(name)), None) => sessions_root.join(name),
+        _ => stored.to_path_buf(),
     }
 }
 
-/// Encode a path for a `session_checkpoints` row written through `connection`.
-pub(super) fn checkpoint_archive_blob(connection: &Connection, path: &Path) -> Vec<u8> {
-    match sessions_root(connection) {
-        Some(root) => path_to_blob(&encode_checkpoint_archive_path(path, &root)),
-        None => path_to_blob(path),
-    }
-}
-
-fn checkpoint_archive_from_blob(connection: &Connection, blob: &[u8]) -> Result<PathBuf> {
-    let stored = blob_to_path(blob);
-    match sessions_root(connection) {
-        Some(root) => decode_checkpoint_archive_path(&stored, &root),
-        None if stored.is_absolute() => Ok(stored),
-        None => bail!(
-            "checkpoint archive path {} is relative in a database with no data directory",
-            stored.display()
-        ),
-    }
+/// Encode a path for a `session_checkpoints` row.
+pub(super) fn checkpoint_archive_blob(path: &Path, sessions_root: &Path) -> Vec<u8> {
+    path_to_blob(&encode_checkpoint_archive_path(path, sessions_root))
 }
 
 /// Migration 160: rewrite managed absolute archive paths to bare file names.
 /// The table holds one small row per suspended session. Rows outside
-/// `sessions/` and in-memory databases are left alone.
-pub(super) fn relativize_checkpoint_archive_paths(connection: &Connection) -> Result<()> {
-    let Some(root) = sessions_root(connection) else {
-        return Ok(());
-    };
+/// `sessions/` are left alone.
+pub(super) fn relativize_checkpoint_archive_paths(
+    connection: &Connection,
+    sessions_root: &Path,
+) -> Result<()> {
     let rows = connection
         .prepare("SELECT session_id, archive_path FROM session_checkpoints")?
         .query_map([], |row| {
@@ -1090,7 +1079,7 @@ pub(super) fn relativize_checkpoint_archive_paths(connection: &Connection) -> Re
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (session_id, stored) in rows {
-        let encoded = encode_checkpoint_archive_path(&stored, &root);
+        let encoded = encode_checkpoint_archive_path(&stored, sessions_root);
         if encoded != stored {
             connection.execute(
                 "UPDATE session_checkpoints SET archive_path = ?2 WHERE session_id = ?1",
@@ -1101,7 +1090,11 @@ pub(super) fn relativize_checkpoint_archive_paths(connection: &Connection) -> Re
     Ok(())
 }
 
-pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+pub(super) fn replace_checkpoint(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    sessions_root: &Path,
+) -> Result<()> {
     tx.execute(
         "DELETE FROM session_checkpoints WHERE session_id = ?1",
         [session.id.as_str()],
@@ -1112,7 +1105,7 @@ pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) 
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 session.id,
-                checkpoint_archive_blob(tx, &checkpoint.archive_path),
+                checkpoint_archive_blob(&checkpoint.archive_path, sessions_root),
                 checkpoint.sha256,
                 checkpoint.created_at,
                 checkpoint.event_frontier,
@@ -1525,16 +1518,21 @@ fn load_mounts_selected(
     Ok(())
 }
 
-pub(super) fn load_checkpoints(connection: &Connection, state: &mut State) -> Result<()> {
-    load_checkpoints_selected(connection, state, None)
+pub(super) fn load_checkpoints(
+    connection: &Connection,
+    state: &mut State,
+    sessions_root: &Path,
+) -> Result<()> {
+    load_checkpoints_selected(connection, state, None, sessions_root)
 }
 
 fn load_checkpoints_selected(
     connection: &Connection,
     state: &mut State,
     id: Option<&str>,
+    sessions_root: &Path,
 ) -> Result<()> {
-    let checkpoints = read_checkpoints(connection, id)?;
+    let checkpoints = read_checkpoints(connection, id, sessions_root)?;
     for (session_id, checkpoint) in checkpoints {
         if let Some(session) = state.sessions.get_mut(&session_id) {
             session.checkpoint = Some(Box::new(checkpoint));
@@ -1545,19 +1543,22 @@ fn load_checkpoints_selected(
 
 pub fn load_session_checkpoints() -> Result<Vec<(String, CheckpointMetadata)>> {
     let connection = open_reader(&database_path())?;
-    read_checkpoints(&connection, None)
+    read_checkpoints(&connection, None, &configured_sessions_root())
 }
 
 pub fn load_session_checkpoint(id: &str) -> Result<Option<CheckpointMetadata>> {
     let connection = open_reader(&database_path())?;
-    Ok(read_checkpoints(&connection, Some(id))?
-        .pop()
-        .map(|(_, checkpoint)| checkpoint))
+    Ok(
+        read_checkpoints(&connection, Some(id), &configured_sessions_root())?
+            .pop()
+            .map(|(_, checkpoint)| checkpoint),
+    )
 }
 
 fn read_checkpoints(
     connection: &Connection,
     id: Option<&str>,
+    sessions_root: &Path,
 ) -> Result<Vec<(String, CheckpointMetadata)>> {
     let predicate = if id.is_some() {
         " WHERE session_id=?1"
@@ -1572,25 +1573,18 @@ fn read_checkpoints(
     let rows = statement.query_map(arguments.as_slice(), |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get_ref(1)?.as_blob()?.to_vec(),
-            row.get::<_, String>(2)?,
-            row.get(3)?,
-            row.get(4)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (session_id, archive, sha256, created_at, event_frontier) = row?;
-        Ok((
-            session_id,
             CheckpointMetadata {
-                archive_path: checkpoint_archive_from_blob(connection, &archive)?,
-                sha256,
-                created_at,
-                event_frontier,
+                archive_path: decode_checkpoint_archive_path(
+                    &blob_to_path(row.get_ref(1)?.as_blob()?),
+                    sessions_root,
+                ),
+                sha256: row.get(2)?,
+                created_at: row.get(3)?,
+                event_frontier: row.get(4)?,
             },
         ))
-    })
-    .collect()
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Fill a missing snapshot without overwriting a concurrent writer. A deleted
@@ -1788,20 +1782,27 @@ pub fn load_session_record(id: &str) -> Result<Option<SessionRecord>> {
 pub fn read_durable_session_record(id: &str) -> Result<Option<SessionRecord>> {
     let mut connection = open_reader(&database_path())?;
     let snapshot = connection.transaction()?;
-    load_session_with(&snapshot, id)
+    load_session_with(&snapshot, id, &configured_sessions_root())
 }
 
 pub(super) fn load_session_with(
     connection: &Connection,
     id: &str,
+    sessions_root: &Path,
 ) -> Result<Option<SessionRecord>> {
-    load_session_interned_with(connection, id, &mut SessionInterns::default())
+    load_session_interned_with(
+        connection,
+        id,
+        &mut SessionInterns::default(),
+        sessions_root,
+    )
 }
 
 pub(super) fn load_session_interned_with(
     connection: &Connection,
     id: &str,
     interns: &mut SessionInterns,
+    sessions_root: &Path,
 ) -> Result<Option<SessionRecord>> {
     let record = connection
         .query_row(
@@ -1818,7 +1819,7 @@ pub(super) fn load_session_interned_with(
     state.sessions.insert(id.to_owned(), record);
     load_targets_selected(connection, &mut state, Some(id))?;
     load_mounts_selected(connection, &mut state, Some(id))?;
-    load_checkpoints_selected(connection, &mut state, Some(id))?;
+    load_checkpoints_selected(connection, &mut state, Some(id), sessions_root)?;
     state.validate()?;
     Ok(state.sessions.remove(id))
 }
@@ -1908,9 +1909,22 @@ mod targeted_read_tests {
         let mut reader = open_reader(&path).unwrap();
         let snapshot = reader.transaction().unwrap();
         assert_eq!(
-            load_session_with(&snapshot, "selected").unwrap(),
+            load_session_with(
+                &snapshot,
+                "selected",
+                &crate::database::state_io::configured_sessions_root()
+            )
+            .unwrap(),
             Some(expected)
         );
-        assert_eq!(load_session_with(&snapshot, "missing").unwrap(), None);
+        assert_eq!(
+            load_session_with(
+                &snapshot,
+                "missing",
+                &crate::database::state_io::configured_sessions_root()
+            )
+            .unwrap(),
+            None
+        );
     }
 }

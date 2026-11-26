@@ -392,7 +392,7 @@ fn verify_schema_once(path: &Path, connection: &Connection) -> Result<()> {
     }
     // Holding the lock across the ladder keeps two first opens of the same
     // database from running the additive migration steps against each other.
-    migrate_schema(connection)?;
+    migrate_schema(connection, Some(&super::state_io::sessions_root_for(path)))?;
     read_schema_state(connection)?.ensure_supported()?;
     verified.insert(key);
     Ok(())
@@ -1041,7 +1041,9 @@ fn migrate_transcript_metadata_v153(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
+/// `sessions_root` is the managed archive directory derived from the path the
+/// store was opened with; `None` for databases with no data directory.
+pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Path>) -> Result<()> {
     let state = read_schema_state(connection)?;
     let version = state.revision;
     if version > SCHEMA_VERSION {
@@ -3782,7 +3784,9 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 160 {
         let transaction =
             Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
-        super::state_io::relativize_checkpoint_archive_paths(&transaction)?;
+        if let Some(sessions_root) = sessions_root {
+            super::state_io::relativize_checkpoint_archive_paths(&transaction, sessions_root)?;
+        }
         transaction.execute_batch(
             "UPDATE schema_compatibility SET minimum_compatible_version = 160 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
@@ -4750,7 +4754,12 @@ mod reader_tests {
             ("absent", None, true),
         ] {
             let session = super::super::tests::session(id, "project");
-            state_io::insert_session(&transaction, &session).unwrap();
+            state_io::insert_session(
+                &transaction,
+                &session,
+                &crate::database::state_io::configured_sessions_root(),
+            )
+            .unwrap();
             transaction
                 .execute(
                     "UPDATE sessions SET subagents = ?2, supervisors = ?3 WHERE session_id = ?1",
@@ -4782,13 +4791,17 @@ mod reader_tests {
             .unwrap();
         transaction.commit().unwrap();
 
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         let before = read_schema_state(&connection).unwrap();
         assert_eq!(
             (before.revision, before.minimum_compatible),
             (151, Some(151))
         );
-        let previous = state_io::load_state_with(&connection).unwrap();
+        let previous = state_io::load_state_with(
+            &connection,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap();
         assert!(matches!(
             previous.sessions["mjolnir"].subagents,
             Some(SubagentPolicy::Mjolnir {
@@ -4799,7 +4812,7 @@ mod reader_tests {
         connection
             .execute_batch("DROP TRIGGER interrupt_152")
             .unwrap();
-        let error = migrate_schema(&connection).unwrap_err();
+        let error = migrate_schema(&connection, None).unwrap_err();
         assert!(error.to_string().contains("fixture revision 152 boundary"));
 
         let schema = read_schema_state(&connection).unwrap();
@@ -4808,7 +4821,11 @@ mod reader_tests {
             (152, Some(152))
         );
         assert!(schema.ensure_supported_by(151).is_err());
-        let state = state_io::load_state_with(&connection).unwrap();
+        let state = state_io::load_state_with(
+            &connection,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap();
         let migrated = state.sessions["mjolnir"].subagents.as_ref().unwrap();
         assert!(matches!(
             migrated,
@@ -4845,14 +4862,14 @@ mod reader_tests {
         let connection = Connection::open(&path).unwrap();
         create_baseline_schema(&connection).unwrap();
         connection.execute_batch("CREATE TRIGGER stop_harness BEFORE INSERT ON schema_migrations WHEN NEW.version > 125 BEGIN SELECT RAISE(ABORT, 'boundary'); END;").unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection.execute_batch("DROP TRIGGER stop_harness;
         INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
         INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at) VALUES ('kept','kept','codex','codex','target','stopped','now');
         CREATE INDEX harness_fixture_index ON sessions(title);
         CREATE TRIGGER harness_external_trigger AFTER UPDATE ON session_contexts BEGIN SELECT count(*) FROM sessions; END;
         CREATE TRIGGER harness_fixture_trigger AFTER UPDATE OF title ON sessions BEGIN SELECT 1; END;").unwrap();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         connection.execute_batch("UPDATE sessions SET harness_kind='future-harness'; INSERT INTO hidden_native_sessions VALUES ('future-harness','native','now');").unwrap();
         let snapshot = || {
             let mut query = connection
@@ -4914,7 +4931,7 @@ mod reader_tests {
                  WHEN NEW.version > 122 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
             )
             .unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         if !connection.is_autocommit() {
             connection.execute_batch("ROLLBACK").unwrap();
         }
@@ -4937,7 +4954,7 @@ mod reader_tests {
             )
             .unwrap();
 
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
 
         let archive: (String, i64, String, Option<i64>) = connection
             .query_row(
@@ -4979,7 +4996,7 @@ mod reader_tests {
                  WHEN NEW.version > 123 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
             )
             .unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         if !connection.is_autocommit() {
             connection.execute_batch("ROLLBACK").unwrap();
         }
@@ -5013,7 +5030,7 @@ mod reader_tests {
             )
             .unwrap();
 
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
 
         let kept: (String, String, String, Option<String>) = connection
             .query_row(
@@ -5080,7 +5097,7 @@ mod reader_tests {
              WHEN NEW.version > 94 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
             )
             .unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         if !connection.is_autocommit() {
             connection.execute_batch("ROLLBACK").unwrap();
         }
@@ -5095,7 +5112,7 @@ mod reader_tests {
              INSERT INTO turn_review_state(session_id,baselines,reviewed_through_ordinal)
                  VALUES ('kept','{\"/repo\":\"tree\"}',42);",
         ).unwrap();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert!(
             state
@@ -5113,7 +5130,7 @@ mod reader_tests {
             .unwrap();
         assert_eq!(revisions, (93..=SCHEMA_VERSION).collect::<Vec<_>>());
         let fresh = Connection::open_in_memory().unwrap();
-        migrate_schema(&fresh).unwrap();
+        migrate_schema(&fresh, None).unwrap();
         let schema = |database: &Connection| {
             database
                 .prepare("SELECT name, sql FROM sqlite_schema WHERE type='table' ORDER BY name")
@@ -5148,7 +5165,7 @@ mod reader_tests {
     fn restart_intent_schema_matches_for_fresh_and_upgraded_stores() {
         let directory = tempfile::tempdir().unwrap();
         let fresh = Connection::open(directory.path().join("fresh.sqlite3")).unwrap();
-        migrate_schema(&fresh).unwrap();
+        migrate_schema(&fresh, None).unwrap();
 
         let upgraded = Connection::open(directory.path().join("upgraded.sqlite3")).unwrap();
         create_baseline_schema(&upgraded).unwrap();
@@ -5159,7 +5176,7 @@ mod reader_tests {
                  BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
             )
             .unwrap();
-        assert!(migrate_schema(&upgraded).is_err());
+        assert!(migrate_schema(&upgraded, None).is_err());
         if !upgraded.is_autocommit() {
             upgraded.execute_batch("ROLLBACK").unwrap();
         }
@@ -5170,7 +5187,7 @@ mod reader_tests {
              INSERT INTO session_restart_intents(session_id,operation_id,phase,updated_at,checkpoint_sha256,checkpoint_started)
                  VALUES ('kept','restart-kept','stopping','now','sealed-sha',1);"
         ).unwrap();
-        assert!(migrate_schema(&upgraded).is_err());
+        assert!(migrate_schema(&upgraded, None).is_err());
         if !upgraded.is_autocommit() {
             upgraded.execute_batch("ROLLBACK").unwrap();
         }
@@ -5183,7 +5200,7 @@ mod reader_tests {
             .execute_batch("DROP TRIGGER stop_before_restart_migration")
             .unwrap();
         assert_eq!(read_schema_state(&upgraded).unwrap().revision, 82);
-        assert!(migrate_schema(&upgraded).is_ok());
+        assert!(migrate_schema(&upgraded, None).is_ok());
 
         let upgraded_schema = read_schema_state(&upgraded).unwrap();
         assert_eq!(
@@ -5221,7 +5238,7 @@ mod reader_tests {
         let connection = Connection::open_in_memory().unwrap();
         create_baseline_schema(&connection).unwrap();
         connection.execute_batch("CREATE TRIGGER stop_repair BEFORE INSERT ON schema_migrations WHEN NEW.version=112 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;").unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         if !connection.is_autocommit() {
             connection.execute_batch("ROLLBACK").unwrap();
         }
@@ -5249,7 +5266,7 @@ mod reader_tests {
             connection.execute("INSERT INTO sessions(session_id,title,session_title_override,harness_kind,last_profile,target_template_id,state,updated_at,project_directory) VALUES (?1,?2,?3,'codex','fake','local','error','now',?4)", params![id,title,manual,directory.map(path_to_blob)]).unwrap();
         }
         connection.execute_batch("INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES ('child','project','task','{}');").unwrap();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         let overrides = || {
             let mut statement = connection
                 .prepare(
@@ -5301,7 +5318,7 @@ mod reader_tests {
             )
             .unwrap();
         let before = overrides();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         assert_eq!(overrides(), before);
     }
 
@@ -5322,7 +5339,7 @@ mod reader_tests {
                  WHEN NEW.version > {revision}
                  BEGIN SELECT RAISE(ABORT,'fixture migration boundary'); END;"
         )).unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         if !connection.is_autocommit() {
             connection.execute_batch("ROLLBACK").unwrap();
         }
@@ -5350,7 +5367,7 @@ mod reader_tests {
                  WHEN NEW.version=69 BEGIN SELECT RAISE(ABORT,'interrupted reconciliation'); END;",
                 )
                 .unwrap();
-            assert!(migrate_schema(&connection).is_err());
+            assert!(migrate_schema(&connection, None).is_err());
             drop(connection);
             let connection = Connection::open(&path).unwrap();
             assert_eq!(read_schema_state(&connection).unwrap().revision, 68);
@@ -5485,7 +5502,7 @@ mod reader_tests {
              WHEN NEW.version=71 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;",
         )
         .unwrap();
-        assert!(migrate_schema(&old).is_err());
+        assert!(migrate_schema(&old, None).is_err());
         let state = read_schema_state(&old).unwrap();
         assert_eq!(state.revision, 70);
         assert_eq!(state.minimum_compatible, Some(69));
@@ -5559,7 +5576,7 @@ mod reader_tests {
             )
             .unwrap();
         }
-        assert!(migrate_schema(&old).is_err());
+        assert!(migrate_schema(&old, None).is_err());
         let upgraded = old;
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, 70);
@@ -5604,7 +5621,7 @@ mod reader_tests {
              WHEN NEW.version=70 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;",
         )
         .unwrap();
-        assert!(migrate_schema(&old).is_err());
+        assert!(migrate_schema(&old, None).is_err());
         assert_eq!(read_schema_state(&old).unwrap().revision, 69);
         let stored: String = old
             .query_row("SELECT acp_session_title FROM sessions", [], |row| {
@@ -5967,7 +5984,7 @@ mod reader_tests {
                 ))
                 .unwrap();
             super::super::legacy_schema::migrate_to_baseline(&connection).unwrap();
-            assert!(migrate_schema(&connection).is_err());
+            assert!(migrate_schema(&connection, None).is_err());
             drop(connection);
             let connection = Connection::open(&path).unwrap();
             let found: i64 = connection
@@ -6045,7 +6062,7 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         let connection = Connection::open(&path).unwrap();
         create_baseline_schema(&connection).unwrap();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         connection
             .execute_batch(
                 "INSERT INTO session_contexts(session_id, bundle_id, created_at)
@@ -6145,7 +6162,7 @@ mod reader_tests {
             CREATE TRIGGER stop_before_accounting BEFORE INSERT ON schema_migrations WHEN NEW.version=67
             BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;").unwrap();
         super::super::legacy_schema::migrate_to_baseline(&connection).unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection
             .execute_batch(
                 "ROLLBACK; DROP TRIGGER stop_before_accounting;
@@ -6209,14 +6226,22 @@ mod reader_tests {
     #[test]
     fn revision_160_relativizes_only_managed_checkpoint_archives_and_refuses_revision_159() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("mj.sqlite3");
-        let sessions = directory.path().join("sessions");
-        let external = PathBuf::from("/srv/elsewhere/external.hel.zip");
+        // Writers store the lexical `data_dir().join("sessions")`, so the
+        // store must not normalize the data directory it was opened with.
+        fs::create_dir(directory.path().join("lexical")).unwrap();
+        let data_dir = directory.path().join("lexical").join("..");
+        let path = data_dir.join("mj.sqlite3");
+        let sessions = data_dir.join("sessions");
+        let external = std::env::temp_dir()
+            .join("elsewhere")
+            .join("external.hel.zip");
+        let legacy = PathBuf::from("sessions").join("legacy.hel.zip");
         let nested = sessions.join("nested").join("deep.hel.zip");
         for (id, archive) in [
             ("managed", sessions.join("managed.hel.zip")),
             ("external", external.clone()),
             ("nested", nested.clone()),
+            ("legacy", legacy.clone()),
         ] {
             save_session_to(&path, &checkpoint_session(id, archive)).unwrap();
         }
@@ -6257,6 +6282,9 @@ mod reader_tests {
         assert_eq!(archive("managed"), sessions.join("managed.hel.zip"));
         assert_eq!(archive("external"), external);
         assert_eq!(archive("nested"), nested);
+        // A legacy relative multi-component value loads as stored; it never
+        // fails the whole state load. Resume rejects it for that session.
+        assert_eq!(archive("legacy"), legacy);
     }
 
     #[test]
@@ -6274,18 +6302,22 @@ mod reader_tests {
                 fs::copy(entry.path(), second.path().join(entry.file_name())).unwrap();
             }
         }
-        let second_db = second.path().join("mj.sqlite3");
+        // The copy is opened through a non-normalized path, as a relative or
+        // symlinked MJ_DATA_DIR would be.
+        fs::create_dir(second.path().join("lexical")).unwrap();
+        let second_data = second.path().join("lexical").join("..");
+        let second_db = second_data.join("mj.sqlite3");
         let moved = load_state_from(&second_db).unwrap().sessions["moved"]
             .checkpoint
             .clone()
             .unwrap();
         assert_eq!(
             moved.archive_path,
-            second.path().join("sessions").join("moved.hel.zip")
+            second_data.join("sessions").join("moved.hel.zip")
         );
 
         let mut replacement = (*moved).clone();
-        replacement.archive_path = second.path().join("sessions").join("swapped.hel.zip");
+        replacement.archive_path = second_data.join("sessions").join("swapped.hel.zip");
         replacement.sha256 = "b".repeat(64);
         let mut connection = open_writer(&second_db).unwrap();
         assert!(
@@ -6295,6 +6327,7 @@ mod reader_tests {
                 &moved.archive_path,
                 &moved.sha256,
                 &replacement,
+                &state_io::sessions_root_for(&second_db),
             )
             .unwrap()
         );
@@ -6601,9 +6634,13 @@ mod reader_tests {
             )
             .unwrap();
         assert_eq!(directory, None);
-        let loaded = state_io::load_session_with(&upgraded, "managed")
-            .unwrap()
-            .unwrap();
+        let loaded = state_io::load_session_with(
+            &upgraded,
+            "managed",
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(loaded.project_directory, None);
         assert_eq!(
             loaded.checkout().project_directory().as_deref(),
@@ -6664,10 +6701,14 @@ mod reader_tests {
             }
         ));
         let load = || {
-            state_io::load_session_with(&upgraded, &session.id)
-                .unwrap()
-                .unwrap()
-                .staged_aws_profile
+            state_io::load_session_with(
+                &upgraded,
+                &session.id,
+                &crate::database::state_io::configured_sessions_root(),
+            )
+            .unwrap()
+            .unwrap()
+            .staged_aws_profile
         };
         assert_eq!(load(), None);
         session.staged_aws_profile = Some("team".into());
@@ -7443,7 +7484,7 @@ mod reader_tests {
              CREATE TRIGGER fail_quota_history BEFORE INSERT ON schema_migrations WHEN NEW.version=103
                  BEGIN SELECT RAISE(ABORT,'quota history migration'); END;"
         ).unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection
             .execute_batch("ROLLBACK; DROP TRIGGER fail_quota_history;")
             .unwrap();
@@ -7457,7 +7498,7 @@ mod reader_tests {
                 )
                 .unwrap()
         );
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         let schema = read_schema_state(&connection).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
         assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
@@ -7514,7 +7555,7 @@ mod reader_tests {
              CREATE TRIGGER fail_restart_handoff BEFORE INSERT ON schema_migrations WHEN NEW.version=102
                  BEGIN SELECT RAISE(ABORT,'restart handoff migration'); END;"
         ).unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection
             .execute_batch("ROLLBACK; DROP TRIGGER fail_restart_handoff;")
             .unwrap();
@@ -7529,7 +7570,7 @@ mod reader_tests {
             )
             .unwrap()
         );
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         let schema = read_schema_state(&connection).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
         assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
@@ -7572,7 +7613,7 @@ mod reader_tests {
                      BEGIN SELECT RAISE(ABORT,'profile preference migration'); END;",
                     )
                     .unwrap();
-                assert!(migrate_schema(&legacy).is_err());
+                assert!(migrate_schema(&legacy, None).is_err());
                 legacy
                     .execute_batch("ROLLBACK; DROP TRIGGER fail_profile_preference_migration;")
                     .unwrap();
@@ -7584,7 +7625,7 @@ mod reader_tests {
                         .unwrap()
                 );
             }
-            migrate_schema(&legacy).unwrap();
+            migrate_schema(&legacy, None).unwrap();
             let schema = read_schema_state(&legacy).unwrap();
             assert_eq!(schema.revision, SCHEMA_VERSION);
             assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
@@ -7697,7 +7738,7 @@ mod reader_tests {
              COMMIT;",
             )
             .unwrap();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
@@ -7880,7 +7921,7 @@ mod reader_tests {
         let old = Connection::open(&path).unwrap();
         older_write(&old, "source", "old-move");
         old.execute_batch("CREATE TRIGGER reject_close_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=133 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
-        assert!(migrate_schema(&old).is_err());
+        assert!(migrate_schema(&old, None).is_err());
         assert_eq!(read_schema_state(&old).unwrap().revision, 132);
         assert_eq!(
             read_schema_state(&old).unwrap().minimum_compatible,
@@ -8642,7 +8683,7 @@ mod reader_tests {
         drop(old);
         let boundary = Connection::open(&path).unwrap();
         boundary.execute_batch("CREATE TRIGGER released_boundary BEFORE INSERT ON schema_migrations WHEN NEW.version=95 BEGIN SELECT RAISE(ABORT,'released boundary'); END;").unwrap();
-        assert!(migrate_schema(&boundary).is_err());
+        assert!(migrate_schema(&boundary, None).is_err());
         boundary.execute_batch("ROLLBACK").unwrap();
         let upgraded = boundary;
         let state = read_schema_state(&upgraded).unwrap();
@@ -8735,7 +8776,7 @@ mod reader_tests {
             .execute_batch("CREATE TABLE workspaces(conflict TEXT)")
             .unwrap();
 
-        let error = migrate_schema(&connection).unwrap_err();
+        let error = migrate_schema(&connection, None).unwrap_err();
 
         assert!(format!("{error:#}").contains("create baseline database schema"));
         assert!(
@@ -8783,7 +8824,7 @@ mod reader_tests {
         stamp_schema_version(&path, 98);
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_away_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=99 BEGIN SELECT RAISE(ABORT,'away migration'); END;").unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection
             .execute_batch("ROLLBACK; DROP TRIGGER fail_away_migration;")
             .unwrap();
@@ -8799,7 +8840,7 @@ mod reader_tests {
             .unwrap()
         );
         connection.execute_batch("CREATE TRIGGER stop_before_profile_preference BEFORE INSERT ON schema_migrations WHEN NEW.version=101 BEGIN SELECT RAISE(ABORT,'profile preference migration'); END;").unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection
             .execute_batch("ROLLBACK; DROP TRIGGER stop_before_profile_preference;")
             .unwrap();
@@ -8814,7 +8855,7 @@ mod reader_tests {
             )
             .unwrap());
         connection.execute_batch("CREATE TRIGGER stop_before_stored_answers BEFORE INSERT ON schema_migrations WHEN NEW.version=113 BEGIN SELECT RAISE(ABORT,'stored answers migration'); END;").unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection
             .execute_batch("ROLLBACK; DROP TRIGGER stop_before_stored_answers;")
             .unwrap();
@@ -8822,7 +8863,7 @@ mod reader_tests {
         assert_eq!(before_answers.revision, 112);
         assert_eq!(before_answers.minimum_compatible, Some(111));
         before_answers.ensure_supported_by(112).unwrap();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         let schema = read_schema_state(&connection).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
         assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
@@ -8878,7 +8919,7 @@ mod reader_tests {
         stamp_schema_version(&path, 92);
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TRIGGER stop_question_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=94 BEGIN SELECT RAISE(ABORT,'question frontier fixture'); END;").unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection
             .execute_batch("ROLLBACK; DROP TRIGGER stop_question_migration;")
             .unwrap();
@@ -8892,7 +8933,7 @@ mod reader_tests {
         );
         assert_eq!(read_schema_state(&connection).unwrap().revision, 93);
         connection.execute_batch("CREATE TRIGGER released_boundary BEFORE INSERT ON schema_migrations WHEN NEW.version=95 BEGIN SELECT RAISE(ABORT,'released boundary'); END;").unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         connection.execute_batch("ROLLBACK").unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, 94);
@@ -9237,7 +9278,7 @@ mod reader_tests {
                      BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
             )
             .unwrap();
-        assert!(migrate_schema(&connection).is_err());
+        assert!(migrate_schema(&connection, None).is_err());
         if !connection.is_autocommit() {
             connection.execute_batch("ROLLBACK").unwrap();
         }
@@ -9265,7 +9306,7 @@ mod reader_tests {
         connection
             .execute_batch("DROP TRIGGER abort_v155; PRAGMA synchronous = FULL;")
             .unwrap();
-        migrate_schema(&connection).unwrap();
+        migrate_schema(&connection, None).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "cache_size", |row| row.get::<_, i64>(0))
