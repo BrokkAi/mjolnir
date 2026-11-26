@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 159;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 160;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3774,6 +3774,23 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 160 is breaking: session_checkpoints.archive_path holds a bare
+    // file name for archives under sessions/ so the store resolves them in
+    // whatever directory it now lives in. Older binaries read the column
+    // verbatim and reject a relative archive path on resume.
+    // O(1) on large tables: session_checkpoints has one small row per suspended session.
+    if version < 160 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        super::state_io::relativize_checkpoint_archive_paths(&transaction)?;
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 160 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (160, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=160;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -6167,6 +6184,131 @@ mod reader_tests {
         );
     }
 
+    fn checkpoint_archive_column(connection: &Connection, id: &str) -> PathBuf {
+        let blob: Vec<u8> = connection
+            .query_row(
+                "SELECT archive_path FROM session_checkpoints WHERE session_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        super::super::values::blob_to_path(&blob)
+    }
+
+    fn checkpoint_session(id: &str, archive: PathBuf) -> SessionRecord {
+        let mut session = super::super::tests::session(id, "project");
+        session.checkpoint = Some(Box::new(CheckpointMetadata {
+            archive_path: archive,
+            sha256: "a".repeat(64),
+            created_at: "2026-11-25T00:00:00Z".into(),
+            event_frontier: 3,
+        }));
+        session
+    }
+
+    #[test]
+    fn revision_160_relativizes_only_managed_checkpoint_archives_and_refuses_revision_159() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let sessions = directory.path().join("sessions");
+        let external = PathBuf::from("/srv/elsewhere/external.hel.zip");
+        let nested = sessions.join("nested").join("deep.hel.zip");
+        for (id, archive) in [
+            ("managed", sessions.join("managed.hel.zip")),
+            ("external", external.clone()),
+            ("nested", nested.clone()),
+        ] {
+            save_session_to(&path, &checkpoint_session(id, archive)).unwrap();
+        }
+        stamp_schema_version(&path, 159);
+        // Revision 159 stored the raw absolute path for every row.
+        let previous = Connection::open(&path).unwrap();
+        previous
+            .execute(
+                "UPDATE session_checkpoints SET archive_path = ?2 WHERE session_id = ?1",
+                params![
+                    "managed",
+                    super::super::values::path_to_blob(&sessions.join("managed.hel.zip"))
+                ],
+            )
+            .unwrap();
+        drop(previous);
+
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(160));
+        assert!(state.ensure_supported_by(159).is_err());
+        assert_eq!(
+            checkpoint_archive_column(&upgraded, "managed"),
+            PathBuf::from("managed.hel.zip")
+        );
+        assert_eq!(checkpoint_archive_column(&upgraded, "external"), external);
+        assert_eq!(checkpoint_archive_column(&upgraded, "nested"), nested);
+        let loaded = load_state_from(&path).unwrap();
+        let archive = |id: &str| {
+            loaded.sessions[id]
+                .checkpoint
+                .as_ref()
+                .unwrap()
+                .archive_path
+                .clone()
+        };
+        assert_eq!(archive("managed"), sessions.join("managed.hel.zip"));
+        assert_eq!(archive("external"), external);
+        assert_eq!(archive("nested"), nested);
+    }
+
+    #[test]
+    fn copied_data_directory_resolves_and_swaps_managed_checkpoint_archives() {
+        let first = tempfile::tempdir().unwrap();
+        let first_db = first.path().join("mj.sqlite3");
+        let archive = first.path().join("sessions").join("moved.hel.zip");
+        save_session_to(&first_db, &checkpoint_session("moved", archive.clone())).unwrap();
+        drop(open_writer(&first_db).unwrap());
+
+        let second = tempfile::tempdir().unwrap();
+        for entry in fs::read_dir(first.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                fs::copy(entry.path(), second.path().join(entry.file_name())).unwrap();
+            }
+        }
+        let second_db = second.path().join("mj.sqlite3");
+        let moved = load_state_from(&second_db).unwrap().sessions["moved"]
+            .checkpoint
+            .clone()
+            .unwrap();
+        assert_eq!(
+            moved.archive_path,
+            second.path().join("sessions").join("moved.hel.zip")
+        );
+
+        let mut replacement = (*moved).clone();
+        replacement.archive_path = second.path().join("sessions").join("swapped.hel.zip");
+        replacement.sha256 = "b".repeat(64);
+        let mut connection = open_writer(&second_db).unwrap();
+        assert!(
+            super::super::sessions::replace_checkpoint_archive_if_current_on(
+                &mut connection,
+                "moved",
+                &moved.archive_path,
+                &moved.sha256,
+                &replacement,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            checkpoint_archive_column(&connection, "moved"),
+            PathBuf::from("swapped.hel.zip")
+        );
+        // The original store still holds its own, unswapped row.
+        assert_eq!(
+            checkpoint_archive_column(&open_writer(&first_db).unwrap(), "moved"),
+            PathBuf::from("moved.hel.zip")
+        );
+    }
+
     #[test]
     fn revision_159_history_only_consent_round_trips_and_refuses_revision_158() {
         let directory = tempfile::tempdir().unwrap();
@@ -6175,8 +6317,8 @@ mod reader_tests {
         stamp_schema_version(&path, 158);
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 159);
-        assert_eq!(state.minimum_compatible, Some(159));
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(158).is_err());
         let consent = mj_core::suspend_consent::SuspendConsent {
             history_only: true,

@@ -1538,27 +1538,46 @@ pub fn replace_checkpoint_archive_if_current(
     replacement: &CheckpointMetadata,
 ) -> Result<bool> {
     let session_id = session_id.to_owned();
-    let expected_archive_path = path_to_blob(expected_archive_path);
+    let expected_archive_path = expected_archive_path.to_path_buf();
     let expected_sha256 = expected_sha256.to_owned();
-    let archive_path = path_to_blob(&replacement.archive_path);
-    let sha256 = replacement.sha256.clone();
+    let replacement = replacement.clone();
     submit_database_write("replace_checkpoint_archive_if_current", move |connection| {
-        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let changed = tx.execute(
-            "UPDATE session_checkpoints
-                 SET archive_path = ?3, sha256 = ?4
-                 WHERE session_id = ?1 AND archive_path = ?2 AND sha256 = ?5",
-            params![
-                session_id,
-                expected_archive_path,
-                archive_path,
-                sha256,
-                expected_sha256,
-            ],
-        )?;
-        tx.commit()?;
-        Ok(changed == 1)
+        replace_checkpoint_archive_if_current_on(
+            connection,
+            &session_id,
+            &expected_archive_path,
+            &expected_sha256,
+            &replacement,
+        )
     })
+}
+
+pub(super) fn replace_checkpoint_archive_if_current_on(
+    connection: &mut Connection,
+    session_id: &str,
+    expected_archive_path: &Path,
+    expected_sha256: &str,
+    replacement: &CheckpointMetadata,
+) -> Result<bool> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Every managed row is stored relative, and callers hold decoded paths.
+    let expected_archive_path =
+        super::state_io::checkpoint_archive_blob(&tx, expected_archive_path);
+    let archive_path = super::state_io::checkpoint_archive_blob(&tx, &replacement.archive_path);
+    let changed = tx.execute(
+        "UPDATE session_checkpoints
+             SET archive_path = ?3, sha256 = ?4
+             WHERE session_id = ?1 AND archive_path = ?2 AND sha256 = ?5",
+        params![
+            session_id,
+            expected_archive_path,
+            archive_path,
+            replacement.sha256,
+            expected_sha256,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(changed == 1)
 }
 
 pub fn save_checkpointed_session(session: &SessionRecord) -> Result<()> {

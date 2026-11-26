@@ -1571,7 +1571,7 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     .unwrap();
 
     let verified = CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/verified.hel.zip"),
+        archive_path: PathBuf::from("/srv/fixture/sessions/verified.hel.zip"),
         sha256: "c".repeat(64),
         created_at: "2026-08-15T00:02:00Z".into(),
         event_frontier: 21,
@@ -1682,7 +1682,7 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
     stale.last_error = Some("worker bootstrap failed: upload failed".into());
     save_session_to(&database, &stale).unwrap();
     let recovered = CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/recovered.hel.zip"),
+        archive_path: PathBuf::from("/srv/fixture/sessions/recovered.hel.zip"),
         sha256: "b".repeat(64),
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,
@@ -1843,14 +1843,14 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
     stale.acp_session_title = Some("Old harness title".into());
     stale.session_title_override = Some("Old user title".into());
     stale.checkpoint = Some(Box::new(CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/old.hel.zip"),
+        archive_path: PathBuf::from("/srv/fixture/sessions/old.hel.zip"),
         sha256: "a".repeat(64),
         created_at: "2026-08-14T11:00:00Z".into(),
         event_frontier: 10,
     }));
     save_session_to(&database, &stale).unwrap();
     let recovered = CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/recovered.hel.zip"),
+        archive_path: PathBuf::from("/srv/fixture/sessions/recovered.hel.zip"),
         sha256: "b".repeat(64),
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,

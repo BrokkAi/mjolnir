@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 159;
+const SCHEMA_VERSION: i64 = 160;
 
 pub mod web_push;
 pub use web_push::*;
@@ -178,7 +178,7 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
         failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
         checkpoint: Some(Box::new(CheckpointMetadata {
-            archive_path: PathBuf::from("sessions/test.hel.zip"),
+            archive_path: PathBuf::from("/srv/fixture/sessions/test.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-12T01:00:00Z".into(),
             event_frontier: 6,

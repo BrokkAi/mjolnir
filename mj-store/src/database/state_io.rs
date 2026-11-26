@@ -1013,6 +1013,94 @@ fn replace_targets_with_parent(
     Ok(())
 }
 
+/// The managed archive directory for the store behind `connection`: the
+/// `sessions/` directory beside the database file, as `tool_details.rs` derives
+/// its root. In-memory databases have no data directory.
+pub(super) fn sessions_root(connection: &Connection) -> Option<PathBuf> {
+    let path = Path::new(connection.path()?);
+    (!path.as_os_str().is_empty())
+        .then(|| super::tool_details::data_dir_from(path).join("sessions"))
+}
+
+/// Store a direct child of `sessions_root` as its bare file name so the store
+/// resolves it under whatever directory it now lives in. Other paths stay
+/// absolute. Writers store the raw `sessions_dir()` join, so stripping the
+/// prefix lexically is exact.
+pub(super) fn encode_checkpoint_archive_path(path: &Path, sessions_root: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if parent == sessions_root => PathBuf::from(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Inverse of `encode_checkpoint_archive_path`. A bare file name joins onto
+/// `sessions_root`; an absolute path is returned unchanged; any other relative
+/// value is corrupt and rejected.
+pub(super) fn decode_checkpoint_archive_path(
+    stored: &Path,
+    sessions_root: &Path,
+) -> Result<PathBuf> {
+    if stored.is_absolute() {
+        return Ok(stored.to_path_buf());
+    }
+    let mut components = stored.components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => Ok(sessions_root.join(name)),
+        _ => bail!(
+            "checkpoint archive path {} is neither absolute nor a bare file name",
+            stored.display()
+        ),
+    }
+}
+
+/// Encode a path for a `session_checkpoints` row written through `connection`.
+pub(super) fn checkpoint_archive_blob(connection: &Connection, path: &Path) -> Vec<u8> {
+    match sessions_root(connection) {
+        Some(root) => path_to_blob(&encode_checkpoint_archive_path(path, &root)),
+        None => path_to_blob(path),
+    }
+}
+
+fn checkpoint_archive_from_blob(connection: &Connection, blob: &[u8]) -> Result<PathBuf> {
+    let stored = blob_to_path(blob);
+    match sessions_root(connection) {
+        Some(root) => decode_checkpoint_archive_path(&stored, &root),
+        None if stored.is_absolute() => Ok(stored),
+        None => bail!(
+            "checkpoint archive path {} is relative in a database with no data directory",
+            stored.display()
+        ),
+    }
+}
+
+/// Migration 160: rewrite managed absolute archive paths to bare file names.
+/// The table holds one small row per suspended session. Rows outside
+/// `sessions/` and in-memory databases are left alone.
+pub(super) fn relativize_checkpoint_archive_paths(connection: &Connection) -> Result<()> {
+    let Some(root) = sessions_root(connection) else {
+        return Ok(());
+    };
+    let rows = connection
+        .prepare("SELECT session_id, archive_path FROM session_checkpoints")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                blob_to_path(row.get_ref(1)?.as_blob()?),
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (session_id, stored) in rows {
+        let encoded = encode_checkpoint_archive_path(&stored, &root);
+        if encoded != stored {
+            connection.execute(
+                "UPDATE session_checkpoints SET archive_path = ?2 WHERE session_id = ?1",
+                params![session_id, path_to_blob(&encoded)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
     tx.execute(
         "DELETE FROM session_checkpoints WHERE session_id = ?1",
@@ -1024,7 +1112,7 @@ pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) 
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 session.id,
-                path_to_blob(&checkpoint.archive_path),
+                checkpoint_archive_blob(tx, &checkpoint.archive_path),
                 checkpoint.sha256,
                 checkpoint.created_at,
                 checkpoint.event_frontier,
@@ -1484,15 +1572,25 @@ fn read_checkpoints(
     let rows = statement.query_map(arguments.as_slice(), |row| {
         Ok((
             row.get::<_, String>(0)?,
-            CheckpointMetadata {
-                archive_path: blob_to_path(row.get_ref(1)?.as_blob()?),
-                sha256: row.get(2)?,
-                created_at: row.get(3)?,
-                event_frontier: row.get(4)?,
-            },
+            row.get_ref(1)?.as_blob()?.to_vec(),
+            row.get::<_, String>(2)?,
+            row.get(3)?,
+            row.get(4)?,
         ))
     })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    rows.map(|row| {
+        let (session_id, archive, sha256, created_at, event_frontier) = row?;
+        Ok((
+            session_id,
+            CheckpointMetadata {
+                archive_path: checkpoint_archive_from_blob(connection, &archive)?,
+                sha256,
+                created_at,
+                event_frontier,
+            },
+        ))
+    })
+    .collect()
 }
 
 /// Fill a missing snapshot without overwriting a concurrent writer. A deleted
