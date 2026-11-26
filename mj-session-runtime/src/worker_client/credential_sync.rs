@@ -181,7 +181,10 @@ pub struct CredentialWakes {
 #[derive(Debug, Default)]
 struct ProfileOwnership {
     epoch: u64,
-    observed: Option<(mj_core::targets::TargetLocator, bool)>,
+    observed: Option<(
+        mj_core::targets::TargetLocator,
+        mj_worker_launch::local_profile_homes::StagedProfileOwnership,
+    )>,
 }
 
 impl Default for CredentialWakes {
@@ -245,19 +248,19 @@ impl CredentialWakes {
         &self,
         session: &mj_core::state::SessionRecord,
         config: &mj_core::config::Config,
-    ) -> bool {
+    ) -> Option<mj_worker_launch::local_profile_homes::StagedProfileOwnership> {
         if !matches!(
             session.target.as_deref(),
             Some(mj_core::state::TargetLocator::SshHostBare { .. })
         ) || session.harness_kind.nested_home()
         {
-            return mj_worker_launch::local_profile_homes::session_has_a_staged_home_of_its_own(
+            return mj_worker_launch::local_profile_homes::probe_staged_home_on_target(
                 session,
+                config,
+                &mj_core::targets::ProcessExecutor,
             );
         }
-        let Some(backend) = Self::profile_backend(session, config) else {
-            return false;
-        };
+        let backend = Self::profile_backend(session, config)?;
         self.observe_profile_with(&session.id, backend, || {
             mj_worker_launch::local_profile_homes::probe_staged_home_on_target(
                 session,
@@ -271,8 +274,8 @@ impl CredentialWakes {
         &self,
         id: &str,
         backend: mj_core::targets::TargetLocator,
-        probe: impl FnOnce() -> Option<bool>,
-    ) -> bool {
+        probe: impl FnOnce() -> Option<mj_worker_launch::local_profile_homes::StagedProfileOwnership>,
+    ) -> Option<mj_worker_launch::local_profile_homes::StagedProfileOwnership> {
         let epoch = {
             let mut profiles = self
                 .profiles
@@ -282,23 +285,21 @@ impl CredentialWakes {
             if let Some((previous, allowed)) = &entry.observed
                 && previous == &backend
             {
-                return *allowed;
+                return Some(*allowed);
             }
             entry.epoch
         };
-        let Some(allowed) = probe() else {
-            return false;
-        };
+        let allowed = probe()?;
         let mut profiles = self
             .profiles
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = profiles.entry(id.to_owned()).or_default();
         if entry.epoch != epoch {
-            return false;
+            return None;
         }
         entry.observed = Some((backend, allowed));
-        allowed
+        Some(allowed)
     }
 
     /// No I/O under the daemon owner lock; an absent or stale observation fails closed.
@@ -306,6 +307,7 @@ impl CredentialWakes {
         &self,
         session: &mj_core::state::SessionRecord,
         config: &mj_core::config::Config,
+        skips_login_file_sync: bool,
     ) -> bool {
         if !matches!(
             session.target.as_deref(),
@@ -322,7 +324,8 @@ impl CredentialWakes {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session.id)
             .and_then(|entry| entry.observed.as_ref())
-            .is_some_and(|(previous, allowed)| previous == &backend && *allowed)
+            .is_some_and(|(previous, ownership)| previous == &backend && ownership.owns_home()
+                && (*ownership != mj_worker_launch::local_profile_homes::StagedProfileOwnership::OwnedSharedLogin || skips_login_file_sync))
     }
 }
 
@@ -4543,6 +4546,9 @@ mod host_bare_ownership_tests {
     use std::sync::{Arc, Barrier};
     #[test]
     fn ownership_probe_is_cached_and_reconnect_discards_inflight_result() {
+        use mj_worker_launch::local_profile_homes::StagedProfileOwnership::{
+            Owned, OwnedSharedLogin, SharedHome,
+        };
         let wakes = Arc::new(CredentialWakes::default());
         let backend = mj_core::targets::TargetLocator::SshHostBare {
             ssh: mj_core::targets::SshTarget {
@@ -4551,15 +4557,26 @@ mod host_bare_ownership_tests {
             },
             data_root: "/source".into(),
         };
-        assert!(!wakes.observe_profile_with("s", backend.clone(), || None));
-        assert!(wakes.observe_profile_with("s", backend.clone(), || Some(true)));
-        assert!(
-            wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated"))
+        assert_eq!(
+            wakes.observe_profile_with("s", backend.clone(), || None),
+            None
+        );
+        assert_eq!(
+            wakes.observe_profile_with("s", backend.clone(), || Some(OwnedSharedLogin)),
+            Some(OwnedSharedLogin)
+        );
+        assert_eq!(
+            wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated")),
+            Some(OwnedSharedLogin)
         );
         wakes.invalidate_profile("s");
-        assert!(!wakes.observe_profile_with("s", backend.clone(), || Some(false)));
-        assert!(
-            !wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated"))
+        assert_eq!(
+            wakes.observe_profile_with("s", backend.clone(), || Some(SharedHome)),
+            Some(SharedHome)
+        );
+        assert_eq!(
+            wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated")),
+            Some(SharedHome)
         );
         wakes.invalidate_profile("s");
         let barrier = Arc::new(Barrier::new(2));
@@ -4571,14 +4588,50 @@ mod host_bare_ownership_tests {
                 other_wakes.observe_profile_with("s", other_backend, || {
                     other_barrier.wait();
                     other_barrier.wait();
-                    Some(true)
+                    Some(Owned)
                 })
             });
             barrier.wait();
             wakes.invalidate_profile("s");
             barrier.wait();
-            assert!(!task.join().unwrap());
+            assert_eq!(task.join().unwrap(), None);
         });
-        assert!(wakes.observe_profile_with("s", backend, || Some(true)));
+        assert_eq!(
+            wakes.observe_profile_with("s", backend, || Some(Owned)),
+            Some(Owned)
+        );
+    }
+
+    // A reattached shared login invalidates queued targets that would write login files.
+    #[test]
+    fn shared_login_invalidates_a_prepared_target_that_would_write_login() {
+        use mj_core::state::{TargetConnection, TargetLocator, TargetRuntimeSettings};
+        use mj_worker_launch::local_profile_homes::StagedProfileOwnership::OwnedSharedLogin;
+        let id = "0123456789abcdef0123456789abcdef";
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+        session.target = Some(Box::new(TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/remote".into(),
+        }));
+        let mut runtime = TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare);
+        runtime.kind = "ssh-host-bare".into();
+        runtime.connection = TargetConnection::Ssh {
+            ssh: mj_core::config::SshConnection {
+                host: "source".into(),
+                user: None,
+                identity_file: None,
+                extra_args: vec![],
+            },
+        };
+        session.target_runtime = Some(runtime.into());
+        let config = mj_core::config::Config::default();
+        let backend = CredentialWakes::profile_backend(&session, &config).unwrap();
+        let wakes = CredentialWakes::default();
+        assert_eq!(
+            wakes.observe_profile_with(id, backend, || Some(OwnedSharedLogin)),
+            Some(OwnedSharedLogin)
+        );
+        assert!(!wakes.profile_is_current(&session, &config, false));
+        assert!(wakes.profile_is_current(&session, &config, true));
     }
 }

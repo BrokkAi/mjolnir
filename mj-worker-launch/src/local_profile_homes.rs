@@ -142,6 +142,20 @@ pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRec
     std::fs::symlink_metadata(worker_root.join("profile")).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// Whether a staged home and its login file are owned by the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedProfileOwnership {
+    Owned,
+    OwnedSharedLogin,
+    SharedHome,
+}
+
+impl StagedProfileOwnership {
+    pub fn owns_home(self) -> bool {
+        matches!(self, Self::Owned | Self::OwnedSharedLogin)
+    }
+}
+
 /// Check ownership on the machine holding the profile, failing closed when it
 /// cannot be reached. Call from supervised background work.
 pub fn session_has_a_staged_home_on_target(
@@ -149,7 +163,8 @@ pub fn session_has_a_staged_home_on_target(
     config: &mj_core::config::Config,
     executor: &impl CommandExecutor,
 ) -> bool {
-    probe_staged_home_on_target(session, config, executor).unwrap_or(false)
+    probe_staged_home_on_target(session, config, executor)
+        .is_some_and(StagedProfileOwnership::owns_home)
 }
 
 /// Return an ownership verdict only when the target can prove one.
@@ -157,14 +172,24 @@ pub fn probe_staged_home_on_target(
     session: &mj_core::state::SessionRecord,
     config: &mj_core::config::Config,
     executor: &impl CommandExecutor,
-) -> Option<bool> {
-    let Some(locator @ TargetLocator::SshHostBare { data_root, .. }) = session.target.as_deref()
-    else {
-        return Some(session_has_a_staged_home_of_its_own(session));
+) -> Option<StagedProfileOwnership> {
+    use StagedProfileOwnership::{Owned, OwnedSharedLogin, SharedHome};
+    let (locator, data_root) = match session.target.as_deref() {
+        Some(locator @ TargetLocator::SshHostBare { data_root, .. })
+            if !session.harness_kind.nested_home() =>
+        {
+            (locator, data_root)
+        }
+        _ => {
+            return Some(if !session_has_a_staged_home_of_its_own(session) {
+                SharedHome
+            } else if session_shares_profile_login(session, session.harness_kind) {
+                OwnedSharedLogin
+            } else {
+                Owned
+            });
+        }
     };
-    if session.harness_kind.nested_home() {
-        return Some(session_has_a_staged_home_of_its_own(session));
-    }
     let backend = match crate::targets::backend_locator(locator, session, config) {
         Ok(backend) => backend,
         Err(error) => {
@@ -175,6 +200,14 @@ pub fn probe_staged_home_on_target(
     let home = mj_core::config::DataLayout::at(data_root)
         .worker_root(&session.id)
         .join("profile");
+    let marker = if session.harness_kind.shares_local_login() {
+        mj_core::target_path::text(&mj_core::config::harness_authentication_marker(
+            session.harness_kind,
+            &home,
+        ))
+    } else {
+        String::new()
+    };
     let command = match crate::targets::command_on_locator(
         mj_core::targets::SshTrafficClass::Control,
         &backend,
@@ -182,9 +215,10 @@ pub fn probe_staged_home_on_target(
         vec![
             "sh".into(),
             "-c".into(),
-            "if [ ! -L \"$1\" ] && [ -d \"$1\" ]; then printf 'owned\\n'; else printf 'shared\\n'; fi".into(),
+            "if [ -L \"$1\" ] || [ ! -d \"$1\" ]; then printf 'shared_home\\n'; elif [ -n \"$2\" ] && [ -L \"$2\" ]; then printf 'shared_login\\n'; else printf 'owned\\n'; fi".into(),
             "mj-profile-ownership".into(),
             mj_core::target_path::text(&home),
+            marker,
         ],
         "check remote profile ownership",
     ) {
@@ -199,13 +233,19 @@ pub fn probe_staged_home_on_target(
             if output.status == 0
                 && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("owned") =>
         {
-            Some(true)
+            Some(Owned)
         }
         Ok(output)
             if output.status == 0
-                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("shared") =>
+                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("shared_login") =>
         {
-            Some(false)
+            Some(OwnedSharedLogin)
+        }
+        Ok(output)
+            if output.status == 0
+                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("shared_home") =>
+        {
+            Some(SharedHome)
         }
         Ok(output) => {
             tracing::warn!(session_id = %session.id, status = output.status, "could not check remote profile ownership");
@@ -490,6 +530,7 @@ mod tests {
         assert!(link_profile_homes_of_earlier_sessions(&state).is_empty());
     }
 
+    // An owned remote home may still contain a shared login symlink.
     #[test]
     fn host_bare_profile_probe_runs_on_ssh_and_fails_closed() {
         struct Probe(i32, &'static str);
@@ -518,7 +559,8 @@ mod tests {
                 command: &crate::targets::CommandSpec,
             ) -> anyhow::Result<crate::targets::CommandOutput> {
                 assert_eq!(command.program, "ssh");
-                assert!(command.args.last().unwrap().contains("[ ! -L"));
+                assert!(command.args.last().unwrap().contains("[ -L"));
+                assert!(command.args.last().unwrap().contains("auth.json"));
                 assert!(
                     command
                         .args
@@ -556,10 +598,15 @@ mod tests {
         };
         record.target_runtime = Some(runtime.into());
         for (status, stdout, expected) in [
-            (0, "owned\n", Some(true)),
-            (0, "shared\n", Some(false)),
+            (0, "owned\n", Some(StagedProfileOwnership::Owned)),
+            (
+                0,
+                "shared_login\n",
+                Some(StagedProfileOwnership::OwnedSharedLogin),
+            ),
+            (0, "shared_home\n", Some(StagedProfileOwnership::SharedHome)),
             (0, "unexpected\n", None),
-            (1, "shared\n", None),
+            (1, "shared_home\n", None),
             (255, "owned\n", None),
             (-1, "", None),
         ] {
@@ -577,7 +624,7 @@ mod tests {
                     &mj_core::config::Config::default(),
                     &Probe(status, stdout)
                 ),
-                expected.unwrap_or(false)
+                expected.is_some_and(StagedProfileOwnership::owns_home)
             );
         }
         record.harness_kind = HarnessKind::OpenCode;

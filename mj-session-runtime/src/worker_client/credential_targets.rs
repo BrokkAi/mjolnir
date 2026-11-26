@@ -1,6 +1,6 @@
 //! Which sessions the daemon keeps supplied with credentials.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use mj_core::credentials::CredentialSyncTarget;
 use mj_core::state::SessionState;
@@ -8,7 +8,9 @@ use mj_core::state::SessionState;
 use crate::session_manager::session_target_is_pollable;
 use mj_core::config::Config;
 use mj_core::state::State;
+pub use mj_worker_launch::local_profile_homes::StagedProfileOwnership;
 use mj_worker_launch::{local_profile_homes, worker_launch};
+pub type StagedCredentialSessions = BTreeMap<String, StagedProfileOwnership>;
 
 /// Sessions whose worker can answer credential requests right now. Sessions
 /// still provisioning or already disconnected would only produce connection
@@ -44,7 +46,7 @@ pub fn credential_sync_targets_with_auth(
     )
 }
 
-pub fn staged_credential_sessions(config: &Config, state: &State) -> BTreeSet<String> {
+pub fn staged_credential_sessions(config: &Config, state: &State) -> StagedCredentialSessions {
     staged_credential_sessions_with_cache(config, state, None)
 }
 
@@ -54,7 +56,7 @@ pub fn staged_credential_sessions_with_cache(
     config: &Config,
     state: &State,
     wakes: Option<&super::CredentialWakes>,
-) -> BTreeSet<String> {
+) -> StagedCredentialSessions {
     let sessions = state
         .sessions
         .values()
@@ -70,30 +72,39 @@ pub fn staged_credential_sessions_with_cache(
     });
     let mut staged = local
         .into_iter()
-        .filter(|session| local_profile_homes::session_has_a_staged_home_of_its_own(session))
-        .map(|session| session.id.clone())
-        .collect::<BTreeSet<_>>();
+        .filter_map(|session| {
+            local_profile_homes::probe_staged_home_on_target(
+                session,
+                config,
+                &mj_core::targets::ProcessExecutor,
+            )
+            .filter(|ownership| ownership.owns_home())
+            .map(|ownership| (session.id.clone(), ownership))
+        })
+        .collect::<StagedCredentialSessions>();
     std::thread::scope(|scope| {
         let tasks = remote
             .into_iter()
             .map(|session| {
                 scope.spawn(move || {
-                    let owned = match wakes {
+                    let ownership = match wakes {
                         Some(wakes) => wakes.observe_profile(session, config),
-                        None => local_profile_homes::session_has_a_staged_home_on_target(
+                        None => local_profile_homes::probe_staged_home_on_target(
                             session,
                             config,
                             &mj_core::targets::ProcessExecutor,
                         ),
                     };
-                    owned.then(|| session.id.clone())
+                    ownership
+                        .filter(|ownership| ownership.owns_home())
+                        .map(|ownership| (session.id.clone(), ownership))
                 })
             })
             .collect::<Vec<_>>();
         for task in tasks {
             match task.join() {
-                Ok(Some(id)) => {
-                    staged.insert(id);
+                Ok(Some((id, ownership))) => {
+                    staged.insert(id, ownership);
                 }
                 Ok(None) => {}
                 Err(_) => tracing::error!("credential profile observation panicked"),
@@ -107,10 +118,10 @@ pub fn credential_sync_targets_from_sources(
     config: &Config,
     state: &State,
     schemes: &BTreeMap<String, bool>,
-    staged: &BTreeSet<String>,
+    staged: &StagedCredentialSessions,
 ) -> Vec<CredentialSyncTarget> {
     state.sessions.values()
-        .filter(|session| staged.contains(&session.id))
+        .filter(|session| staged.get(&session.id).is_some_and(|ownership| ownership.owns_home()))
         .filter_map(|session| {
             let profile = config.profiles.get(&session.last_profile)?;
             let spec = match worker_launch::reconnect_command(config, state, &session.id) {
@@ -134,6 +145,7 @@ pub fn credential_sync_targets_from_sources(
                 profile_home: profile.home.clone(),
                 aws_credentials,
                 skips_login_file_sync: *schemes.get(&session.last_profile)?
+                    || staged.get(&session.id) == Some(&StagedProfileOwnership::OwnedSharedLogin)
                     || local_profile_homes::session_shares_profile_login(
                         session,
                         profile.kind,
@@ -161,4 +173,64 @@ pub fn credential_sync_target_is_current(
 ) -> bool {
     state.sessions.retain(|id, _| id == &candidate.session_id);
     credential_sync_targets(config, &state).contains(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An SSH host-bare login file can still symlink to a personal home.
+    #[test]
+    fn host_bare_shared_login_skips_login_but_keeps_other_syncs() {
+        use mj_core::config::{HarnessKind, HarnessProfile, TargetTemplate};
+        use mj_core::state::{TargetConnection, TargetLocator, TargetRuntimeSettings};
+        let id = "0123456789abcdef0123456789abcdef";
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(HarnessKind::Codex, "/profile"),
+        );
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some("/workspace".into());
+        session.target = Some(Box::new(TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/remote".into(),
+        }));
+        let mut runtime = TargetRuntimeSettings::from(&TargetTemplate::LocalBare);
+        runtime.kind = "ssh-host-bare".into();
+        runtime.connection = TargetConnection::Ssh {
+            ssh: mj_core::config::SshConnection {
+                host: "source".into(),
+                user: None,
+                identity_file: None,
+                extra_args: vec![],
+            },
+        };
+        session.target_runtime = Some(runtime.into());
+        let mut state = State::default();
+        state.sessions.insert(id.into(), session);
+        let schemes = BTreeMap::from([("codex".into(), false)]);
+        for (ownership, skip) in [
+            (StagedProfileOwnership::Owned, false),
+            (StagedProfileOwnership::OwnedSharedLogin, true),
+        ] {
+            let staged = BTreeMap::from([(id.into(), ownership)]);
+            let targets = credential_sync_targets_from_sources(&config, &state, &schemes, &staged);
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].skips_login_file_sync, skip);
+            assert!(targets[0].sync_github_token);
+            assert_eq!(
+                targets[0].skills_scope,
+                mj_core::skills::SkillsScope::Isolated
+            );
+        }
+        let shared = BTreeMap::from([(id.into(), StagedProfileOwnership::SharedHome)]);
+        assert!(
+            credential_sync_targets_from_sources(&config, &state, &schemes, &shared).is_empty()
+        );
+    }
 }

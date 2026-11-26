@@ -239,16 +239,17 @@ impl CheckpointTransfer<'_> {
     }
 
     /// The host staging path this transfer uses, when its target is a
-    /// container behind SSH: the only target whose archive is copied to the
-    /// SSH host before it is downloaded.
+    /// container or host-bare worker behind SSH.
     pub fn host_staging_path(&self) -> Option<Result<String>> {
-        self.locator
-            .container_endpoint()
-            .is_some_and(|endpoint| endpoint.ssh.is_some())
-            .then(|| remote_staging_path(self.session_id, self.operation_id))
+        (matches!(self.locator, TargetLocator::SshHostBare { .. })
+            || self
+                .locator
+                .container_endpoint()
+                .is_some_and(|endpoint| endpoint.ssh.is_some()))
+        .then(|| remote_staging_path(self.session_id, self.operation_id))
     }
 
-    /// [`Self::execute`], except that an SSH container target's host staging
+    /// [`Self::execute`], except that an SSH target's host staging
     /// archive is kept after verification so the caller can promote it
     /// without uploading it again. The caller must remove it with
     /// [`cleanup_host_staging`] or consume it. A failure removes the staging
@@ -382,12 +383,12 @@ impl CheckpointTransfer<'_> {
     }
 }
 
-/// Remove the host-side staging copy of an SSH container transfer. Other
+/// Remove the host-side staging copy of an SSH transfer. Other
 /// targets have none, so this does nothing for them.
 ///
-/// SSH container transfers use a host-side copy because `scp` cannot address
-/// a path inside the container. The copy is disposable; the in-container
-/// archive remains gated by [`CheckpointTransfer::cleanup_plan`] until the
+/// Containers need a host-side copy, and host-bare targets need an ASCII path
+/// that SCP can address safely. The copy is disposable; the target archive
+/// remains gated by [`CheckpointTransfer::cleanup_plan`] until the
 /// local copy is verified.
 pub fn cleanup_host_staging(
     locator: &TargetLocator,
@@ -395,10 +396,13 @@ pub fn cleanup_host_staging(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     validate_remote_path(staging)?;
-    if let Some(ssh) = locator
-        .container_endpoint()
-        .and_then(|endpoint| endpoint.ssh)
-    {
+    let ssh = match locator {
+        TargetLocator::SshHostBare { ssh, .. } => Some(ssh),
+        _ => locator
+            .container_endpoint()
+            .and_then(|endpoint| endpoint.ssh),
+    };
+    if let Some(ssh) = ssh {
         let command =
             crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["rm", "-f", "--", staging])
                 .purpose("remove remote checkpoint staging");
@@ -503,14 +507,26 @@ pub fn transfer_plan(
                     .purpose("copy local bare checkpoint"),
             ],
             TargetLocator::SshHostBare { ssh, .. } => {
-                // Legacy SCP runs a remote shell, so quote the original path as one argument.
-                let mut command = crate::targets::scp_download(
-                    ssh,
-                    &mj_core::targets::posix_quote(remote_archive),
-                    &local,
+                let script = format!(
+                    "set -eu; (umask 077; mkdir -p -- .local/share/hel/transfers); chmod 0700 .local/share/hel/transfers; ln -f -- \"$1\" \"$2\" 2>/dev/null || cp -f -- \"$1\" \"$2\"; printf '{REMOTE_HOME_MARKER}%s\\n' \"$HOME\""
                 );
-                command.args.insert(0, "-O".into());
-                vec![command.purpose("download checkpoint over SSH")]
+                vec![
+                    crate::targets::ssh_command_owned(
+                        SshTrafficClass::Bulk,
+                        ssh,
+                        vec![
+                            "sh".into(),
+                            "-c".into(),
+                            script,
+                            "hel-checkpoint-stage".into(),
+                            remote_archive.into(),
+                            staging.into(),
+                        ],
+                    )
+                    .purpose("stage remote host checkpoint"),
+                    crate::targets::scp_download(ssh, staging, &local)
+                        .purpose("download checkpoint over SSH"),
+                ]
             }
             TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => vec![
                 crate::targets::scp_download(ssh, remote_archive, &local)
