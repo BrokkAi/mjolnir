@@ -118,11 +118,8 @@ pub(super) fn router(options: ServerOptions) -> Router {
     Router::new()
         .route("/", get(viewer))
         .route("/login", get(viewer))
-        .route("/viewer.css", get(viewer_css))
-        .route("/viewer.js", get(viewer_js))
+        .route("/assets/{*path}", get(hashed_asset))
         .route("/push-sync.js", get(push_sync_js))
-        .route("/markdown.js", get(markdown_js))
-        .route("/tool-output.js", get(tool_output_js))
         .route("/manifest.webmanifest", get(manifest))
         .route("/service-worker.js", get(service_worker))
         .route("/icon.svg", get(icon))
@@ -130,7 +127,6 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/icon-512.png", get(icon_512))
         .route("/maskable-512.png", get(maskable_512))
         .route("/apple-touch-icon.png", get(apple_touch_icon))
-        .route("/fonts/jetbrains-mono.woff2", get(mono_font))
         .route(
             "/auth/session",
             get(session_status)

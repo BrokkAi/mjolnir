@@ -547,8 +547,71 @@ impl DashboardState {
             mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
         >,
     ) {
-        if self.notification_cards == cards {
+        if self.published_cards == cards {
             return;
+        }
+        self.published_cards = cards;
+        self.refresh_notification_cards();
+    }
+
+    /// Records the conversations the last frame drew; reports whether that
+    /// changed the cards readers see.
+    pub fn set_conversations_on_screen(
+        &mut self,
+        sessions: impl IntoIterator<Item = String>,
+    ) -> bool {
+        let sessions: BTreeSet<String> = sessions.into_iter().collect();
+        if self.conversations_on_screen == sessions {
+            return false;
+        }
+        self.conversations_on_screen = sessions;
+        self.refresh_notification_cards()
+    }
+
+    /// Derives the cards every reader sees from the published ones and this
+    /// client's read frontier. The daemon drops an Important entry once the
+    /// session's receipt passes it; this client's receipt is usually ahead of
+    /// the daemon's, so it applies the same rule (`NotificationStackEntry::
+    /// is_unread`) to its own frontier instead of showing a card for a
+    /// conversation it has already read. Call after anything that changes
+    /// either input.
+    pub(crate) fn refresh_notification_cards(&mut self) -> bool {
+        let cards = self.published_cards.as_ref().map(|published| {
+            let mut cards = published.clone();
+            for (id, card) in published.iter() {
+                // A conversation being read is read through everything, even
+                // before the chat has received and acknowledged the event.
+                let viewed_through = if self.conversations_on_screen.contains(id) {
+                    u64::MAX
+                } else {
+                    self.state
+                        .sessions
+                        .get(id)
+                        .map_or(0, |session| session.viewed_through_event_ordinal)
+                };
+                match card.unread_through(viewed_through) {
+                    Some(std::borrow::Cow::Borrowed(_)) => {}
+                    Some(std::borrow::Cow::Owned(card)) => {
+                        cards.insert(id.clone(), card);
+                    }
+                    None => {
+                        cards.remove(id);
+                    }
+                }
+            }
+            cards
+        });
+        // A skip follows the daemon's card, not this client's filtered view:
+        // a card hidden only while its conversation is on screen keeps its
+        // place behind the others.
+        let published = &self.published_cards;
+        self.notifications.prune_published_skips(|id| {
+            published
+                .as_ref()
+                .is_some_and(|cards| cards.contains_key(id))
+        });
+        if self.notification_cards == cards {
+            return false;
         }
         if let Some(cards) = &cards {
             for (id, detail) in self.session_details.iter_mut() {
@@ -568,9 +631,8 @@ impl DashboardState {
                 .errors
                 .retain(|id, _| previous.and_then(|cards| cards.get(id)) == cards.get(id));
         }
-        self.notifications
-            .prune_published_skips(|id| cards.as_ref().is_some_and(|cards| cards.contains_key(id)));
         self.notification_cards = cards;
+        true
     }
 
     pub fn set_session_attention_for(
@@ -788,6 +850,7 @@ impl DashboardState {
         self.clamp_selections();
         self.leave_subagents_stopped_by_suspend(stopped_by_suspend);
         self.presented_records = self.state.sessions.clone();
+        self.refresh_notification_cards();
     }
 
     /// Replace the daemon's complete durable Move projection. Active intents
@@ -1381,7 +1444,10 @@ impl DashboardState {
         target: mj_core::attention::NotificationDismissal,
         result: Result<u64, String>,
     ) {
-        match self.apply_notification_dismissal(session_id, target, result) {
+        let applied = self.apply_notification_dismissal(session_id, target, result);
+        // A read dismissal advanced the local receipt.
+        self.refresh_notification_cards();
+        match applied {
             Some(Ok(())) => self.set_notice("Notification dismissed."),
             Some(Err(error)) => {
                 self.set_notice(format!("Could not dismiss notification: {error}"));
@@ -1410,6 +1476,8 @@ impl DashboardState {
                 None => {}
             }
         }
+        // A read dismissal advanced local receipts.
+        self.refresh_notification_cards();
         let count = |n| crate::widgets::counted(n, "notification", "notifications");
         match failures.as_slice() {
             [] if cleared == 0 => {}

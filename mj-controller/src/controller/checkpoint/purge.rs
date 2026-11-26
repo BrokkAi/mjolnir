@@ -508,7 +508,9 @@ mod tests {
         ArchiveInput, RepositoryMetadata, RepositorySnapshot, SnapshotHead,
         WorkspaceSnapshotMetadata, write_archive_atomic,
     };
-    use mj_core::config::sessions_dir;
+    fn sessions_dir() -> PathBuf {
+        mj_core::config::DataLayout::current().sessions_dir()
+    }
     use mj_core::state::{
         CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
         SessionState,

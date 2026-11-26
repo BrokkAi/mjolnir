@@ -1,17 +1,17 @@
 === focused replacement source (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭ Sessions                                                                                ─────────╮
-│ Create                                                                                           │
-│           ╭ × Repository history is missing ─────────────────────────────────────────╮  open.    │
-╰─────────  │Repository: bifrost                                                       │  ─────────╯
-╭ Targets   │                                                                          │  ── ▁   ▄ ╮
-│  Host /   │The configured source does not contain checkpoint base b41dc78.           │           │
-╰─────────  │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │  ─────────╯
-╭ Profiles  │Configured source checked: BrokkAi/bifrost-dev                            │  ── ▁   ▄ ╮
-│ANTHROPIC  │                                                                          │           ▐
-│ + refres  │Enter a GitHub origin or absolute local path that contains this history:  │           │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions                                                                                ─────────╯
+│ Create                                                                                  ─────────╮
+│           ╭ × Repository history is missing ─────────────────────────────────────────╮           │
+│           │Repository: bifrost                                                       │  open.    │
+╰─────────  │                                                                          │  ─────────╯
+╭ Targets   │The configured source does not contain checkpoint base b41dc78.           │  ── ▁   ▄ ╮
+│  Host /   │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │           │
+╰─────────  │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╯
+╭ Profiles  │                                                                          │  ── ▁   ▄ ╮
+│ANTHROPIC  │Enter a GitHub origin or absolute local path that contains this history:  │           ▐
 ╰─────────  │Source:                                                                   │  ─────────╯
 ╭ Notifica  │                                                                          │  ── ▁   ▄ ╮
 │Nothing n  │Type or paste into Source · Tab moves · Enter checks                      │           │
@@ -31,17 +31,17 @@ Cancel action focused: false
 === focus moves to origin actions (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭ Sessions                                                                                ─────────╮
-│ Create                                                                                           │
-│           ╭ × Repository history is missing ─────────────────────────────────────────╮  open.    │
-╰─────────  │Repository: bifrost                                                       │  ─────────╯
-╭ Targets   │                                                                          │  ── ▁   ▄ ╮
-│  Host /   │The configured source does not contain checkpoint base b41dc78.           │           │
-╰─────────  │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │  ─────────╯
-╭ Profiles  │Configured source checked: BrokkAi/bifrost-dev                            │  ── ▁   ▄ ╮
-│ANTHROPIC  │                                                                          │           ▐
-│ + refres  │Enter a GitHub origin or absolute local path that contains this history:  │           │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions                                                                                ─────────╯
+│ Create                                                                                  ─────────╮
+│           ╭ × Repository history is missing ─────────────────────────────────────────╮           │
+│           │Repository: bifrost                                                       │  open.    │
+╰─────────  │                                                                          │  ─────────╯
+╭ Targets   │The configured source does not contain checkpoint base b41dc78.           │  ── ▁   ▄ ╮
+│  Host /   │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │           │
+╰─────────  │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╯
+╭ Profiles  │                                                                          │  ── ▁   ▄ ╮
+│ANTHROPIC  │Enter a GitHub origin or absolute local path that contains this history:  │           ▐
 ╰─────────  │Source:                                                                   │  ─────────╯
 ╭ Notifica  │                                                                          │  ── ▁   ▄ ╮
 │Nothing n  │Type or paste into Source · Tab moves · Enter checks                      │           │

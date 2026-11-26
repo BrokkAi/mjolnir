@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, ensure};
-use mj_core::config::{AuthScheme, Config, HarnessProfile, Machine, TargetTemplate};
+use mj_core::config::{AuthScheme, Config, HarnessProfile, Machine, MachineId, TargetTemplate};
 
 use super::machines::{MachineProbe, add_machine_runtimes, probe_machines};
 use super::{RuntimeProbe, add_detected_profiles, discover_runtimes, harness_cli_installed};
@@ -33,7 +33,7 @@ pub struct AvailabilityReport {
     /// The profiles this check added.
     pub added_profiles: Vec<String>,
     /// The runtimes this check added, by machine.
-    pub added_runtimes: BTreeMap<String, Vec<String>>,
+    pub added_runtimes: BTreeMap<MachineId, Vec<String>>,
 }
 
 /// Readiness detail for the local operator and an explanation safe to publish.
@@ -98,7 +98,7 @@ pub fn check_availability(
 ) -> Result<AvailabilityReport> {
     let config = Config::load_from(config_path)?.with_local_targets();
     let mut targets = config.targets;
-    let machines: Vec<(String, Machine)> = config
+    let machines: Vec<(MachineId, Machine)> = config
         .machines
         .into_iter()
         .filter(|(_, machine)| !matches!(machine, Machine::Local { .. }))

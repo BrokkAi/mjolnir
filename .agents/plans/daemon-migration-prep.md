@@ -34,10 +34,11 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
 - [x] (2026-11-26 00:08Z) First draft, five milestones; requested Advisor review.
 - [x] (2026-11-26 02:30Z) Advisor review received (verdict: do not implement as written). Nine read-only children checked the draft against the code; reports in `/home/jonathan/Projects/mjolnir/.mj/clones/91233b0efdd193066e7b4eeb46c8db10/.mj/agents/*/` (files dated 2026-11-25 20:2x–20:4x local time, notably `layout-inventory.md`, `daemon-fence-verification.md`, `store-fence-verification.md`, `instance-identity-verification.md`, `milestone2-archive-paths.md`, `milestone2-home-config-verification.md`, `milestone4-worker-root.md`, `milestone5-verification.md`, `daemon-migration-local-host.md`, `migrate-credential-connection.md`).
 - [x] (2026-11-26 02:52Z) User decisions: cut the `SshBare.worker_root` milestone (replaced by notes), cut `CONFIG_VERSION` 25 (migrate rewrites managed homes instead), cut `HostKey`, accept that local-bare sessions lose a working `mj` CLI after a migration. Plan rewritten into four milestones.
-- [ ] Milestone 1: path manifest `mj-core/src/config/layout.rs` and clippy ban on raw `data_dir()` / `config_dir()`.
-- [ ] Milestone 2: durable `instance-identity` resolved once by the daemon; store fence (schema revision 160) with `mj daemon fence` / `unfence`.
-- [ ] Milestone 3: relative managed checkpoint archive paths (schema revision 161).
-- [ ] Milestone 4: `machine_id` on `session_targets` and `environment_workers` with backfill (schema revision 162), and machine-first SSH option refresh.
+- [x] (2026-11-26 03:50Z) Milestone 1: path manifest `mj-core/src/config/layout.rs` and clippy ban on raw `data_dir()` / `config_dir()` (89 files across 17 crates; reviewed clean).
+- [x] (2026-11-26 03:50Z) Milestone 3: relative managed checkpoint archive paths (schema revision 160; two review rounds, then clean).
+- [x] (2026-11-26 04:22Z) Milestone 4: `machine_id` on `session_targets` and `environment_workers` with backfill (schema revision 161), and machine-first SSH option refresh (three review rounds fixed, fourth overridden).
+- [x] (2026-11-26 04:22Z) Milestone 2: durable `instance-identity` resolved once by the daemon; store fence (schema revision 162) with `mj daemon fence` / `unfence` (one review round fixed).
+- [x] (2026-11-26 04:47Z) Pushed all four milestones to origin/master (`a30e83083`).
 
 
 ## Surprises & Discoveries
@@ -75,7 +76,40 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
 - Observation: an `SshBare` locator cannot represent a local-bare session. `SshBare` teardown runs `rm -rf` on `workspace`, the worker root and the profile home (`mj-targets/src/targets/cleanup.rs`), which is safe only because validation requires a non-borrowed workspace to end in the session ID (`mj-core/src/state.rs:1431-1436`). A local-bare checkout is the user's own project directory. See "Notes for `mj migrate`".
 
 
+- Observation (implementation): SQLite's `Connection::path()` is normalized (absolute, symlinks possibly resolved) and is `None` for non-UTF-8 paths, so it cannot serve as the checkpoint root. Writers store `data_dir()` verbatim.
+  Evidence: Milestone 3 review; the fix derives the root from the configured database path, as `tool_details` does, and migration 160 also matches rows by canonical parent so a store opened through a symlink still converts.
+
+- Observation (implementation): `kind LIKE 'local-%'` misses `apple-container`, which is also a local kind.
+  Evidence: Milestone 4 backfill sets `'local'` on `local-bare`, `local-podman`, `local-docker` and `apple-container` explicitly.
+
+- Observation (implementation): a template may have been repointed to another host after a session was placed, so the template's current machine is not proof of where a session runs.
+  Evidence: Milestone 4 review; the backfill fills a row only when the machine's location matches the placement's recorded host, user and port. Legacy EC2 rows are never filled: the frozen runtime has no launch template, so profile, region and user cannot tell two machines in one account apart (second Milestone 4 review).
+
+- Observation (implementation): `Controller` is constructed per call (`Controller::load()` at about 145 sites), so it cannot carry the ownership identity.
+  Evidence: Milestone 2 carries it on the daemon's database writer (`start_database_writer(identity)`, read through `database::ownership_identity()`), which errors in a process without a daemon writer.
+
+
 ## Decision Log
+
+- Decision: Assign schema revision numbers in landing order: 160 checkpoint paths, 161 `machine_id`, 162 fence.
+  Rationale: three milestones were implemented in parallel worktrees; schema tests need contiguous revisions.
+  Date/Author: 2026-11-26 / Coordinator.
+
+- Decision: `SessionRecord.machine_id` is not serialized; environment placements read `environment_workers.machine_id`.
+  Rationale: `SessionRecord` and `MoveOperation` go to clients, and older clients reject unknown fields (`deny_unknown_fields`), so serializing the field would break attached terminals across a daemon upgrade (third Milestone 4 review; the second review had asked for it to travel in Move snapshots). A record restored from a Move's `recovery_session` saves NULL until the next daemon load refills the column where the placement proves its machine. Every reader of a placement's machine asks the column that owns it.
+  Date/Author: 2026-11-26 / Coordinator.
+
+- Decision: The backfill leaves an SSH placement with no recorded runtime NULL.
+  Rationale: the host name alone cannot tell users or ports on one host apart.
+  Date/Author: 2026-11-26 / Coordinator, from Milestone 4 review.
+
+- Decision: Setup and doctor smoke containers carry the fixed ownership label `setup-smoke`.
+  Rationale: they run in the CLI with no daemon. Letting the CLI create `instance-identity` outside `controller.lock` could race a daemon that writes a different random value. A leftover smoke container is listed by `mj recover --all-instances`.
+  Date/Author: 2026-11-26 / Coordinator.
+
+- Decision: `mj daemon fence` refuses, with an explanation, when the instance's daemon runs in a container.
+  Rationale: that store lives in the container's volume. Moving container-hosted daemons belongs to `mj migrate`.
+  Date/Author: 2026-11-26 / Coordinator.
 
 - Decision: Land the path manifest first, as one short-lived commit.
   Rationale: it touches about 16 crates on a branch other agents commit to, and landing it first means `instance-identity` is classified from the start.
@@ -97,7 +131,7 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
   Rationale: one owner for the fact. A fallback that recomputes the path hash when the file is missing would change the identity mid-run while the guard fails closed for the same condition: two answers to one question. ControlMaster directories are host-local runtime state and must not follow a moved store.
   Date/Author: 2026-11-26 / Coordinator, on Advisor advice.
 
-- Decision: Store the fence in SQLite (`store_fence` singleton, revision 160, breaking), checked before schema migration; `mj daemon fence` takes `daemon-start.lock`, stops the daemon itself, takes `controller.lock`, writes the fence, then releases; clients check the fence before spawning.
+- Decision: Store the fence in SQLite (`store_fence` singleton, revision 162, breaking), checked before schema migration; `mj daemon fence` takes `daemon-start.lock`, stops the daemon itself, takes `controller.lock`, writes the fence, then releases; clients check the fence before spawning.
   Rationale: deleting or renaming `mj.sqlite3` makes the next `mj` command create an empty store. Holding the start lock across stop and fence makes the restart race impossible to express instead of narrowing it, and removes a "stop the daemon first" refusal that a TUI restarting the daemon would turn into a dead end. The breaking floor makes pre-fence binaries refuse the store.
   Date/Author: 2026-11-26 / Coordinator, on Advisor advice.
 
@@ -109,7 +143,7 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
   Rationale: they are seeded with the old hash so running workers stay owned. New container-native stores get a random token.
   Date/Author: 2026-11-26 / Coordinator.
 
-- Decision: Encode only `session_checkpoints.archive_path` (revision 161). Do not rewrite the archive paths embedded in move, restart-intent, and retained-source JSON; `mj migrate` requires no in-flight move or restart and handles retained move sources itself.
+- Decision: Encode only `session_checkpoints.archive_path` (revision 160). Do not rewrite the archive paths embedded in move, restart-intent, and retained-source JSON; `mj migrate` requires no in-flight move or restart and handles retained move sources itself.
   Rationale: those rows describe short-lived operations or rollback copies. Teaching three JSON shapes a path encoding adds risk for state that migrate can wait out or rewrite once.
   Date/Author: 2026-11-26 / Coordinator.
 
@@ -144,7 +178,13 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
 
 ## Outcomes & Retrospective
 
-Not yet implemented. Fill in after each milestone and at completion.
+All four milestones are implemented, reviewed, and pushed (`a30e83083`).
+
+- The manifest and clippy ban hold: workspace clippy fails on a raw `data_dir()` or `config_dir()` call outside `layout.rs`.
+- A copied data directory keeps its ownership identity and its managed checkpoint archives, and a fenced store refuses daemon startup before any migration, with a separate message for a copy. The end-to-end test in `mj-cli/tests/daemon_startup.rs` runs fence, copy, and unfence with a real binary in isolated directories.
+- Placements record their machine where it can be proved; SSH rows whose template is gone or was repointed stay NULL and are listed for `mj migrate` to map by hand.
+- Declined review findings, left as follow-ups: (1) the existing `backfill_target_runtime` fills a missing session runtime from the current template, and the machine backfill then trusts it, so a legacy SSH placement whose template was repointed to another user or port on the same host can take the template's machine; (2) `SessionRecord.machine_id` is not serialized, so a Move recovery snapshot restored after a daemon restart loses a known machine until the next load can prove it again.
+- Gaps: no controller-level test resumes a session from a copied data directory (the store-level relocation test covers read and swap); the orphan-adoption `machine_id` line has no test (adoption tests need a live worker).
 
 
 ## Context and Orientation
@@ -260,7 +300,7 @@ Identity. In `mj-core/src/config/loading.rs`, rename today's computation to `leg
 
 Note in code comments: existing container-native stores keep the identity they share today because they are seeded with the old hash; a copied data directory carries the same identity, and the fence is what keeps two daemons with one identity from running at once.
 
-Fence schema. Advance `SCHEMA_VERSION` to 160. Migration 160 is breaking (floor 160; pre-160 binaries do not read the fence and would start a daemon on a fenced store) and O(1):
+Fence schema. Advance `SCHEMA_VERSION` to 162. Migration 162 is breaking (floor 162; pre-162 binaries do not read the fence and would start a daemon on a fenced store) and O(1):
 
     CREATE TABLE IF NOT EXISTS store_fence (
         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -275,7 +315,7 @@ Validate non-empty fields in Rust. Add `mj-store/src/database/store_fence.rs` wi
 
 `StoreFenced`'s message has two forms. When the current host name and data directory match the recorded ones: "This Mjolnir store was moved to <destination> on <fenced_at>. No daemon will start here." When they differ: "This Mjolnir store is a copy fenced on <fenced_host> at <fenced_data_dir>. Finish editing it, then run `mj daemon unfence` to activate it here." Both forms add, for agent readers: "If you are an agent running inside a Mjolnir session, `mj` commands on this host no longer reach a daemon. Do not run `mj daemon unfence`; tell the user." Include `note` if set.
 
-Fence commands. Add `mj daemon fence --to <destination> [--note <text>]` and `mj daemon unfence` to `DaemonCommand` (`mj-cli/src/main.rs:309`). `fence`: take `daemon-start.lock` the way `restart_daemon` does (`mj-cli/src/daemon.rs:1534-1622`), stop a running daemon using the same stop path, take `ControllerStoreGuard`, open the store writable without the fence check (this migrates it to revision 160 if needed), write the row, and release both locks. `unfence`: same locks, clear the row, do not start a daemon. Both print what they did. `mj daemon status` reports a fence when no daemon is running.
+Fence commands. Add `mj daemon fence --to <destination> [--note <text>]` and `mj daemon unfence` to `DaemonCommand` (`mj-cli/src/main.rs:309`). `fence`: take `daemon-start.lock` the way `restart_daemon` does (`mj-cli/src/daemon.rs:1534-1622`), stop a running daemon using the same stop path, take `ControllerStoreGuard`, open the store writable without the fence check (this migrates it to revision 162 if needed), write the row, and release both locks. `unfence`: same locks, clear the row, do not start a daemon. Both print what they did. `mj daemon status` reports a fence when no daemon is running.
 
 Pre-spawn check. In `connect_or_start` (`mj-cli/src/daemon.rs`), before spawning `daemon-run`, open the store read-only and check the fence; refuse with `StoreFenced` instead of spawning. Clients that only connect to an already-running daemon need no change. No new exit code: an exited `daemon-run` child is not relaunched.
 
@@ -295,9 +335,9 @@ In `mj-store/src/database/state_io.rs`, add two helpers taking `sessions_root: &
 
 `encode` returns the bare file name when `path` is a direct child of `sessions_root`, else `path` unchanged. `decode` joins a relative single-component name onto `sessions_root`, returns absolute paths unchanged, and rejects relative values with more than one component or `..`. Writers store the raw `sessions_dir()` join, and resume canonicalizes without saving the result (`resume.rs:1575-1588`), so plain prefix stripping is correct.
 
-Use `encode` in `replace_checkpoint` (`state_io.rs:1016-1034`) and in `replace_checkpoint_archive_if_current` (`mj-store/src/database/sessions.rs:1534-1561`), whose `WHERE` compares `encode(expected)` only; after revision 161 every managed row is relative and callers hold decoded paths. Use `decode` in `read_checkpoints` (`state_io.rs:1470-1496`). `resume.rs`, `purge.rs`, `checkpoint/archives.rs` and `checkpoint/staging.rs` keep receiving absolute paths.
+Use `encode` in `replace_checkpoint` (`state_io.rs:1016-1034`) and in `replace_checkpoint_archive_if_current` (`mj-store/src/database/sessions.rs:1534-1561`), whose `WHERE` compares `encode(expected)` only; after revision 160 every managed row is relative and callers hold decoded paths. Use `decode` in `read_checkpoints` (`state_io.rs:1470-1496`). `resume.rs`, `purge.rs`, `checkpoint/archives.rs` and `checkpoint/staging.rs` keep receiving absolute paths.
 
-Advance `SCHEMA_VERSION` to 161. Migration 161 is breaking (floor 161; older binaries read the column verbatim and `resume.rs` rejects relative paths). It reads `(session_id, archive_path)` from the small `session_checkpoints` table and rewrites rows that `encode` shortens; in-memory databases and rows outside `sessions_root` are left alone.
+Advance `SCHEMA_VERSION` to 160. Migration 160 is breaking (floor 160; older binaries read the column verbatim and `resume.rs` rejects relative paths). It reads `(session_id, archive_path)` from the small `session_checkpoints` table and rewrites rows that `encode` shortens; in-memory databases and rows outside `sessions_root` are left alone.
 
 Do not touch the archive paths inside `session_moves.operation_json`, `session_restart_intents.handoff_json`, or `retained_move_sources.source_json`. Record in "Notes for `mj migrate`" that migrate requires no in-flight move or restart and handles retained move sources.
 
@@ -310,14 +350,14 @@ Goal: every placement records which configured machine it runs on, so migrate ca
 
 In `mj-core/src/config/machines.rs`, add a validated `MachineId` newtype (`serde(transparent)`, validated with `validate_id("machine", ...)`, `MachineId::local()`, `is_local()`). Use it where the code passes machine ids today; do not add a parallel string key.
 
-Advance `SCHEMA_VERSION` to 162. Migration 162 is breaking because older binaries rewrite `session_targets` with `DELETE` plus `INSERT` (`state_io.rs:1006-1011`, `:1213-1215`) and would drop the column; `environment_workers` alone would be compatible (`ON CONFLICT DO UPDATE`, `environments.rs:234`). O(1) DDL plus a small-table update:
+Advance `SCHEMA_VERSION` to 161. Migration 161 is breaking because older binaries rewrite `session_targets` with `DELETE` plus `INSERT` (`state_io.rs:1006-1011`, `:1213-1215`) and would drop the column; `environment_workers` alone would be compatible (`ON CONFLICT DO UPDATE`, `environments.rs:234`). O(1) DDL plus a small-table update:
 
     ALTER TABLE session_targets ADD COLUMN machine_id TEXT;
     ALTER TABLE environment_workers ADD COLUMN machine_id TEXT;
     UPDATE session_targets SET machine_id = 'local' WHERE kind LIKE 'local-%';
     UPDATE environment_workers SET machine_id = 'local' WHERE kind LIKE 'local-%';
 
-(Check the exact local kind strings in the migration-124 schema before writing the `WHERE`.) Read and write the column in `state_io.rs` and `environments.rs`. Provisioning sets it from the template's machine (`"local"` for local kinds). At daemon load, next to the existing `target_runtime_json` backfill (`controller.rs:809-831`, `state_io.rs:1501-1512`), fill NULL `machine_id` on SSH and legacy EC2 rows from `config.targets[target_template_id].machine` when that template still exists. Rows whose template was removed stay NULL; record that in a code comment and in the notes for migrate.
+(Check the exact local kind strings in the migration-124 schema before writing the `WHERE`.) Read and write the column in `state_io.rs` and `environments.rs`. Provisioning sets it from the template's machine (`"local"` for local kinds). At daemon load, next to the existing `target_runtime_json` backfill (`controller.rs:809-831`, `state_io.rs:1501-1512`), fill NULL `machine_id` on SSH rows from `config.targets[target_template_id].machine` when that template still exists. Rows whose template was removed stay NULL; record that in a code comment and in the notes for migrate.
 
 Do not add `machine_id` to `TargetRuntimeSettings`; the column is the only owner.
 
@@ -340,7 +380,7 @@ These are not part of this plan. They record what review found so migrate's desi
 8. State outside the two directories must exist on B: SSH identity files, `ssh_config` aliases, `gh auth`, `~/.aws`. The 462 ssh-podman sessions depend on them.
 9. Rows that would act on the wrong machine: `host_snapshot_cache` rows with host `local` hold paths under A's cache (`host_cache.rs:209-219`); `host_container_sizes` with host `local` would give B A's chosen size.
 10. Project memory for a checkout with no remote is keyed by a hash containing `path:<absolute>` (`repository.rs:162-167`, `project_memory.rs:674`); it survives only if the path string is kept.
-11. Placements with `machine_id IS NULL` (SSH rows whose template was removed) need a manual mapping.
+11. Placements with `machine_id IS NULL` (SSH rows whose template was removed or repointed or that have no recorded runtime, all legacy EC2 rows, and records restored from a Move snapshot whose template no longer proves the machine) need a manual mapping.
 12. Named instances are separate stores and migrate separately.
 
 
@@ -351,31 +391,31 @@ Run from the repository root. Run every `cargo test` outside the restricted sand
 Milestone 1:
 
     cargo clippy --workspace --all-targets -- -D warnings
-    cargo test -p mj-cli --test daemon_startup
+    cargo test -p brokk-mjolnir --test daemon_startup
 
 Milestone 2:
 
-    cargo test -p mj-core instance_identity
-    cargo test -p mj-store store_fence
-    cargo test -p mj-store schema
-    cargo test -p mj-controller controller_store_guard
-    cargo test -p mj-cli --test daemon_startup
-    cargo clippy -p mj-core -p mj-store -p mj-controller -p mj-cli -p mj-targets -p mj-worker-launch --all-targets -- -D warnings
+    cargo test -p brokk-mj-core instance_identity
+    cargo test -p brokk-mj-store store_fence
+    cargo test -p brokk-mj-store schema
+    cargo test -p brokk-mj-controller controller_store_guard
+    cargo test -p brokk-mjolnir --test daemon_startup
+    cargo clippy -p brokk-mj-core -p brokk-mj-store -p brokk-mj-controller -p brokk-mjolnir -p brokk-mj-targets -p brokk-mj-worker-launch --all-targets -- -D warnings
 
 Milestone 3:
 
-    cargo test -p mj-store checkpoint
-    cargo test -p mj-store schema
-    cargo test -p mj-controller resume
-    cargo clippy -p mj-store -p mj-controller --all-targets -- -D warnings
+    cargo test -p brokk-mj-store checkpoint
+    cargo test -p brokk-mj-store schema
+    cargo test -p brokk-mj-controller resume
+    cargo clippy -p brokk-mj-store -p brokk-mj-controller --all-targets -- -D warnings
 
 Milestone 4:
 
-    cargo test -p mj-store schema
-    cargo test -p mj-store target
-    cargo test -p mj-store environment
-    cargo test -p mj-core target_runtime
-    cargo clippy -p mj-core -p mj-store -p mj-controller --all-targets -- -D warnings
+    cargo test -p brokk-mj-store schema
+    cargo test -p brokk-mj-store target
+    cargo test -p brokk-mj-store environment
+    cargo test -p brokk-mj-core target_runtime
+    cargo clippy -p brokk-mj-core -p brokk-mj-store -p brokk-mj-controller --all-targets -- -D warnings
 
 Test names above are expected filters; adjust them to the names the new tests use. Commit each milestone after its review.
 
@@ -389,15 +429,15 @@ Milestone 1: the clippy ban is the check. Confirm by adding a temporary raw `dat
 Milestone 2:
 - End-to-end (real `mj` binary, isolated instance): start a daemon; `mj daemon fence --to ssh://b --note test` stops it; a client command is refused with the "moved" message and no `daemon-run` process appears; `mj daemon status` shows the fence; copy both directories to new paths and run with `MJ_DATA_DIR` / `MJ_CONFIG_DIR` pointing there, and see the "copy" message; `mj daemon unfence` there, and the daemon starts with the same `instance-identity` as the original.
 - Tricky condition (race): with `daemon-start.lock` held by a running `fence`, a concurrent `connect_or_start` waits and then sees the fence instead of spawning.
-- Integration (schema): the fence is read before migration. Build a fixture store at revision 159 with a hand-made `store_fence` table and row (standing in for a fenced store that a later binary opens). `open_writable` refuses it with `StoreFenced` and the stored schema version is still 159 afterward. Separately, an unfenced revision-159 store upgrades to 160 with floor 160.
+- Integration (schema): the fence is read before migration. Build a fixture store at revision 161 with a hand-made `store_fence` table and row (standing in for a fenced store that a later binary opens). `open_writable` refuses it with `StoreFenced` and the stored schema version is still 161 afterward. Separately, an unfenced revision-161 store upgrades to 162 with floor 162.
 - Tricky condition (fail closed): a corrupt `instance-identity` makes `ControllerStoreGuard::try_acquire_at` fail with an error naming the file.
 
 Milestone 3:
-- Integration (schema): a revision-160 store with absolute managed rows and one external row upgrades to relative names for the managed rows only.
+- Integration (schema): a revision-159 store with absolute managed rows and one external row upgrades to relative names for the managed rows only.
 - End-to-end or controller-level: suspend a session in an isolated instance, stop, copy the data directory to a new path, start there, resume the session from the copied archive.
 
 Milestone 4:
-- Integration (schema): a revision-161 store with local and SSH rows upgrades with `machine_id = 'local'` on local rows; after daemon load, SSH rows with a surviving template have their machine and rows with a removed template stay NULL.
+- Integration (schema): a revision-160 store with local and SSH rows upgrades with `machine_id = 'local'` on local rows; after daemon load, SSH rows with a surviving template have their machine and rows with a removed template stay NULL.
 - Tricky condition: with the template deleted, editing `[machines.<id>].identity_file` changes the result of `target_runtime_settings_for`; deleting the machine falls back to the frozen settings.
 
 
@@ -420,9 +460,9 @@ Baseline:
 
 Schema revisions:
 
-    160 (breaking): store_fence table; floor 160
-    161 (breaking): session_checkpoints.archive_path relative for managed rows; floor 161
-    162 (breaking): machine_id on session_targets and environment_workers, local rows backfilled; floor 162
+    160 (breaking): session_checkpoints.archive_path relative for managed rows; floor 160
+    161 (breaking): machine_id on session_targets and environment_workers, local rows backfilled; floor 161
+    162 (breaking): store_fence table; floor 162
 
 
 ## Interfaces and Dependencies

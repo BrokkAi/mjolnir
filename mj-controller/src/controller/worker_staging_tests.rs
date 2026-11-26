@@ -25,7 +25,10 @@ use crate::test_isolation::{IsolatedTest, test_name};
 #[test]
 #[ignore = "requires Docker, the daemon image, MJ_WORKER_BINARY and MJ_INSTANCE=issue-1138-docker"]
 fn stopped_docker_session_recovers_with_the_current_worker_build() {
-    assert_eq!(mj_core::config::instance_identity(), "issue-1138-docker");
+    assert_eq!(
+        mj_core::config::instance_name().as_deref(),
+        Some("issue-1138-docker")
+    );
     let source =
         PathBuf::from(std::env::var_os("MJ_WORKER_BINARY").expect("portable Linux worker"));
     verify_worker_build(&source).unwrap();

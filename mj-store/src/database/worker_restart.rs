@@ -45,7 +45,8 @@ fn begin_worker_restart_for(
     let destination = destination.cloned();
     submit_database_write("begin_worker_restart", move |connection| {
         let tx = connection.transaction()?;
-        let record = state_io::load_session_with(&tx, &session_id)?;
+        let record =
+            state_io::load_session_with(&tx, &session_id, &state_io::configured_sessions_root())?;
         ensure!(
             record.is_some_and(|s| s.target.as_deref() == Some(&intent.target)),
             "worker restart target changed before admission"

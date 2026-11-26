@@ -299,14 +299,16 @@ async fn prepare(
     });
     tokio::try_join!(
         assets::prepare(
-            data_directory.join("models/wolf-defender-jev"),
+            mj_core::config::DataLayout::at(data_directory)
+                .models_dir()
+                .join("wolf-defender-jev"),
             manifest,
             "https://huggingface.co",
             &client,
             cancellation,
         ),
         runtime::prepare_selected(
-            data_directory.join("github-student-native"),
+            mj_core::config::DataLayout::at(data_directory).github_student_native_dir(),
             use_gpu,
             &notice,
             &client,
@@ -761,7 +763,7 @@ mod tests {
         let runtime = std::env::var_os("MJ_ORT_TEST_LIB").map_or_else(
             || {
                 runtime::cached_cpu_library(
-                    &mj_core::config::data_dir().join("github-student-native"),
+                    &mj_core::config::DataLayout::current().github_student_native_dir(),
                 )
                 .expect("set MJ_ORT_TEST_LIB to the pinned ONNX Runtime shared library")
             },

@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail, ensure};
 
 use mj_checkpoint::archive::ArchiveManifest;
-use mj_core::config::{TargetTemplate, atomic_write, data_dir};
+use mj_core::config::{DataLayout, TargetTemplate, atomic_write};
 use mj_core::state::{MovePhase, SessionState, State, TargetLocator};
 use mj_session_runtime::host_git_config::controller_git_settings;
 
@@ -812,6 +812,13 @@ impl Controller {
                 .context("harness profile disappeared before provisioning")?
                 .ensure_ready(&session.last_profile)?;
             let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
+            // The placement saved once the target exists records the machine
+            // this template runs on.
+            self.state
+                .sessions
+                .get_mut(session_id)
+                .unwrap()
+                .machine_id = self.config.template_machine_id(&session.target_template_id);
             if let Some(recorded) = &session.target_runtime {
                 runtime.tool_cache = recorded.tool_cache.clone();
                 runtime.container_settings = recorded.container_settings.clone();
@@ -1006,9 +1013,11 @@ impl Controller {
                             let (_, worker_root) = self.worker_placement(session_id)?;
                             return targets::provision_local_bundle_plan(bundle, &worker_root, github_token);
                         }
+                        let identity = crate::database::ownership_identity()?;
                         targets::provision_plan_named(
                             &target,
                             session_id,
+                            identity.as_str(),
                             bundle,
                             &runtime_mounts,
                             session.container_workspace.as_deref(),
@@ -1367,7 +1376,7 @@ const RETAINED_LAUNCH_DIAGNOSTICS: usize = 20;
 /// annotated with the diagnostic path, which the caller stores in `last_error`
 /// so the reason travels to `mj sessions`, `mj wait`, and `mj events`.
 pub(super) fn note_new_session_launch_failure(session_id: &str, error: &anyhow::Error) -> String {
-    note_new_session_launch_failure_in(&data_dir().join("diagnostics"), session_id, error)
+    note_new_session_launch_failure_in(&DataLayout::current().diagnostics_dir(), session_id, error)
 }
 
 fn note_new_session_launch_failure_in(

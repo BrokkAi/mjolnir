@@ -224,10 +224,10 @@ impl CommittedTurn {
 }
 
 impl CommittedState {
-    pub(super) fn bootstrap(connection: &mut Connection) -> Result<Self> {
+    pub(super) fn bootstrap(connection: &mut Connection, sessions_root: &Path) -> Result<Self> {
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
-        let state = state_io::load_state_with(&transaction)?;
+        let state = state_io::load_state_with(&transaction, sessions_root)?;
         let ids = transaction
             .prepare("SELECT session_id FROM materialized_sessions")?
             .query_map([], |row| row.get::<_, String>(0))?
@@ -304,6 +304,7 @@ impl CommittedState {
 pub(super) fn finish_operation(
     connection: &mut Connection,
     previous: &CommittedState,
+    sessions_root: &Path,
 ) -> Result<Option<CommittedState>> {
     let changes = PENDING
         .with(|pending| pending.borrow_mut().take())
@@ -403,8 +404,12 @@ pub(super) fn finish_operation(
                 // Only a changed value consults the pool over all sessions.
                 let previous = state.sessions.get(key);
                 let mut local = state_io::SessionInterns::from_record(previous)?;
-                let mut record =
-                    state_io::load_session_interned_with(&transaction, key, &mut local)?;
+                let mut record = state_io::load_session_interned_with(
+                    &transaction,
+                    key,
+                    &mut local,
+                    sessions_root,
+                )?;
                 fn fresh<T>(
                     value: &Option<std::sync::Arc<T>>,
                     old: Option<&Option<std::sync::Arc<T>>>,

@@ -77,7 +77,7 @@ pub fn image_pull_mutex(host: &ImageHost, image: &str) -> Arc<ImagePullLock> {
     // lock. Other in-process tests must keep the live store untouched.
     let unisolated_fixture = mj_core::test_hooks::test_fixtures_enabled()
         && mj_core::config::ensure_may_control_store(
-            &mj_core::config::data_dir(),
+            mj_core::config::DataLayout::current().root(),
             "lock an image download",
         )
         .is_err();
@@ -102,8 +102,8 @@ fn lock_file_path(key: &str) -> PathBuf {
         .take(12)
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    mj_core::config::data_dir()
-        .join("image-pulls")
+    mj_core::config::DataLayout::current()
+        .image_pulls_dir()
         .join(format!("{name}.lock"))
 }
 

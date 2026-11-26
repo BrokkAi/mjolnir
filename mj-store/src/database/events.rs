@@ -304,7 +304,12 @@ pub fn save_requested_checkpoint(session: &SessionRecord, command_id: &str) -> R
     let command_id = command_id.to_owned();
     submit_database_write("save_requested_checkpoint", move |connection| {
         let tx = connection.transaction()?;
-        save_requested_checkpoint_with(&tx, &session, &command_id)?;
+        save_requested_checkpoint_with(
+            &tx,
+            &session,
+            &command_id,
+            &super::state_io::configured_sessions_root(),
+        )?;
         tx.commit()?;
         Ok(())
     })
@@ -314,6 +319,7 @@ fn save_requested_checkpoint_with(
     tx: &Transaction<'_>,
     session: &SessionRecord,
     command_id: &str,
+    sessions_root: &Path,
 ) -> Result<()> {
     super::sessions::validate_session_record(session)?;
     let owns: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM checkpoint_operations WHERE session_id = ?1 AND command_id = ?2)", params![session.id, command_id], |row| row.get(0))?;
@@ -331,7 +337,7 @@ fn save_requested_checkpoint_with(
         "UPDATE sessions SET native_session_id = ?2 WHERE session_id = ?1",
         params![session.id, session.native_session_id],
     )?;
-    super::state_io::replace_checkpoint(tx, session)?;
+    super::state_io::replace_checkpoint(tx, session, sessions_root)?;
     finish_checkpoint_operation(tx, &session.id, CommandResultKind::Succeeded, None, None)
 }
 
@@ -1764,7 +1770,15 @@ mod tests {
         }));
         {
             let tx = connection.transaction().unwrap();
-            assert!(save_requested_checkpoint_with(&tx, &record, "stale-owner").is_err());
+            assert!(
+                save_requested_checkpoint_with(
+                    &tx,
+                    &record,
+                    "stale-owner",
+                    &crate::database::state_io::configured_sessions_root()
+                )
+                .is_err()
+            );
             finish_failed_checkpoint_with(
                 &tx,
                 &record,
@@ -1779,7 +1793,13 @@ mod tests {
                     .unwrap(),
                 0
             );
-            save_requested_checkpoint_with(&tx, &record, "owner").unwrap();
+            save_requested_checkpoint_with(
+                &tx,
+                &record,
+                "owner",
+                &crate::database::state_io::configured_sessions_root(),
+            )
+            .unwrap();
             // Drop rolls back both metadata and the terminal event.
         }
         assert_eq!(
@@ -1794,7 +1814,13 @@ mod tests {
         );
         {
             let tx = connection.transaction().unwrap();
-            save_requested_checkpoint_with(&tx, &record, "owner").unwrap();
+            save_requested_checkpoint_with(
+                &tx,
+                &record,
+                "owner",
+                &crate::database::state_io::configured_sessions_root(),
+            )
+            .unwrap();
             finish_failed_checkpoint_with(
                 &tx,
                 &record,

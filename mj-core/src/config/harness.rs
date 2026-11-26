@@ -624,14 +624,14 @@ impl HarnessKind {
     /// below the configuration directory identifies Mjolnir, rather than the
     /// harness's own installation, as the owner of the login and native data.
     pub fn managed_profile_home(self, profile_id: &str) -> PathBuf {
-        self.managed_profile_home_in(&super::config_dir(), profile_id)
+        self.managed_profile_home_in(super::ConfigLayout::current().root(), profile_id)
     }
 
     /// [`Self::managed_profile_home`] with an explicit configuration root for
     /// tests and callers that are already operating on another instance.
     pub fn managed_profile_home_in(self, config_root: &Path, profile_id: &str) -> PathBuf {
-        config_root
-            .join("profiles")
+        super::ConfigLayout::at(config_root)
+            .profiles_dir()
             .join(profile_id)
             .join(self.id())
     }

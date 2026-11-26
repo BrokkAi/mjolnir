@@ -154,7 +154,7 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
         .run();
         return;
     }
-    let cache = data_dir().join("workers").join("pinned");
+    let cache = DataLayout::current().pinned_workers_dir();
     let source = cache.join("source");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::write(&source, stamped_worker(b"matching cached worker")).unwrap();
@@ -774,7 +774,7 @@ fn stale_pins_are_re_resolved() {
         panic!("local source")
     };
     verify_worker_build(&path).unwrap();
-    assert!(path.starts_with(data_dir().join("workers/pinned")));
+    assert!(path.starts_with(DataLayout::current().pinned_workers_dir()));
 }
 
 /// A client replacing the daemon pins the new build's workers during the
@@ -807,7 +807,7 @@ fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
     }
     let source = std::path::PathBuf::from(std::env::var_os("MJ_WORKER_DIR").unwrap())
         .join("mj-worker-x86_64-unknown-linux-musl");
-    let cache_root = data_dir().join("workers").join("pinned");
+    let cache_root = DataLayout::current().pinned_workers_dir();
     assert!(indexed_pinned_worker(&cache_root, &source).is_none());
 
     warm_worker_binary_sources().unwrap();
@@ -940,7 +940,10 @@ fn downloads_reject_stale_builds_even_with_the_expected_checksum() {
     let error = download_worker(&url, &digest, "x86_64-unknown-linux-musl").unwrap_err();
     server.join().unwrap();
     assert!(format!("{error:#}").contains("missing worker build stamp"));
-    let cached = data_dir().join("workers/pinned").join(&digest).join("hel");
+    let cached = DataLayout::current()
+        .pinned_workers_dir()
+        .join(&digest)
+        .join("hel");
     assert!(!cached.exists());
     std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
     std::fs::write(&cached, vec![b'x'; 150_000]).unwrap();
@@ -4809,13 +4812,15 @@ fn only_localhost_harnesses_receive_the_owning_daemons_configuration_paths() {
         if target == "localhost" {
             assert_eq!(
                 launch.environment["MJ_CONFIG_DIR"],
-                std::path::absolute(mj_core::config::config_dir())
+                std::path::absolute(mj_core::config::ConfigLayout::current().root())
                     .unwrap()
                     .to_string_lossy()
             );
             assert_eq!(
                 launch.environment["MJ_DATA_DIR"],
-                std::path::absolute(data_dir()).unwrap().to_string_lossy()
+                std::path::absolute(DataLayout::current().root())
+                    .unwrap()
+                    .to_string_lossy()
             );
             assert_eq!(
                 launch.environment.get("MJ_INSTANCE"),

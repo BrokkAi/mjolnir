@@ -1790,15 +1790,25 @@ impl DashboardContext {
         if self.shutdown_requested_at.is_some() || self.login.is_some() {
             return;
         }
+        for session_id in self.conversations_on_screen() {
+            self.acknowledge_chat(&session_id);
+        }
+    }
+
+    /// The conversations the user is reading: those the last frame drew plus
+    /// the one the focused pane would draw. Nothing while a modal covers them.
+    /// Read receipts and the notification cards both follow this set.
+    pub(super) fn conversations_on_screen(&mut self) -> Vec<String> {
+        if self.login.is_some() {
+            return Vec::new();
+        }
         let mut sessions = self.drawn_chat_sessions.clone();
         if let Some(session_id) = self.visible_chat().map(|chat| chat.session_id().to_owned())
             && !sessions.contains(&session_id)
         {
             sessions.push(session_id);
         }
-        for session_id in sessions {
-            self.acknowledge_chat(&session_id);
-        }
+        sessions
     }
 
     fn acknowledge_chat(&mut self, session_id: &str) {

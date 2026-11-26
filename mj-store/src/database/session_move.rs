@@ -827,7 +827,12 @@ mod tests {
         });
         let mut connection = open(&path).unwrap();
         let tx = connection.transaction().unwrap();
-        insert_session(&tx, &source).unwrap();
+        insert_session(
+            &tx,
+            &source,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap();
         tx.commit().unwrap();
 
         let mut intent = serde_json::to_value(operation(&source)).unwrap();
@@ -1023,15 +1028,20 @@ mod tests {
                 text: id.into(),
             })
             .unwrap();
-            tool_details::append_tool_detail(&mj_core::config::data_dir(), id, "detail", &body)
-                .unwrap();
+            tool_details::append_tool_detail(
+                mj_core::config::DataLayout::current().root(),
+                id,
+                "detail",
+                &body,
+            )
+            .unwrap();
         };
         let exists = |id: &str| {
             let row = load_session_record(id).unwrap().is_some();
             assert_eq!(
                 row,
-                mj_core::config::data_dir()
-                    .join("tool-details")
+                mj_core::config::DataLayout::current()
+                    .tool_details_dir()
                     .join(format!("{id}.mjtd"))
                     .is_file()
             );
@@ -1607,7 +1617,13 @@ mod tests {
         let tx = connection.transaction().unwrap();
         update_move_requests(&tx, &selection).unwrap();
         tx.commit().unwrap();
-        let retained = load_session_with(&connection, &stale.id).unwrap().unwrap();
+        let retained = load_session_with(
+            &connection,
+            &stale.id,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(retained.resource_allocation, Some(allocation));
         assert_eq!(retained.additional_mounts, current.additional_mounts);
 
@@ -1617,7 +1633,13 @@ mod tests {
         let tx = connection.transaction().unwrap();
         update_move_requests(&tx, &selection).unwrap();
         tx.commit().unwrap();
-        let changed = load_session_with(&connection, &stale.id).unwrap().unwrap();
+        let changed = load_session_with(
+            &connection,
+            &stale.id,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(changed.resource_allocation, None);
         assert!(changed.additional_mounts.is_empty());
     }

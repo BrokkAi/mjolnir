@@ -263,7 +263,7 @@ fn sqlite_coordination() -> Arc<Ec2GrantCoordination> {
         .get_or_init(Default::default)
         .lock()
         .expect("coordination registry lock")
-        .entry(mj_core::config::data_dir())
+        .entry(mj_core::config::DataLayout::current().root().to_path_buf())
         .or_default()
         .clone()
 }

@@ -663,7 +663,7 @@ async fn supervise(
                         return Ok(None);
                     };
                     let directory = assets::prepare(
-                        root.join("github-student"),
+                        mj_core::config::DataLayout::at(&root).github_student_dir(),
                         options
                             .model_manifest
                             .selected(device == StudentDevice::CoreMl),
@@ -721,14 +721,14 @@ async fn supervise(
                     })?;
                     let (directory, runtime) = tokio::try_join!(
                         assets::prepare(
-                            root.join("github-student"),
+                            mj_core::config::DataLayout::at(&root).github_student_dir(),
                             options.model_manifest.selected(false),
                             &options.model_base,
                             &client,
                             &cancellation
                         ),
                         runtime::prepare_selected(
-                            root.join("github-student-native"),
+                            mj_core::config::DataLayout::at(&root).github_student_native_dir(),
                             use_gpu,
                             &inner.notice,
                             &client,

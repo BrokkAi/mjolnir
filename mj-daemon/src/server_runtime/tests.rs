@@ -2312,6 +2312,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -3543,7 +3544,9 @@ async fn project_and_workspace_http_clients_use_the_daemons_state() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir(&project).unwrap();
-    let config_dir = mj_core::config::config_dir();
+    let config_dir = mj_core::config::ConfigLayout::current()
+        .root()
+        .to_path_buf();
     std::fs::create_dir_all(&config_dir).unwrap();
     let mut config = bare_preflight_config();
     config.profiles.insert(

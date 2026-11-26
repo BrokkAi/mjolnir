@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ConfigLock, atomic_write, config_path};
+use crate::config::{ConfigLock, atomic_write};
 use crate::state::SessionResourceAllocation;
 use crate::targets::AdditionalMount;
 
@@ -181,7 +181,7 @@ impl GoPreferences {
     }
 
     pub fn path() -> PathBuf {
-        config_path().with_file_name("go.json")
+        crate::config::ConfigLayout::current().go_json()
     }
 
     pub fn load(path: &Path) -> Result<Self> {

@@ -36,7 +36,7 @@ fn account_path_apply_expands_home_before_config_and_quota_use() {
 fn remote_path_apply_preserves_failed_and_newer_drafts() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.machines.insert(
-        "builder".into(),
+        mj_core::config::MachineId::new("builder").unwrap(),
         serde_json::from_value(json!({"kind":"ssh","host":"builder"})).unwrap(),
     );
     dashboard.config.targets.insert(
@@ -99,7 +99,7 @@ fn remote_path_apply_preserves_failed_and_newer_drafts() {
 fn setup_identity_file_completes_files_locally() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.machines.insert(
-        "builder".into(),
+        mj_core::config::MachineId::new("builder").unwrap(),
         serde_json::from_value(json!({"kind":"ssh","host":"builder"})).unwrap(),
     );
     dashboard.begin_setup();
@@ -152,7 +152,7 @@ fn setup_identity_file_completes_files_locally() {
 fn setup_workspace_prefix_completes_on_its_machine() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.machines.insert(
-        "builder".into(),
+        mj_core::config::MachineId::new("builder").unwrap(),
         serde_json::from_value(json!({"kind":"ssh","host":"builder"})).unwrap(),
     );
     dashboard.begin_setup();
@@ -181,7 +181,7 @@ fn setup_workspace_prefix_completes_on_its_machine() {
 fn save_resolves_pending_target_paths_and_continues_only_for_the_matching_reply() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.machines.insert(
-        "builder".into(),
+        mj_core::config::MachineId::new("builder").unwrap(),
         serde_json::from_value(json!({"kind":"ssh", "host":"builder"})).unwrap(),
     );
     dashboard.begin_settings_section("machines", Some("builder"));

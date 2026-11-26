@@ -21,7 +21,7 @@ impl SetupOperations for RuntimeState {
             terminal_blocking(|| {
                 mj_setup::setup::automatic_setup_due(
                     &mj_core::config::config_path(),
-                    &mj_core::config::data_dir(),
+                    mj_core::config::DataLayout::current().root(),
                 )
             })
             .await
@@ -337,7 +337,7 @@ async fn run_first_run_setup(
             let mut admission = None;
             let report = mj_setup::setup::run_setup(
                 &mj_core::config::config_path(),
-                &mj_core::config::data_dir(),
+                mj_core::config::DataLayout::current().root(),
                 project_directory.as_deref(),
                 &PrerequisiteExecutor(&executor),
                 &|| executor.is_cancelled_without_deadline(),

@@ -223,8 +223,8 @@ pub const CLAUDE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 /// It sits beside the configuration rather than inside the profile home, so
 /// profile staging never copies it into a session home or a container.
 pub fn claude_oauth_token_path(profile_id: &str) -> PathBuf {
-    crate::config::config_dir()
-        .join("profiles")
+    crate::config::ConfigLayout::current()
+        .profiles_dir()
         .join(profile_id)
         .join("claude-oauth-token")
 }

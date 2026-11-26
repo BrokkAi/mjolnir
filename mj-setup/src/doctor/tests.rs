@@ -405,7 +405,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         ("pi", "pi.example.test"),
     ] {
         machines.machines.insert(
-            id.to_owned(),
+            mj_core::config::MachineId::new(id).unwrap(),
             mj_core::config::Machine::Ssh {
                 ssh: mj_core::config::SshConnection {
                     host: host.into(),
@@ -419,7 +419,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         );
     }
     machines.machines.insert(
-        "spot".to_owned(),
+        mj_core::config::MachineId::new("spot").unwrap(),
         mj_core::config::Machine::AwsEc2 {
             aws_profile: None,
             region: "us-east-2".into(),

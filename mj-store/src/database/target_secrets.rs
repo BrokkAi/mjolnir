@@ -501,9 +501,13 @@ mod tests {
             .unwrap();
         assert!(retained.contains("old-target-literal"), "{retained}");
         let reference = EnvironmentValue::FromSecret("stored".into());
-        let scrubbed = state_io::load_session_with(&connection, "scrubbed")
-            .unwrap()
-            .unwrap();
+        let scrubbed = state_io::load_session_with(
+            &connection,
+            "scrubbed",
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         let recorded = scrubbed.target_runtime.unwrap();
         assert_eq!(
             recorded.environment,
@@ -513,9 +517,13 @@ mod tests {
             recorded.environment_references,
             BTreeMap::from([("API_KEY".to_owned(), reference)])
         );
-        let untouched = state_io::load_session_with(&connection, "other-target")
-            .unwrap()
-            .unwrap();
+        let untouched = state_io::load_session_with(
+            &connection,
+            "other-target",
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             untouched.target_runtime.unwrap().environment["API_KEY"],
             "literal-here"
@@ -566,11 +574,15 @@ mod tests {
             scrub_resolved_target_secrets_in(&connection, &templates).unwrap(),
             0
         );
-        let kept = state_io::load_session_with(&connection, "later")
-            .unwrap()
-            .unwrap()
-            .target_runtime
-            .unwrap();
+        let kept = state_io::load_session_with(
+            &connection,
+            "later",
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap()
+        .target_runtime
+        .unwrap();
         assert_eq!(kept.environment["API_KEY"], "plain");
         assert!(kept.environment_references.is_empty());
         // A key another target gives a plain value is never guessed at for a

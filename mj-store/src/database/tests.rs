@@ -280,7 +280,11 @@ fn compatible_migration_preserves_new_data_through_existing_session_writes() {
         .writer
         .execute("save session", move |connection| {
             let tx = connection.transaction()?;
-            insert_session(&tx, &updated)?;
+            insert_session(
+                &tx,
+                &updated,
+                &crate::database::state_io::configured_sessions_root(),
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -528,6 +532,14 @@ fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
     }
 }
 
+/// A platform-absolute archive path outside every test data directory.
+fn fixture_archive(name: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("fixture")
+        .join("sessions")
+        .join(format!("{name}.hel.zip"))
+}
+
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     super::test_session(id, bundle)
 }
@@ -601,7 +613,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
 fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("runtime-removal.sqlite3");
-    let record = session("old-session", "project-1");
+    let mut record = session("old-session", "project-1");
     save_session_to(&path, &record).unwrap();
     let receipt = serde_json::json!({
         "type": "runtime_resolved",
@@ -651,6 +663,8 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     drop(connection);
     forget_verified_schema(&path);
 
+    // The upgrade records `local` on a local placement.
+    record.machine_id = Some(mj_core::config::MachineId::local());
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
         record
@@ -758,6 +772,8 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
             .unwrap(),
         schema::MINIMUM_COMPATIBLE_VERSION
     );
+    // The upgrade records `local` on a local placement.
+    record.machine_id = Some(mj_core::config::MachineId::local());
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
         record
@@ -1571,7 +1587,7 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     .unwrap();
 
     let verified = CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/verified.hel.zip"),
+        archive_path: fixture_archive("verified"),
         sha256: "c".repeat(64),
         created_at: "2026-08-15T00:02:00Z".into(),
         event_frontier: 21,
@@ -1682,7 +1698,7 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
     stale.last_error = Some("worker bootstrap failed: upload failed".into());
     save_session_to(&database, &stale).unwrap();
     let recovered = CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/recovered.hel.zip"),
+        archive_path: fixture_archive("recovered"),
         sha256: "b".repeat(64),
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,
@@ -1843,14 +1859,14 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
     stale.acp_session_title = Some("Old harness title".into());
     stale.session_title_override = Some("Old user title".into());
     stale.checkpoint = Some(Box::new(CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/old.hel.zip"),
+        archive_path: fixture_archive("old"),
         sha256: "a".repeat(64),
         created_at: "2026-08-14T11:00:00Z".into(),
         event_frontier: 10,
     }));
     save_session_to(&database, &stale).unwrap();
     let recovered = CheckpointMetadata {
-        archive_path: PathBuf::from("sessions/recovered.hel.zip"),
+        archive_path: fixture_archive("recovered"),
         sha256: "b".repeat(64),
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,
@@ -6661,7 +6677,12 @@ pub(super) fn register_test_subagent(
 ) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction()?;
-    super::state_io::insert_session_with_parent(&tx, session, Some(&relation.parent_session_id))?;
+    super::state_io::insert_session_with_parent(
+        &tx,
+        session,
+        Some(&relation.parent_session_id),
+        &crate::database::state_io::configured_sessions_root(),
+    )?;
     super::usage::record_child_accounting(&tx, relation, None)?;
     tx.execute(
         "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,?3,?4)",
@@ -7978,6 +7999,7 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
         &open_reader(&database).unwrap(),
         &record.id,
         &mut interns,
+        &crate::database::state_io::configured_sessions_root(),
     )
     .unwrap()
     .unwrap();
@@ -9987,7 +10009,7 @@ fn suspend_settlement_rolls_back_transcript_deletes_and_temporary_close_preserve
     let mut child = session("child", "project");
     child.state = SessionState::Stopped;
     save_subagent_session(&child, &test_subagent("parent", "child")).unwrap();
-    let data_dir = mj_core::config::data_dir();
+    let data_dir = mj_core::config::DataLayout::current().root().to_path_buf();
     let detail = data_dir.join("tool-details/child.mjtd");
     tool_details::append_tool_detail(&data_dir, "child", "detail", "{}").unwrap();
 

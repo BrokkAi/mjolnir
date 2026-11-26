@@ -180,7 +180,7 @@ async fn run_poll_loop(
             let local = student.get_or_insert_with(|| {
                 let notices = notices.clone();
                 Arc::new(mj_github_relevance::github_student::Student::new(
-                    mj_core::config::data_dir(),
+                    mj_core::config::DataLayout::current().root().to_path_buf(),
                     config.use_gpu,
                     Arc::new(move |notice| notices.student_notice(notice)),
                 ))

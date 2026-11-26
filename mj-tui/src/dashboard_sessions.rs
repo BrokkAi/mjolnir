@@ -1270,6 +1270,9 @@ impl DashboardState {
                 receipts.push((session_id, through));
             }
         }
+        if !receipts.is_empty() {
+            self.refresh_notification_cards();
+        }
         if receipts.is_empty() {
             self.set_notice("No unread sessions in this workspace.");
             DashboardAction::None

@@ -25,7 +25,7 @@ use mj_checkpoint::checkpoint::{
     CheckpointRepositorySpec, NO_SESSION_ARTIFACTS, checkpoint_sha256,
     current_native_session_is_unused,
 };
-use mj_core::config::{HarnessKind, sessions_dir};
+use mj_core::config::HarnessKind;
 use mj_core::state::{
     CheckpointMetadata, ManagedSessionSnapshot, SessionRecord, SessionState, State,
 };

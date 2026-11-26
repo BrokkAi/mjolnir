@@ -782,7 +782,7 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.8.0, which serves the pinned
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.8.1, which serves the pinned
 official DSH runtime over ACP. DSH owns model calls, the agent loop, tools,
 permissions, MCP clients, session persistence, and plugins; dsh-acp owns the
 ACP protocol and replay projection. It is not the DeepSeek harness earlier
@@ -1222,7 +1222,7 @@ and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
-it is 0.8.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.8.0` package
+it is 0.8.1 or newer, or fetches the pinned `@brokkai/dsh-acp@0.8.1` package
 through `npx`, using the compatible system runtime or the managed Node
 described above; the npm package bundles the native bridge and pinned DSH
 runtime. An older

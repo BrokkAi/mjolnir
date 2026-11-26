@@ -36,5 +36,12 @@ disallowed-methods = [
     # it away from the user's real agent credentials.
     { path = "dirs::home_dir", reason = "use mj_core::path_input::user_home, the one owner of the user's home directory" },
     { path = "std::env::home_dir", reason = "use mj_core::path_input::user_home, the one owner of the user's home directory" },
+    # Every path under the data and configuration directories is built by
+    # mj_core::config::DataLayout / ConfigLayout, which also record what
+    # `mj migrate` does with each entry. Only their `current()` constructors
+    # call these. Test fixtures that need an isolated root use `at(root)` or
+    # carry a scoped allow with a reason.
+    { path = "mj_core::config::loading::data_dir", reason = "use mj_core::config::DataLayout::current() and an accessor, so the path has a migrate classification" },
+    { path = "mj_core::config::loading::config_dir", reason = "use mj_core::config::ConfigLayout::current() and an accessor, so the path has a migrate classification" },
     { path = "tokio::process::Child::wait_with_output", reason = "write-then-wait deadlocks once a pipe buffer fills; use the shared run_with_input helper (or justify with an explicit allow)", allow-invalid = true },
 ]

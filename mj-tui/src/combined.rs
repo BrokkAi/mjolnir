@@ -45,6 +45,10 @@ const SUMMARY_ROW: u16 = 1;
 /// Upper bound for midsize support panes: nine content rows and two border rows.
 const STANDARD_SUPPORT_PANE_HEIGHT: u16 = 11;
 
+/// The stacked sidebar's floor: the workspace pane at its own minimum above
+/// Sessions' minimum frame, the project heading and one session row.
+const SIDEBAR_MINIMUM: u16 = PANE_MINIMUM + PANE_MINIMUM + 2;
+
 /// The terminal height at or above which the minimized Sessions list gets its
 /// taller five-row cap; below it the list is capped at two rows. Compact
 /// summaries occupy two lines, so the returned value is a content height.
@@ -119,6 +123,25 @@ impl CombinedHeights {
     }
 }
 
+/// What the band above the support panes needs besides the transcript's own
+/// minimum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpperNeeds {
+    /// The composer's preferred height.
+    desired_prompt: u16,
+    /// Rows that transcript and composer together keep so the stacked
+    /// Sessions sidebar (workspaces plus one session row) stays usable;
+    /// zero when Sessions has its own band or sits beside the support panes.
+    sidebar_floor: u16,
+}
+
+impl UpperNeeds {
+    /// Rows the transcript and composer keep whatever the support panes ask.
+    fn upper_minimum(self) -> u16 {
+        (TRANSCRIPT_MINIMUM + PROMPT_MINIMUM).max(self.sidebar_floor)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CombinedAllocation {
     Fits(CombinedHeights),
@@ -138,7 +161,7 @@ fn allocate_combined_heights(
     targets: PaneBand,
     quota: PaneBand,
     notifications: PaneBand,
-    desired_prompt: u16,
+    upper: UpperNeeds,
     sizes: [(SupportPane, PaneSize); 4],
 ) -> CombinedAllocation {
     let other_minimum = sessions
@@ -159,6 +182,16 @@ fn allocate_combined_heights(
         } else {
             PANE_MINIMUM
         });
+    // The sidebar floor is spent from the frame's spare rows, never from what
+    // the frame needs to fit: a short frame keeps its Sessions rows before the
+    // notification band reaches its fixed height, but never becomes "too small"
+    // because of them.
+    let spare = frame_height.saturating_sub(other_minimum.saturating_add(notification_floor));
+    let sidebar_extra = upper
+        .upper_minimum()
+        .saturating_sub(TRANSCRIPT_MINIMUM + PROMPT_MINIMUM)
+        .min(spare);
+    let other_minimum = other_minimum.saturating_add(sidebar_extra);
     let notification_minimum = notifications.minimum.min(
         frame_height
             .saturating_sub(other_minimum)
@@ -185,11 +218,15 @@ fn allocate_combined_heights(
         *current = current.saturating_add(step);
         *surplus = surplus.saturating_sub(step);
     };
-    grow(
-        &mut heights.prompt,
-        prompt_target(desired_prompt, frame_height),
-        &mut surplus,
-    );
+    let prompt_goal = prompt_target(upper.desired_prompt, frame_height);
+    // The sidebar's rows come out of the composer and transcript together, so
+    // the composer's growth counts toward them: only what it leaves goes to
+    // the transcript, and everything else competes for the rest of the surplus
+    // as if no floor existed.
+    let mut sidebar_rows = sidebar_extra;
+    grow(&mut heights.prompt, prompt_goal, &mut sidebar_rows);
+    heights.transcript = heights.transcript.saturating_add(sidebar_rows);
+    grow(&mut heights.prompt, prompt_goal, &mut surplus);
     if sizes[0].1 == PaneSize::Minimized {
         // Compact session rows stay fixed; only the workspace viewport can
         // grow beyond the stacked band's minimum.
@@ -238,8 +275,10 @@ fn support_bands(
     dimensions: [(SupportPane, PaneDimensions); 4],
     sizes: [(SupportPane, PaneSize); 4],
     notification_minimum: Option<u16>,
+    frame_height: u16,
+    reserved_above: u16,
 ) -> [PaneBand; 4] {
-    std::array::from_fn(|index| {
+    let mut bands: [PaneBand; 4] = std::array::from_fn(|index| {
         let (pane, dimensions) = dimensions[index];
         let mut band = sized_band(
             sizes[index].1,
@@ -251,13 +290,7 @@ fn support_bands(
             match sizes[index].1 {
                 // A Standard Notifications band is content-independent: cards
                 // and forms appear and vanish without moving any other band.
-                PaneSize::Standard => {
-                    band = PaneBand {
-                        minimum: dimensions.standard_cap,
-                        full: dimensions.standard_cap,
-                        cap: dimensions.standard_cap,
-                    };
-                }
+                PaneSize::Standard => {}
                 // Maximized still grows to the content, with the form's
                 // readable minimum reserved.
                 PaneSize::Maximized => {
@@ -269,24 +302,64 @@ fn support_bands(
             }
         }
         band
-    })
+    });
+    // A Standard Notifications band is content-independent: cards and forms
+    // appear and vanish without moving any other band. Its height is its cap
+    // where the frame has room, and what the frame leaves after the other
+    // bands' minimums and `reserved_above` (footer, Sessions, and the
+    // transcript and composer's floor) where it does not. Either way it
+    // depends on the frame and the pane sizes, never on the cards.
+    if sizes[3].1 == PaneSize::Standard {
+        let others = bands[1].minimum.saturating_add(bands[2].minimum);
+        let room = frame_height
+            .saturating_sub(reserved_above)
+            .saturating_sub(others);
+        let height = dimensions[3].1.standard_cap.min(room).max(PANE_MINIMUM);
+        bands[3] = PaneBand {
+            minimum: height,
+            full: height,
+            cap: height,
+        };
+    }
+    bands
+}
+
+/// Rows the bands other than Targets, Quota and Notifications keep: the
+/// footer, a stacked Sessions band, and the upper band's floor.
+fn reserved_above_support(sessions: PaneBand, upper: UpperNeeds) -> u16 {
+    FOOTER_HEIGHT
+        .saturating_add(sessions.minimum)
+        .saturating_add(upper.upper_minimum())
 }
 
 fn maximized_pane_is_effective(
     frame_height: u16,
     dimensions: [(SupportPane, PaneDimensions); 4],
     sessions: PaneBand,
-    desired_prompt: u16,
+    upper: UpperNeeds,
     sizes: [(SupportPane, PaneSize); 4],
     notification_minimum: Option<u16>,
 ) -> [(SupportPane, bool); 4] {
     let bands = dimensions;
+    let reserved_above = reserved_above_support(sessions, upper);
     std::array::from_fn(|index| {
         let (pane, _) = bands[index];
         let standard_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Standard);
         let maximum_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Maximized);
-        let standard_bands = support_bands(dimensions, standard_sizes, notification_minimum);
-        let maximum_bands = support_bands(dimensions, maximum_sizes, notification_minimum);
+        let standard_bands = support_bands(
+            dimensions,
+            standard_sizes,
+            notification_minimum,
+            frame_height,
+            reserved_above,
+        );
+        let maximum_bands = support_bands(
+            dimensions,
+            maximum_sizes,
+            notification_minimum,
+            frame_height,
+            reserved_above,
+        );
         let effective = match (
             allocate_combined_heights(
                 frame_height,
@@ -294,7 +367,7 @@ fn maximized_pane_is_effective(
                 standard_bands[1],
                 standard_bands[2],
                 standard_bands[3],
-                desired_prompt,
+                upper,
                 standard_sizes,
             ),
             allocate_combined_heights(
@@ -303,7 +376,7 @@ fn maximized_pane_is_effective(
                 maximum_bands[1],
                 maximum_bands[2],
                 maximum_bands[3],
-                desired_prompt,
+                upper,
                 maximum_sizes,
             ),
         ) {
@@ -808,7 +881,6 @@ fn render_combined_themed(
             },
         ),
     ];
-    let bands = support_bands(dimensions, sizes, notification_minimum);
     // Stacked, reserve one workspace content row, then grow its viewport
     // only after the other bands' minimums and the composer have room.
     let sessions = if narrow {
@@ -826,16 +898,34 @@ fn render_combined_themed(
             cap: 0,
         }
     };
-    let targets = bands[1];
-    let quota = bands[2];
     // Keep the support panes stacked together, using the space left by the
     // current sidebar size to decide whether they fit beside Sessions.
     let supports_adjacent = !narrow && support_panes_fit(content_area.width, dashboard);
+    let upper = UpperNeeds {
+        desired_prompt,
+        // Wide but with the support panes below the sidebar: the sidebar is
+        // only as tall as the transcript and composer, and keeps the
+        // workspace pane and one Sessions row (see `sessions_floor` below).
+        sidebar_floor: if narrow || supports_adjacent {
+            0
+        } else {
+            SIDEBAR_MINIMUM
+        },
+    };
+    let bands = support_bands(
+        dimensions,
+        sizes,
+        notification_minimum,
+        area.height,
+        reserved_above_support(sessions, upper),
+    );
+    let targets = bands[1];
+    let quota = bands[2];
     let mut maximize_enabled = maximized_pane_is_effective(
         area.height,
         dimensions,
         sessions,
-        desired_prompt,
+        upper,
         sizes,
         notification_minimum,
     );
@@ -849,7 +939,7 @@ fn render_combined_themed(
         targets,
         quota,
         bands[3],
-        desired_prompt,
+        upper,
         sizes,
     );
     let heights = match allocation {
@@ -2483,7 +2573,10 @@ mod tests {
             fixed(1),
             fixed(1),
             fixed(1),
-            3,
+            UpperNeeds {
+                desired_prompt: 3,
+                sidebar_floor: 0,
+            },
             [
                 (SupportPane::Sessions, PaneSize::Minimized),
                 (SupportPane::Targets, PaneSize::Minimized),
@@ -2804,7 +2897,10 @@ mod tests {
             band(15, 15),
             band(8, 8),
             band(3, 3),
-            6,
+            UpperNeeds {
+                desired_prompt: 6,
+                sidebar_floor: 0,
+            },
             sizes,
         ) else {
             panic!("40 rows should fit");

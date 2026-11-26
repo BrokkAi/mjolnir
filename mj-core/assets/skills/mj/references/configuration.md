@@ -694,7 +694,7 @@ dsh-acp settings may go in
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
 cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
-only when it is 0.8.0 or newer, otherwise the pinned npm package. Containers
+only when it is at least the pinned version (0.8.1), otherwise the pinned npm package. Containers
 use their image-provided runtime or the documented installer fallback. The
 `mj login` command invokes the harness's canonical controller-side command from
 `PATH`.
