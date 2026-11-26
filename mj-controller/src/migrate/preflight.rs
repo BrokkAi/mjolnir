@@ -153,39 +153,40 @@ pub fn inspect_preflight(
                 _ => {}
             }
         }
+        let home = mj_core::path_input::expand_home(&profile.home, Some(old_home))?;
         let managed = profile.kind.managed_profile_home_in(old_config_root, id);
-        if profile.home == managed {
+        if home == managed {
             continue;
         }
-        let Ok(relative) = profile.home.strip_prefix(old_home) else {
+        let Ok(relative) = home.strip_prefix(old_home) else {
             warnings.push(format!(
                 "profile {id} uses unmanaged home outside source HOME: {}",
-                profile.home.display()
+                home.display()
             ));
             ensure!(
-                destination_exists(&profile.home)?,
+                destination_exists(&home)?,
                 "profile {id} home is absent on destination: {}",
-                profile.home.display()
+                home.display()
             );
             continue;
         };
-        if exists(&profile.home)? {
+        if exists(&home)? {
             let destination = new_home.join(relative);
             check_destination(&destination, &destination_exists, &mut checked_destinations)?;
             home_copies.push(HomeCopy {
-                source: profile.home.clone(),
+                source: home.clone(),
                 destination,
                 private: false,
             });
         } else {
             warnings.push(format!(
                 "profile {id} home does not exist on source: {}",
-                profile.home.display()
+                home.display()
             ));
         }
         if matches!(profile.kind, HarnessKind::Muse | HarnessKind::OpenCode)
-            && let Some(data) = profile.kind.nested_data_dir(&profile.home)
-            && !data.starts_with(&profile.home)
+            && let Some(data) = profile.kind.nested_data_dir(&home)
+            && !data.starts_with(&home)
         {
             plan_extra_home_file(
                 &data,
@@ -209,28 +210,40 @@ pub fn inspect_preflight(
         ),
     ] {
         if let Some(path) = path {
-            if let Ok(relative) = path.strip_prefix(old_home) {
+            let source = mj_core::path_input::expand_home(path, Some(old_home))?;
+            let config_copied = source
+                .strip_prefix(old_config_root)
+                .is_ok_and(|relative| !relative.starts_with("instances"));
+            if config_copied {
                 ensure!(
-                    credential_file_exists(path)?,
+                    credential_file_exists(&source)?,
                     "{label} does not exist or is not a regular file on source: {}",
-                    path.display()
+                    source.display()
+                );
+                continue;
+            }
+            if let Ok(relative) = source.strip_prefix(old_home) {
+                ensure!(
+                    credential_file_exists(&source)?,
+                    "{label} does not exist or is not a regular file on source: {}",
+                    source.display()
                 );
                 let destination = new_home.join(relative);
                 check_destination(&destination, &destination_exists, &mut checked_destinations)?;
                 home_copies.push(HomeCopy {
-                    source: path.clone(),
+                    source,
                     destination,
                     private: true,
                 });
             } else {
                 warnings.push(format!(
                     "{label} is outside source HOME: {}",
-                    path.display()
+                    source.display()
                 ));
                 ensure!(
-                    destination_exists(path)?,
+                    destination_exists(&source)?,
                     "{label} is absent on destination: {}",
-                    path.display()
+                    source.display()
                 );
             }
         }
@@ -1267,6 +1280,7 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         let target = old_home.join("secrets/actual");
         std::fs::write(&target, "credential").unwrap();
+        std::fs::write(old_home.join("secrets/app.pem"), "pem").unwrap();
         let token = old_home.join("secrets/token");
         let identity = old_home.join(".ssh/key");
         symlink(&target, &token).unwrap();
@@ -1279,7 +1293,14 @@ mod tests {
         .unwrap();
         let connection = Connection::open(db).unwrap();
         let mut config = Config::default();
-        config.github.session_token_path = Some(token.clone());
+        config.github.session_token_path = Some(PathBuf::from("~/secrets/token"));
+        config.github.app = Some(mj_core::config::GithubAppConfig {
+            app_id: 1,
+            private_key_path: PathBuf::from("~/secrets/app.pem"),
+            installations: Default::default(),
+            session_permissions: None,
+            token_permissions: None,
+        });
         config.machines.insert(
             MachineId::new("ssh").unwrap(),
             Machine::Ssh {
@@ -1308,12 +1329,18 @@ mod tests {
             )
         };
         let preflight = inspect(&config).unwrap();
-        for source in [&token, &identity] {
+        for (source, destination) in [
+            (&token, new_home.join("secrets/token")),
+            (&old_home.join("secrets/app.pem"), new_home.join("secrets/app.pem")),
+            (&identity, new_home.join(".ssh/key")),
+        ] {
             assert!(
                 preflight
                     .home_copies
                     .iter()
-                    .any(|entry| &entry.source == source && entry.private)
+                    .any(|entry| &entry.source == source
+                        && entry.destination == destination
+                        && entry.private)
             );
         }
         std::fs::remove_file(&token).unwrap();

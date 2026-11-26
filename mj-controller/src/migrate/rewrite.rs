@@ -363,16 +363,20 @@ pub fn rewrite_staged_config_and_files(
             profile.home = spec.new_home.join(relative);
         }
     }
-    let relocate_home = |path: &mut std::path::PathBuf| {
-        if let Ok(relative) = path.strip_prefix(&spec.old_home) {
-            *path = spec.new_home.join(relative);
-        }
+    let relocate_credential = |path: &mut std::path::PathBuf| {
+        migration_paths::relocate_ssh_identity_path(
+            path,
+            &spec.old_config_root,
+            &spec.new_config_root,
+            &spec.old_home,
+            &spec.new_home,
+        );
     };
     if let Some(path) = &mut config.github.session_token_path {
-        relocate_home(path);
+        relocate_credential(path);
     }
     if let Some(app) = &mut config.github.app {
-        relocate_home(&mut app.private_key_path);
+        relocate_credential(&mut app.private_key_path);
     }
     config.daemon = DaemonConfig::default();
     config.validate()?;
