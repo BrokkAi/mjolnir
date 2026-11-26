@@ -236,7 +236,7 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
 
   // Snap to the end exactly once, when the initial transcript arrives.
   useEffect(() => {
-    if (!enabled || !hasLoaded || snappedSession.current === sessionId) return;
+    if (!enabled || !hasLoaded || !scrollerRef.current || snappedSession.current === sessionId) return;
     snappedSession.current = sessionId;
     previousContent.current = contentVersion;
     scheduleFollow();

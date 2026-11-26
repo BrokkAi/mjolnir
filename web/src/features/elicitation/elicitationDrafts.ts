@@ -51,8 +51,11 @@ export function loadElicitationDraft(
   requestId: string,
 ): StoredElicitationDraft | null {
   const key = elicitationDraftKey(sessionId, requestId);
+  // `memory` holds only drafts that storage could not take, so it is always the newer copy.
+  const fallback = memory.get(key);
+  if (fallback) return fallback;
   const store = storage();
-  if (!store) return memory.get(key) ?? null;
+  if (!store) return null;
   try {
     const raw = store.getItem(key);
     if (!raw) return null;
@@ -75,6 +78,7 @@ export function saveElicitationDraft(
   }
   try {
     store.setItem(key, JSON.stringify(draft));
+    memory.delete(key);
   } catch {
     // Private mode or a full quota: the answer still works for this render.
     memory.set(key, draft);
@@ -89,6 +93,23 @@ export function clearElicitationDraft(sessionId: string, requestId: string): voi
     store?.removeItem(key);
   } catch {
     // Nothing to clear.
+  }
+}
+
+/** Drop every draft, secret fields included; nothing outlives a sign-out. */
+export function clearAllElicitationDrafts(): void {
+  memory.clear();
+  const store = storage();
+  if (!store) return;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < store.length; index += 1) {
+      const key = store.key(index);
+      if (key?.startsWith(DRAFT_KEY_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) store.removeItem(key);
+  } catch {
+    // Storage is unavailable, so there is nothing stored to clear.
   }
 }
 

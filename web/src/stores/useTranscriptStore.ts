@@ -303,7 +303,9 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
         const again = queued.get(id);
         queued.delete(id);
         // A failed fetch is not retried by itself: the next stream change or an explicit retry is.
-        if (!ok || !again) return;
+        // A trigger that arrived while it ran is that next change, so run it once; it was
+        // dequeued above, so a failing follow-up with no new trigger stops here. A 401 signs out.
+        if (!again || (!ok && useSessionStore.getState().auth !== 'signed_in')) return;
         const latest = get().entries[id];
         if (again.force || needsSync(latest, useSessionStore.getState().conversationVersions[id])) {
           await get().syncConversation(id, { force: again.force });

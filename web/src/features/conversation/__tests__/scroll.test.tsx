@@ -285,6 +285,52 @@ describe('useConversationScroll', () => {
     expect(scroller.scrollTop).toBe(900);
   });
 
+  it('waits for the scroller before snapping and observing growth', () => {
+    const observed: Element[] = [];
+    class FakeResizeObserver {
+      observe(element: Element) {
+        observed.push(element);
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+
+    const apiRef: { current: ConversationScroll | null } = { current: null };
+    function Gated({ mounted }: { mounted: boolean }) {
+      const scroll = useConversationScroll({
+        sessionId: 's1',
+        enabled: mounted,
+        hasLoaded: true,
+        contentVersion: 'v1',
+        olderCount: 0,
+        latestSeq: 0,
+        streaming: null,
+        canMarkRead: false,
+      });
+      apiRef.current = scroll;
+      if (!mounted) return <p>Loading session details…</p>;
+      return (
+        <div data-testid="conversation-scroll" ref={scroll.scrollerRef} onScroll={scroll.onScroll}>
+          <div data-testid="conversation-content" ref={scroll.contentRef} />
+        </div>
+      );
+    }
+
+    const { rerender } = render(<Gated mounted={false} />);
+    runFrames();
+    expect(observed).toHaveLength(0);
+
+    rerender(<Gated mounted />);
+    const scroller = screen.getByTestId('conversation-scroll');
+    installGeometry(scroller, { scrollHeight: 1000, clientHeight: 500 });
+    scroller.scrollTop = 0;
+    runFrames();
+
+    expect(scroller.scrollTop).toBe(500);
+    expect(observed).toEqual([screen.getByTestId('conversation-content')]);
+  });
+
   describe('read receipts', () => {
     let visibility: DocumentVisibilityState;
     let focused: boolean;
@@ -313,7 +359,6 @@ describe('useConversationScroll', () => {
       expect(markConversationRead).toHaveBeenCalledExactlyOnceWith('s1', 5);
     });
 
-    // Hard-won: pre-push review round 2: a hidden or unfocused tab was marked read.
     it('sends nothing while the page is hidden or unfocused, and sends when the person returns', () => {
       const apiRef: { current: ConversationScroll | null } = { current: null };
       visibility = 'hidden';

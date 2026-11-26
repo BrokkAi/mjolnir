@@ -38,6 +38,7 @@ import {
 import { parseRoute, useUiStore } from './useUiStore';
 import { useTranscriptStore } from './useTranscriptStore';
 import { clearAllDraftState } from '../features/conversation/draftQueue';
+import { clearAllElicitationDrafts } from '../features/elicitation/elicitationDrafts';
 
 export type AuthState = 'checking' | 'signed_out' | 'signed_in';
 /** `upgrading` overrides the stream status while the daemon hands off. */
@@ -155,6 +156,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Nothing from the previous viewer survives a sign-out in this tab.
     useTranscriptStore.getState().clearAll();
     clearAllDraftState();
+    clearAllElicitationDrafts();
     set({
       auth: 'signed_out',
       streamStatus: 'idle',

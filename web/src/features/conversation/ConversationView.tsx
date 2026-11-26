@@ -132,6 +132,8 @@ export default function ConversationView({ sessionId, subagentParentId, childKin
   const streamingKey = useMemo(() => selectStreamingEntryKey(session, cached), [session, cached]);
   const scroll = useConversationScroll({
     sessionId,
+    // The transcript scroller only mounts once detail and the first page exist.
+    enabled: Boolean(detail && cached?.hasLoaded),
     hasLoaded: Boolean(cached?.hasLoaded),
     contentVersion: cached ? transcriptContentVersion(cached) : 'empty',
     olderCount: cached ? visibleOlderItems(cached).length : 0,

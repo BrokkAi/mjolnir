@@ -373,7 +373,6 @@ describe('conversation fetch gating', () => {
     expect(transcripts().entries.s1.latestSeq).toBe(9);
   });
 
-  // Hard-won: pre-push review round 4: a fetch answer at the same sequence overwrote a newer presentation key from the stream.
   it('keeps a presentation key the stream announced while an older fetch was in flight, then fetches it', async () => {
     await open('s1');
     let release!: (response: Response) => void;
@@ -420,7 +419,34 @@ describe('conversation fetch gating', () => {
     expect(conversationCalls()).toHaveLength(after);
   });
 
-  // Hard-won: pre-push review round 2: a transcript fetch that failed during a stream drop never retried.
+  it('runs the one queued follow-up after a failed fetch, and stops when the follow-up fails with nothing queued', async () => {
+    await open('s1');
+    let release!: (response: Response) => void;
+    let seen = 0;
+    net = mockFetch({
+      '/api/v1/conversations/s1': () => {
+        seen += 1;
+        if (seen === 1) return new Promise<Response>(resolve => (release = resolve));
+        return seen === 2
+          ? jsonResponse(transcript({ latest_seq: 7, entries: [entry(7)] }))
+          : new Response('boom', { status: 500 });
+      },
+    });
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(6) } }));
+    await flush(1);
+    sessions().applyFrame(delta(2, 3, { conversation_versions: { s1: v(7) } }));
+    release(new Response('boom', { status: 500 }));
+    await flush();
+    expect(conversationCalls()).toHaveLength(2);
+    expect(transcripts().entries.s1.latestSeq).toBe(7);
+
+    // A failed fetch with nothing queued behind it does not loop.
+    sessions().applyFrame(delta(3, 4, { conversation_versions: { s1: v(8) } }));
+    await flush();
+    await flush();
+    expect(conversationCalls()).toHaveLength(3);
+  });
+
   it('retries a failed fetch when the stream reconnects or the browser comes back online', async () => {
     await open('s1');
     net = mockFetch({ '/api/v1/conversations/s1': () => new Response('boom', { status: 500 }) });

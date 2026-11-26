@@ -72,7 +72,6 @@ describe('TranscriptRow', () => {
     expect(markdownCalls.byText.get('stable row') ?? 0).toBe(0);
   });
 
-  // Hard-won: pre-push review round 4: a same-id, same-sequence replacement after a presentation reset kept showing stale content.
   it('re-renders a replaced entry that keeps its id and sequence, but not the same object', () => {
     const original = entry(1, { stable_id: 'msg-1', lines: ['before reset'] });
     const { rerender } = render(<Harness rows={[original]} />);
