@@ -968,6 +968,9 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    /// Conversations the user is reading, as the last frame drew them. A card
+    /// entry for one of these is read even before its receipt catches up.
+    conversations_on_screen: BTreeSet<String>,
     /// The daemon's cards as published. Readers use `notification_cards`.
     published_cards: Option<
         mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
@@ -1396,6 +1399,7 @@ impl DashboardState {
             stopped_records: Default::default(),
             unread_frontiers: Default::default(),
             notification_dismissals: Default::default(),
+            conversations_on_screen: BTreeSet::new(),
             published_cards: None,
             notification_cards: None,
             form_holders: Default::default(),

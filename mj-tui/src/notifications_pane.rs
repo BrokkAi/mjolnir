@@ -2764,6 +2764,20 @@ pub(crate) mod tests {
         dashboard.set_notification_cards(Some(cards()));
         dashboard.set_state(state);
         assert_eq!(shown(&dashboard), expected);
+
+        // The conversations are on screen but their chats have not yet received
+        // the events, so the receipts are still behind: a drawn conversation
+        // counts as read through everything.
+        let mut behind = super::tests::dashboard();
+        behind.set_notification_cards(Some(cards()));
+        behind.set_conversations_on_screen(["i1".to_owned(), "q1".to_owned()]);
+        assert_eq!(shown(&behind), expected);
+        behind.set_conversations_on_screen([]);
+        assert_eq!(
+            shown(&behind),
+            [("i1".to_owned(), 1, 10), ("q1".to_owned(), 2, 10)],
+            "a conversation that is no longer drawn owes its entries again"
+        );
     }
 
     // Hard-won: dc77f11c1: an id-less question skipped its bounded text read.

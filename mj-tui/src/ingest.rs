@@ -554,6 +554,14 @@ impl DashboardState {
         self.refresh_notification_cards();
     }
 
+    pub fn set_conversations_on_screen(&mut self, sessions: impl IntoIterator<Item = String>) {
+        let sessions: BTreeSet<String> = sessions.into_iter().collect();
+        if self.conversations_on_screen != sessions {
+            self.conversations_on_screen = sessions;
+            self.refresh_notification_cards();
+        }
+    }
+
     /// Derives the cards every reader sees from the published ones and this
     /// client's read frontier. The daemon drops an Important entry once the
     /// session's receipt passes it; this client's receipt is usually ahead of
@@ -565,11 +573,16 @@ impl DashboardState {
         let cards = self.published_cards.as_ref().map(|published| {
             let mut cards = published.clone();
             for (id, card) in published.iter() {
-                let viewed_through = self
-                    .state
-                    .sessions
-                    .get(id)
-                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                // A conversation being read is read through everything, even
+                // before the chat has received and acknowledged the event.
+                let viewed_through = if self.conversations_on_screen.contains(id) {
+                    u64::MAX
+                } else {
+                    self.state
+                        .sessions
+                        .get(id)
+                        .map_or(0, |session| session.viewed_through_event_ordinal)
+                };
                 match card.unread_through(viewed_through) {
                     Some(std::borrow::Cow::Borrowed(_)) => {}
                     Some(std::borrow::Cow::Owned(card)) => {

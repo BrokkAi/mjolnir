@@ -186,6 +186,8 @@ impl DashboardContext {
         // The modal obscures its center while leaving the dashboard visible
         // around it. Do not advance read receipts for a covered conversation.
         self.drawn_chat_sessions = if login_open { Vec::new() } else { drawn };
+        let on_screen = self.conversations_on_screen();
+        self.dashboard.set_conversations_on_screen(on_screen);
         self.dashboard.acknowledge_render();
         if !login_open {
             for action in self.dashboard.take_drawn_failure_dismissals() {
