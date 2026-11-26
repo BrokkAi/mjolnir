@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
+import { reconcilePendingPush } from '../../features/push/useWebPush';
 import { SessionActionModal } from '../../features/lifecycle/SessionActionModal';
 import { useUiStore } from '../../stores/useUiStore';
 import { BottomNav } from './BottomNav';
@@ -20,6 +21,20 @@ import { useVisualViewportInset } from './useVisualViewportInset';
 export function AppShell({ children }: { children: ReactNode }) {
   useVisualViewportInset();
   useConversationRoute();
+  // Settle leftover Web Push intent when signed in, and whenever the person
+  // comes back to the page or the network returns.
+  useEffect(() => {
+    const reconcile = () => {
+      if (document.visibilityState === 'visible') void reconcilePendingPush();
+    };
+    reconcile();
+    window.addEventListener('focus', reconcile);
+    window.addEventListener('online', reconcile);
+    return () => {
+      window.removeEventListener('focus', reconcile);
+      window.removeEventListener('online', reconcile);
+    };
+  }, []);
   const routeName = useUiStore(state => state.route.name);
   const isConversation = routeName === 'conversation';
   return (

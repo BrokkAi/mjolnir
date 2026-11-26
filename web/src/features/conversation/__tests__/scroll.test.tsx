@@ -1,11 +1,17 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { markConversationRead } from '../../../api/client';
 import {
   BOTTOM_BAND_PX,
+  READ_RECEIPT_DELAY_MS,
   useConversationScroll,
   type ConversationScroll,
   type ConversationScrollOptions,
 } from '../useConversationScroll';
+
+vi.mock('../../../api/client', () => ({
+  markConversationRead: vi.fn(async () => undefined),
+}));
 
 /**
  * The scroll engine is deliberately measurable without a real browser: a fixed
@@ -277,5 +283,64 @@ describe('useConversationScroll', () => {
     expect(apiRef.current?.paused).toBe(true);
     expect(apiRef.current?.showJumpPill).toBe(true);
     expect(scroller.scrollTop).toBe(900);
+  });
+
+  describe('read receipts', () => {
+    let visibility: DocumentVisibilityState;
+    let focused: boolean;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.mocked(markConversationRead).mockClear();
+      visibility = 'visible';
+      focused = true;
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+      vi.spyOn(document, 'hasFocus').mockImplementation(() => focused);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      Reflect.deleteProperty(document, 'visibilityState');
+    });
+
+    const settle = () => act(() => void vi.advanceTimersByTime(READ_RECEIPT_DELAY_MS + 1));
+
+    it('sends one receipt for the latest sequence while the page is visible and focused', () => {
+      const apiRef: { current: ConversationScroll | null } = { current: null };
+      render(<Harness apiRef={apiRef} canMarkRead latestSeq={5} />);
+      settle();
+      expect(markConversationRead).toHaveBeenCalledExactlyOnceWith('s1', 5);
+    });
+
+    // Hard-won: pre-push review round 2: a hidden or unfocused tab was marked read.
+    it('sends nothing while the page is hidden or unfocused, and sends when the person returns', () => {
+      const apiRef: { current: ConversationScroll | null } = { current: null };
+      visibility = 'hidden';
+      render(<Harness apiRef={apiRef} canMarkRead latestSeq={5} />);
+      settle();
+      expect(markConversationRead).not.toHaveBeenCalled();
+
+      // Visible again but the window is not focused.
+      visibility = 'visible';
+      focused = false;
+      act(() => void document.dispatchEvent(new Event('visibilitychange')));
+      settle();
+      expect(markConversationRead).not.toHaveBeenCalled();
+
+      focused = true;
+      act(() => void window.dispatchEvent(new Event('focus')));
+      settle();
+      expect(markConversationRead).toHaveBeenCalledExactlyOnceWith('s1', 5);
+    });
+
+    it('drops a receipt whose page went inactive after it was scheduled', () => {
+      const apiRef: { current: ConversationScroll | null } = { current: null };
+      render(<Harness apiRef={apiRef} canMarkRead latestSeq={5} />);
+      // The tab is hidden without an event reaching the hook before the timer fires.
+      visibility = 'hidden';
+      settle();
+      expect(markConversationRead).not.toHaveBeenCalled();
+    });
   });
 });

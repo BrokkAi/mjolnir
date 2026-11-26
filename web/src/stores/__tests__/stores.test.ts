@@ -362,6 +362,42 @@ describe('conversation fetch gating', () => {
     expect(conversationCalls()).toHaveLength(after);
   });
 
+  // Hard-won: pre-push review round 2: a transcript fetch that failed during a stream drop never retried.
+  it('retries a failed fetch when the stream reconnects or the browser comes back online', async () => {
+    await open('s1');
+    net = mockFetch({ '/api/v1/conversations/s1': () => new Response('boom', { status: 500 }) });
+    sessions().applyFrame(delta(1, 2, { conversation_seqs: { s1: 6 } }));
+    await flush();
+    expect(transcripts().entries.s1.error).toBe('boom');
+    expect(transcripts().entries.s1.latestSeq).toBe(3);
+
+    useSessionStore.setState({ streamStatus: 'reconnecting' });
+    net = mockFetch({
+      '/api/v1/conversations/s1': () => jsonResponse(transcript({ latest_seq: 6, entries: [entry(6)] })),
+    });
+    useSessionStore.setState({ streamStatus: 'live' });
+    await flush();
+    expect(conversationCalls()).toEqual(['/api/v1/conversations/s1?after_seq=3&presentation_key=k']);
+    expect(transcripts().entries.s1.error).toBeNull();
+    expect(transcripts().entries.s1.latestSeq).toBe(6);
+
+    // The same recovery on `online`, and nothing when the cache is already current.
+    net = mockFetch({ '/api/v1/conversations/s1': () => new Response('boom', { status: 500 }) });
+    sessions().applyFrame(delta(2, 3, { conversation_seqs: { s1: 9 } }));
+    await flush();
+    expect(transcripts().entries.s1.error).toBe('boom');
+    net = mockFetch({
+      '/api/v1/conversations/s1': () => jsonResponse(transcript({ latest_seq: 9, entries: [entry(9)] })),
+    });
+    window.dispatchEvent(new Event('online'));
+    await flush();
+    expect(transcripts().entries.s1.latestSeq).toBe(9);
+    net.calls.length = 0;
+    window.dispatchEvent(new Event('online'));
+    await flush();
+    expect(conversationCalls()).toHaveLength(0);
+  });
+
   it('fetches again when a transitioning conversation becomes readable', async () => {
     sessions().applyFrame(
       delta(1, 2, {

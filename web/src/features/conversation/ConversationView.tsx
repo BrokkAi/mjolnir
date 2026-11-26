@@ -59,6 +59,27 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void 
   );
 }
 
+function TranscriptErrorBanner({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="border-b border-danger/40 bg-danger/10 px-3 py-1.5">
+      <div className="mx-auto flex w-full max-w-3xl items-center gap-2 text-[12px] text-danger">
+        <p role="alert" className="flex min-w-0 flex-1 items-start gap-2">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1 break-words">{message}</span>
+        </p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs text-fg"
+        >
+          <RefreshCw className="size-3.5" aria-hidden />
+          Retry
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function BlockedNotice({ kind }: { kind: 'transitioning' | 'unavailable' }) {
   const text =
     kind === 'transitioning'
@@ -166,6 +187,9 @@ export default function ConversationView({ sessionId, subagentParentId, childKin
     body = (
       <div className="flex min-h-0 flex-1 flex-col">
         {blocked && <BlockedNotice kind={blocked} />}
+        {cached.hasLoaded && cached.error && (
+          <TranscriptErrorBanner message={cached.error} onRetry={retryTranscript} />
+        )}
         {cached.hasLoaded ? (
           <TranscriptFeed
             sessionId={sessionId}

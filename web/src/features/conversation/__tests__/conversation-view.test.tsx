@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyTranscript, useTranscriptStore } from '../../../stores/useTranscriptStore';
 import { useSessionStore } from '../../../stores/useSessionStore';
@@ -88,5 +88,22 @@ describe('ConversationView', () => {
     expect(screen.queryByText(/No messages yet/)).not.toBeInTheDocument();
     expect(screen.queryByTestId('composer')).not.toBeInTheDocument();
     expect(screen.getByText(/stored history is shown read-only/)).toBeInTheDocument();
+  });
+
+  it('keeps the cached rows visible and shows an error banner with Retry when a later fetch failed', () => {
+    const fetchMock = mockFetch({
+      '/api/v1/sessions/s1/client-state': () => jsonResponse({ draft: '', through_event_ordinal: 0 }),
+      '/api/v1/conversations/s1': () => jsonResponse({ latest_seq: 1, entries: [] }),
+    });
+    useTranscriptStore.setState(state => ({
+      entries: { ...state.entries, s1: { ...state.entries.s1, error: 'network down' } },
+    }));
+
+    render(<ConversationView sessionId="s1" subagentParentId={undefined} />);
+
+    expect(screen.getByText('Hello from the agent')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('network down');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(fetchMock.urls().some(url => url.startsWith('/api/v1/conversations/s1'))).toBe(true);
   });
 });

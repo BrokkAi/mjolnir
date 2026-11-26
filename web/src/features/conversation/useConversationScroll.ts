@@ -68,6 +68,11 @@ interface ScrollState {
 
 const INITIAL_STATE: ScrollState = { mode: 'following', paused: false, hasNew: false };
 
+/** A read receipt means "the person saw this": the page must be visible and focused. */
+function isPageActive(): boolean {
+  return document.visibilityState === 'visible' && document.hasFocus();
+}
+
 function distanceFromEnd(element: HTMLElement): number {
   return element.scrollHeight - element.scrollTop - element.clientHeight;
 }
@@ -99,6 +104,20 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
       }
       return next;
     });
+  }, []);
+
+  const [pageActive, setPageActive] = useState(isPageActive);
+  useEffect(() => {
+    const sync = () => setPageActive(isPageActive());
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    window.addEventListener('focus', sync);
+    window.addEventListener('blur', sync);
+    return () => {
+      document.removeEventListener('visibilitychange', sync);
+      window.removeEventListener('focus', sync);
+      window.removeEventListener('blur', sync);
+    };
   }, []);
 
   const frame = useRef(0);
@@ -281,20 +300,22 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
   });
 
   // A read receipt is a courtesy, not a correctness path: debounce it while
-  // following, and never send one for a session that cannot take one.
+  // following, and never send one for a session that cannot take one or while
+  // the page is hidden or unfocused. Returning to the page re-runs this effect.
   useEffect(() => {
-    if (!enabled || !canMarkRead || !hasLoaded) return;
+    if (!enabled || !canMarkRead || !hasLoaded || !pageActive) return;
     if (state.mode !== 'following' || state.paused) return;
     if (latestSeq <= lastMarkedSeq.current) return;
     const seq = latestSeq;
     const timer = setTimeout(() => {
+      if (!isPageActive()) return;
       lastMarkedSeq.current = seq;
       void markConversationRead(sessionId, seq).catch(() => {
         // The next stream advance retries; a receipt never blocks reading.
       });
     }, READ_RECEIPT_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [enabled, canMarkRead, hasLoaded, state.mode, state.paused, latestSeq, sessionId]);
+  }, [enabled, canMarkRead, hasLoaded, state.mode, state.paused, pageActive, latestSeq, sessionId]);
 
   return {
     scrollerRef,

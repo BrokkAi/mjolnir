@@ -101,6 +101,33 @@ async function activeRegistration(): Promise<ServiceWorkerRegistration> {
   return registration;
 }
 
+let pendingReconcile: Promise<void> | null = null;
+
+/**
+ * Finish durable push intent that an earlier session left behind (an enable or
+ * disable whose server call failed, a renewed endpoint). Sends no request when
+ * the browser cannot do Push, has no service worker, or has nothing pending:
+ * the pending check reads IndexedDB only. Never throws.
+ */
+export function reconcilePendingPush(): Promise<void> {
+  if (pendingReconcile) return pendingReconcile;
+  const run = (async () => {
+    if (!pushSupported()) return;
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) return;
+    const api = await loadMjPush();
+    const state = await api.state();
+    if (state.enabled !== true && !(state.endpoints?.length > 0)) return;
+    await api.reconcile(registration);
+  })()
+    .catch(error => console.warn('Could not reconcile notification state', messageOf(error)))
+    .finally(() => {
+      pendingReconcile = null;
+    });
+  pendingReconcile = run;
+  return run;
+}
+
 export function useWebPush(): WebPushController {
   const supported = pushSupported();
   const [loading, setLoading] = useState(supported);

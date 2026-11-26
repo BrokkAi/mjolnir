@@ -374,10 +374,21 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
  * Follow the runtime stream for the open conversation. A delta triggers a
  * fetch only when the server's sequence for that conversation moved past the
  * cache, or when the conversation becomes readable again (a transition ended).
- * Returns the unsubscribe function.
+ * A stream that comes back, or a browser that comes back online, retries a
+ * conversation whose earlier fetch failed. Returns the unsubscribe function.
  */
 export function startTranscriptSync(): () => void {
-  return useSessionStore.subscribe((state, previous) => {
+  /** Fetch the open conversation if, and only if, the cache is behind. */
+  const catchUp = () => {
+    const transcripts = useTranscriptStore.getState();
+    const id = transcripts.activeId;
+    if (!id) return;
+    if (needsSync(transcripts.entries[id], useSessionStore.getState().conversationSeqs[id])) {
+      void transcripts.syncConversation(id);
+    }
+  };
+
+  const unsubscribe = useSessionStore.subscribe((state, previous) => {
     const transcripts = useTranscriptStore.getState();
     const id = transcripts.activeId;
     if (!id) return;
@@ -394,6 +405,15 @@ export function startTranscriptSync(): () => void {
     const seq = state.conversationSeqs[id];
     if (seq !== previous.conversationSeqs[id] && seq !== undefined && seq > cached.latestSeq) {
       void transcripts.syncConversation(id);
+      return;
     }
+    // The stream (re)connected: a fetch that failed during the drop is not
+    // otherwise retried while the server's sequence stays the same.
+    if (state.streamStatus === 'live' && previous.streamStatus !== 'live') catchUp();
   });
+  window.addEventListener('online', catchUp);
+  return () => {
+    unsubscribe();
+    window.removeEventListener('online', catchUp);
+  };
 }
