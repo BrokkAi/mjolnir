@@ -244,16 +244,12 @@ impl DashboardState {
         if !self.support_projection_visible(SupportPane::Quota) {
             return clocks;
         }
-        if self.quota_refreshing.is_empty()
-            && let Some(refreshed) = self
-                .quotas
-                .values()
-                .map(|quota| quota.refreshed_at_epoch_seconds)
-                .min()
-        {
+        if self.quota_refreshing.is_empty() && !self.quotas.is_empty() {
+            // The same text the title draws, so a hold ending or the age
+            // ticking over redraws it.
             clocks.push(DisplayedClock {
                 key: "quota:refreshed".to_owned(),
-                value: refresh_age(now, refreshed),
+                value: crate::render::quota_refresh_status(&self.quotas, now),
             });
         }
 

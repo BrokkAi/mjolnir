@@ -263,6 +263,43 @@ pub(crate) fn render_quotas(
     render_quotas_at(frame, area, dashboard, size, now);
 }
 
+/// The title's refresh status. The age is the oldest reading among profiles
+/// the daemon is free to check; a profile whose check was refused is waiting
+/// for its next check, which a refresh does not bring forward, so it is named
+/// as pending instead of holding the age back.
+pub(crate) fn quota_refresh_status(
+    quotas: &std::collections::BTreeMap<String, ProfileQuota>,
+    now: u64,
+) -> String {
+    let pending = |quota: &ProfileQuota| quota.next_check_at().is_some_and(|next| next > now);
+    let age = quotas
+        .values()
+        .filter(|quota| !pending(quota))
+        .map(|quota| quota.refreshed_at_epoch_seconds)
+        .min()
+        // Every profile is waiting: show how old the oldest reading is.
+        .or_else(|| {
+            quotas
+                .values()
+                .map(|quota| quota.refreshed_at_epoch_seconds)
+                .min()
+        });
+    let waiting = quotas
+        .iter()
+        .filter(|(_, quota)| pending(quota))
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let refreshed = age.map_or_else(
+        || "not refreshed".to_string(),
+        |refreshed| format!("refreshed {}", refresh_age(now, refreshed)),
+    );
+    if waiting.is_empty() {
+        refreshed
+    } else {
+        format!("{refreshed}, pending: {}", waiting.join(", "))
+    }
+}
+
 pub(crate) fn render_quotas_at(
     frame: &mut Frame,
     area: Rect,
@@ -275,13 +312,7 @@ pub(crate) fn render_quotas_at(
     let refresh_status = if !dashboard.quota_refreshing.is_empty() {
         format!("refreshing{}", theme::glyphs().ellipsis)
     } else {
-        dashboard
-            .quotas
-            .values()
-            .map(|quota| quota.refreshed_at_epoch_seconds)
-            .min()
-            .map(|refreshed| format!("refreshed {}", refresh_age(now, refreshed)))
-            .unwrap_or_else(|| "not refreshed".to_string())
+        quota_refresh_status(&dashboard.quotas, now)
     };
     // On the combined surface (`size` is set) the title opens the pane's
     // menu, and says so with a dropdown mark.
