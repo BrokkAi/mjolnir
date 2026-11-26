@@ -3446,11 +3446,11 @@ function oracleChoiceApplies(draft = newDraft) {
   return snapshot?.profiles.some(profile => profile.id === draft?.profileId) === true;
 }
 
-// Mirrors HarnessKind::has_native_subagents. DSH has none, so Native would
-// do nothing there and is not offered.
+// Mirrors HarnessKind::has_native_subagents. Antigravity has none that
+// Mjolnir offers, so Native would do nothing there and is not offered.
 function subagentNativeOffered(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind !== 'dsh' && kind !== 'antigravity';
+  return kind !== 'antigravity';
 }
 
 // A policy as the delegation choice shows and submits it for the draft's

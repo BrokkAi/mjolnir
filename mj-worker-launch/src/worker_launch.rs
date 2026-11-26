@@ -346,6 +346,7 @@ pub fn stage_worker_files_for(
         config.subagents.max_concurrent,
         launch.subtle_subagents,
     )?;
+    stage_dsh_home_patch(profile.kind, &profile_stage, &launch.subagents)?;
     apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
     if let Some(reviewer) = &launch.reviewer_launch
         && mj_core::worker_launch::ReviewMcpDelivery::for_harness(profile.kind)

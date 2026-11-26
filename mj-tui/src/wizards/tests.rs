@@ -6084,8 +6084,8 @@ fn single_profile_raw_resume_starts_checks_without_confirm() {
 #[test]
 fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_skipped() {
     use mj_core::subagent::SubagentPolicy;
-    // DSH shows a stored Native as None, which is what it does there; an
-    // untouched Move still retains the stored policy.
+    // An untouched Move retains the stored policy for every destination,
+    // including one whose harness normalizes Native to another choice.
     for (destination, stored) in [HarnessKind::Claude, HarnessKind::Dsh]
         .into_iter()
         .flat_map(|destination| {
@@ -6828,18 +6828,18 @@ fn golden_create_delegation_availability_and_submission() {
             SubagentPolicy::None
         );
     }
-    // DSH has no sub-agents of its own, so Native is not offered. Create
-    // starts on a remembered Mjolnir only when it is configured, and on None
-    // otherwise, and submits what it shows.
+    // DSH has sub-agents of its own, so Native is offered. Create starts on
+    // the remembered choice, falls back to Native when a remembered Mjolnir is
+    // unconfigured, and submits what it shows.
     let mjolnir = SubagentPolicy::Mjolnir {
         orchestrators: false,
         straightforward: None,
         subtle: None,
     };
     for (remembered, configured, expected) in [
-        (SubagentPolicy::Native, true, SubagentPolicy::None),
+        (SubagentPolicy::Native, true, SubagentPolicy::Native),
         (mjolnir.clone(), true, mjolnir.clone()),
-        (mjolnir.clone(), false, SubagentPolicy::None),
+        (mjolnir.clone(), false, SubagentPolicy::Native),
     ] {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Dsh;
@@ -6864,7 +6864,7 @@ fn golden_create_delegation_availability_and_submission() {
         assert_eq!(new_wizard(&dashboard).subagents.selected(), expected);
         assert_eq!(
             new_wizard(&dashboard).subagents.policies(),
-            ["Mjolnir", "None"]
+            ["Native", "Mjolnir", "None"]
         );
         let Mode::New(wizard) = &mut dashboard.mode else {
             unreachable!()
@@ -6941,8 +6941,18 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
             .unwrap()
             .contains("Claude, Codex, DSH, or OpenCode")
     );
-    // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
+    // DSH has native sub-agents now, so it lists all three and keeps Native.
+    // Unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
+    draft.update_choices("claude-1", &config);
+    assert_eq!(draft.policies(), ["Native", "Mjolnir", "None"]);
+    assert_eq!(draft.enabled_policies(), [true, false, true]);
+    assert_eq!(draft.selected(), SubagentPolicy::Native);
+    assert!(!draft.select_policy(1));
+    assert!(draft.select_policy(2));
+    assert_eq!(draft.selected(), SubagentPolicy::None);
+    // Antigravity has no native sub-agents of its own, so Native reads as None.
+    config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Antigravity;
     draft.update_choices("claude-1", &config);
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);

@@ -145,6 +145,29 @@ pub fn append_orchestrator_policy(
     )
 }
 
+/// DSH composes every profile over a home-level `cordis.patch.yml`, the
+/// supported deployment seam for adding or removing plugins. A session whose
+/// effective delegation policy suppresses native sub-agents gets its
+/// native-delegation rows disabled there, so DSH never presents itself as the
+/// root agent above Mjolnir's tree. A native session gets an empty patch, also
+/// written so a retained home cannot keep an earlier suppression.
+pub fn stage_dsh_home_patch(
+    harness: mj_core::config::HarnessKind,
+    destination: &Path,
+    policy: &mj_core::subagent::SubagentPolicy,
+) -> Result<()> {
+    if harness != mj_core::config::HarnessKind::Dsh {
+        return Ok(());
+    }
+    let path = destination
+        .join(mj_core::harness_runtime::DSH_HOME_DIRECTORY)
+        .join(mj_core::harness_runtime::DSH_HOME_PATCH_FILE);
+    let patch = mj_core::harness_runtime::dsh_native_subagents_patch(policy.suppresses_native());
+    mj_core::config::atomic_write(&path, patch.as_bytes())
+        .with_context(|| format!("stage DSH home patch {}", path.display()))?;
+    Ok(())
+}
+
 /// Called only on a fresh profile stage, never on a retained session profile.
 pub fn append_composed_session_instructions(
     launch: &WorkerLaunchConfig,

@@ -471,9 +471,8 @@ ancestors. Directories you attach with `additional_mounts` are not checked.
 Choose `native` for harness delegation, `mjolnir` for Mjolnir-managed children,
 or `none` to turn off delegation. When omitted, Mjolnir is the default. If it is
 unconfigured or unavailable, the session uses `native` where supported and
-`none` on DSH and Antigravity. The response includes a `notice` describing the
-fallback. A named DSH or Antigravity profile refuses an explicit `native`
-choice. An explicit Mjolnir policy, including one with `"orchestrators": true`, requires Mjolnir
+`none` on Antigravity. The response includes a `notice` describing the
+fallback. A named Antigravity profile refuses an explicit `native` choice. An explicit Mjolnir policy, including one with `"orchestrators": true`, requires Mjolnir
 delegation to be available. Mjolnir delegation supports Claude, Codex, DSH,
 OpenCode, and Antigravity parents and requires a straightforward choice, either
 global or a session override. A subtle choice is optional.

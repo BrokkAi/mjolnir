@@ -224,12 +224,12 @@ action: CreateSession { remember_container_size: false, create_managed_worktree:
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Sub-agents None ▾                                                                │                           │
+│                           │ Sub-agents Native ▾                                                              │                           │
 │                           │            ╭ Values ─╮                                                           │                           │
-│                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
-│                           │            │None     │                                                           │  ─────────────────────────╮
+│                           │            │Native   │                                                           │  ─────────────────────────╯
+│                           │            │Mjolnir  │                                                           │  ─────────────────────────╮
+│                           │            │None     │                                                           │                           │
 │                           │            ╰─────────╯                                                           │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
@@ -267,10 +267,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │ Sub-agents Mjolnir ▾                                                             │                           │
 │                           │            ╭ Values ─╮                                                           │                           │
-│                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
-│                           │            │None     │                                                           │  ─────────────────────────╮
+│                           │            │Native   │                                                           │  ─────────────────────────╯
+│                           │            │Mjolnir  │                                                           │  ─────────────────────────╮
+│                           │            │None     │                                                           │                           │
 │                           │            ╰─────────╯                                                           │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
@@ -306,12 +306,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Sub-agents None ▾                                                                │                           │
+│                           │ Sub-agents Native ▾                                                              │                           │
 │                           │ Set up Mjol╭ Values ─╮nts in Settings -> Sub-agents                              │                           │
-│                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
-│                           │            │None     │                                                           │  ─────────────────────────╮
+│                           │            │Native   │                                                           │  ─────────────────────────╯
+│                           │            │Mjolnir  │                                                           │  ─────────────────────────╮
+│                           │            │None     │                                                           │                           │
 │                           │            ╰─────────╯                                                           │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │

@@ -1705,6 +1705,7 @@ mod tests {
             mj_core::config::HarnessKind::OpenCode,
             mj_core::config::HarnessKind::Grok,
             mj_core::config::HarnessKind::Muse,
+            mj_core::config::HarnessKind::Antigravity,
         ] {
             let mut config = Config::default();
             config.profiles.insert(
@@ -1764,8 +1765,8 @@ mod tests {
             )
             .await
             .unwrap();
-            // Native keeps a harness's own sub-agents; DSH has none, so an
-            // explicit Native is refused with the two choices it offers.
+            // Native keeps a harness's own sub-agents; Antigravity has none,
+            // so an explicit Native is refused with the two choices it offers.
             let native = validate_session_subagent_policy(
                 &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
                 &config,
