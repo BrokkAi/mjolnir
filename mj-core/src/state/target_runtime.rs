@@ -237,8 +237,9 @@ pub fn machine_hosts_placement(
             }
             match runtime.map(|runtime| &runtime.connection) {
                 Some(TargetConnection::Ssh { ssh: recorded }) => same_ssh_place(recorded, ssh),
-                Some(_) => false,
-                None => true,
+                // Without recorded access settings only the host name is known,
+                // which cannot tell users or ports on one host apart.
+                Some(_) | None => false,
             }
         }
         Machine::AwsEc2 { .. } => false,

@@ -1776,8 +1776,15 @@ pub struct SessionRecord {
     /// The configured machine this placement runs on, stored beside the
     /// placement (`session_targets.machine_id`) and nowhere else. `None`
     /// means unknown: a row written before machines were recorded whose
-    /// template is gone. A Move snapshot carries it with the locator.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// template is gone.
+    ///
+    /// Not serialized: `SessionRecord` is sent to clients, and clients one
+    /// release older reject unknown fields, so a new field would break an
+    /// attached terminal across a daemon upgrade. A record restored from a
+    /// JSON snapshot (a Move's `recovery_session`) therefore saves `None`
+    /// until the next daemon load fills the column again where the placement
+    /// proves its machine.
+    #[serde(skip)]
     pub machine_id: Option<crate::config::MachineId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,

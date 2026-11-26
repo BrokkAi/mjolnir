@@ -95,8 +95,12 @@ Scope of "another machine": a move between hosts of the same OS family (Unix to 
   Rationale: three milestones were implemented in parallel worktrees; schema tests need contiguous revisions.
   Date/Author: 2026-11-26 / Coordinator.
 
-- Decision: `SessionRecord.machine_id` is serialized with the record (omitted when absent), and environment placements read `environment_workers.machine_id`.
-  Rationale: Move recovery snapshots persist a `SessionRecord` and restore it into `session_targets`; the snapshot carries the locator, so it must carry the machine. Every reader of a placement's machine asks the column that owns it.
+- Decision: `SessionRecord.machine_id` is not serialized; environment placements read `environment_workers.machine_id`.
+  Rationale: `SessionRecord` and `MoveOperation` go to clients, and older clients reject unknown fields (`deny_unknown_fields`), so serializing the field would break attached terminals across a daemon upgrade (third Milestone 4 review; the second review had asked for it to travel in Move snapshots). A record restored from a Move's `recovery_session` saves NULL until the next daemon load refills the column where the placement proves its machine. Every reader of a placement's machine asks the column that owns it.
+  Date/Author: 2026-11-26 / Coordinator.
+
+- Decision: The backfill leaves an SSH placement with no recorded runtime NULL.
+  Rationale: the host name alone cannot tell users or ports on one host apart.
   Date/Author: 2026-11-26 / Coordinator, from Milestone 4 review.
 
 - Decision: Setup and doctor smoke containers carry the fixed ownership label `setup-smoke`.
@@ -375,7 +379,7 @@ These are not part of this plan. They record what review found so migrate's desi
 8. State outside the two directories must exist on B: SSH identity files, `ssh_config` aliases, `gh auth`, `~/.aws`. The 462 ssh-podman sessions depend on them.
 9. Rows that would act on the wrong machine: `host_snapshot_cache` rows with host `local` hold paths under A's cache (`host_cache.rs:209-219`); `host_container_sizes` with host `local` would give B A's chosen size.
 10. Project memory for a checkout with no remote is keyed by a hash containing `path:<absolute>` (`repository.rs:162-167`, `project_memory.rs:674`); it survives only if the path string is kept.
-11. Placements with `machine_id IS NULL` (SSH rows whose template was removed or repointed, and all legacy EC2 rows) need a manual mapping.
+11. Placements with `machine_id IS NULL` (SSH rows whose template was removed or repointed or that have no recorded runtime, all legacy EC2 rows, and records restored from a Move snapshot whose template no longer proves the machine) need a manual mapping.
 12. Named instances are separate stores and migrate separately.
 
 

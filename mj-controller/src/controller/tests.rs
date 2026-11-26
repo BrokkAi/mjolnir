@@ -3324,6 +3324,11 @@ fn load_fills_placement_machines_from_surviving_templates_only() {
         let mut session = super::test_support::checkpoint_test_session(id);
         session.target_template_id = (*template).into();
         session.target = Some(Box::new(target.clone()));
+        // The access settings recorded when the placement was made, on the
+        // host its locator names.
+        if let TargetLocator::SshPodman { host, .. } = target {
+            session.target_runtime = Some((&durable_remote_template(host)).into());
+        }
         // These rows are what revision 160 leaves: placements with no machine.
         session.machine_id = None;
         controller
