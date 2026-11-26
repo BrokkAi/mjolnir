@@ -2911,6 +2911,13 @@ set -eu
 case "$1 ${{2-}}" in
     'container inspect'|'container exists') exit 1 ;;
     'rm --force'|'info ') exit 0 ;;
+    # Absence comes from successful listings: no container, and the volumes
+    # whose state files exist.
+    'container ls') exit 0 ;;
+    'volume ls')
+        [ ! -f "$MJ_DEFERRED_CLEANUP_TEST_ROOT/volume" ] || echo '{container}-workspace'
+        [ ! -f "$MJ_DEFERRED_CLEANUP_TEST_ROOT/replacement-volume" ] || echo '{container}-replacement'
+        ;;
     'volume inspect')
         case "$5" in
             '{container}-workspace') file=volume ;;
@@ -16574,17 +16581,23 @@ async fn queued_resume_rechecks_state_after_suspend_before_reserving_capacity() 
         mj_core::test_hooks::install_fake_command(
             &bin,
             "podman",
-            r#"
+            &r#"
 printf '%s\n' "$*" >> "$MJ_TEST_QUEUED_RESUME_PODMAN_LOG"
 case "$*" in
     *".State.Running"*) printf 'false\n' ;;
+    "container ls "*) [ -f "$MJ_TEST_QUEUED_RESUME_REMOVED" ] || printf 'fakeid CONTAINER_NAME\n' ;;
+    "volume ls "*) ;;
     "container inspect --format "*|"volume inspect --format "*) printf 'true|queued-resume\n' ;;
     "container inspect "*|"container exists "*) [ ! -f "$MJ_TEST_QUEUED_RESUME_REMOVED" ] ;;
     "rm "*) : > "$MJ_TEST_QUEUED_RESUME_REMOVED" ;;
     "stop "*|"volume rm "*|"info"|"exec "*) exit 0 ;;
     *) printf 'unexpected podman arguments: %s\n' "$*" >&2; exit 92 ;;
 esac
-"#,
+"#
+            .replace(
+                "CONTAINER_NAME",
+                &mj_core::targets::resource_name("queued-resume").unwrap(),
+            ),
         );
         let path = std::env::join_paths(
             std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
