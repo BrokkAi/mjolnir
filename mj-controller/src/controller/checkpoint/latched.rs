@@ -634,9 +634,12 @@ impl Controller {
         // and will not send it again. It also owns a queued mailbox wake's
         // prompt: the projection shows the wake's messages as rows of their own
         // and keeps no payload for it. Ask the worker for both while the latch
-        // still holds the cut. Reading a queued command is not bound to the
-        // cut, so the wakes come first and the cut-bound mailbox read after
-        // them proves what they read: it refuses once the relay has moved.
+        // still holds the cut. At protocol 97 one paged read, bound to the cut,
+        // returns the mailbox and every wake's prompt, so the wakes it returns
+        // are the ones at the cut by construction. Older workers answer a wake
+        // with `ReadQueuedCommand`, which is not bound to the cut, so the wakes
+        // come first and the cut-bound mailbox read after them proves what they
+        // read: it refuses once the relay has moved.
         let wakes: Vec<usize> = canonical_session
             .queued_prompts
             .iter()
@@ -647,9 +650,28 @@ impl Controller {
             })
             .map(|(index, _)| index)
             .collect();
-        if relay.connection_mut().protocol_version()
-            >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL
-        {
+        let worker_protocol = relay.connection_mut().protocol_version();
+        if worker_protocol >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL {
+            let mut read = relay
+                .connection_mut()
+                .read_checkpoint_mailbox_pages(barrier_command_id.clone(), cursor.clone())
+                .await
+                .context("read the worker's mail and queued wakes at the checkpoint cut")?;
+            for &index in &wakes {
+                let queued = &mut canonical_session.queued_prompts[index];
+                queued.content = read
+                    .wake_prompts
+                    .remove(&queued.command_id)
+                    .filter(|prompt| !prompt.is_empty())
+                    .with_context(|| {
+                        format!(
+                            "the worker's queue holds no prompt for mailbox wake {}",
+                            queued.command_id
+                        )
+                    })?;
+            }
+            canonical_session.mailbox = (!read.mailbox.is_empty()).then_some(read.mailbox);
+        } else if worker_protocol >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL {
             for &index in &wakes {
                 let queued = &mut canonical_session.queued_prompts[index];
                 let command = relay
@@ -657,7 +679,10 @@ impl Controller {
                     .read_queued_command(queued.command_id.clone())
                     .await
                     .with_context(|| {
-                        format!("read queued mailbox wake {} from the worker", queued.command_id)
+                        format!(
+                            "read queued mailbox wake {} from the worker",
+                            queued.command_id
+                        )
                     })?;
                 let prompt = command
                     .as_ref()
@@ -679,9 +704,11 @@ impl Controller {
                 .read_checkpoint_mailbox(barrier_command_id.clone(), cursor.clone())
                 .await
                 .context("read the worker's mail at the checkpoint cut")?;
-            if relay.connection_mut().protocol_version() >= mj_core::relay::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL {
-                mailbox.quota_input = relay.connection_mut()
-                    .read_checkpoint_quota_input(barrier_command_id.clone(), cursor.clone()).await
+            if worker_protocol >= mj_core::relay::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL {
+                mailbox.quota_input = relay
+                    .connection_mut()
+                    .read_checkpoint_quota_input(barrier_command_id.clone(), cursor.clone())
+                    .await
                     .context("read the worker's quota-interrupted input at the checkpoint cut")?;
             }
             canonical_session.mailbox = (!mailbox.is_empty()).then_some(mailbox);

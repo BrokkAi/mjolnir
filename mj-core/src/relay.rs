@@ -232,7 +232,10 @@ pub const RELAY_READ_SESSION_V2_PROTOCOL: u32 = 94;
 pub const RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL: u32 = 95;
 /// 96 pages retained quota and steered input at a checkpoint cut.
 pub const RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL: u32 = 96;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL;
+/// 97 pages the whole checkpoint mailbox, queued wake prompts included, from
+/// one serialization of the cut.
+pub const RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL: u32 = 97;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

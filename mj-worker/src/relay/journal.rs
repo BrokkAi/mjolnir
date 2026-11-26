@@ -815,6 +815,8 @@ impl DurableRelay {
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
+        // A journaled event moves the frontier, which ends every cut.
+        self.checkpoint_mailbox_text = None;
         if let RelayObservation::SessionUpdate { update } = &event.observation {
             self.observe_committed_tools(update, event.recorded_at_ms);
         }
@@ -1161,6 +1163,7 @@ impl DurableRelay {
                 || self.snapshot.native_use_evidence != next_snapshot.native_use_evidence);
         persist_relay_snapshot(&self.root, &next_snapshot)?;
         self.snapshot = next_snapshot;
+        self.checkpoint_mailbox_text = None;
         self.unpersisted_journal_bytes = 0;
         if cut_changed {
             self.spoil_checkpoint_cut()?;

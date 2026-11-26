@@ -1325,6 +1325,41 @@ impl RelayClient {
         }
     }
 
+    /// The whole mailbox at the cut and the prompts of its queued mailbox
+    /// wakes, in one cut-bound read. The worker serializes the cut once and
+    /// serves its pages; the read fails if the relay moves past the cut.
+    pub async fn read_checkpoint_mailbox_pages(
+        &mut self,
+        barrier_command_id: String,
+        cut: mj_core::relay::RelayCursor,
+    ) -> Result<mj_core::relay::CheckpointMailboxRead> {
+        let mut offset = 0u64;
+        let mut json = String::new();
+        loop {
+            let RelayResponsePayload::CheckpointMailboxPage { page, next_offset } = self
+                .call(RelayRequest::ReadCheckpointMailboxPage {
+                    barrier_command_id: barrier_command_id.clone(),
+                    cut: cut.clone(),
+                    offset,
+                })
+                .await?
+            else {
+                bail!("relay returned an unexpected checkpoint mailbox page response")
+            };
+            json.push_str(&page);
+            match next_offset {
+                None => return Ok(serde_json::from_str(&json)?),
+                Some(next) => {
+                    anyhow::ensure!(
+                        next > offset && usize::try_from(next).ok() == Some(json.len()),
+                        "checkpoint mailbox page returned an invalid next offset"
+                    );
+                    offset = next;
+                }
+            }
+        }
+    }
+
     pub async fn read_checkpoint_quota_input(
         &mut self,
         barrier_command_id: String,
