@@ -179,7 +179,7 @@ fn owner() -> &'static str {
 }
 
 pub fn controller_log_dir() -> PathBuf {
-    crate::config::data_dir().join("jev-decisions")
+    crate::config::DataLayout::current().jev_decisions_dir()
 }
 
 impl DecisionLog {

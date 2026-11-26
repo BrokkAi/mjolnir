@@ -1491,7 +1491,9 @@ mod tests {
             "codex".into(),
             HarnessProfile::new(
                 HarnessKind::Codex,
-                mj_core::config::data_dir().join("profile"),
+                mj_core::config::DataLayout::current()
+                    .root()
+                    .join("profile"),
             ),
         );
         let choice = mj_core::config::SubagentChoice {
@@ -1515,10 +1517,12 @@ mod tests {
             straightforward: None,
             subtle: None,
         });
-        let workspace = mj_core::config::data_dir().join("child-workspace");
+        let workspace = mj_core::config::DataLayout::current()
+            .root()
+            .join("child-workspace");
         child.project_directory = Some(workspace.clone());
         child.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join(child_id),
+            worker_root: mj_core::config::DataLayout::current().worker_root(child_id),
         }));
         let relation = SubagentRecord {
             child_session_id: child_id.into(),
@@ -1659,7 +1663,9 @@ mod tests {
         );
         assert_eq!(same_launch.initial_commands, original_commands);
 
-        let deepseek_home = mj_core::config::data_dir().join("deepseek-profile");
+        let deepseek_home = mj_core::config::DataLayout::current()
+            .root()
+            .join("deepseek-profile");
         std::fs::create_dir_all(&deepseek_home).unwrap();
         std::fs::write(
             deepseek_home.join("config.toml"),
@@ -1718,7 +1724,7 @@ wire_api = "responses"
             "claude".into(),
             HarnessProfile::new(
                 HarnessKind::Claude,
-                mj_core::config::data_dir().join("claude"),
+                mj_core::config::DataLayout::current().root().join("claude"),
             ),
         );
         let mut moved = state.clone();

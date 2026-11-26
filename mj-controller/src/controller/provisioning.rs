@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail, ensure};
 
 use mj_checkpoint::archive::ArchiveManifest;
-use mj_core::config::{TargetTemplate, atomic_write, data_dir};
+use mj_core::config::{DataLayout, TargetTemplate, atomic_write};
 use mj_core::state::{MovePhase, SessionState, State, TargetLocator};
 use mj_session_runtime::host_git_config::controller_git_settings;
 
@@ -1372,7 +1372,7 @@ const RETAINED_LAUNCH_DIAGNOSTICS: usize = 20;
 /// annotated with the diagnostic path, which the caller stores in `last_error`
 /// so the reason travels to `mj sessions`, `mj wait`, and `mj events`.
 pub(super) fn note_new_session_launch_failure(session_id: &str, error: &anyhow::Error) -> String {
-    note_new_session_launch_failure_in(&data_dir().join("diagnostics"), session_id, error)
+    note_new_session_launch_failure_in(&DataLayout::current().diagnostics_dir(), session_id, error)
 }
 
 fn note_new_session_launch_failure_in(

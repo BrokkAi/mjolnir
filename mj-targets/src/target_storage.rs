@@ -114,7 +114,7 @@ fn board() -> Arc<Board> {
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .entry(mj_core::config::data_dir())
+        .entry(mj_core::config::DataLayout::current().root().to_path_buf())
         .or_default()
         .clone()
 }

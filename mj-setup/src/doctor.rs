@@ -3538,7 +3538,7 @@ fn normalized_worker_architecture(platform_arch: &str) -> String {
 /// The cache is never pruned, so this is what any daemon on this machine has
 /// pinned at some point, which is why it is reported rather than judged.
 fn pinned_worker_digests() -> Vec<String> {
-    let root = mj_core::config::data_dir().join("workers").join("pinned");
+    let root = mj_core::config::DataLayout::current().pinned_workers_dir();
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };

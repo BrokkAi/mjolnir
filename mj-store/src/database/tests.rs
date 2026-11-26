@@ -10005,7 +10005,7 @@ fn suspend_settlement_rolls_back_transcript_deletes_and_temporary_close_preserve
     let mut child = session("child", "project");
     child.state = SessionState::Stopped;
     save_subagent_session(&child, &test_subagent("parent", "child")).unwrap();
-    let data_dir = mj_core::config::data_dir();
+    let data_dir = mj_core::config::DataLayout::current().root().to_path_buf();
     let detail = data_dir.join("tool-details/child.mjtd");
     tool_details::append_tool_detail(&data_dir, "child", "detail", "{}").unwrap();
 

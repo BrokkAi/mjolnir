@@ -51,7 +51,10 @@ pub fn run_setup(
 /// welcome, so an existing installation never sees one; `run_setup` then
 /// decides again under the setup lock.
 pub fn automatic_setup_due(config_path: &Path, instance_data: &Path) -> Result<bool> {
-    automatic_setup_is_due(&instance_data.join("setup-state"), config_path)
+    automatic_setup_is_due(
+        &mj_core::config::DataLayout::at(instance_data).setup_state(),
+        config_path,
+    )
 }
 
 /// The one reading of the setup marker and the configuration.
@@ -97,8 +100,11 @@ fn run_setup_transaction(
     discover: impl FnOnce() -> Result<(Vec<DiscoveredHome>, Option<String>)>,
 ) -> Result<Option<FirstRunSetupReport>> {
     std::fs::create_dir_all(instance_data).context("create setup state directory")?;
-    let _owner = acquire_setup_lock(&instance_data.join("setup.lock"), cancelled)?;
-    let marker = instance_data.join("setup-state");
+    let _owner = acquire_setup_lock(
+        &mj_core::config::DataLayout::at(instance_data).setup_lock(),
+        cancelled,
+    )?;
+    let marker = mj_core::config::DataLayout::at(instance_data).setup_state();
     if !automatic_setup_is_due(&marker, config_path)? {
         return Ok(None);
     }

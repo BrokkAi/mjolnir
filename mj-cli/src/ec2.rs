@@ -1936,7 +1936,7 @@ fn cleanup_record(cloud: &Cloud, record: &Record, root: &Path) -> Result<()> {
 /// that would otherwise retry its address until they expire. Never fails the
 /// destroy: the rows stay for the expiry sweep, which backs off the dead host.
 fn retire_host_snapshot_cache(key: &Path) {
-    let data_dir = mj_core::config::data_dir();
+    let data_dir = mj_core::config::DataLayout::current().root().to_path_buf();
     if mj_core::config::ensure_may_control_store(&data_dir, "retire host snapshot cache").is_err() {
         return;
     }

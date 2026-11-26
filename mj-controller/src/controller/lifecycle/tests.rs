@@ -2467,8 +2467,8 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
     assert_eq!(&arguments[..3], ["shared", "/srv/mbx-cache", ""]);
     assert_eq!(
         arguments[3],
-        mj_core::config::data_dir()
-            .join("mbx")
+        mj_core::config::DataLayout::current()
+            .mbx_dir()
             .to_string_lossy()
             .as_ref()
     );
@@ -2603,7 +2603,7 @@ fn destroy_removes_every_archive_of_the_session_and_only_those() {
     let _writer = crate::database::install_isolated_test_writer();
     let session_id = "0123456789abcdef0123456789abcdef";
     let other_id = "fedcba9876543210fedcba9876543210";
-    let sessions = mj_core::config::sessions_dir();
+    let sessions = mj_core::config::DataLayout::current().sessions_dir();
     // The record points at the newest archive; the Move's handoff archive is
     // an older file no record refers to.
     std::fs::create_dir_all(&sessions).unwrap();
@@ -3309,7 +3309,7 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
     let mut relation = failed_subagent_relation(child_id);
     relation.parent_session_id = session_id.into();
     crate::database::save_subagent_session(&child, &relation).unwrap();
-    let data = mj_core::config::data_dir();
+    let data = mj_core::config::DataLayout::current().root().to_path_buf();
     crate::database::tool_details::append_tool_detail(&data, child_id, "detail", "{}").unwrap();
     let err = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint(session_id, true, &CancellingFailingExecutor)

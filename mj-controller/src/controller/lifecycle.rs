@@ -3268,7 +3268,7 @@ impl Controller {
             );
         }
         super::checkpoint::remove_session_checkpoint_archives(
-            &mj_core::config::sessions_dir(),
+            &mj_core::config::DataLayout::current().sessions_dir(),
             session_id,
             session.checkpoint.as_deref(),
         )?;
@@ -3665,7 +3665,7 @@ impl Controller {
                 )?;
                 retire_worker_restart_intent(session_id)?;
                 super::checkpoint::remove_session_checkpoint_archives(
-                    &mj_core::config::sessions_dir(),
+                    &mj_core::config::DataLayout::current().sessions_dir(),
                     session_id,
                     session.checkpoint.as_deref(),
                 )?;
@@ -3858,7 +3858,7 @@ pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
 fn finish_retired_session_destroy(session_id: &str) -> Result<()> {
     let checkpoint = crate::database::load_session_checkpoint(session_id)?;
     super::checkpoint::remove_session_checkpoint_archives(
-        &mj_core::config::sessions_dir(),
+        &mj_core::config::DataLayout::current().sessions_dir(),
         session_id,
         checkpoint.as_ref(),
     )?;

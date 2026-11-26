@@ -1028,15 +1028,20 @@ mod tests {
                 text: id.into(),
             })
             .unwrap();
-            tool_details::append_tool_detail(&mj_core::config::data_dir(), id, "detail", &body)
-                .unwrap();
+            tool_details::append_tool_detail(
+                mj_core::config::DataLayout::current().root(),
+                id,
+                "detail",
+                &body,
+            )
+            .unwrap();
         };
         let exists = |id: &str| {
             let row = load_session_record(id).unwrap().is_some();
             assert_eq!(
                 row,
-                mj_core::config::data_dir()
-                    .join("tool-details")
+                mj_core::config::DataLayout::current()
+                    .tool_details_dir()
                     .join(format!("{id}.mjtd"))
                     .is_file()
             );

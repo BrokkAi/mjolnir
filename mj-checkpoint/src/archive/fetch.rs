@@ -272,7 +272,7 @@ impl FetchedPath {
 /// `/tmp`, which is commonly tmpfs. The final user copy keeps its requested
 /// destination; only rebuildable transport scratch lives here.
 pub fn create_fetch_spool() -> anyhow::Result<fs::File> {
-    let directory = mj_core::config::data_dir().join("fetch-spool");
+    let directory = mj_core::config::DataLayout::current().fetch_spool_dir();
     fs::create_dir_all(&directory).context("create fetch spool directory")?;
     tempfile::tempfile_in(directory).context("create fetch spool")
 }

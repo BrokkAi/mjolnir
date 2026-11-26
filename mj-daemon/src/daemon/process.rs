@@ -171,7 +171,7 @@ pub(super) async fn run_daemon_runtime(
     owner_pid: Option<u32>,
     cancellation: CancellationToken,
 ) -> Result<()> {
-    let uploads = mj_core::config::data_dir().join("uploads");
+    let uploads = mj_core::config::DataLayout::current().uploads_dir();
     if tokio::fs::try_exists(&uploads).await? {
         tokio::fs::remove_dir_all(&uploads).await?;
     }
@@ -319,7 +319,7 @@ pub(super) async fn run_daemon_runtime(
         })
     }));
     let guardian_classifier = Arc::new(GuardianClassifier::new(
-        mj_core::config::data_dir(),
+        mj_core::config::DataLayout::current().root().to_path_buf(),
         controller.config.guardian.use_gpu,
     ));
     manager_control

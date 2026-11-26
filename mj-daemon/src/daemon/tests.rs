@@ -3119,7 +3119,7 @@ async fn deferred_cleanup_serializes_queued_destroy_and_archive_without_holding_
                 content: vec![serde_json::json!({"type": "text", "text": "archive this session"})],
             },
         });
-    let archives = mj_core::config::sessions_dir();
+    let archives = mj_core::config::DataLayout::current().sessions_dir();
     fs::create_dir_all(&archives).unwrap();
     stopped.checkpoint = Some(Box::new(
         mj_controller::controller::test_support::write_checkpoint_archive_input(
@@ -3224,7 +3224,7 @@ async fn deferred_cleanup_inside_archive_yields_handoff_without_destroying_sessi
                 content: vec![serde_json::json!({"type": "text", "text": "archive this session"})],
             },
         });
-    let archives = mj_core::config::sessions_dir();
+    let archives = mj_core::config::DataLayout::current().sessions_dir();
     fs::create_dir_all(&archives).unwrap();
     stopped.checkpoint = Some(Box::new(
         mj_controller::controller::test_support::write_checkpoint_archive_input(
@@ -10780,7 +10780,7 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
         &runtime_test_subagent(closed_id, LATCH_RELAY_SESSION),
     )
     .unwrap();
-    let data = mj_core::config::data_dir();
+    let data = mj_core::config::DataLayout::current().root().to_path_buf();
     mj_controller::database::tool_details::append_tool_detail(&data, closed_id, "detail", "{}")
         .unwrap();
 
@@ -11624,7 +11624,7 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     projection.applied_event_digest = format!("{:064x}", 1);
     projection.transcript.push(item.clone());
     mj_controller::database::save_materialized_session(&projection).unwrap();
-    let data_dir = mj_core::config::data_dir();
+    let data_dir = mj_core::config::DataLayout::current().root().to_path_buf();
     mj_controller::database::tool_details::append_tool_detail(
         &data_dir,
         closed_id,
@@ -12069,7 +12069,7 @@ async fn exercise_child_close_with_a_nested_workspace(
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
     let profile = mj_controller::targets::local_nested_profile_root(LATCH_RELAY_SESSION);
     std::fs::create_dir_all(&profile).unwrap();
-    let detail_data = mj_core::config::data_dir();
+    let detail_data = mj_core::config::DataLayout::current().root().to_path_buf();
     let detail_body = mj_core::transcript::TranscriptBody::System {
         text: "spilled child detail".into(),
     };
@@ -14013,7 +14013,7 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     parent.project_directory = Some(repository.path().to_owned());
     parent.updated_at = "2000-01-01T00:00:00Z".into();
-    let archives = mj_core::config::sessions_dir();
+    let archives = mj_core::config::DataLayout::current().sessions_dir();
     std::fs::create_dir_all(&archives).unwrap();
     let mut input = mj_controller::controller::test_support::checkpoint_archive_input(
         parent_id,
@@ -15337,7 +15337,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         subtle: None,
     });
     parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(parent_id),
     }));
     mj_controller::database::save_session(&parent).unwrap();
 
@@ -15658,9 +15658,11 @@ async fn daemon_api_exchange() {
         "DAEMON_TEST_KEY": {"from_secret": "daemon-only-key"}
     }))
     .unwrap();
-    fs::create_dir_all(mj_core::config::config_dir()).unwrap();
+    fs::create_dir_all(mj_core::config::ConfigLayout::current().root()).unwrap();
     fs::write(
-        mj_core::config::config_dir().join("secrets.toml"),
+        mj_core::config::ConfigLayout::current()
+            .root()
+            .join("secrets.toml"),
         r#"daemon-only-key = "daemon-secret-value""#,
     )
     .unwrap();
@@ -15876,7 +15878,8 @@ async fn daemon_api_exchange() {
         .unwrap()
         .replace("\\\\", "/")
         .replace(
-            &mj_core::config::config_dir()
+            &mj_core::config::ConfigLayout::current()
+                .root()
                 .to_string_lossy()
                 .replace('\\', "/"),
             "<daemon-config>",
@@ -16090,7 +16093,10 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
         .unwrap();
     partial.write_all(&header).await.unwrap();
     partial.write_all(&archive[..80 * 1024]).await.unwrap();
-    let uploads = mj_core::config::data_dir().join("uploads");
+    let uploads = mj_core::config::DataLayout::current()
+        .root()
+        .to_path_buf()
+        .join("uploads");
     let upload_count = || {
         fs::read_dir(&uploads)
             .map(|files| files.count())
@@ -16129,7 +16135,7 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
     );
     assert!(mj_controller::upgrade::active_labels().is_empty());
     assert_eq!(
-        std::fs::read_dir(mj_core::config::sessions_dir())
+        std::fs::read_dir(mj_core::config::DataLayout::current().sessions_dir())
             .unwrap()
             .count(),
         0
@@ -16171,14 +16177,20 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
             .is_some()
     );
     assert!(
-        mj_core::config::sessions_dir()
+        mj_core::config::DataLayout::current()
+            .sessions_dir()
             .join("import-session.hel.zip")
             .is_file()
     );
     assert_eq!(
-        std::fs::read_dir(mj_core::config::data_dir().join("uploads"))
-            .unwrap()
-            .count(),
+        std::fs::read_dir(
+            mj_core::config::DataLayout::current()
+                .root()
+                .to_path_buf()
+                .join("uploads")
+        )
+        .unwrap()
+        .count(),
         0
     );
     shutdown.cancel();
@@ -16267,7 +16279,10 @@ async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_stagi
         }
         // The client response and shutdown need not wait for the disposable
         // blocking probe. Wait for it to close the download and clean staging.
-        let staging = mj_core::config::data_dir().join("mbx-download");
+        let staging = mj_core::config::DataLayout::current()
+            .root()
+            .to_path_buf()
+            .join("mbx-download");
         tokio::time::timeout(Duration::from_secs(30), async {
             download.read_to_end(&mut Vec::new()).await.unwrap();
             while fs::read_dir(&staging).unwrap().count() != 0 {
@@ -17830,7 +17845,10 @@ async fn parent_suspend_records_only_children_it_stops_and_resume_keeps_failed_c
     }
     let failed_id = "44444444444444444444444444444444";
     let mut failed = runtime_test_session(failed_id, &workspace.id, SessionState::Parked);
-    let unbootable_root = mj_core::config::data_dir().join(failed_id);
+    let unbootable_root = mj_core::config::DataLayout::current()
+        .root()
+        .to_path_buf()
+        .join(failed_id);
     std::fs::create_dir(&unbootable_root).unwrap();
     failed.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: unbootable_root,
@@ -18182,7 +18200,10 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
         "codex".into(),
         mj_core::config::HarnessProfile::new(
             mj_core::config::HarnessKind::Codex,
-            mj_core::config::data_dir().join("profile"),
+            mj_core::config::DataLayout::current()
+                .root()
+                .to_path_buf()
+                .join("profile"),
         ),
     );
     config.save().unwrap();
@@ -18886,7 +18907,7 @@ async fn terminal_setup_and_viewer_round_trip_and_only_writes_refuse_during_drai
     gate.begin_draining();
     assert!(http.first_run_setup_due().await.is_ok());
     assert_eq!(http.config().await.unwrap().spinner, updated.spinner);
-    let paths = vec![mj_core::config::data_dir()];
+    let paths = vec![mj_core::config::DataLayout::current().root().to_path_buf()];
     assert_eq!(
         http.check_project_directories(paths.clone()).await.unwrap(),
         vec![(paths[0].clone(), true)]
@@ -19097,7 +19118,7 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
 
     let writer = mj_controller::database::install_isolated_test_writer();
     let workspace = mj_controller::database::create_workspace("Bootstrap").unwrap();
-    let data = mj_core::config::data_dir();
+    let data = mj_core::config::DataLayout::current().root().to_path_buf();
     let mut config = Config::default();
     config.profiles.insert(
         "codex".into(),

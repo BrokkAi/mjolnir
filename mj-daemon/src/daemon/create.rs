@@ -1326,9 +1326,14 @@ mod delegation_replay_tests {
         let mut config = Config::default();
         config.profiles.insert(
             "kimi".into(),
-            HarnessProfile::new(HarnessKind::Kimi, mj_core::config::data_dir().join("kimi")),
+            HarnessProfile::new(
+                HarnessKind::Kimi,
+                mj_core::config::DataLayout::current().root().join("kimi"),
+            ),
         );
-        let compatible_home = mj_core::config::data_dir().join("compatible");
+        let compatible_home = mj_core::config::DataLayout::current()
+            .root()
+            .join("compatible");
         std::fs::create_dir_all(&compatible_home).unwrap();
         std::fs::write(compatible_home.join("config.toml"), "model_provider = 'moonshot'\n[model_providers.moonshot]\nname = 'Moonshot'\nbase_url = 'https://api.moonshot.ai/v1'\nwire_api = 'responses'\nenv_key = 'MOONSHOT_API_KEY'\n").unwrap();
         let mut compatible = HarnessProfile::new(HarnessKind::Codex, compatible_home);
@@ -1435,7 +1440,10 @@ mod delegation_replay_tests {
         ] {
             config.profiles.insert(
                 name.into(),
-                HarnessProfile::new(harness, mj_core::config::data_dir().join(name)),
+                HarnessProfile::new(
+                    harness,
+                    mj_core::config::DataLayout::current().root().join(name),
+                ),
             );
         }
         config
@@ -1664,7 +1672,9 @@ mod delegation_replay_tests {
                 legacy_subagents: None,
                 ..mj_core::config::HarnessProfile::new(
                     mj_core::config::HarnessKind::Codex,
-                    mj_core::config::data_dir().join("unused-profile-home"),
+                    mj_core::config::DataLayout::current()
+                        .root()
+                        .join("unused-profile-home"),
                 )
             },
         );
@@ -1845,7 +1855,9 @@ mod delegation_replay_tests {
                 legacy_subagents: None,
                 ..mj_core::config::HarnessProfile::new(
                     mj_core::config::HarnessKind::Codex,
-                    mj_core::config::data_dir().join("missing-profile-home"),
+                    mj_core::config::DataLayout::current()
+                        .root()
+                        .join("missing-profile-home"),
                 )
             },
         );

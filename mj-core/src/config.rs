@@ -13,6 +13,8 @@
 //!   between them and [`TargetTemplate`].
 //! * `targets` -- projects, containers and [`TargetTemplate`].
 //! * `ui` -- terminal appearance settings.
+//! * `layout` -- every path under the data and configuration directories and
+//!   what `mj migrate` does with each.
 //! * `loading` -- instance names, directories, and atomic file writes.
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
@@ -23,6 +25,7 @@ mod dsh_credentials;
 mod github;
 mod harness;
 mod keys;
+mod layout;
 mod loading;
 mod machines;
 mod secrets;
@@ -34,6 +37,7 @@ pub use daemon::*;
 pub use github::*;
 pub use harness::*;
 pub use keys::*;
+pub use layout::*;
 pub use loading::*;
 pub use machines::*;
 pub use secrets::*;

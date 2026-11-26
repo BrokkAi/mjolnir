@@ -134,7 +134,7 @@ pub(super) fn read_schema_state(connection: &Connection) -> Result<SchemaState> 
 }
 
 pub fn database_path() -> PathBuf {
-    data_dir().join("mj.sqlite3")
+    mj_core::config::DataLayout::current().database()
 }
 
 /// Verify that this client can read the daemon's store without creating or
@@ -7901,7 +7901,9 @@ mod reader_tests {
             .run();
             return;
         }
-        let path = mj_core::config::data_dir().join("move-close-compat.sqlite3");
+        let path = mj_core::config::DataLayout::current()
+            .root()
+            .join("move-close-compat.sqlite3");
         for id in ["source", "later"] {
             save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
         }
@@ -7990,7 +7992,9 @@ mod reader_tests {
             return;
         }
         use mj_core::state::SessionState;
-        let path = mj_core::config::data_dir().join("create-intent-compat.sqlite3");
+        let path = mj_core::config::DataLayout::current()
+            .root()
+            .join("create-intent-compat.sqlite3");
         let mut existing = super::super::tests::session("existing", "project");
         existing.state = SessionState::Provisioning;
         save_session_to(&path, &existing).unwrap();

@@ -1,7 +1,7 @@
 use super::*;
 use futures::TryStreamExt;
 use mj_client::daemon::ImportedBundle;
-use mj_core::config::{Config, data_dir, sessions_dir};
+use mj_core::config::{Config, DataLayout};
 use mj_core::state::{MaterializedSession, SessionRecord};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,7 +45,7 @@ pub(super) async fn prepare(body: Body) -> Result<PreparedImport, ApiFailure> {
     }
 
     let (uploaded, descriptor) = mj_core::runtime::spawn_blocking(|| -> AnyResult<_> {
-        let root = data_dir().join("uploads");
+        let root = DataLayout::current().uploads_dir();
         std::fs::create_dir_all(&root)?;
         let uploaded = NamedTempFile::new_in(root)?;
         let descriptor = uploaded.reopen().context("open import upload")?;
@@ -79,7 +79,7 @@ pub(super) async fn prepare(body: Body) -> Result<PreparedImport, ApiFailure> {
             session.id.clone(),
             &verified.canonical_session,
         )?;
-        let root = sessions_dir();
+        let root = DataLayout::current().sessions_dir();
         std::fs::create_dir_all(&root)?;
         let mut staged = NamedTempFile::new_in(root)?;
         let mut input = uploaded.reopen()?;
@@ -118,7 +118,9 @@ impl PreparedImport {
             materialized,
             staged,
         } = self;
-        let destination = sessions_dir().join(format!("{}.hel.zip", session.id));
+        let destination = DataLayout::current()
+            .sessions_dir()
+            .join(format!("{}.hel.zip", session.id));
         session
             .checkpoint
             .as_mut()

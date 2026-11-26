@@ -2616,7 +2616,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
         }
         DaemonCommand::Stop(stop) => {
             mj_core::config::ensure_may_control_store(
-                &mj_core::config::data_dir(),
+                mj_core::config::DataLayout::current().root(),
                 "stop the Mjolnir daemon",
             )?;
             if stop.suspend_sessions {

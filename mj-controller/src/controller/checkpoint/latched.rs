@@ -1006,7 +1006,7 @@ impl Controller {
             // so a frontier-only name could overwrite the last known-good
             // archive before the metadata swap commits.
             let archive_id = new_command_id("archive")?;
-            let destination = sessions_dir().join(format!(
+            let destination = mj_core::config::DataLayout::current().sessions_dir().join(format!(
                 "{session_id}-{}-{archive_id}.hel.zip",
                 target_checkpoint.event_frontier
             ));

@@ -66,13 +66,11 @@ use chrono::Utc;
 
 use mj_core::config::{
     Config, ProjectBundle, ProjectRepository, TargetTemplate, atomic_write, container_size_host,
-    data_dir, is_bare_project_target, mount_history_host,
+    is_bare_project_target, mount_history_host,
 };
 
 use crate::import::{RepositoryIdentity, setup_style_id};
 use mj_core::remote_git::{Shorthand, display_url, project_source};
-
-const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,8 +185,8 @@ impl std::error::Error for StoreAlreadyOwnedError {}
 
 impl ControllerStoreGuard {
     pub fn acquire() -> Result<Self> {
-        let directory = data_dir();
-        Self::acquire_at(&directory)
+        let directory = mj_core::config::DataLayout::current();
+        Self::acquire_at(directory.root())
     }
 
     fn acquire_at(directory: &Path) -> Result<Self> {
@@ -203,7 +201,7 @@ impl ControllerStoreGuard {
 
     /// Probe exclusivity without treating an owner that is still exiting as an error.
     pub fn try_acquire() -> Result<Option<Self>> {
-        Self::try_acquire_at(&data_dir())
+        Self::try_acquire_at(mj_core::config::DataLayout::current().root())
     }
 
     fn try_acquire_at(directory: &Path) -> Result<Option<Self>> {
@@ -211,7 +209,7 @@ impl ControllerStoreGuard {
         mj_core::config::ensure_may_control_store(directory, "own this data store")?;
         mj_core::config::create_owner_only_directory(directory)
             .with_context(|| format!("create controller data directory {}", directory.display()))?;
-        let path = directory.join("controller.lock");
+        let path = mj_core::config::DataLayout::at(directory).controller_lock();
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
         #[cfg(unix)]
@@ -1691,7 +1689,7 @@ impl Controller {
 }
 
 fn config_rename_journal_path() -> PathBuf {
-    data_dir().join(CONFIG_RENAME_JOURNAL)
+    mj_core::config::DataLayout::current().config_rename_journal()
 }
 
 fn write_config_rename_journal(journal: &ConfigRenameJournal) -> Result<()> {

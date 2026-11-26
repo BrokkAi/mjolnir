@@ -687,7 +687,7 @@ mod tests {
     }
 
     fn save_legacy_session(session_id: &str) -> (PathBuf, String) {
-        let directory = mj_core::config::sessions_dir();
+        let directory = mj_core::config::DataLayout::current().sessions_dir();
         std::fs::create_dir_all(&directory).unwrap();
         let repository = RepositorySnapshot {
             origin_delta_pack: None,

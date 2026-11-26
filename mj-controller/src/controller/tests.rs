@@ -2173,7 +2173,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         straightforward: None,
         subtle: None,
     });
-    let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
+    let parent_root = mj_core::config::DataLayout::current().worker_root(parent_id);
     parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
     }));
@@ -2281,7 +2281,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             .expect("Codex receives project memory")
             .project_key
     };
-    let child_root = mj_core::config::data_dir().join("workers").join(&child_id);
+    let child_root = mj_core::config::DataLayout::current().worker_root(&child_id);
     assert_eq!(
         memory_key(&controller, &child_id, child_root),
         memory_key(&controller, parent_id, parent_root),
@@ -2343,7 +2343,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         straightforward: None,
         subtle: None,
     });
-    let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
+    let parent_root = mj_core::config::DataLayout::current().worker_root(parent_id);
     parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: parent_root,
     }));
@@ -2374,9 +2374,8 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
     let child_id = child.child_session_id.clone();
     let prompt_id = crate::database::startup_step_id(&child.startup_group_id(), "prompt");
     let backend = targets::TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir()
-            .join("workers")
-            .join(&child_id)
+        worker_root: mj_core::config::DataLayout::current()
+            .worker_root(&child_id)
             .to_string_lossy()
             .into_owned(),
     };
@@ -2708,7 +2707,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             subtle: None,
         });
         session.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join("workers").join(id),
+            worker_root: mj_core::config::DataLayout::current().worker_root(id),
         }));
         session.no_project_memory = opted_out;
         session.no_github_events = opted_out;
@@ -2760,9 +2759,8 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             .current_worker_launch_config(
                 id,
                 &targets::TargetLocator::LocalBare {
-                    worker_root: mj_core::config::data_dir()
-                        .join("workers")
-                        .join(id)
+                    worker_root: mj_core::config::DataLayout::current()
+                        .worker_root(id)
                         .to_string_lossy()
                         .into_owned(),
                 },
@@ -3448,7 +3446,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     parent.project_directory = Some(project.path().to_path_buf());
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
     parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(parent_id),
     }));
     let mut controller = Controller {
         config,
@@ -3502,9 +3500,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     );
     // Review is on, so the launch files show who may request it.
     controller.config.review = mj_core::config::ReviewConfig::legacy_default();
-    let worker_root = mj_core::config::data_dir()
-        .join("workers")
-        .join(&child.child_session_id);
+    let worker_root = mj_core::config::DataLayout::current().worker_root(&child.child_session_id);
     let worker_launch = controller
         .current_worker_launch_config(
             &child.child_session_id,
@@ -3570,9 +3566,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .current_worker_launch_config(
             &oracle.child_session_id,
             &targets::TargetLocator::LocalBare {
-                worker_root: mj_core::config::data_dir()
-                    .join("workers")
-                    .join(&oracle.child_session_id)
+                worker_root: mj_core::config::DataLayout::current()
+                    .worker_root(&oracle.child_session_id)
                     .to_string_lossy()
                     .into_owned(),
             },
@@ -3593,9 +3588,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     muse_parent.id = muse_parent_id.into();
     muse_parent.harness_kind = HarnessKind::Kimi;
     muse_parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir()
-            .join("workers")
-            .join(muse_parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(muse_parent_id),
     }));
     save_fixture_session(&mut controller, muse_parent);
     let mut muse_profile = controller.config.profiles["resolved-reviewer"].clone();
@@ -3684,9 +3677,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .current_worker_launch_config(
             &worker.child_session_id,
             &targets::TargetLocator::LocalBare {
-                worker_root: mj_core::config::data_dir()
-                    .join("workers")
-                    .join(&worker.child_session_id)
+                worker_root: mj_core::config::DataLayout::current()
+                    .worker_root(&worker.child_session_id)
                     .to_string_lossy()
                     .into_owned(),
             },
@@ -3798,7 +3790,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
         subtle: None,
     });
     parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(parent_id),
     }));
     parent.review = Some(Box::new(mj_core::config::SessionReview::Push {
         reviewers: Some(vec![mj_core::config::SubagentChoice {
@@ -3835,9 +3827,8 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
         .current_worker_launch_config(
             &child.child_session_id,
             &targets::TargetLocator::LocalBare {
-                worker_root: mj_core::config::data_dir()
-                    .join("workers")
-                    .join(&child.child_session_id)
+                worker_root: mj_core::config::DataLayout::current()
+                    .worker_root(&child.child_session_id)
                     .to_string_lossy()
                     .into_owned(),
             },
@@ -3912,8 +3903,8 @@ mod profile_homes {
             let root = removable_profile_root(&local, SESSION, &profile(kind, home));
             assert_eq!(
                 root,
-                mj_core::config::data_dir()
-                    .join("profiles")
+                mj_core::config::DataLayout::current()
+                    .profiles_dir()
                     .join(SESSION)
                     .to_string_lossy()
                     .into_owned(),

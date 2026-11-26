@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::{CONFIG_VERSION, PRODUCT_DIR};
+use super::{CONFIG_VERSION, ConfigLayout, DataLayout, PRODUCT_DIR};
 
 /// Configuration load context with metadata safe to report without TOML input.
 #[derive(Debug)]
@@ -210,7 +210,7 @@ pub const INSTANCE_ENV: &str = "MJ_INSTANCE";
 
 /// Directory under the default configuration and data roots holding one
 /// isolated instance's files (`<root>/mjolnir/instances/<name>`).
-const INSTANCE_DIR: &str = "instances";
+pub(super) const INSTANCE_DIR: &str = "instances";
 
 /// Instance name from [`INSTANCE_ENV`], trimmed. Empty means no instance.
 pub fn instance_name() -> Option<String> {
@@ -292,7 +292,7 @@ pub(crate) fn session_index_dir_for(
     data_dir_override
         .map(PathBuf::from)
         .filter(|data| data != default_data_dir)
-        .map(|data| data.join("sessionwiki"))
+        .map(|data| DataLayout::at(data).sessionwiki_dir())
 }
 
 /// Whether process startup has chosen where the session index lives.
@@ -328,7 +328,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn config_path() -> PathBuf {
-    config_dir().join("config.toml")
+    ConfigLayout::current().config_toml()
 }
 
 pub fn data_dir() -> PathBuf {
@@ -408,7 +408,7 @@ fn cargo_profile_dir(executable: &Path) -> Option<&Path> {
 /// fingerprinted so an explicit `MJ_DATA_DIR` override also gets its own
 /// identity.
 pub fn instance_identity() -> String {
-    instance_identity_for(instance_name().as_deref(), &data_dir())
+    instance_identity_for(instance_name().as_deref(), DataLayout::current().root())
 }
 
 /// Pure form of [`instance_identity`] for callers that already resolved the
@@ -422,10 +422,6 @@ pub fn instance_identity_for(instance: Option<&str>, data_dir: &Path) -> String 
     use sha2::Digest;
     let digest = sha2::Sha256::digest(data_dir.to_string_lossy().as_bytes());
     crate::hex::lower_hex(digest)[..16].to_owned()
-}
-
-pub fn sessions_dir() -> PathBuf {
-    data_dir().join("sessions")
 }
 
 /// The first available configuration identifier, retaining a readable base.

@@ -1030,7 +1030,10 @@ fn failed_owned_child_startup_retires_its_environment_and_keeps_the_relation() {
 
 fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
     startup_cleanup_fixture_on(owns_environment, |id| TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join(id),
+        worker_root: mj_core::config::DataLayout::current()
+            .root()
+            .to_path_buf()
+            .join(id),
     })
 }
 
@@ -1048,14 +1051,14 @@ fn startup_cleanup_fixture_on(
     config.subagents.max_concurrent = 1;
     config.save().unwrap();
     let mut parent = crate::controller::test_support::checkpoint_test_session(PROVISIONED_SESSION);
-    parent.project_directory = Some(mj_core::config::data_dir());
+    parent.project_directory = Some(mj_core::config::DataLayout::current().root().to_path_buf());
     parent.target = Some(Box::new(target(PROVISIONED_SESSION)));
     crate::database::save_session(&parent).unwrap();
     let child_id = "fedcba9876543210fedcba9876543210";
     let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
     child.state = SessionState::StartupCleanup;
     child.last_error = Some("fixture launch failed".into());
-    child.project_directory = Some(mj_core::config::data_dir());
+    child.project_directory = Some(mj_core::config::DataLayout::current().root().to_path_buf());
     child.target = Some(Box::new(target(child_id)));
     crate::database::register_subagent_with_startup(
         &child,
@@ -2504,7 +2507,10 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
     let _writer = crate::database::install_isolated_test_writer();
     let source = crate::controller::test_support::committed_repository();
     let root = source.path().canonicalize().unwrap();
-    let home = mj_core::config::data_dir().join("codex-home");
+    let home = mj_core::config::DataLayout::current()
+        .root()
+        .to_path_buf()
+        .join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     let mut config = Config::default();
     config

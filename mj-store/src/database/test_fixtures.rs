@@ -209,7 +209,7 @@ pub fn worker_test_gate() -> std::sync::Arc<crate::recovery_gate::RecoveryGate> 
         .get_or_init(Mutex::default)
         .lock()
         .unwrap()
-        .entry(mj_core::config::data_dir())
+        .entry(mj_core::config::DataLayout::current().root().to_path_buf())
         .or_default()
         .clone()
 }

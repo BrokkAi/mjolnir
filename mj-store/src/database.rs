@@ -15,7 +15,6 @@ use chrono::Utc;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use mj_core::config::data_dir;
 use mj_core::state::{
     CheckpointMetadata, HostContainerSize, ManagedWorktree, MaterializedExecutionState,
     MaterializedQueuedPrompt, MaterializedSession, MaterializedSessionSummary, MaterializedTurn,

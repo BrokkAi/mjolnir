@@ -2401,7 +2401,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
     let archive_directory = data_directory.join("archives");
     std::fs::create_dir_all(&archive_directory).unwrap();
-    std::fs::create_dir_all(mj_core::config::config_dir()).unwrap();
+    std::fs::create_dir_all(mj_core::config::ConfigLayout::current().root()).unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
 
@@ -2536,7 +2536,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     );
     // Legacy raw-to-workspace conversion no longer writes a persistent
     // conversion archive into sessions_dir().
-    let sessions = mj_core::config::sessions_dir();
+    let sessions = mj_core::config::DataLayout::current().sessions_dir();
     let leftover: Vec<_> = std::fs::read_dir(&sessions)
         .map(|entries| {
             entries

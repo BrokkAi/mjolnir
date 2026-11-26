@@ -2683,7 +2683,7 @@ impl Controller {
                         // straight into the local destination worker root first so
                         // `restore_managed_clone_origin_delta` reads it locally.
                         let local_worker_root =
-                            mj_core::config::data_dir().join("workers").join(session_id);
+                            mj_core::config::DataLayout::current().worker_root(session_id);
                         self.reserve_provisioning_target(
                             session_id,
                             mj_core::state::TargetLocator::LocalBare {

@@ -303,7 +303,7 @@ fn default_control_dir(runtime: Option<std::ffi::OsString>, identity: &str) -> P
             PathBuf::from(runtime).join("mjolnir").join(identity)
         }
         // The data directory is already specific to the instance.
-        _ => crate::config::data_dir().join("ssh"),
+        _ => crate::config::DataLayout::current().ssh_dir(),
     }
 }
 
@@ -319,7 +319,10 @@ fn control_dir_identity(instance: Option<&str>, data_dir_override: Option<&Path>
     if instance.is_none() && data_dir_override.is_none() {
         return "default".to_owned();
     }
-    let data_dir = data_dir_override.map_or_else(crate::config::data_dir, Path::to_path_buf);
+    let data_dir = data_dir_override.map_or_else(
+        || crate::config::DataLayout::current().root().to_path_buf(),
+        Path::to_path_buf,
+    );
     crate::config::instance_identity_for(instance, &data_dir)
 }
 

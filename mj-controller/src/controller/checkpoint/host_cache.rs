@@ -115,10 +115,10 @@ pub(crate) fn parse_host_cache_key(host: &str) -> Result<HostCacheTarget> {
 
 /// Local host-owned directory for cached snapshot archives.
 ///
-/// Lives under `mj_core::config::data_dir()` so isolated `--instance` daemons
+/// Lives under the data directory so isolated `--instance` daemons
 /// and unit tests never share or clobber each other's snapshot cache.
 pub fn local_snapshot_cache_dir() -> PathBuf {
-    mj_core::config::data_dir().join("snapshot-cache")
+    mj_core::config::DataLayout::current().snapshot_cache_dir()
 }
 
 fn cache_filename(sha256: &str) -> String {
