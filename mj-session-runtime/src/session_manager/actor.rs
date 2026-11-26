@@ -111,6 +111,7 @@ pub async fn run_session_actor(
     // connection was leased or reconnecting. A new actor owes one too: the
     // coordinator may have asked for its session before the actor existed.
     let mut credentials_owed = true;
+    let mut profile_connection_usable = false;
     let mut failures = 0_u32;
     let mut unreachable = false;
     let mut harness_readiness = HarnessStartupWatch::default();
@@ -143,6 +144,13 @@ pub async fn run_session_actor(
         Storage(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
+        let usable = connection.is_some() && !lifecycle.is_leased();
+        if usable != profile_connection_usable {
+            updates
+                .credential_wakes
+                .invalidate_profile(&target.session_id);
+            profile_connection_usable = usable;
+        }
         if credentials_owed && connection.is_some() && !lifecycle.is_leased() {
             credentials_owed = false;
             updates.credential_wakes.wake(&target.session_id);
@@ -1319,6 +1327,9 @@ pub async fn run_session_actor(
             }
         }
     }
+    updates
+        .credential_wakes
+        .invalidate_profile(&target.session_id);
     if let Some(connection) = connection.as_mut() {
         connection.cancel_guardian_jobs();
     }

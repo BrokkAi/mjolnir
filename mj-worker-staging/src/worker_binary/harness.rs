@@ -11,7 +11,7 @@ pub fn workspace_paths(
     container_workspace: Option<&Path>,
 ) -> Result<(String, Vec<String>)> {
     let root = match locator {
-        targets::TargetLocator::LocalBare { .. } => {
+        targets::TargetLocator::LocalBare { .. } | targets::TargetLocator::SshHostBare { .. } => {
             bail!("local bare projects use their selected directory")
         }
         targets::TargetLocator::LocalPodman { .. }

@@ -23,7 +23,9 @@ pub fn append_hel_target_environment(
         targets::TargetLocator::AwsEc2 { workspace, .. } => format!(
             "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/{workspace}`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/{workspace}`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n"
         ),
-        targets::TargetLocator::LocalBare { .. } | targets::TargetLocator::SshBare { .. } => {
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::SshBare { .. }
+        | targets::TargetLocator::SshHostBare { .. } => {
             return Ok(());
         }
     };
@@ -553,7 +555,8 @@ fn mbx_container(
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshAppleContainer { .. }
         | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => {
+        | targets::TargetLocator::SshBare { .. }
+        | targets::TargetLocator::SshHostBare { .. } => {
             bail!("the build cache is only installed into Podman, Docker and Nitro sessions")
         }
     })
@@ -873,7 +876,8 @@ pub fn link_legacy_mbx_configuration(
         | targets::TargetLocator::SshAppleContainer { .. }
         | targets::TargetLocator::SshNitro { .. }
         | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => {
+        | targets::TargetLocator::SshBare { .. }
+        | targets::TargetLocator::SshHostBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
         }
     };
@@ -1254,6 +1258,20 @@ pub fn install_worker_profile_files(
             }
             return Ok(());
         }
+        targets::TargetLocator::SshHostBare { ssh, .. } => {
+            unlink_host_bare_profile_home(executor, locator, session_id, profile_home)?;
+            install_worker_over_ssh(
+                executor,
+                ssh,
+                worker_root,
+                profile_home,
+                launch_config,
+                ownership,
+                profile_stage,
+                shared_paths,
+            )?;
+            return Ok(());
+        }
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. } => {
             install_worker_over_ssh(
@@ -1422,6 +1440,34 @@ fn worker_files_archive(files: &[(&str, &Path)]) -> Result<Vec<u8>> {
     Ok(archive.into_inner()?)
 }
 
+/// Replace a whole-home link without traversing its personal-home target.
+pub fn unlink_host_bare_profile_home(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    home: &str,
+) -> Result<()> {
+    if matches!(locator, targets::TargetLocator::SshHostBare { .. }) {
+        execute_checked(
+            executor,
+            targets::command_on_locator(
+                SshTrafficClass::Control,
+                locator,
+                session_id,
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "if [ -L \"$1\" ]; then rm -f -- \"$1\"; fi".into(),
+                    "mj-unlink-profile".into(),
+                    home.into(),
+                ],
+                "unlink a shared host-bare profile home",
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
 /// Refresh configuration without removing native history or skills the harness
 /// maintains itself. Absent destination settings must not inherit the source's.
 pub fn clear_profile_configuration(
@@ -1433,6 +1479,12 @@ pub fn clear_profile_configuration(
 ) -> Result<()> {
     let (paths, protected_paths) = profile_clear_spec(harness);
     let mut script = String::from("set -eu\n");
+    if matches!(locator, targets::TargetLocator::SshHostBare { .. }) {
+        script.push_str(&format!(
+            "if [ -L {} ]; then echo 'shared profile home' >&2; exit 1; fi\n",
+            targets::posix_quote(home)
+        ));
+    }
     for relative in paths {
         let path = mj_core::target_path::join(Path::new(home), Path::new(&relative));
         let quoted = targets::posix_quote(&mj_core::target_path::text(&path));

@@ -859,6 +859,13 @@ pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
             }
             verify_session_workspace(workspace, session_id)?;
         }
+        TargetLocator::SshHostBare { ssh, data_root } => {
+            validate_ssh(ssh)?;
+            crate::target_path::validate_host_bare(data_root, session_id)?;
+            if data_root.to_str().is_none() {
+                bail!("host-bare data root cannot be represented by the SSH transport");
+            }
+        }
         TargetLocator::SshBare {
             workspace,
             worker_id,
@@ -890,7 +897,9 @@ pub fn is_borrowed(locator: &TargetLocator) -> bool {
         | TargetLocator::SshAppleContainer { borrowed_from, .. }
         | TargetLocator::SshNitro { borrowed_from, .. } => borrowed_from.is_some(),
         TargetLocator::SshBare { worker_id, .. } => worker_id.is_some(),
-        TargetLocator::LocalBare { .. } | TargetLocator::AwsEc2 { .. } => false,
+        TargetLocator::LocalBare { .. }
+        | TargetLocator::SshHostBare { .. }
+        | TargetLocator::AwsEc2 { .. } => false,
     }
 }
 

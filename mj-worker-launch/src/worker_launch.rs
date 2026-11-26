@@ -467,6 +467,9 @@ pub fn stage_worker_files_for(
         // Stage it, and the mbx the launchers run, before the file names them.
         install_build_cache_shim(session, backend, &launch, executor)
             .context("stage the session's mbx and configuration")?;
+        if preparation == WorkerFilePreparation::RefreshProfileOnly {
+            unlink_host_bare_profile_home(executor, backend, session_id, &target_profile_home)?;
+        }
         clear_profile_configuration(
             executor,
             backend,

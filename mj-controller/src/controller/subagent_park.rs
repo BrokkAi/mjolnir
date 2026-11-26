@@ -263,6 +263,16 @@ impl Controller {
             profile_id: String,
         }
 
+        if matches!(
+            session.target.as_deref(),
+            Some(mj_core::state::TargetLocator::SshHostBare { .. })
+        ) && !super::local_profile_homes::session_has_a_staged_home_on_target(
+            session,
+            &self.config,
+            executor,
+        ) {
+            return Ok(false);
+        }
         let kind = session.harness_kind;
         let Some(relative_login) = mj_core::credentials::copied_login_relative_path(kind) else {
             return Ok(false);

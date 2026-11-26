@@ -2,7 +2,7 @@
 //! `Controller`. The answers come from `crate::worker_client`, which reads the
 //! same configuration and records.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use mj_core::credentials::CredentialSyncTarget;
 
@@ -22,14 +22,31 @@ pub fn credential_sync_targets_with_auth(
     worker_client::credential_sync_targets_with_auth(&controller.config, &controller.state, schemes)
 }
 
-pub fn staged_credential_sessions(controller: &Controller) -> BTreeSet<String> {
-    worker_client::staged_credential_sessions(&controller.state)
+pub fn staged_credential_sessions(
+    controller: &Controller,
+) -> worker_client::StagedCredentialSessions {
+    worker_client::staged_credential_sessions(&controller.config, &controller.state)
+}
+
+pub fn staged_credential_sessions_with_cache(
+    controller: &Controller,
+    wakes: &std::sync::Arc<worker_client::CredentialWakes>,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+    reprobe_non_owned: bool,
+) -> worker_client::StagedCredentialSessions {
+    worker_client::staged_credential_sessions_with_cache(
+        &controller.config,
+        &controller.state,
+        Some(wakes),
+        cancellation,
+        reprobe_non_owned,
+    )
 }
 
 pub fn credential_sync_targets_from_sources(
     controller: &Controller,
     schemes: &BTreeMap<String, bool>,
-    staged: &BTreeSet<String>,
+    staged: &worker_client::StagedCredentialSessions,
 ) -> Vec<CredentialSyncTarget> {
     worker_client::credential_sync_targets_from_sources(
         &controller.config,

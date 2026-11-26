@@ -119,6 +119,7 @@ impl Controller {
                 let workspace_root = crate::controller::network_git::workspace_root(
                     &backend,
                     session.container_workspace.as_deref(),
+                    &session.id,
                 );
                 // A checkout without later history has no origin remote, so
                 // the archive records the one the session was created from.

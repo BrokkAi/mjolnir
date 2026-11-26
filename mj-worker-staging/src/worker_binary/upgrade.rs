@@ -373,7 +373,8 @@ pub fn prepare_managed_harness_for_upgrade(
 
     let ssh = match locator {
         targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => ssh,
+        | targets::TargetLocator::SshBare { ssh, .. }
+        | targets::TargetLocator::SshHostBare { ssh, .. } => ssh,
         _ => bail!("managed harness policy requires a local bare, SSH-bare, or EC2 target"),
     };
     let result = (|| -> Result<()> {
@@ -408,11 +409,20 @@ pub fn prepare_managed_harness_for_upgrade(
                 Path::new("hel"),
             )),
         )?;
-        execute_checked(
-            executor,
+        let mut upload = if matches!(locator, targets::TargetLocator::SshHostBare { .. }) {
+            let mut upload = crate::targets::scp_upload(
+                ssh,
+                &local_config,
+                &targets::posix_quote(&staging_config),
+                false,
+            );
+            upload.args.insert(0, "-O".into());
+            upload
+        } else {
             crate::targets::scp_upload(ssh, &local_config, &staging_config, false)
-                .purpose("stage managed harness launch configuration"),
-        )?;
+        };
+        upload = upload.purpose("stage managed harness launch configuration");
+        execute_checked(executor, upload)?;
         execute_checked(
             executor,
             crate::targets::ssh_command(

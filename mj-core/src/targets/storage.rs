@@ -173,6 +173,21 @@ pub fn session_storage_paths(
                 TEMPORARY_DIRECTORY.to_owned(),
             ],
         ),
+        Recorded::SshHostBare { host, data_root } => {
+            let layout = crate::config::DataLayout::at(data_root);
+            (
+                ssh_host_name(host).to_owned(),
+                text(&layout.worker_root(session_id)),
+                project_directory
+                    .map(text)
+                    .into_iter()
+                    .chain([
+                        text(&layout.profiles_dir().join(session_id)),
+                        TEMPORARY_DIRECTORY.to_owned(),
+                    ])
+                    .collect(),
+            )
+        }
         Recorded::SshBare {
             host,
             workspace,

@@ -2322,6 +2322,115 @@ fn bare_locator_on_the_container_host(session: &str) -> targets::TargetLocator {
         workspace: format!(".local/share/hel/workspaces/{session}"),
     }
 }
+#[test]
+fn host_bare_staging_checks_the_profile_link_and_uses_ssh() {
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let session = "0123456789abcdef0123456789abcdef";
+    let locator = targets::TargetLocator::SshHostBare {
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        data_root: "/old".into(),
+    };
+    install::clear_profile_configuration(
+        &executor,
+        &locator,
+        session,
+        &format!("/old/workers/{session}/profile"),
+        HarnessKind::Codex,
+    )
+    .unwrap();
+    assert!(
+        rendered(&executor.commands.take())
+            .iter()
+            .any(|line| line.contains("shared profile home"))
+    );
+    let lines = install_on_ssh_host(&executor, &fixture, &locator, session);
+    let check = lines
+        .iter()
+        .position(|line| line.contains("rm -f --"))
+        .unwrap();
+    let upload = lines
+        .iter()
+        .position(|line| line.contains("mj-upload"))
+        .unwrap();
+    assert!(check < upload);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("ssh ")
+                && line.contains(&format!("/old/workers/{session}")))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn host_bare_restage_unlinks_personal_home_before_install() {
+    struct LocalSsh;
+    impl CommandExecutor for LocalSsh {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "ssh");
+            let local = CommandSpec::new("sh", ["-c", command.args.last().unwrap().as_str()]);
+            targets::ProcessExecutor.execute(&local)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let personal = temp.path().join("personal");
+    std::fs::create_dir(&personal).unwrap();
+    std::fs::write(personal.join("auth.json"), b"personal").unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let root = temp.path().join("data");
+    let home = root.join("workers").join(id).join("profile");
+    std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&personal, &home).unwrap();
+    let locator = targets::TargetLocator::SshHostBare {
+        ssh: SshTarget {
+            destination: "test".into(),
+            ssh_args: vec![],
+        },
+        data_root: root,
+    };
+    let home_text = home.to_str().unwrap();
+    assert!(
+        install::clear_profile_configuration(
+            &LocalSsh,
+            &locator,
+            id,
+            home_text,
+            HarnessKind::Codex
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(personal.join("auth.json")).unwrap(),
+        b"personal"
+    );
+    install::unlink_host_bare_profile_home(&LocalSsh, &locator, id, home_text).unwrap();
+    assert!(!home.exists());
+    assert_eq!(
+        std::fs::read(personal.join("auth.json")).unwrap(),
+        b"personal"
+    );
+}
+
 /// R3-4 (J-16): every SSH-bare session uploaded its own 139 MB worker, so ten
 /// parallel creates on one host each held a daemon action slot for minutes.
 /// The binary now crosses the network once per build and host; each session

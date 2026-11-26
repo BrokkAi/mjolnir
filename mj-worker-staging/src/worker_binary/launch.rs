@@ -156,10 +156,13 @@ pub fn worker_workspace_for_recovery(
 ) -> Option<WorkerWorkspace> {
     let target = match backend {
         targets::TargetLocator::LocalBare { .. } => mj_core::state::ManagedWorktreeTarget::Local,
-        targets::TargetLocator::SshBare { ssh, .. } => mj_core::state::ManagedWorktreeTarget::Ssh {
-            destination: ssh.destination.clone(),
-            ssh_args: ssh.ssh_args.clone(),
-        },
+        targets::TargetLocator::SshBare { ssh, .. }
+        | targets::TargetLocator::SshHostBare { ssh, .. } => {
+            mj_core::state::ManagedWorktreeTarget::Ssh {
+                destination: ssh.destination.clone(),
+                ssh_args: ssh.ssh_args.clone(),
+            }
+        }
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
@@ -635,9 +638,9 @@ pub fn exclude_harness_environment(
 pub fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePolicy {
     match backend {
         targets::TargetLocator::LocalBare { .. } => mj_core::placement::local_harness_runtime(),
-        targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
-            HarnessRuntimePolicy::Managed
-        }
+        targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. }
+        | targets::TargetLocator::SshHostBare { .. } => HarnessRuntimePolicy::Managed,
         _ => HarnessRuntimePolicy::Ambient,
     }
 }

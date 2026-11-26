@@ -383,6 +383,114 @@ fn local_checkpoint_transfer_and_cleanup_accept_native_paths() {
     assert!(error.contains(&invalid), "{error}");
 }
 
+// Host-bare checkpoints stage to an ASCII path so ordinary SCP never checks quoted basenames.
+#[test]
+fn host_bare_checkpoint_paths_preserve_spaces_and_unicode_over_ssh() {
+    let locator = TargetLocator::SshHostBare {
+        ssh: ssh(),
+        data_root: "/source home/資料".into(),
+    };
+    let path = format!("/source home/資料/workers/{SESSION}/quote's.zip");
+    let staging = format!(".local/share/hel/transfers/{SESSION}-operation.hel.zip");
+    let plan = transfer_plan(
+        &locator,
+        SESSION,
+        &path,
+        Path::new("/tmp/destination"),
+        &staging,
+    )
+    .unwrap();
+    assert_eq!(plan.commands.len(), 2);
+    assert_eq!(plan.commands[0].program, "ssh");
+    let stage = plan.commands[0].args.last().unwrap();
+    assert!(stage.contains(&mj_core::targets::posix_quote(&path)));
+    assert!(stage.contains("ln -f --") && stage.contains("cp -f --"));
+    let scp = &plan.commands[1];
+    assert_eq!(scp.program, "scp");
+    assert!(!scp.args.iter().any(|arg| arg == "-O" || arg.contains('\'')));
+    assert!(
+        scp.args
+            .iter()
+            .any(|arg| arg.ends_with(&format!(":{staging}")))
+    );
+    let executor = SshDockerTransferExecutor::new(Vec::new());
+    cleanup_host_staging(&locator, &staging, &executor).unwrap();
+    assert!(
+        executor.commands.borrow()[0]
+            .args
+            .last()
+            .unwrap()
+            .contains(&format!("'rm' '-f' '--' '{staging}'"))
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("checkpoint.zip");
+    let transfer = CheckpointTransfer {
+        locator: &locator,
+        session_id: SESSION,
+        operation_id: "operation",
+        remote_archive: &path,
+        destination: &destination,
+        expected_sha256: &"0".repeat(64),
+        expected_event_frontier: 1,
+        expected_event_frontier_digest: &"a".repeat(64),
+    };
+    assert_eq!(transfer.host_staging_path().unwrap().unwrap(), staging);
+    let source = temp.path().join("source");
+    fs::write(&source, b"archive bytes").unwrap();
+    let sha256 = checkpoint_sha256(&source).unwrap();
+    let successful = CheckpointTransfer {
+        expected_sha256: &sha256,
+        ..transfer
+    };
+    let executor = SshDockerTransferExecutor::new(b"archive bytes".to_vec());
+    successful.execute(&executor).unwrap();
+    assert!(
+        executor
+            .commands
+            .borrow()
+            .iter()
+            .any(|command| command.purpose == "remove remote checkpoint staging")
+    );
+    for fail_download in [false, true] {
+        let mut executor = SshDockerTransferExecutor::new(b"not the expected archive".to_vec());
+        executor.fail_download = fail_download;
+        assert!(successful.execute(&executor).is_err());
+        assert!(
+            executor
+                .commands
+                .borrow()
+                .iter()
+                .any(|command| command.purpose == "remove remote checkpoint staging")
+        );
+    }
+    let mut executor = SshDockerTransferExecutor::new(Vec::new());
+    executor.fail_download = true;
+    assert!(
+        successful
+            .execute_retaining_host_staging(&executor)
+            .is_err()
+    );
+    assert!(
+        executor
+            .commands
+            .borrow()
+            .iter()
+            .any(|command| command.purpose == "remove remote checkpoint staging")
+    );
+    for invalid in ["/source/../bad", "/source/line\nbreak", "relative"] {
+        assert!(
+            transfer_plan(
+                &locator,
+                SESSION,
+                invalid,
+                Path::new("/tmp/destination"),
+                "safe-stage"
+            )
+            .is_err()
+        );
+    }
+}
+
 #[test]
 fn transfer_rejects_a_target_checksum_mismatch() {
     let temp = tempfile::tempdir().unwrap();

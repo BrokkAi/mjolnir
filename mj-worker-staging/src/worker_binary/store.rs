@@ -98,7 +98,9 @@ fn gate_target(locator: &targets::TargetLocator) -> String {
         LocalPodman { container_id, .. }
         | LocalDocker { container_id, .. }
         | AppleContainer { container_id, .. } => format!("local container {container_id}"),
-        SshBare { ssh, .. } | AwsEc2 { ssh, .. } => format!("host {}", ssh.destination),
+        SshBare { ssh, .. } | SshHostBare { ssh, .. } | AwsEc2 { ssh, .. } => {
+            format!("host {}", ssh.destination)
+        }
         LocalBare { .. } => "this host".to_owned(),
     }
 }
@@ -889,7 +891,8 @@ fn transfer_binary(
     destination: &str,
 ) -> Result<()> {
     if let targets::TargetLocator::AwsEc2 { ssh, .. }
-    | targets::TargetLocator::SshBare { ssh, .. } = locator
+    | targets::TargetLocator::SshBare { ssh, .. }
+    | targets::TargetLocator::SshHostBare { ssh, .. } = locator
     {
         // This path already belongs to the private store upload. Stream the
         // worker without the deadline reserved for the surrounding commands.

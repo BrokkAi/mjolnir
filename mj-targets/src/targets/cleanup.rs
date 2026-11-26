@@ -219,6 +219,26 @@ exit "$status""#;
             instance_id,
             ..
         } => terminate_ec2_instance_command(profile, region, instance_id)?.into(),
+        TargetLocator::SshHostBare { ssh, data_root } => {
+            let script = stopped
+                .map(|_| ControlScript::without_control(String::new()))
+                .unwrap_or_else(|| kill_worker_daemon_script(&session_worker_root))
+                .map_script(|kill| {
+                    format!(
+                        "{kill}\nrm -rf -- {} {}\n",
+                        posix_quote(&session_worker_root),
+                        posix_quote(&mj_core::target_path::text(
+                            &mj_core::config::DataLayout::at(data_root)
+                                .profiles_dir()
+                                .join(session_id)
+                        ))
+                    )
+                });
+            script.into_command(|script| {
+                ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()])
+                    .purpose("stop the remote worker and remove its exact host-bare state")
+            })
+        }
         TargetLocator::SshBare { ssh, workspace, .. } => {
             // Same ordering constraint as the local bare target: stop the
             // daemon before deleting the root it keeps writing to.

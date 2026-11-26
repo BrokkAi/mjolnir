@@ -49,6 +49,7 @@ impl From<&TargetLocator> for SessionHost {
             | TargetLocator::LocalDocker { .. }
             | TargetLocator::AppleContainer { .. }
             | TargetLocator::SshBare { .. }
+            | TargetLocator::SshHostBare { .. }
             | TargetLocator::SshPodman { .. }
             | TargetLocator::SshDocker { .. }
             | TargetLocator::SshAppleContainer { .. }

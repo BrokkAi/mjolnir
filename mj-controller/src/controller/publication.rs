@@ -114,7 +114,11 @@ fn assess_network_checkpoint_inner(
         .as_ref()
         .context("session has no live target")?;
     let backend = super::backend::backend_locator(locator, session, config)?;
-    let root = super::network_git::workspace_root(&backend, session.container_workspace.as_deref());
+    let root = super::network_git::workspace_root(
+        &backend,
+        session.container_workspace.as_deref(),
+        &session.id,
+    );
     let bounded = CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(30));
     let mut commits = BTreeSet::new();
     let mut any_unverified = false;

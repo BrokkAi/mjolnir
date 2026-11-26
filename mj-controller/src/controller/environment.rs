@@ -223,6 +223,7 @@ impl Reclamation {
                 target,
                 mj_core::state::TargetLocator::LocalBare { .. }
                     | mj_core::state::TargetLocator::SshBare { .. }
+                    | mj_core::state::TargetLocator::SshHostBare { .. }
             )
         {
             let backend = &self
@@ -249,6 +250,7 @@ impl Reclamation {
                     target,
                     targets::TargetLocator::LocalBare { .. }
                         | targets::TargetLocator::SshBare { .. }
+                        | targets::TargetLocator::SshHostBare { .. }
                 ) {
                     targets::stopped_borrowed_worker_cleanup_plan(
                         self.stopped_worker(worker, target)?,
@@ -775,6 +777,7 @@ fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
         locator,
         mj_core::targets::TargetLocator::AwsEc2 { .. }
             | mj_core::targets::TargetLocator::SshBare { .. }
+            | mj_core::targets::TargetLocator::SshHostBare { .. }
             | mj_core::targets::TargetLocator::SshPodman { .. }
             | mj_core::targets::TargetLocator::SshDocker { .. }
             | mj_core::targets::TargetLocator::SshAppleContainer { .. }
@@ -816,6 +819,7 @@ fn retained_container_checkout_available(
     let workspace = PathBuf::from(super::network_git::workspace_root(
         backend,
         record.container_workspace.as_deref(),
+        session_id,
     ));
     let checkouts = resume_checkout_directories(controller, session_id, backend)?;
     let mut paths = std::collections::BTreeSet::new();
@@ -843,7 +847,8 @@ fn retained_container_checkout_available(
         }
     }
     let host = match backend {
-        targets::TargetLocator::SshPodman { ssh, .. }
+        targets::TargetLocator::SshHostBare { ssh, .. }
+        | targets::TargetLocator::SshPodman { ssh, .. }
         | targets::TargetLocator::SshDocker { ssh, .. }
         | targets::TargetLocator::SshAppleContainer { ssh, .. }
         | targets::TargetLocator::SshNitro { ssh, .. } => targets::TargetLocator::SshBare {
@@ -915,6 +920,7 @@ pub(super) fn resume_checkout_directories(
             let workspace = PathBuf::from(super::network_git::workspace_root(
                 backend,
                 record.container_workspace.as_deref(),
+                session_id,
             ));
             return Ok(bundle
                 .repositories
@@ -953,6 +959,7 @@ pub(super) fn resume_checkout_directory(
     let root = PathBuf::from(super::network_git::workspace_root(
         backend,
         session.container_workspace.as_deref(),
+        session_id,
     ));
     Ok(session
         .project_bundle(&controller.config)

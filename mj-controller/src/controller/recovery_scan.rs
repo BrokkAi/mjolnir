@@ -139,7 +139,13 @@ impl Controller {
             .state
             .sessions
             .get(&candidate.session_id)
-            .is_some_and(|record| locator_in_flight(record.state))
+            .is_some_and(|record| {
+                locator_in_flight(record.state)
+                    || matches!(
+                        record.target.as_deref(),
+                        Some(TargetLocator::SshHostBare { .. })
+                    )
+            })
         {
             return true;
         }

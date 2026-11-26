@@ -1147,6 +1147,7 @@ pub(super) struct StoredTargetValues<'a> {
     pub worker_id: Option<&'a str>,
     pub workspace_storage: Option<String>,
     pub borrowed_from: Option<&'a str>,
+    pub data_root: Option<Vec<u8>>,
 }
 
 pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTargetValues<'_>> {
@@ -1257,6 +1258,16 @@ pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTarge
                 None,
                 None,
             ),
+            TargetLocator::SshHostBare { host, .. } => (
+                "ssh-host-bare",
+                Some(host.as_str()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             TargetLocator::SshBare {
                 host,
                 workspace,
@@ -1296,7 +1307,37 @@ pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTarge
         worker_id,
         workspace_storage,
         borrowed_from,
+        data_root: match target {
+            TargetLocator::SshHostBare { data_root, .. } => Some(path_to_blob(data_root)),
+            _ => None,
+        },
     })
+}
+
+pub(super) fn validate_target_for_store(target: &TargetLocator, session_id: &str) -> Result<()> {
+    let fields = stored_target_values(target)?;
+    if let Some(host) = fields.host {
+        anyhow::ensure!(
+            !host.trim().is_empty() && !host.starts_with('-'),
+            "empty or invalid target host for session {session_id}"
+        );
+    }
+    if let Some(resource) = fields.resource {
+        anyhow::ensure!(
+            !resource.trim().is_empty(),
+            "empty target resource for session {session_id}"
+        );
+    }
+    if let Some(workspace) = fields.workspace.as_ref() {
+        anyhow::ensure!(
+            !workspace.is_empty(),
+            "empty target workspace for session {session_id}"
+        );
+    }
+    if let TargetLocator::SshHostBare { data_root, .. } = target {
+        mj_core::target_path::validate_host_bare(data_root, session_id)?;
+    }
+    Ok(())
 }
 
 pub(super) fn insert_target(
@@ -1305,6 +1346,7 @@ pub(super) fn insert_target(
     target: &TargetLocator,
     machine_id: Option<&MachineId>,
 ) -> Result<()> {
+    validate_target_for_store(target, session_id)?;
     let StoredTargetValues {
         kind,
         host,
@@ -1314,10 +1356,11 @@ pub(super) fn insert_target(
         worker_id,
         workspace_storage,
         borrowed_from,
+        data_root,
     } = stored_target_values(target)?;
     tx.execute(
-        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, machine_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, machine_id, data_root)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             session_id,
             kind,
@@ -1328,7 +1371,8 @@ pub(super) fn insert_target(
             worker_id,
             workspace_storage,
             borrowed_from,
-            machine_id.map(MachineId::as_str)
+            machine_id.map(MachineId::as_str),
+            data_root
         ],
     )?;
     Ok(())
@@ -1395,14 +1439,21 @@ pub(super) fn read_targets(
     } else {
         ""
     };
-    let mut statement = connection.prepare(&format!("SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from
+    let extra =
+        if super::legacy_schema::table_has_column(connection, "session_targets", "data_root")? {
+            "data_root"
+        } else {
+            "NULL"
+        };
+    let mut statement = connection.prepare(&format!("SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, {extra}
          FROM session_targets{predicate}"))?;
     let arguments: Vec<&dyn rusqlite::ToSql> = id
         .as_ref()
         .map(|id| vec![id as &dyn rusqlite::ToSql])
         .unwrap_or_default();
     let rows = statement.query_map(arguments.as_slice(), |row| {
-        Ok((row.get(0)?, decode_target(row, 1)?))
+        let id: String = row.get(0)?;
+        Ok((id.clone(), decode_target(row, 1, &id)?))
     })?;
     rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
 }
@@ -1424,6 +1475,24 @@ pub(super) fn decode_machine(
 pub(super) fn decode_target(
     row: &rusqlite::Row<'_>,
     start: usize,
+    session_id: &str,
+) -> rusqlite::Result<TargetLocator> {
+    decode_target_inner(row, start, session_id).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            start,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid target for session {session_id:?}: {error}"),
+            )),
+        )
+    })
+}
+
+fn decode_target_inner(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+    session_id: &str,
 ) -> rusqlite::Result<TargetLocator> {
     let kind: String = row.get(start)?;
     let host: Option<String> = row.get(start + 1)?;
@@ -1431,8 +1500,9 @@ pub(super) fn decode_target(
     let address: Option<String> = row.get(start + 3)?;
     let workspace = row.get_ref(start + 4)?.blob_or_null()?.map(blob_to_path);
     let worker_id: Option<String> = row.get(start + 5)?;
-    let workspace_storage = row
-        .get::<_, Option<String>>(start + 6)?
+    let storage_text = row.get::<_, Option<String>>(start + 6)?;
+    let workspace_storage = storage_text
+        .clone()
         .map(|serialized| {
             serde_json::from_str(&serialized).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(start + 6, Type::Text, Box::new(error))
@@ -1441,54 +1511,149 @@ pub(super) fn decode_target(
         .transpose()?
         .unwrap_or_default();
     let borrowed_from: Option<String> = row.get(start + 7)?;
+    let data_root = row.get_ref(start + 8)?.blob_or_null()?.map(blob_to_path);
+    let invalid = || {
+        rusqlite::Error::FromSqlConversionFailure(
+            start,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid target columns for session {session_id:?}, kind {kind}"),
+            )),
+        )
+    };
+    let host_present = host.is_some();
+    let resource_present = resource.is_some();
+    let workspace_present = workspace.is_some();
+    let base_valid = match kind.as_str() {
+        "local-bare" => {
+            !host_present
+                && !resource_present
+                && address.is_none()
+                && workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "local-podman" => {
+            !host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+        }
+        "local-docker" | "apple-container" => {
+            !host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+        }
+        "aws-ec2" => {
+            !host_present
+                && resource_present
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "ssh-bare" => {
+            host_present
+                && !resource_present
+                && address.is_none()
+                && workspace_present
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "ssh-host-bare" => {
+            host_present
+                && !resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "ssh-podman" => {
+            host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+        }
+        "ssh-docker" | "ssh-apple-container" | "ssh-nitro" => {
+            host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+        }
+        _ => false,
+    };
+    let extra_valid = if kind == "ssh-host-bare" {
+        data_root
+            .as_ref()
+            .is_some_and(|root| mj_core::target_path::validate_host_bare(root, session_id).is_ok())
+    } else {
+        data_root.is_none()
+    };
+    if !base_valid || !extra_valid {
+        return Err(invalid());
+    }
     let target = match kind.as_str() {
         "local-bare" => TargetLocator::LocalBare {
-            worker_root: workspace.unwrap(),
+            worker_root: workspace.ok_or_else(invalid)?,
         },
         "local-podman" => TargetLocator::LocalPodman {
             borrowed_from,
-            container_id: resource.unwrap(),
+            container_id: resource.ok_or_else(invalid)?,
             workspace_storage,
         },
         "local-docker" => TargetLocator::LocalDocker {
             borrowed_from,
-            container_id: resource.unwrap(),
+            container_id: resource.ok_or_else(invalid)?,
         },
         "apple-container" => TargetLocator::AppleContainer {
             borrowed_from,
-            container_id: resource.unwrap(),
+            container_id: resource.ok_or_else(invalid)?,
         },
         "aws-ec2" => TargetLocator::AwsEc2 {
-            instance_id: resource.unwrap(),
+            instance_id: resource.ok_or_else(invalid)?,
             address,
         },
+        "ssh-host-bare" => TargetLocator::SshHostBare {
+            host: host.ok_or_else(invalid)?,
+            data_root: data_root.ok_or_else(invalid)?,
+        },
         "ssh-bare" => TargetLocator::SshBare {
-            host: host.unwrap(),
-            workspace: workspace.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            workspace: workspace.ok_or_else(invalid)?,
             worker_id,
         },
         "ssh-docker" => TargetLocator::SshDocker {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
         },
         "ssh-apple-container" => TargetLocator::SshAppleContainer {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
         },
         "ssh-nitro" => TargetLocator::SshNitro {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
         },
         "ssh-podman" => TargetLocator::SshPodman {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
             workspace_storage,
         },
-        _ => unreachable!("target kind constrained by schema"),
+        _ => return Err(invalid()),
     };
     Ok(target)
 }
@@ -1690,8 +1855,7 @@ pub fn backfill_target_runtime(
 /// whatever the configuration says.
 const LOCAL_TARGET_KINDS: &str = "'local-bare','local-podman','local-docker','apple-container'";
 /// Target kinds on another host, whose machine only the target template names.
-const REMOTE_TARGET_KINDS: &str =
-    "'ssh-bare','ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro','aws-ec2'";
+const REMOTE_TARGET_KINDS: &str = "'ssh-bare','ssh-host-bare','ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro','aws-ec2'";
 
 /// Fill the machine on stored placements that have none, and return the
 /// session placements filled so the caller can update its copies.

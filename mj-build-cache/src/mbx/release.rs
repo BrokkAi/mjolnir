@@ -1403,6 +1403,14 @@ mod tests {
             worker_id: None,
         };
         assert!(BuildStateRelease::for_target(&session, &shared_bare, &config).is_none());
+        let host_bare = targets::TargetLocator::SshHostBare {
+            ssh: SshTarget {
+                destination: "builder.test".into(),
+                ssh_args: Vec::new(),
+            },
+            data_root: "/source/data".into(),
+        };
+        assert!(BuildStateRelease::for_target(&session, &host_bare, &config).is_none());
 
         let (mut legacy, backend) = container_session(id, None);
         legacy.container_workspace = Some("/workspace".into());
