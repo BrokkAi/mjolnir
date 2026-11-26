@@ -324,10 +324,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   noteConversationVersion: (id, version) =>
     set(state => {
       const known = state.conversationVersions[id];
-      if (known && known.latest_seq > version.latest_seq) return state;
-      if (known && known.latest_seq === version.latest_seq && known.presentation_key === version.presentation_key) {
-        return state;
-      }
+      // The event stream owns this fact; a fetch only seeds it when absent or
+      // strictly ahead, so an in-flight response never replaces a newer key
+      // announced at the same sequence.
+      if (known && known.latest_seq >= version.latest_seq) return state;
       return { conversationVersions: { ...state.conversationVersions, [id]: version } };
     }),
 }));

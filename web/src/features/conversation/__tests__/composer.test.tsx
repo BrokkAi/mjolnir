@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ViewerSession } from '../../../api/types';
 import { emptyTranscript, useTranscriptStore } from '../../../stores/useTranscriptStore';
@@ -272,5 +272,67 @@ describe('Composer', () => {
 
     rerender(<Composer session={session({ prompt_images_supported: true })} />);
     expect(screen.getByRole('button', { name: 'Attach image' })).toBeInTheDocument();
+  });
+  describe('pasted and dropped attachments', () => {
+    const uploads = (calls: { url: string; init?: RequestInit }[]) =>
+      calls.filter(call => call.url.startsWith('/api/v1/sessions/s1/attachments'));
+    const uploadRoutes = () =>
+      installRoutes({
+        '/api/v1/sessions/s1/attachments': url =>
+          jsonResponse(
+            url.includes('mode=file')
+              ? { file: { filename: 'shot.png' } }
+              : { mime_type: 'image/png', width: 1, height: 1, attachment: 'a1' },
+          ),
+      });
+    const png = () => new File(['x'], 'shot.png', { type: 'image/png' });
+    const clipboard = (files: File[], text = '') => ({
+      files,
+      items: files.map(file => ({ kind: 'file', getAsFile: () => file })),
+      getData: (type: string) => (type === 'text/plain' ? text : ''),
+    });
+
+    it('pastes an image as an image when the harness takes images, and as a file otherwise', async () => {
+      const fetchMock = uploadRoutes();
+      const { rerender } = render(<Composer session={session({ prompt_images_supported: true })} />);
+      const textarea = screen.getByLabelText('Message');
+      fireEvent.paste(textarea, { clipboardData: clipboard([png()]) });
+      await waitFor(() => expect(uploads(fetchMock.calls)).toHaveLength(1));
+      expect(uploads(fetchMock.calls)[0].url).toBe('/api/v1/sessions/s1/attachments');
+
+      rerender(<Composer session={session({ prompt_images_supported: false })} />);
+      fireEvent.paste(textarea, { clipboardData: clipboard([png()]) });
+      await waitFor(() => expect(uploads(fetchMock.calls)).toHaveLength(2));
+      expect(uploads(fetchMock.calls)[1].url).toBe('/api/v1/sessions/s1/attachments?mode=file');
+    });
+
+    it('uploads a dropped file as a file and takes over the drop', async () => {
+      const fetchMock = uploadRoutes();
+      render(<Composer session={session({ prompt_images_supported: true })} />);
+      const target = screen.getByLabelText('Message').parentElement as HTMLElement;
+      const file = new File(['data'], 'notes.txt', { type: 'text/plain' });
+
+      const over = createEvent.dragOver(target, { dataTransfer: { types: ['Files'], files: [file] } });
+      fireEvent(target, over);
+      expect(over.defaultPrevented).toBe(true);
+      expect(target.className).toContain('border-accent');
+
+      const drop = createEvent.drop(target, { dataTransfer: { types: ['Files'], files: [file] } });
+      fireEvent(target, drop);
+      expect(drop.defaultPrevented).toBe(true);
+      expect(target.className).not.toContain('border-accent');
+      await waitFor(() => expect(uploads(fetchMock.calls)).toHaveLength(1));
+      expect(uploads(fetchMock.calls)[0].url).toBe('/api/v1/sessions/s1/attachments?mode=file');
+    });
+
+    it('leaves a plain-text paste to the browser', async () => {
+      const fetchMock = uploadRoutes();
+      render(<Composer session={session({ prompt_images_supported: true })} />);
+      const paste = createEvent.paste(screen.getByLabelText('Message'), { clipboardData: clipboard([], 'hello') });
+      fireEvent(screen.getByLabelText('Message'), paste);
+      await flushPromises();
+      expect(paste.defaultPrevented).toBe(false);
+      expect(uploads(fetchMock.calls)).toHaveLength(0);
+    });
   });
 });

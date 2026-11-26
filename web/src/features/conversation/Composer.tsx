@@ -5,6 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import {
@@ -151,6 +153,7 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
   }, []);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const submittingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
@@ -237,7 +240,7 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
   );
 
   const pickFiles = useCallback(
-    async (list: FileList | null, kind: 'image' | 'file') => {
+    async (list: ArrayLike<File> | null, kind: 'image' | 'file') => {
       if (!list || list.length === 0) return;
       for (const file of Array.from(list)) {
         if (kind === 'image' && !session.prompt_images_supported) continue;
@@ -267,6 +270,52 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
     },
     [session.id, session.prompt_images_supported],
   );
+
+  /** Pasted and dropped files: images go up as images when the harness takes them, everything else as files. */
+  const attachDroppedOrPastedFiles = useCallback(
+    async (files: File[]) => {
+      const asImages = session.prompt_images_supported;
+      const images = asImages ? files.filter(file => file.type.startsWith('image/')) : [];
+      const others = asImages ? files.filter(file => !file.type.startsWith('image/')) : files;
+      await Promise.all([pickFiles(images, 'image'), pickFiles(others, 'file')]);
+    },
+    [pickFiles, session.prompt_images_supported],
+  );
+
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!canPrompt) return;
+    const data = event.clipboardData;
+    let files = Array.from(data.files);
+    if (files.length === 0) {
+      files = Array.from(data.items)
+        .filter(item => item.kind === 'file')
+        .flatMap(item => item.getAsFile() ?? []);
+    }
+    if (files.length === 0) return;
+    // A screenshot arrives with no text; keep the text of a mixed paste.
+    if (!data.getData('text/plain')) event.preventDefault();
+    void attachDroppedOrPastedFiles(files);
+  };
+
+  const carriesFiles = (event: DragEvent<HTMLDivElement>) => event.dataTransfer.types.includes('Files');
+
+  const onDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!canPrompt || !carriesFiles(event)) return;
+    event.preventDefault();
+    setDragging(true);
+  };
+
+  const onDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragging(false);
+  };
+
+  const onDrop = (event: DragEvent<HTMLDivElement>) => {
+    setDragging(false);
+    if (!canPrompt || !carriesFiles(event)) return;
+    event.preventDefault();
+    void attachDroppedOrPastedFiles(Array.from(event.dataTransfer.files));
+  };
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments(current => {
@@ -649,7 +698,12 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
             </div>
           )}
 
-          <div className="flex items-end gap-1.5 rounded-xl border border-line bg-bg p-1.5">
+          <div
+            className={`flex items-end gap-1.5 rounded-xl border bg-bg p-1.5 ${dragging ? 'border-accent' : 'border-line'}`}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+          >
             {canPrompt && (
               <div className="flex shrink-0 items-center gap-0.5 self-end pb-0.5">
                 {session.prompt_images_supported && (
@@ -712,6 +766,7 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
                 setError(null);
               }}
               onKeyDown={onKeyDown}
+              onPaste={onPaste}
               placeholder={placeholder}
               aria-label="Message"
               className="min-h-9 max-h-40 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-snug text-fg outline-none placeholder:text-muted disabled:opacity-60"

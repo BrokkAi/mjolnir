@@ -72,15 +72,31 @@ describe('TranscriptRow', () => {
     expect(markdownCalls.byText.get('stable row') ?? 0).toBe(0);
   });
 
-  it('treats an equal-sequence row as unchanged and a revised row as changed', () => {
+  // Hard-won: pre-push review round 4: a same-id, same-sequence replacement after a presentation reset kept showing stale content.
+  it('re-renders a replaced entry that keeps its id and sequence, but not the same object', () => {
+    const original = entry(1, { stable_id: 'msg-1', lines: ['before reset'] });
+    const { rerender } = render(<Harness rows={[original]} />);
+    expect(screen.getByText('before reset')).toBeInTheDocument();
+    markdownCalls.byText.clear();
+
+    rerender(<Harness rows={[original]} />);
+    expect(markdownCalls.byText.size).toBe(0);
+
+    const replaced = { ...original, lines: ['after reset'] };
+    expect(replaced.updated_seq).toBe(original.updated_seq);
+    rerender(<Harness rows={[replaced]} />);
+    expect(screen.getByText('after reset')).toBeInTheDocument();
+  });
+
+  it('compares the entry by identity and the other props by value', () => {
     const base = {
       entry: entry(1, { stable_id: 'msg-1' }),
       sessionId: 's1',
       isStreaming: false,
       onBeforeExpand: () => {},
     };
-    expect(sameTranscriptRowProps(base, { ...base, entry: { ...base.entry } })).toBe(true);
-    expect(sameTranscriptRowProps(base, { ...base, entry: { ...base.entry, updated_seq: 2 } })).toBe(false);
+    expect(sameTranscriptRowProps(base, { ...base })).toBe(true);
+    expect(sameTranscriptRowProps(base, { ...base, entry: { ...base.entry } })).toBe(false);
     expect(sameTranscriptRowProps(base, { ...base, isStreaming: true })).toBe(false);
     expect(sameTranscriptRowProps(base, { ...base, sessionId: 's2' })).toBe(false);
   });

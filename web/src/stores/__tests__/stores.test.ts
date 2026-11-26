@@ -373,6 +373,41 @@ describe('conversation fetch gating', () => {
     expect(transcripts().entries.s1.latestSeq).toBe(9);
   });
 
+  // Hard-won: pre-push review round 4: a fetch answer at the same sequence overwrote a newer presentation key from the stream.
+  it('keeps a presentation key the stream announced while an older fetch was in flight, then fetches it', async () => {
+    await open('s1');
+    let release!: (response: Response) => void;
+    let seen = 0;
+    net = mockFetch({
+      '/api/v1/conversations/s1': () => {
+        seen += 1;
+        return seen === 1
+          ? new Promise<Response>(resolve => (release = resolve))
+          : jsonResponse(
+              transcript({
+                latest_seq: 5,
+                presentation_key: 'B',
+                reset: true,
+                entries: [entry(5, { stable_id: 'regrouped:5' })],
+              }),
+            );
+      },
+    });
+    sessions().applyFrame(delta(1, 2, { conversation_versions: { s1: v(5, 'A') } }));
+    await flush(1);
+    sessions().applyFrame(delta(2, 3, { conversation_versions: { s1: v(5, 'B') } }));
+    release(jsonResponse(transcript({ latest_seq: 5, presentation_key: 'A', entries: [entry(5)] })));
+    await flush();
+
+    expect(conversationCalls()).toEqual([
+      '/api/v1/conversations/s1?after_seq=3&presentation_key=k',
+      '/api/v1/conversations/s1?after_seq=5&presentation_key=A',
+    ]);
+    expect(sessions().conversationVersions.s1.presentation_key).toBe('B');
+    expect(transcripts().entries.s1.presentationKey).toBe('B');
+    expect(transcripts().entries.s1.orderedIds).toEqual(['regrouped:5']);
+  });
+
   it('does not retry by itself after a failed fetch', async () => {
     await open('s1');
     net = mockFetch({ '/api/v1/conversations/s1': () => new Response('boom', { status: 500 }) });

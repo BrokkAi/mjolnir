@@ -305,19 +305,16 @@ function TranscriptRowImpl({
 }
 
 /**
- * Streaming revises the same entry object's `updated_seq`; everything else
- * keeps both its object identity and its sequence. Comparing sequence rather
- * than identity also covers a cache merge that rebuilt an equal row.
+ * Incremental transcript updates preserve the object identity of every
+ * unchanged entry, so identity is the whole test: a replaced entry may keep its
+ * id and sequence yet change content (a same-sequence presentation reset).
  */
 export function sameTranscriptRowProps(prev: TranscriptRowProps, next: TranscriptRowProps): boolean {
   if (prev.sessionId !== next.sessionId) return false;
   if (prev.isStreaming !== next.isStreaming) return false;
   if (prev.onBeforeExpand !== next.onBeforeExpand) return false;
   if (prev.streamingRef !== next.streamingRef) return false;
-  const a = prev.entry;
-  const b = next.entry;
-  if (a === b) return true;
-  return a.id === b.id && a.stable_id === b.stable_id && a.updated_seq === b.updated_seq;
+  return prev.entry === next.entry;
 }
 
 export const TranscriptRow = memo(TranscriptRowImpl, sameTranscriptRowProps);
