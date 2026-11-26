@@ -392,7 +392,10 @@ export function ElicitationSheet({
     return (
       <section
         aria-labelledby={titleId}
-        className="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm"
+        // Bound the card so the body scrolls inside it and the footer and
+        // composer below the card stay on screen for long prompts.
+        className="flex max-h-[min(70dvh,calc(100dvh-13rem))] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm"
+        data-testid="elicitation-inline-card"
       >
         {header}
         {body}

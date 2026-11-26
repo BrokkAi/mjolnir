@@ -117,6 +117,24 @@ describe('elicitation rendering', () => {
     }
   });
 
+  it('bounds the inline desktop card so its body scrolls inside one scrollport', () => {
+    const options = Array.from({ length: 40 }, (_, index) => ({
+      value: `o${index}`,
+      title: `Option ${index}`,
+    }));
+    const elicitation = request([
+      { id: 'choice', title: 'Pick one', kind: 'single_select', required: false, options },
+    ]);
+    mockFetch({});
+    render(<ElicitationHost session={sessionFor(elicitation)} />);
+
+    const card = screen.getByTestId('elicitation-inline-card');
+    expect(card.className).toMatch(/max-h-\[min\(70dvh,calc\(100dvh-13rem\)\)\]/);
+    expect(card.className).toContain('overflow-hidden');
+    expect(card.className).not.toContain('overflow-y-auto');
+    expect(card).toContainElement(screen.getByTestId('elicitation-sheet-body'));
+  });
+
   it('opens the full-height sheet once on a phone and collapses to the dock without losing the draft', async () => {
     setViewport(false);
     const elicitation = request([

@@ -92,6 +92,59 @@ describe('ConversationView', () => {
     expect(screen.getByText(/stored history is shown read-only/)).toBeInTheDocument();
   });
 
+  it('opens the full detail of a trimmed history row on demand', async () => {
+    const row = liveRow('c1', { title: 'Stopped child', lifecycle: 'suspended' });
+    useSessionStore.getState().applySnapshot(
+      snapshot([
+        { ...row, capabilities: { ...row.capabilities, open: false, read_history: true, resume: false } },
+      ]),
+    );
+    useTranscriptStore.setState({
+      entries: {
+        c1: {
+          ...emptyTranscript('c1'),
+          hasLoaded: true,
+          hasMoreHistory: false,
+          olderItems: [
+            {
+              stable_id: 'tool:7',
+              position: 1,
+              role: 'tool',
+              label: 'Run tests',
+              text: 'summary only',
+              tool_detail_trimmed: true,
+            },
+          ],
+        },
+      },
+      order: ['c1'],
+      activeId: 'c1',
+    });
+    const fetchMock = mockFetch({
+      '/api/v1/sessions/c1/items/tool%3A7/detail': () =>
+        jsonResponse({
+          status: 'full',
+          stable_id: 'tool:7',
+          entry: { tool_input: { command: 'cargo test' }, tool_content: [] },
+          body: { kind: 'system', text: '' },
+          call: {},
+          diffs: [],
+          terminal_outputs: [{ terminal_id: 't1', output: 'full history output' }],
+        }),
+    });
+
+    render(<ConversationView sessionId="c1" />);
+    expect(fetchMock.calls.filter(call => call.url.includes('/detail'))).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Full detail' }));
+
+    await waitFor(() => expect(screen.getByText('full history output')).toBeInTheDocument());
+    expect(screen.getByText(/"command": "cargo test"/)).toBeInTheDocument();
+    expect(fetchMock.calls.filter(call => call.url.includes('/detail'))).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Hide detail' }));
+    expect(screen.queryByText('full history output')).not.toBeInTheDocument();
+  });
+
   it('keeps the cached rows visible and shows an error banner with Retry when a later fetch failed', () => {
     const fetchMock = mockFetch({
       '/api/v1/sessions/s1/client-state': () => jsonResponse({ draft: '', through_event_ordinal: 0 }),

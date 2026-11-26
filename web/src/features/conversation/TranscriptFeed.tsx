@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { ArrowDown, Clock, LoaderCircle } from 'lucide-react';
 import { MarkdownContent } from '../../components/MarkdownContent';
 import type { HistoryEntry } from '../../api/types';
@@ -9,6 +10,7 @@ import {
 } from '../../stores/useTranscriptStore';
 import { pendingLocalPrompts } from './conversationData';
 import type { ConversationScroll } from './useConversationScroll';
+import { ToolDetailBody, useToolDetail } from './ToolCard';
 import { TranscriptRow } from './TranscriptRow';
 import { formatClock } from './format';
 
@@ -51,21 +53,73 @@ function historyRoleLabel(item: HistoryEntry): string {
   return item.label || HISTORY_ROLE_LABEL[item.role] || item.role;
 }
 
-function HistoryRow({ item }: { item: HistoryEntry }) {
+interface HistoryRowProps {
+  item: HistoryEntry;
+  sessionId: string;
+  /** Runs just before the full detail opens, so follow is released first. */
+  onBeforeExpand: () => void;
+}
+
+function HistoryRow({ item, sessionId, onBeforeExpand }: HistoryRowProps) {
   const assistant =
     item.role === 'Agent' || item.role === 'agent' || item.role === 'Message' || item.role === 'message';
   const clock = formatClock(item.recorded_at_ms);
+  const [detailOpen, setDetailOpen] = useState(false);
+  // History entries carry no update sequence; their detail does not change.
+  const { detail, loading, error, retry } = useToolDetail(
+    sessionId,
+    item.stable_id,
+    '',
+    detailOpen && Boolean(item.tool_detail_trimmed),
+  );
   return (
     <article className="rounded-lg border border-line/60 bg-surface/50 px-3 py-2">
       <header className="mb-1 flex items-center gap-2 text-[10.5px] text-muted">
         <span className="font-medium">{historyRoleLabel(item)}</span>
-        {item.tool_detail_trimmed && <span className="rounded bg-raised px-1 py-0.5">trimmed</span>}
+        {item.tool_detail_trimmed && (
+          <button
+            type="button"
+            aria-expanded={detailOpen}
+            onClick={() => {
+              if (!detailOpen) onBeforeExpand();
+              setDetailOpen(open => !open);
+            }}
+            className="min-h-6 rounded bg-raised px-1.5 py-0.5 text-fg hover:bg-line/60"
+          >
+            {detailOpen ? 'Hide detail' : 'Full detail'}
+          </button>
+        )}
         {clock && <time className="ml-auto tabular-nums">{clock}</time>}
       </header>
       {assistant ? (
         <MarkdownContent text={item.text} compact />
       ) : (
         <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-fg">{item.text}</p>
+      )}
+      {detailOpen && item.tool_detail_trimmed && (
+        <div className="mt-2 space-y-2 border-t border-line pt-2 text-[13px] [overflow-anchor:none]" data-testid="history-detail">
+          {loading && (
+            <p className="flex items-center gap-2 text-xs text-muted" role="status">
+              <LoaderCircle className="size-3.5 animate-spin" aria-hidden />
+              Loading full tool output…
+            </p>
+          )}
+          {error && (
+            <div className="rounded-md border border-danger/40 bg-danger/10 p-2">
+              <p role="alert" className="text-[12px] text-danger">
+                Could not load the full tool output: {error}
+              </p>
+              <button
+                type="button"
+                onClick={retry}
+                className="mt-1 rounded border border-line bg-surface px-2 py-1 text-[12px] text-fg"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+          {detail && <ToolDetailBody detail={detail} />}
+        </div>
       )}
     </article>
   );
@@ -133,7 +187,12 @@ export function TranscriptFeed({ sessionId, cached, scroll, streamingKey, onLoad
           {older.length > 0 && (
             <section aria-label="Earlier messages" className="mb-2 flex flex-col gap-2 border-b border-line/60 pb-2">
               {older.map(item => (
-                <HistoryRow key={item.stable_id} item={item} />
+                <HistoryRow
+                  key={item.stable_id}
+                  item={item}
+                  sessionId={sessionId}
+                  onBeforeExpand={scroll.releaseFollow}
+                />
               ))}
             </section>
           )}

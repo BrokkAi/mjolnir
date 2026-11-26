@@ -11,7 +11,7 @@ import type { NativeAgent, NativeHistoryItem, ToolCallDetailResponse } from '../
 import { useSessionStore } from '../../stores/useSessionStore';
 import { useUiStore } from '../../stores/useUiStore';
 import { OverlaySheet } from './OverlaySheet';
-import { ToolDetailPanel } from './ToolCard';
+import { ToolDetailBody } from './ToolCard';
 import { describeError } from './format';
 
 /**
@@ -111,7 +111,7 @@ function NativeHistoryRow({ item, ownerSessionId, nativeChildId }: { item: Nativ
             </p>
           )}
           {detail ? (
-            <ToolDetailPanel detail={detail} />
+            <ToolDetailBody detail={detail} />
           ) : (
             !loading &&
             !error && (

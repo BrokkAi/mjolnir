@@ -6,7 +6,7 @@ import { resetToolDetailCache, ToolCard } from '../ToolCard';
 
 const DETAIL_PATH = '/api/v1/sessions/s1/items/tool-1/detail';
 
-function detailPayload(): ToolCallDetailResponse {
+function detailPayload(toolInput?: unknown): ToolCallDetailResponse {
   return {
     status: 'full',
     stable_id: 'tool-1',
@@ -21,6 +21,7 @@ function detailPayload(): ToolCallDetailResponse {
       tool_call_id: 'call-1',
       tool_status: 'Completed',
       tool_content: ['tool output line'],
+      ...(toolInput === undefined ? {} : { tool_input: toolInput }),
       tool_diffstats: [],
       tool_locations: [],
       plan: [],
@@ -128,6 +129,69 @@ describe('ToolCard', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
 
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByText('hello from terminal')).toBeInTheDocument());
+    expect(fetchMock.calls).toHaveLength(2);
+  });
+  it('renders the tool input in the expanded full-detail panel', async () => {
+    mockFetch({
+      [DETAIL_PATH]: () => jsonResponse(detailPayload({ command: 'cargo test --workspace' })),
+    });
+    render(<ToolCard entry={toolEntry()} sessionId="s1" onBeforeExpand={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Run tests, expand/ }));
+
+    await waitFor(() => expect(screen.getByText('Input')).toBeInTheDocument());
+    expect(screen.getByText(/"command": "cargo test --workspace"/)).toBeInTheDocument();
+  });
+
+  it('fetches fresh detail after the entry updates instead of serving the stale cached output', async () => {
+    let output = 'first run';
+    const fetchMock = mockFetch({
+      [DETAIL_PATH]: () => {
+        const payload = detailPayload();
+        if (payload.status === 'full') payload.terminal_outputs = [{ terminal_id: 't1', output }];
+        return jsonResponse(payload);
+      },
+    });
+    const { rerender } = render(
+      <ToolCard entry={toolEntry()} sessionId="s1" onBeforeExpand={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Run tests, expand/ }));
+    await waitFor(() => expect(screen.getByText('first run')).toBeInTheDocument());
+
+    output = 'second run';
+    rerender(
+      <ToolCard
+        entry={toolEntry({ updated_seq: 9, tool_status: 'done' })}
+        sessionId="s1"
+        onBeforeExpand={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText('second run')).toBeInTheDocument());
+    expect(screen.queryByText('first run')).not.toBeInTheDocument();
+    expect(fetchMock.calls).toHaveLength(2);
+  });
+
+  it('does not cache an unavailable response, so reopening retries', async () => {
+    let unavailable = true;
+    const fetchMock = mockFetch({
+      [DETAIL_PATH]: () =>
+        jsonResponse(
+          unavailable
+            ? { status: 'unavailable', stable_id: 'tool-1', summary: null, unavailable_reason: 'store offline' }
+            : detailPayload(),
+        ),
+    });
+    render(<ToolCard entry={toolEntry()} sessionId="s1" onBeforeExpand={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Run tests, expand/ }));
+    expect(await screen.findByText('store offline')).toBeInTheDocument();
+
+    unavailable = false;
+    fireEvent.click(screen.getByRole('button', { name: /Run tests, collapse/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Run tests, expand/ }));
+
     await waitFor(() => expect(screen.getByText('hello from terminal')).toBeInTheDocument());
     expect(fetchMock.calls).toHaveLength(2);
   });

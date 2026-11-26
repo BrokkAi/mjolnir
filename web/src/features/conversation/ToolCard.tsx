@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AlertTriangle, ChevronDown, LoaderCircle, Terminal } from 'lucide-react';
 import { getToolDetail } from '../../api/client';
 import type {
   BrowserTranscriptEntry,
   ChatEntry,
+  JsonValue,
   TerminalOutputRecord,
   ToolCallDetailResponse,
   TranscriptBody,
@@ -16,14 +17,81 @@ import { describeError, formatDuration } from './format';
  *
  * The expanded body is never rendered before the tap and never while
  * collapsed, which keeps long-output rows cheap. A trimmed row fetches its
- * full output only on first expansion and keeps the result in the module cache
- * so collapsing and reopening a card costs nothing.
+ * full output only while expanded and keeps a full response in the module
+ * cache, keyed by the entry version, so collapsing and reopening an unchanged
+ * card costs nothing while a later update to the same call fetches fresh
+ * output. An unavailable response is never cached, so reopening retries.
  */
 
 const detailCache = new Map<string, ToolCallDetailResponse>();
 
-function cacheKey(sessionId: string, stableId: string): string {
-  return `${sessionId}\u001f${stableId}`;
+function cacheKey(sessionId: string, stableId: string, version: string): string {
+  return `${sessionId}\u0000${stableId}\u0000${version}`;
+}
+
+/** The part of the cache key that changes when the transcript updates the call. */
+export function toolDetailVersion(entry: Pick<BrowserTranscriptEntry, 'updated_seq' | 'tool_status'>): string {
+  return `${entry.updated_seq}\u0000${entry.tool_status ?? ''}`;
+}
+
+type DetailResult =
+  | { key: string; response: ToolCallDetailResponse }
+  | { key: string; error: string };
+
+export interface ToolDetailState {
+  detail: ToolCallDetailResponse | undefined;
+  loading: boolean;
+  error: string | null;
+  retry: () => void;
+}
+
+/**
+ * Fetches the full detail of one tool call while `enabled`. Each enable, entry
+ * version change, or retry runs one request; results for another key are never
+ * shown.
+ */
+export function useToolDetail(
+  sessionId: string,
+  stableId: string | undefined,
+  version: string,
+  enabled: boolean,
+): ToolDetailState {
+  const key = stableId ? cacheKey(sessionId, stableId, version) : undefined;
+  const [result, setResult] = useState<DetailResult | undefined>();
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    if (!enabled || !key || !stableId) return;
+    const cached = detailCache.get(key);
+    if (cached) {
+      setResult({ key, response: cached });
+      return;
+    }
+    let cancelled = false;
+    getToolDetail(sessionId, stableId).then(
+      response => {
+        if (response.status === 'full') detailCache.set(key, response);
+        if (!cancelled) setResult({ key, response });
+      },
+      error => {
+        if (!cancelled) setResult({ key, error: describeError(error) });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, key, sessionId, stableId, attempt]);
+
+  const current = result && result.key === key ? result : undefined;
+  return {
+    detail: current && 'response' in current ? current.response : undefined,
+    loading: enabled && Boolean(key) && !current,
+    error: current && 'error' in current ? current.error : null,
+    retry: () => {
+      setResult(undefined);
+      setAttempt(count => count + 1);
+    },
+  };
 }
 
 /** Test hook: forget fetched details between cases. */
@@ -112,8 +180,30 @@ function ChatEntryOutput({ entry }: { entry: ChatEntry }) {
   );
 }
 
-/** Shared with the native-agent detail viewer, which fetches the same shape. */
-export function ToolDetailPanel({ detail }: { detail: ToolCallDetailResponse }) {
+function hasContent(value: JsonValue | undefined): value is JsonValue {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function ToolInput({ value }: { value: JsonValue }) {
+  return (
+    <section className="space-y-1">
+      <h4 className="text-[11px] font-medium uppercase tracking-wide text-muted">Input</h4>
+      <pre className="overflow-x-auto overflow-y-hidden whitespace-pre rounded-md border border-line bg-bg/60 p-2 font-mono text-[12px] leading-[1.55] text-fg [overflow-anchor:none]">
+        {typeof value === 'string' ? value : formatJson(value)}
+      </pre>
+    </section>
+  );
+}
+
+/**
+ * The full detail of one tool call. Shared by the transcript card, history
+ * rows, and the native-agent detail viewer, which fetch the same shape.
+ */
+export function ToolDetailBody({ detail }: { detail: ToolCallDetailResponse }) {
   if (detail.status === 'unavailable') {
     const summary = detail.summary;
     const summaryText = summary ? bodyText(summary) || formatJson(summary) : '';
@@ -136,9 +226,15 @@ export function ToolDetailPanel({ detail }: { detail: ToolCallDetailResponse }) 
   const extraBody = bodyText(detail.body);
   const terminalOutputs = detail.terminal_outputs;
   const duplicateBody = terminalOutputs.some(record => record.output && record.output === extraBody);
+  const input = hasContent(detail.entry.tool_input)
+    ? detail.entry.tool_input
+    : hasContent(detail.call)
+      ? detail.call
+      : undefined;
 
   return (
     <div className="space-y-2">
+      {input !== undefined && <ToolInput value={input} />}
       {detail.entry.tool_error && (
         <pre className="overflow-x-auto whitespace-pre rounded-md border border-danger/40 bg-danger/10 p-2 font-mono text-[12px] text-danger [overflow-anchor:none]">
           {detail.entry.tool_error}
@@ -160,52 +256,23 @@ export function ToolDetailPanel({ detail }: { detail: ToolCallDetailResponse }) 
 
 export function ToolCard({ entry, sessionId, onBeforeExpand }: ToolCardProps) {
   const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<ToolCallDetailResponse | undefined>(() =>
-    entry.stable_id ? detailCache.get(cacheKey(sessionId, entry.stable_id)) : undefined,
-  );
-  const [loading, setLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
-
   const stableId = entry.stable_id;
   const trimmed = Boolean(entry.tool_detail_trimmed);
+  const { detail, loading, error: detailError, retry } = useToolDetail(
+    sessionId,
+    stableId,
+    toolDetailVersion(entry),
+    expanded && trimmed,
+  );
 
-  const loadDetail = useCallback(async () => {
-    if (!stableId) return;
-    const key = cacheKey(sessionId, stableId);
-    const cached = detailCache.get(key);
-    if (cached) {
-      setDetail(cached);
-      return;
-    }
-    setLoading(true);
-    setDetailError(null);
-    try {
-      const response = await getToolDetail(sessionId, stableId);
-      detailCache.set(key, response);
-      if (alive.current) setDetail(response);
-    } catch (error) {
-      if (alive.current) setDetailError(describeError(error));
-    } finally {
-      if (alive.current) setLoading(false);
-    }
-  }, [sessionId, stableId]);
-
-  const onToggle = useCallback(() => {
+  const onToggle = () => {
     if (expanded) {
       setExpanded(false);
       return;
     }
     onBeforeExpand();
     setExpanded(true);
-    if (trimmed && stableId && !detail) void loadDetail();
-  }, [detail, expanded, loadDetail, onBeforeExpand, stableId, trimmed]);
+  };
 
   const duration =
     entry.tool_ended_at_ms != null && entry.recorded_at_ms != null
@@ -282,14 +349,14 @@ export function ToolCard({ entry, sessionId, onBeforeExpand }: ToolCardProps) {
               </p>
               <button
                 type="button"
-                onClick={() => void loadDetail()}
+                onClick={retry}
                 className="mt-1 rounded border border-line bg-surface px-2 py-1 text-[12px] text-fg"
               >
                 Try again
               </button>
             </div>
           )}
-          {detail && <ToolDetailPanel detail={detail} />}
+          {detail && <ToolDetailBody detail={detail} />}
         </div>
       )}
     </article>
