@@ -1800,7 +1800,7 @@ async fn a_dropped_live_export_request_stops_its_worker_command() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    let alive = mj_client::daemon::process_is_alive;
     assert!(alive(pid));
     request.abort();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);

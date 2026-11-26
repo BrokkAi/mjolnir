@@ -4191,10 +4191,12 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
-    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    // Git reports canonical worktree paths, including macOS /private/var.
+    let fixture_root = directory.path().canonicalize().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(&fixture_root, name);
     let worktrees = [
-        directory.path().join("outside/first"),
-        directory.path().join("outside/second"),
+        fixture_root.join("outside/first"),
+        fixture_root.join("outside/second"),
     ];
     for worktree in &worktrees {
         std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
@@ -4214,7 +4216,7 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
     let mut session = checkpoint_test_session(name);
     session.state = SessionState::Running;
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(name),
+        worker_root: fixture_root.join(name),
     }));
     attach_local_managed_clone(&mut session, repo, origin);
     let mut controller = Controller {

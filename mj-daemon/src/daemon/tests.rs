@@ -3357,6 +3357,14 @@ fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
 // Hard-won: #1321: a daemon stop cancelled a child launch and the failure did not say so.
 #[tokio::test]
 async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
+    #[cfg(windows)]
+    const SLEEP_CHILD: &str = "MJ_TEST_SHUTDOWN_CANCEL_SLEEP_CHILD";
+    #[cfg(windows)]
+    if std::env::var_os(SLEEP_CHILD).is_some() {
+        std::thread::sleep(Duration::from_secs(30));
+        return;
+    }
+
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
@@ -3453,11 +3461,24 @@ async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
         assert_eq!(cancelled.cancelled_restart_releases_intent(), restart);
 
         let executor = control.executor();
+        #[cfg(windows)]
+        let command = {
+            let name = mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "only_a_shutdown_cancel_reports_that_the_daemon_stopped",
+            );
+            let mut command = CommandSpec::new(
+                std::env::current_exe().unwrap().to_string_lossy(),
+                ["--exact", name.as_str(), "--nocapture"],
+            );
+            command.env.insert(SLEEP_CHILD.into(), "1".into());
+            command
+        };
+        #[cfg(not(windows))]
+        let command = CommandSpec::new("sh", ["-c", "sleep 30"]);
         let rollback = std::thread::spawn(move || {
             let started = std::time::Instant::now();
-            let result = executor
-                .shutdown_only()
-                .execute(&CommandSpec::new("sh", ["-c", "sleep 30"]));
+            let result = executor.shutdown_only().execute(&command);
             (result, started.elapsed())
         });
         std::thread::sleep(Duration::from_millis(300));
