@@ -1341,6 +1341,11 @@ fn ssh_container_script_reuses_verified_pins_heals_corruption_and_cleans_failed_
         )
         .unwrap();
         std::fs::set_permissions(stat, std::fs::Permissions::from_mode(0o755)).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &root.join("bin"),
+            "chown",
+            "#!/bin/sh\nif [ \"$1\" = -R ] && [ \"$3\" = -- ]; then owner=$2; shift 3; exec /usr/sbin/chown -R -- \"$owner\" \"$@\"; fi\nexec /usr/sbin/chown \"$@\"\n",
+        );
     }
     let id = "cccccccccccccccccccccccccccccccc";
     let locator = targets::TargetLocator::SshPodman {

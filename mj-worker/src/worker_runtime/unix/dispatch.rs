@@ -1140,6 +1140,12 @@ pub(super) async fn apply_harness_reload_transition(
             }
             disk_launch.write(&root.join("launch.json"))?;
         }
+        // Both paths have committed the launch. A crash before this line is
+        // settled when the next worker start adopts the same launch.
+        relay
+            .lock()
+            .expect("relay lock")
+            .adopt_launch(&launch_config)?;
         let supervisor_path = root.join("acp-supervisor.json");
         mj_core::runtime::spawn_blocking(move || {
             let bytes = serde_json::to_vec(&supervisor_spec)?;
