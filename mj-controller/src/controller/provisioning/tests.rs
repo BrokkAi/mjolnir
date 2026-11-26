@@ -391,6 +391,7 @@ fn a_source_that_cannot_overlay_is_mounted_read_only_and_reported() {
     let plan = targets::provision_plan(
         &podman_target(),
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &mounts,
         None,
@@ -427,6 +428,7 @@ fn a_probe_that_cannot_answer_keeps_the_overlay_and_says_so() {
     let plan = targets::provision_plan(
         &podman_target(),
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &mounts,
         None,
@@ -458,6 +460,7 @@ fn podman_session_runs_as_root_without_image_user_probing_or_keep_id() {
     let plan = targets::provision_plan(
         &target,
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &[],
         None,
@@ -506,6 +509,7 @@ fn credential_free_container_creation_omits_runtime_token_environment() {
     let plan = targets::provision_plan_named(
         &target,
         &session.id,
+        "test-instance",
         &probe_bundle(),
         &[],
         None,
@@ -1892,9 +1896,15 @@ fn container_targets() -> Vec<targets::TargetTemplate> {
 fn a_failure_after_the_container_exists_removes_it_and_keeps_the_original_error() {
     let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
     for target in container_targets() {
-        let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                .unwrap();
+        let plan = targets::provision_plan(
+            &target,
+            PROVISIONED_SESSION,
+            "test-instance",
+            &probe_bundle(),
+            &[],
+            None,
+        )
+        .unwrap();
         let executor = RecordingExecutor::failing("clone app");
 
         let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
@@ -1920,8 +1930,15 @@ fn a_failure_after_the_container_exists_removes_it_and_keeps_the_original_error(
 #[test]
 fn target_creation_returns_repository_setup_without_running_it() {
     let target = podman_target();
-    let plan =
-        targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None).unwrap();
+    let plan = targets::provision_plan(
+        &target,
+        PROVISIONED_SESSION,
+        "test-instance",
+        &probe_bundle(),
+        &[],
+        None,
+    )
+    .unwrap();
     let executor = RecordingExecutor::succeeding();
 
     let (_, repositories) =
@@ -1946,9 +1963,15 @@ fn target_creation_returns_repository_setup_without_running_it() {
 #[test]
 fn a_target_whose_creation_failed_is_never_torn_down() {
     for target in container_targets() {
-        let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                .unwrap();
+        let plan = targets::provision_plan(
+            &target,
+            PROVISIONED_SESSION,
+            "test-instance",
+            &probe_bundle(),
+            &[],
+            None,
+        )
+        .unwrap();
         let creation = plan.split_at_target_creation().unwrap().0;
         let executor =
             RecordingExecutor::failing(creation.commands.last().unwrap().purpose.clone());
@@ -1972,8 +1995,15 @@ fn a_target_whose_creation_failed_is_never_torn_down() {
 #[test]
 fn a_target_whose_locator_cannot_be_discovered_is_removed_again() {
     let target = podman_target();
-    let plan =
-        targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None).unwrap();
+    let plan = targets::provision_plan(
+        &target,
+        PROVISIONED_SESSION,
+        "test-instance",
+        &probe_bundle(),
+        &[],
+        None,
+    )
+    .unwrap();
     let executor = RecordingExecutor::succeeding();
 
     let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
@@ -2371,6 +2401,7 @@ fn container_run_args(target: &targets::TargetTemplate) -> Vec<String> {
     targets::provision_plan(
         target,
         "0123456789abcdef0123456789abcdef",
+        "test-instance",
         &probe_bundle(),
         &[],
         None,

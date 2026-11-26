@@ -1013,9 +1013,11 @@ impl Controller {
                             let (_, worker_root) = self.worker_placement(session_id)?;
                             return targets::provision_local_bundle_plan(bundle, &worker_root, github_token);
                         }
+                        let identity = crate::database::ownership_identity()?;
                         targets::provision_plan_named(
                             &target,
                             session_id,
+                            identity.as_str(),
                             bundle,
                             &runtime_mounts,
                             session.container_workspace.as_deref(),

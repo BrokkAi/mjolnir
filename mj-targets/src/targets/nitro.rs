@@ -198,6 +198,7 @@ pub(super) fn nitro_run_args(
     template: &ContainerTemplate,
     name: &str,
     session_id: &str,
+    instance: &str,
     additional_mounts: &[AdditionalMount],
     workspace_root: &str,
     mbx_remote: Option<&NitroMbxRemote<'_>>,
@@ -215,6 +216,7 @@ pub(super) fn nitro_run_args(
     args.extend(managed_resource_identity_args(
         ManagedResourceKind::Container,
         session_id,
+        instance,
     ));
     // The size, platform and environment the shared template builder wrote in
     // Podman's `--flag=value` spelling. A VM runs only the host's
@@ -275,10 +277,14 @@ pub(super) fn nitro_run_args(
 
 /// Create the sandbox, then make `/tmp` the world-writable sticky directory
 /// the Podman launch script makes it (the fresh volume is root-owned 0755).
+// Each argument is an independent input of one container's creation; the
+// owning instance's identity is one more of them.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn nitro_container_run(
     template: &ContainerTemplate,
     name: &str,
     session_id: &str,
+    instance: &str,
     additional_mounts: &[AdditionalMount],
     ssh: &SshTarget,
     workspace_root: &str,
@@ -288,6 +294,7 @@ pub(super) fn nitro_container_run(
         template,
         name,
         session_id,
+        instance,
         additional_mounts,
         workspace_root,
         mbx_remote,

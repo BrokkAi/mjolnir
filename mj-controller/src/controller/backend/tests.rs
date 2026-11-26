@@ -369,6 +369,7 @@ fn a_container_launch_gives_the_engine_only_literal_environment_entries() {
     let plan = targets::provision_plan_named(
         &target,
         session_id,
+        "test-instance",
         &bundle,
         &[],
         None,

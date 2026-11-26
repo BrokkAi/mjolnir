@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 161;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 162;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -133,6 +133,25 @@ pub(super) fn read_schema_state(connection: &Connection) -> Result<SchemaState> 
     })
 }
 
+/// The fence recorded in the store at `path`, read without creating,
+/// migrating, or writing anything. A missing database is unfenced. This reads
+/// the table directly, with no schema check, so any build can see a fence.
+pub(super) fn read_store_fence_at(
+    path: &Path,
+) -> Result<Option<super::store_fence::StoreFenceRecord>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open Mjolnir database read-only {}", path.display()))?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA query_only = ON;")?;
+    super::store_fence::read_store_fence(&connection)
+}
+
 pub fn database_path() -> PathBuf {
     mj_core::config::DataLayout::current().database()
 }
@@ -156,6 +175,17 @@ pub(super) fn open_writer(path: &Path) -> Result<Connection> {
 }
 
 fn open_writable(path: &Path) -> Result<Connection> {
+    open_writable_checking_fence(path, true)
+}
+
+/// [`open_writable`] for `mj daemon fence` and `unfence`, which write the
+/// fence itself and so must open a fenced store. Migrates it like any writable
+/// open.
+pub(super) fn open_writable_ignoring_fence(path: &Path) -> Result<Connection> {
+    open_writable_checking_fence(path, false)
+}
+
+fn open_writable_checking_fence(path: &Path, refuse_fenced: bool) -> Result<Connection> {
     // A writable open migrates the store, so this is where the decision
     // belongs: test binaries reach it without the controller lock.
     if let Some(store) = path.parent() {
@@ -172,6 +202,13 @@ fn open_writable(path: &Path) -> Result<Connection> {
         "PRAGMA foreign_keys = ON;
          PRAGMA synchronous = FULL;",
     )?;
+    // Before the schema is verified, because verifying migrates: a newer
+    // build must refuse a fenced store without advancing it. A store without
+    // the fence table is unfenced.
+    if refuse_fenced && let Some(fence) = super::store_fence::read_store_fence(&connection)? {
+        let data_dir = path.parent().unwrap_or(Path::new(""));
+        return Err(fence.refusal(data_dir).into());
+    }
     verify_schema_once(path, &connection)?;
     committed::observe_connection(&connection, path)?;
     Ok(connection)
@@ -3826,6 +3863,29 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
         )?;
         transaction.commit()?;
     }
+    // Revision 162 is breaking: store_fence marks a store that was moved to
+    // another machine. Older binaries do not read it and would start a daemon
+    // on a fenced store, so the floor rises in the same transaction.
+    // O(1): one new empty table; no existing row is touched.
+    if version < 162 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS store_fence (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                 destination TEXT NOT NULL,
+                 fenced_at TEXT NOT NULL,
+                 fenced_host TEXT NOT NULL,
+                 fenced_data_dir BLOB NOT NULL,
+                 note TEXT
+             ) STRICT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 162 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (162, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=162;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -6261,6 +6321,63 @@ mod reader_tests {
         session
     }
 
+    // Integration: the fence is read before the schema is migrated. A fenced
+    // store one revision behind this build is refused and left at that
+    // revision, where a check after `verify_schema_once` would have migrated
+    // it first. An unfenced store at the same revision upgrades and raises the
+    // floor, so a build without the fence cannot open it.
+    #[test]
+    fn store_fence_refuses_before_migration_and_an_unfenced_store_raises_the_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let fenced = directory.path().join("fenced").join("mj.sqlite3");
+        let unfenced = directory.path().join("unfenced").join("mj.sqlite3");
+        for path in [&fenced, &unfenced] {
+            save_session_to(path, &super::super::tests::session("kept", "project")).unwrap();
+            stamp_schema_version(path, SCHEMA_VERSION - 1);
+        }
+        let previous = Connection::open(&fenced).unwrap();
+        previous
+            .execute_batch(
+                "CREATE TABLE store_fence (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     destination TEXT NOT NULL,
+                     fenced_at TEXT NOT NULL,
+                     fenced_host TEXT NOT NULL,
+                     fenced_data_dir BLOB NOT NULL,
+                     note TEXT
+                 ) STRICT;
+                 INSERT INTO store_fence
+                     VALUES (1, 'ssh://b', '2026-11-25T00:00:00Z', 'a', X'2f7372762f6d6a', NULL);",
+            )
+            .unwrap();
+        drop(previous);
+
+        let error = open_writer(&fenced).unwrap_err();
+        let refusal = error
+            .downcast_ref::<StoreFenced>()
+            .expect("the refusal is a typed StoreFenced");
+        assert_eq!(refusal.destination, "ssh://b");
+        assert!(refusal.is_copy);
+        let revision: i64 = Connection::open(&fenced)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(revision, SCHEMA_VERSION - 1, "refused before migrating");
+        // Readers still open a fenced store.
+        assert!(read_store_fence_at(&fenced).unwrap().is_some());
+
+        let upgraded = open_writer(&unfenced).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(state.ensure_supported_by(SCHEMA_VERSION - 1).is_err());
+        assert!(
+            super::super::store_fence::read_store_fence(&upgraded)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn revision_160_relativizes_only_managed_checkpoint_archives_and_refuses_revision_159() {
         let directory = tempfile::tempdir().unwrap();
@@ -6441,7 +6558,7 @@ mod reader_tests {
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(161));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(160).is_err());
         let machines = |table: &str, key: &str| -> Vec<(String, Option<String>)> {
             let mut statement = connection
@@ -7033,6 +7150,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 162 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS store_fence;")
+                .unwrap();
+        }
         if version < 161 {
             for table in ["session_targets", "environment_workers"] {
                 if legacy_schema::table_has_column(&connection, table, "machine_id").unwrap() {

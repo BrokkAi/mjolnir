@@ -2038,6 +2038,33 @@ fn controller_store_lock_excludes_a_second_process_owner() {
     run_controller_lock_probe(directory.path(), false);
 }
 
+// A corrupt or unreadable ownership identity must stop the controller from
+// starting. Replacing it would orphan every worker stamped with the old value.
+#[test]
+fn controller_store_guard_fails_closed_on_a_corrupt_instance_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity =
+        mj_core::config::DataLayout::at(directory.path().to_path_buf()).instance_identity();
+    for corrupt in [&b"../escape"[..], b"", b"two words", &[0xff, 0xfe]] {
+        std::fs::write(&identity, corrupt).unwrap();
+        let error = ControllerStoreGuard::acquire_at(directory.path())
+            .expect_err("a corrupt identity must fail the acquisition");
+        assert!(
+            format!("{error:#}").contains(&identity.display().to_string()),
+            "the error must name the file: {error:#}"
+        );
+        assert_eq!(std::fs::read(&identity).unwrap(), corrupt, "left untouched");
+    }
+    // A directory where the file belongs is unreadable, not absent.
+    std::fs::remove_file(&identity).unwrap();
+    std::fs::create_dir(&identity).unwrap();
+    let error = ControllerStoreGuard::acquire_at(directory.path()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("instance-identity"),
+        "{error:#}"
+    );
+}
+
 // The data store holds every session record; it must not be traversable by
 // other local users (#1409).
 #[cfg(unix)]

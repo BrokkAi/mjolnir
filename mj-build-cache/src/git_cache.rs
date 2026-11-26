@@ -956,7 +956,9 @@ mod tests {
         assert!(mounts.is_empty());
         assert_eq!(bundle.repositories[0].reference, None);
         assert!(executor.notices.lock().unwrap()[0].contains("using direct clones"));
-        let plan = targets::provision_plan(&target, session_id, &bundle, &mounts, None).unwrap();
+        let plan =
+            targets::provision_plan(&target, session_id, "test-instance", &bundle, &mounts, None)
+                .unwrap();
         let clone = plan
             .commands
             .iter()

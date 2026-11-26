@@ -308,8 +308,10 @@ fn default_control_dir(runtime: Option<std::ffi::OsString>, identity: &str) -> P
 }
 
 /// The name of this instance's directory under `$XDG_RUNTIME_DIR/mjolnir`:
-/// the identity [`crate::config::instance_identity`] stamps on the
-/// instance's workers. A named instance uses its name, and a data-directory
+/// the identity [`crate::config::legacy_instance_identity_for`] computes.
+/// Unlike the worker ownership identity, it stays on the path hash because
+/// ControlMaster sockets are host-local and must not follow a moved store.
+/// A named instance uses its name, and a data-directory
 /// override (`MJ_DATA_DIR`, as every end-to-end lab sets) uses the
 /// fingerprint of that directory, so neither shares the default instance's
 /// masters or sweeps its lock files. The default instance keeps `default`,
@@ -323,7 +325,7 @@ fn control_dir_identity(instance: Option<&str>, data_dir_override: Option<&Path>
         || crate::config::DataLayout::current().root().to_path_buf(),
         Path::to_path_buf,
     );
-    crate::config::instance_identity_for(instance, &data_dir)
+    crate::config::legacy_instance_identity_for(instance, &data_dir)
 }
 
 /// Create the socket directory 0700 and reject one whose sockets would not fit
@@ -2995,7 +2997,7 @@ mod tests {
     /// A daemon isolated only by `MJ_DATA_DIR` (every luna lab) is another
     /// instance, so it must not share the default instance's masters or
     /// sweep its lock files (launch finding R5-1). Its directory is named by
-    /// the same fingerprint `instance_identity` stamps on its workers.
+    /// the same fingerprint `legacy_instance_identity_for` computes.
     // Hard-won: 5cd9c555: MJ_DATA_DIR-only daemons reused default-instance sockets and swept each other’s locks.
     #[test]
     #[cfg(unix)]
@@ -3008,7 +3010,7 @@ mod tests {
         assert_eq!(
             lab_dir,
             PathBuf::from("/run/user/1000/mjolnir")
-                .join(crate::config::instance_identity_for(None, lab))
+                .join(crate::config::legacy_instance_identity_for(None, lab))
         );
         assert_ne!(
             lab_dir,
@@ -3018,7 +3020,7 @@ mod tests {
             )
         );
         // A named instance keeps its name whatever its data directory, as
-        // `instance_identity` does.
+        // `legacy_instance_identity_for` does.
         assert_eq!(
             default_control_dir(runtime, &control_dir_identity(Some("hel2"), Some(lab))),
             PathBuf::from("/run/user/1000/mjolnir/hel2")

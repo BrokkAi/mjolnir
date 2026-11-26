@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 161;
+const SCHEMA_VERSION: i64 = 162;
 
 pub mod web_push;
 pub use web_push::*;
@@ -58,6 +58,8 @@ pub use mailbox::*;
 
 mod legacy_schema;
 mod schema;
+mod store_fence;
+pub use store_fence::*;
 mod turn_outcome;
 use turn_outcome::{deserialize_turn_outcome, serialize_turn_outcome};
 mod usage;

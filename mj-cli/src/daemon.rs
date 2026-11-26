@@ -378,11 +378,12 @@ async fn connect_or_start_prepared(
     // Do not launch a child that can only fail to acquire that lock. A
     // container daemon owns a store in its volume, so the host guard is not
     // about it at all.
-    let configured_container = load_daemon_config()
-        .await
-        .map(|daemon| daemon.runtime.engine().is_some())
-        .unwrap_or(false);
+    let configured_container = daemon_configured_for_container().await;
     if !configured_container {
+        // A fenced store must not get a daemon. The fence is read under the
+        // start lock that `mj daemon fence` holds while it writes the row, so
+        // a client that waited for the fence sees it here instead of spawning.
+        ensure_store_not_fenced().await?;
         let released = Instant::now();
         let handoff_deadline = released + STOP_TIMEOUT;
         loop {
@@ -1538,15 +1539,21 @@ pub(crate) async fn stop_instance(force: bool) -> Result<bool> {
         "stop the Mjolnir daemon",
     )?;
     let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
+    stop_instance_holding(&startup, force).await
+}
+
+/// [`stop_instance`] for a caller that already holds the startup lock and
+/// needs it held after the stop, as `mj daemon fence` does.
+async fn stop_instance_holding(startup: &DaemonStartGuard, force: bool) -> Result<bool> {
     let fallback = if force {
         StopFallback::Force
     } else {
         StopFallback::Graceful
     };
     let stopped = match read_metadata_any() {
-        Ok(metadata) => stop_daemon(&startup, &metadata, fallback).await?,
+        Ok(metadata) => stop_daemon(startup, &metadata, fallback).await?,
         Err(error) if daemon_not_running(&error).is_some() => match read_container_owner() {
-            Ok(Some(record)) => stop_pending_container(&startup, &record, force).await?,
+            Ok(Some(record)) => stop_pending_container(startup, &record, force).await?,
             Ok(None) => false,
             Err(_) if force => {
                 clear_unreadable_container_owner()?;
@@ -2371,6 +2378,96 @@ enum StopFallback {
     Graceful,
     Force,
     Restart,
+}
+
+/// Whether the configured daemon runs in a container, whose store lives in
+/// the container's volume rather than in this data directory.
+async fn daemon_configured_for_container() -> bool {
+    load_daemon_config()
+        .await
+        .map(|daemon| daemon.runtime.engine().is_some())
+        .unwrap_or(false)
+}
+
+/// The fence on this data directory's store, read without creating or
+/// migrating anything.
+pub(crate) async fn read_store_fence() -> Result<Option<mj_controller::database::StoreFenceRecord>>
+{
+    mj_core::runtime::spawn_blocking(mj_controller::database::read_configured_store_fence)
+        .await
+        .context("read store fence task failed")?
+}
+
+/// Refuse with [`mj_core::storage::StoreFenced`] when the store is fenced.
+async fn ensure_store_not_fenced() -> Result<()> {
+    match read_store_fence().await? {
+        Some(fence) => Err(fence.refusal(DataLayout::current().root()).into()),
+        None => Ok(()),
+    }
+}
+
+/// What `mj daemon fence` did.
+#[derive(Debug)]
+pub(crate) struct FencedStore {
+    pub fence: mj_controller::database::StoreFenceRecord,
+    pub replaced: Option<mj_controller::database::StoreFenceRecord>,
+    pub stopped_daemon: bool,
+}
+
+/// Stop the daemon and mark the store so no daemon starts on it.
+///
+/// The startup lock is held from before the stop until the fence row is
+/// written. Every client that starts a daemon takes that lock first, so none
+/// can start one in the gap between the stop and the fence: the gap does not
+/// exist, rather than being narrow. A client that waited for the lock then
+/// reads the fence and refuses instead of spawning.
+pub(crate) async fn fence_store(destination: String, note: Option<String>) -> Result<FencedStore> {
+    mj_core::config::ensure_may_control_store(
+        DataLayout::current().root(),
+        "fence the Mjolnir store",
+    )?;
+    ensure!(
+        !daemon_configured_for_container().await,
+        "this instance runs its daemon in a container, so its store is in the container's volume \
+         and `mj daemon fence` cannot mark it"
+    );
+    let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
+    let stopped_daemon = stop_instance_holding(&startup, false).await?;
+    let fenced = mj_core::runtime::spawn_blocking(move || {
+        // The daemon has released the store; hold it while the row is written.
+        let _store = ControllerStoreGuard::acquire()?;
+        mj_controller::database::fence_configured_store(&destination, note.as_deref())
+    })
+    .await
+    .context("fence store task failed")??;
+    drop(startup);
+    Ok(FencedStore {
+        fence: fenced.0,
+        replaced: fenced.1,
+        stopped_daemon,
+    })
+}
+
+/// Remove the fence, under the same locks as [`fence_store`]. Starts no
+/// daemon. Returns the fence that was removed, or `None` if the store was not
+/// fenced (in which case nothing is opened for writing).
+pub(crate) async fn unfence_store() -> Result<Option<mj_controller::database::StoreFenceRecord>> {
+    mj_core::config::ensure_may_control_store(
+        DataLayout::current().root(),
+        "unfence the Mjolnir store",
+    )?;
+    let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
+    let removed = mj_core::runtime::spawn_blocking(|| {
+        if mj_controller::database::read_configured_store_fence()?.is_none() {
+            return Ok(None);
+        }
+        let _store = ControllerStoreGuard::acquire()?;
+        mj_controller::database::unfence_configured_store()
+    })
+    .await
+    .context("unfence store task failed")??;
+    drop(startup);
+    Ok(removed)
 }
 
 async fn stop_daemon(

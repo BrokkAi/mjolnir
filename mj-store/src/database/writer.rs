@@ -30,6 +30,9 @@ pub struct DatabaseWriter {
     space: Arc<tokio::sync::Notify>,
     path: Arc<PathBuf>,
     committed: tokio::sync::watch::Sender<std::result::Result<Arc<CommittedState>, Arc<str>>>,
+    /// The ownership identity the controller guard resolved for this store.
+    /// Only the daemon's installed writer carries one.
+    identity: Option<mj_core::config::InstanceIdentity>,
 }
 
 impl std::fmt::Debug for DatabaseWriter {
@@ -253,6 +256,20 @@ pub fn database_writer_installed() -> bool {
         .is_some()
 }
 
+/// The ownership identity this daemon stamps on the workers and containers it
+/// creates and filters recovery scans by. The controller guard resolves it once
+/// from `<data_dir>/instance-identity` and the daemon's writer carries it, so
+/// every reader asks this one owner. It fails when the process holds no
+/// daemon writer; nothing recomputes it from the data directory.
+pub fn ownership_identity() -> Result<mj_core::config::InstanceIdentity> {
+    database_writer_slot()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .and_then(|writer| writer.identity.clone())
+        .context("this process holds no daemon database writer, so it has no ownership identity")
+}
+
 /// The daemon's current durable records. Client/offline readers have no writer
 /// and use explicit store reads; a failed daemon projection remains an error.
 pub fn committed_state() -> Result<Option<Arc<CommittedState>>> {
@@ -300,16 +317,34 @@ pub(super) fn clear_database_writer(id: u64) {
 #[doc(hidden)]
 #[must_use = "the writer stops when this owner is dropped"]
 pub fn install_isolated_test_writer() -> DatabaseWriterOwner {
-    start_database_writer().expect("install the writer for an isolated test child")
+    let identity = mj_core::config::ensure_instance_identity_at(
+        mj_core::config::instance_name().as_deref(),
+        mj_core::config::DataLayout::current().root(),
+    )
+    .expect("resolve the instance identity for an isolated test child");
+    start_database_writer(identity).expect("install the writer for an isolated test child")
 }
 
-pub fn start_database_writer() -> Result<DatabaseWriterOwner> {
-    start_database_writer_at(&database_path(), true)
+/// Start the process-wide writer under the ownership identity the controller
+/// guard resolved.
+pub fn start_database_writer(
+    identity: mj_core::config::InstanceIdentity,
+) -> Result<DatabaseWriterOwner> {
+    start_database_writer_with(&database_path(), true, Some(identity))
 }
 
+#[cfg(test)]
 pub(super) fn start_database_writer_at(
     path: &Path,
     install_globally: bool,
+) -> Result<DatabaseWriterOwner> {
+    start_database_writer_with(path, install_globally, None)
+}
+
+fn start_database_writer_with(
+    path: &Path,
+    install_globally: bool,
+    identity: Option<mj_core::config::InstanceIdentity>,
 ) -> Result<DatabaseWriterOwner> {
     static NEXT_WRITER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -347,6 +382,7 @@ pub(super) fn start_database_writer_at(
         space: Arc::new(tokio::sync::Notify::new()),
         path: Arc::new(path.clone()),
         committed,
+        identity,
     };
     if install_globally {
         let mut installed = database_writer_slot()

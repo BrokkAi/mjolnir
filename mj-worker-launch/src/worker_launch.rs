@@ -270,7 +270,7 @@ pub fn stage_worker_files_for(
         profile_id: session.last_profile.clone(),
         bundle_id: session.bundle_id.clone(),
         target_template_id: session.target_template_id.clone(),
-        instance_id: Some(mj_core::config::instance_identity()),
+        instance_id: Some(crate::database::ownership_identity()?.as_str().to_owned()),
     }
     .write(&ownership_path)?;
     // Every session runs from a staged copy of its profile, on every target,

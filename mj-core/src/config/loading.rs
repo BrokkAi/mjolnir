@@ -402,18 +402,50 @@ fn cargo_profile_dir(executable: &Path) -> Option<&Path> {
         .find(|directory| directory.join(".fingerprint").is_dir())
 }
 
-/// Identity stamped on every worker this Mjolnir instance creates, so a
-/// recovery scan from another instance can tell the worker is not its own.
-/// A named `--instance` uses its name; otherwise the data directory path is
-/// fingerprinted so an explicit `MJ_DATA_DIR` override also gets its own
-/// identity.
-pub fn instance_identity() -> String {
-    instance_identity_for(instance_name().as_deref(), DataLayout::current().root())
+/// Identity stamped on every worker and container this store's daemon
+/// creates, so a recovery scan can tell a worker it does not own. It is read
+/// from `<data_dir>/instance-identity` once, by [`ensure_instance_identity_at`],
+/// while the daemon holds the controller lock, and handed from there to the
+/// code that stamps or filters ownership.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InstanceIdentity(String);
+
+impl InstanceIdentity {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// Pure form of [`instance_identity`] for callers that already resolved the
-/// instance name and data directory.
-pub fn instance_identity_for(instance: Option<&str>, data_dir: &Path) -> String {
+impl std::fmt::Display for InstanceIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for InstanceIdentity {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for InstanceIdentity {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for InstanceIdentity {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+/// The ownership identity an existing store used before it kept one in
+/// `instance-identity`: a valid `--instance` name, else the first 16 hex
+/// characters of SHA-256 of the data directory path. It seeds the file for a
+/// store that already has workers, so those workers stay owned, and names the
+/// host-local ControlMaster directory, which must not follow a moved store.
+pub fn legacy_instance_identity_for(instance: Option<&str>, data_dir: &Path) -> String {
     if let Some(name) = instance
         && is_valid_instance_name(name)
     {
@@ -422,6 +454,64 @@ pub fn instance_identity_for(instance: Option<&str>, data_dir: &Path) -> String 
     use sha2::Digest;
     let digest = sha2::Sha256::digest(data_dir.to_string_lossy().as_bytes());
     crate::hex::lower_hex(digest)[..16].to_owned()
+}
+
+/// Read the ownership identity stored in `data_dir`, creating it on first use.
+///
+/// The caller holds the controller lock, so nothing else writes the file. An
+/// existing file must hold a valid identifier; a corrupt or unreadable one is
+/// an error naming the file, because a silent replacement would orphan every
+/// worker stamped with the old value. When the file is absent the seed is the
+/// instance name if one is set; otherwise [`legacy_instance_identity_for`] if
+/// `mj.sqlite3` or `workers/` already exists (an existing store upgrading in
+/// place keeps its workers owned); otherwise 16 random lowercase hex
+/// characters.
+///
+/// Existing container-native stores keep the identity they share today
+/// because they are seeded with the old hash of the in-container data path.
+/// A copied data directory carries the same identity; the store fence is what
+/// keeps two daemons with one identity from running at once.
+pub fn ensure_instance_identity_at(
+    instance: Option<&str>,
+    data_dir: &Path,
+) -> Result<InstanceIdentity> {
+    let layout = DataLayout::at(data_dir.to_path_buf());
+    let path = layout.instance_identity();
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let text = std::str::from_utf8(&bytes)
+                .ok()
+                .map(str::trim)
+                .filter(|text| validate_id("instance identity", text).is_ok())
+                .with_context(|| {
+                    format!(
+                        "{} does not hold a valid instance identity; \
+                         restore it from a copy of this store or delete it only if no workers \
+                         were started under this data directory",
+                        path.display()
+                    )
+                })?;
+            return Ok(InstanceIdentity(text.to_owned()));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", path.display()));
+        }
+    }
+    let seed = match instance.filter(|name| is_valid_instance_name(name)) {
+        Some(name) => name.to_owned(),
+        None if layout.database().exists() || layout.workers_dir().exists() => {
+            legacy_instance_identity_for(None, data_dir)
+        }
+        None => {
+            let mut random = [0_u8; 8];
+            getrandom::fill(&mut random)
+                .map_err(|error| anyhow!("generate instance identity: {error}"))?;
+            crate::hex::lower_hex(random)
+        }
+    };
+    atomic_write(&path, seed.as_bytes()).with_context(|| format!("write {}", path.display()))?;
+    Ok(InstanceIdentity(seed))
 }
 
 /// The first available configuration identifier, retaining a readable base.

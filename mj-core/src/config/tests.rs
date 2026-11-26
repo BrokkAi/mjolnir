@@ -2955,24 +2955,75 @@ fn an_override_naming_the_default_data_directory_shares_the_user_index() {
     }
 }
 
+// A copied data directory must keep its ownership identity, and an existing
+// store that upgrades in place must keep the identity its workers carry.
+#[test]
+fn instance_identity_is_seeded_once_and_follows_a_copied_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let fresh = root.path().join("fresh");
+    let first = ensure_instance_identity_at(None, &fresh).unwrap();
+    assert_eq!(first.as_str().len(), 16);
+    assert_ne!(
+        first.as_str(),
+        legacy_instance_identity_for(None, &fresh),
+        "a new store gets a random identity, not the path hash"
+    );
+    assert_eq!(ensure_instance_identity_at(None, &fresh).unwrap(), first);
+    assert_eq!(
+        ensure_instance_identity_at(Some("other-name"), &fresh).unwrap(),
+        first,
+        "an existing identity is never replaced"
+    );
+    let copy = root.path().join("copy");
+    fs::create_dir(&copy).unwrap();
+    fs::copy(
+        DataLayout::at(fresh.clone()).instance_identity(),
+        DataLayout::at(copy.clone()).instance_identity(),
+    )
+    .unwrap();
+    assert_eq!(ensure_instance_identity_at(None, &copy).unwrap(), first);
+
+    for existing in ["mj.sqlite3", "workers"] {
+        let store = root.path().join(format!("store-{existing}"));
+        fs::create_dir(&store).unwrap();
+        let marker = store.join(existing);
+        if existing == "workers" {
+            fs::create_dir(&marker).unwrap();
+        } else {
+            fs::write(&marker, b"").unwrap();
+        }
+        assert_eq!(
+            ensure_instance_identity_at(None, &store).unwrap().as_str(),
+            legacy_instance_identity_for(None, &store),
+            "an existing store keeps the identity its workers were stamped with"
+        );
+    }
+
+    let named = root.path().join("named");
+    assert_eq!(
+        ensure_instance_identity_at(Some("qa0916"), &named).unwrap(),
+        "qa0916"
+    );
+}
+
 // Hard-won: 18de1bb4: recovery could act on workers belonging to another instance
 #[test]
-fn instance_identity_prefers_a_valid_instance_name() {
+fn legacy_instance_identity_prefers_a_valid_instance_name() {
     let dir = Path::new("/home/user/.local/share/mjolnir");
-    assert_eq!(instance_identity_for(Some("qa0916"), dir), "qa0916");
+    assert_eq!(legacy_instance_identity_for(Some("qa0916"), dir), "qa0916");
     assert_eq!(
-        instance_identity_for(Some("../escape"), dir),
-        instance_identity_for(None, dir),
+        legacy_instance_identity_for(Some("../escape"), dir),
+        legacy_instance_identity_for(None, dir),
         "an invalid name falls back to the data-dir fingerprint"
     );
 }
 
 // Hard-won: 18de1bb4: recovery could act on workers belonging to another instance
 #[test]
-fn instance_identity_fingerprints_the_data_dir_stably() {
-    let first = instance_identity_for(None, Path::new("/srv/mj/one"));
-    let same = instance_identity_for(None, Path::new("/srv/mj/one"));
-    let other = instance_identity_for(None, Path::new("/srv/mj/two"));
+fn legacy_instance_identity_fingerprints_the_data_dir_stably() {
+    let first = legacy_instance_identity_for(None, Path::new("/srv/mj/one"));
+    let same = legacy_instance_identity_for(None, Path::new("/srv/mj/one"));
+    let other = legacy_instance_identity_for(None, Path::new("/srv/mj/two"));
     assert_eq!(first, same);
     assert_ne!(first, other);
     assert_eq!(first.len(), 16);

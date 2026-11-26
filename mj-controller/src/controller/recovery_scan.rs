@@ -56,10 +56,16 @@ impl Controller {
         executor: &impl CommandExecutor,
         all_instances: bool,
     ) -> RecoveryScan {
-        let mut scan = RecoveryScan {
-            instance_id: mj_core::config::instance_identity(),
-            ..RecoveryScan::default()
-        };
+        let mut scan = RecoveryScan::default();
+        match crate::database::ownership_identity() {
+            Ok(identity) => scan.instance_id = identity.as_str().to_owned(),
+            Err(error) => {
+                scan.warnings.push(format!(
+                    "cannot resolve this daemon's ownership identity: {error:#}"
+                ));
+                return scan;
+            }
+        }
         let moves = match crate::database::load_move_operations() {
             Ok(moves) => moves,
             Err(error) => {
@@ -423,6 +429,7 @@ impl Controller {
                         .downcast_ref::<crate::worker_client::LiveBaselineUnsupported>()
                         .is_some()
                 }) {
+                    let identity = crate::database::ownership_identity()?;
                     let needs_all_instances = mj_core::runtime::off_async_worker(|| {
                         self.config
                             .targets
@@ -437,7 +444,7 @@ impl Controller {
                             })
                             .and_then(|candidate| candidate.instance_id)
                             .as_deref()
-                            != Some(mj_core::config::instance_identity().as_str())
+                            != Some(identity.as_str())
                     });
                     let error =
                         unsupported_orphan_adoption(session_id, target_id, needs_all_instances);

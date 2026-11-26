@@ -164,6 +164,7 @@ pub struct Controller {
 #[derive(Debug)]
 pub struct ControllerStoreGuard {
     _file: mj_core::file_lock::FileLock,
+    instance_identity: mj_core::config::InstanceIdentity,
 }
 
 #[derive(Debug)]
@@ -228,15 +229,27 @@ impl ControllerStoreGuard {
                     .with_context(|| format!("lock controller store {}", directory.display()));
             }
         }
+        // Resolved once, under the lock that serializes every writer of the
+        // file. A corrupt identity fails the acquisition, naming the file.
+        let instance_identity = mj_core::config::ensure_instance_identity_at(
+            mj_core::config::instance_name().as_deref(),
+            directory,
+        )?;
         Ok(Some(Self {
             _file: mj_core::file_lock::FileLock::new(file),
+            instance_identity,
         }))
+    }
+
+    /// The ownership identity of this store, from `<data_dir>/instance-identity`.
+    pub fn instance_identity(&self) -> &mj_core::config::InstanceIdentity {
+        &self.instance_identity
     }
 
     /// Start the sole production SQLite writer after controller exclusivity
     /// has been established by this guard.
     pub fn start_database_writer(&self) -> Result<crate::database::DatabaseWriterOwner> {
-        crate::database::start_database_writer()
+        crate::database::start_database_writer(self.instance_identity.clone())
     }
 }
 

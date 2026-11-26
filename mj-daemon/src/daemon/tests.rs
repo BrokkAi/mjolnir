@@ -15987,7 +15987,7 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
         .run();
         return;
     }
-    let _writer = mj_controller::database::start_database_writer().unwrap();
+    let _writer = mj_controller::database::install_isolated_test_writer();
     let state = test_runtime_state_loading_the_store();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
