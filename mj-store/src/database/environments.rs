@@ -27,6 +27,10 @@ impl EnvironmentPhase {
 pub struct EnvironmentPlacement {
     #[serde(skip)]
     pub target: Option<TargetLocator>,
+    /// The machine recorded on the lease row of `target`. Stored in the
+    /// column, never in the placement JSON.
+    #[serde(skip)]
+    pub machine_id: Option<MachineId>,
     pub target_template_id: String,
     pub runtime: Option<TargetRuntimeSettings>,
     pub managed_worktree: Option<ManagedWorktree>,
@@ -52,6 +56,7 @@ impl EnvironmentPlacement {
     pub fn from_session(session: &SessionRecord) -> Self {
         Self {
             target: session.target.clone().map(|v| *v),
+            machine_id: session.machine_id.clone(),
             target_template_id: session.target_template_id.clone(),
             runtime: session.target_runtime.as_deref().cloned(),
             managed_worktree: session.managed_worktree.clone().map(|v| *v),
@@ -93,16 +98,39 @@ pub struct EnvironmentWorker {
     pub target: TargetLocator,
     pub target_template_id: String,
     pub runtime: Option<TargetRuntimeSettings>,
+    /// The machine recorded on this lease; `None` when unknown.
+    pub machine_id: Option<MachineId>,
 }
 
 pub(super) fn read_environment(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<EnvironmentRecord>> {
+    read_environment_with(connection, id, "machine_id")
+}
+
+/// `read_environment` for the migrations before revision 161, whose
+/// `environment_workers` has no `machine_id` column.
+pub(super) fn read_environment_before_machine_id(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<EnvironmentRecord>> {
+    read_environment_with(connection, id, "NULL")
+}
+
+fn read_environment_with(
+    connection: &Connection,
+    id: &str,
+    machine_column: &str,
+) -> Result<Option<EnvironmentRecord>> {
     let row = connection.query_row("SELECT owner_session_id,phase,placement_json,target_lease_id FROM environments WHERE environment_id=?1",[id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?))).optional()?;
     row.map(|(owner_session_id,phase,json,lease)| {
         let mut placement: EnvironmentPlacement = serde_json::from_str(&json).context("read environment placement")?;
-        placement.target = lease.map(|lease| connection.query_row("SELECT kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from FROM environment_workers WHERE lease_id=?1",[lease],|row|super::state_io::decode_target(row,0))).transpose()?;
+        let lease = lease.map(|lease| connection.query_row(&format!("SELECT kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,{machine_column} FROM environment_workers WHERE lease_id=?1"),[lease],|row|Ok((super::state_io::decode_target(row,0)?,super::state_io::decode_machine(row,8)?)))).transpose()?;
+        (placement.target, placement.machine_id) = match lease {
+            Some((target, machine_id)) => (Some(target), machine_id),
+            None => (None, None),
+        };
         Ok(EnvironmentRecord {id:id.to_owned(),owner_session_id,phase:EnvironmentPhase::from_stored(&phase)?,placement})
     }).transpose()
 }
@@ -190,7 +218,15 @@ fn read_environment_workers(
     connection: &Connection,
     environment_id: &str,
 ) -> Result<Vec<EnvironmentWorker>> {
-    let mut query = connection.prepare("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,target_template_id,runtime_json,lease_id FROM environment_workers WHERE environment_id=?1 ORDER BY worker_session_id,lease_id")?;
+    read_environment_workers_with(connection, environment_id, "machine_id")
+}
+
+fn read_environment_workers_with(
+    connection: &Connection,
+    environment_id: &str,
+    machine_column: &str,
+) -> Result<Vec<EnvironmentWorker>> {
+    let mut query = connection.prepare(&format!("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,target_template_id,runtime_json,lease_id,{machine_column} FROM environment_workers WHERE environment_id=?1 ORDER BY worker_session_id,lease_id"))?;
     let rows = query.query_map([environment_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -198,10 +234,11 @@ fn read_environment_workers(
             row.get::<_, String>(9)?,
             row.get::<_, Option<String>>(10)?,
             row.get::<_, String>(11)?,
+            super::state_io::decode_machine(row, 12)?,
         ))
     })?;
     rows.map(|row| {
-        let (session_id, target, target_template_id, runtime, lease_id) = row?;
+        let (session_id, target, target_template_id, runtime, lease_id, machine_id) = row?;
         Ok(EnvironmentWorker {
             lease_id,
             session_id,
@@ -211,6 +248,7 @@ fn read_environment_workers(
                 .map(|json| serde_json::from_str(&json))
                 .transpose()
                 .context("read environment worker access")?,
+            machine_id,
         })
     })
     .collect()
@@ -223,7 +261,8 @@ fn worker_lease(
     session_id: &str,
     target: &TargetLocator,
 ) -> Result<String> {
-    let existing = read_environment_workers(transaction, environment_id)?
+    // Also run by the revision-122 backfill, before `machine_id` exists.
+    let existing = read_environment_workers_with(transaction, environment_id, "NULL")?
         .into_iter()
         .find(|worker| worker.session_id == session_id && worker.target.same_resource(target));
     Ok(match existing {
@@ -239,9 +278,14 @@ fn point_environment_at_lease(
     session_id: &str,
     lease: &str,
 ) -> Result<()> {
-    if read_environment(transaction, environment_id)?
-        .is_some_and(|environment| environment.owner_session_id == session_id)
-    {
+    let owner: Option<String> = transaction
+        .query_row(
+            "SELECT owner_session_id FROM environments WHERE environment_id=?1",
+            [environment_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if owner.as_deref() == Some(session_id) {
         transaction.execute(
             "UPDATE environments SET target_lease_id=?2 WHERE environment_id=?1",
             params![environment_id, lease],
@@ -613,6 +657,7 @@ pub(super) fn backfill_environments(transaction: &Transaction<'_>) -> Result<()>
             id.clone(),
             EnvironmentPlacement {
                 target: targets.get(&id).cloned(),
+                machine_id: None,
                 target_template_id,
                 runtime: runtime
                     .map(|json| serde_json::from_str(&json))
@@ -833,8 +878,8 @@ fn register_historical_environment(
         .query_map([owner], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
-        let candidate =
-            read_environment(transaction, &id)?.context("historical environment disappeared")?;
+        let candidate = read_environment_before_machine_id(transaction, &id)?
+            .context("historical environment disappeared")?;
         let same_target = match (&candidate.placement.target, &placement.target) {
             (Some(left), Some(right)) => left.same_resource(right),
             (None, None) => true,

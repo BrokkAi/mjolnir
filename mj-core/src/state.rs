@@ -23,6 +23,7 @@ pub const STATE_VERSION: u32 = 1;
 mod target_runtime;
 pub use target_runtime::{
     ContainerSettings, TargetConnection, TargetRuntimeSettings, ToolCachePlacement,
+    machine_hosts_placement,
 };
 
 mod session_configuration;
@@ -1775,9 +1776,8 @@ pub struct SessionRecord {
     /// The configured machine this placement runs on, stored beside the
     /// placement (`session_targets.machine_id`) and nowhere else. `None`
     /// means unknown: a row written before machines were recorded whose
-    /// template is gone. Database-owned; omitted from portable session
-    /// formats.
-    #[serde(skip)]
+    /// template is gone. A Move snapshot carries it with the locator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<crate::config::MachineId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
@@ -3760,18 +3760,24 @@ pub fn target_runtime_settings_for<'a>(
 ) -> Result<Cow<'a, TargetRuntimeSettings>> {
     if let Some(runtime) = runtime {
         // How to reach the target follows the machine's current ssh
-        // options; where it is stays as recorded (launch finding R3-7). The
-        // recorded machine is asked first, so a placement whose template was
-        // removed or renamed still follows `[machines.<id>]`; the template is
-        // the answer for a placement that records no machine.
-        let refreshed = machine_id
+        // options; where it is stays as recorded (launch finding R3-7). A
+        // recorded machine that reaches this placement answers for it, changed
+        // or not, so a placement whose template was removed or repointed still
+        // follows `[machines.<id>]`. Only a placement with no machine, or one
+        // the machine does not reach, asks its template.
+        if let Some(refreshed) = machine_id
             .and_then(|id| config.machines.get(id))
-            .and_then(|machine| runtime.with_current_machine_ssh_options(machine))
-            .or_else(|| {
-                let template = config.targets.get(target_template_id)?;
-                runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
+            .and_then(|machine| runtime.following_machine(machine))
+        {
+            return Ok(if refreshed == *runtime {
+                std::borrow::Cow::Borrowed(runtime)
+            } else {
+                std::borrow::Cow::Owned(refreshed)
             });
-        if let Some(refreshed) = refreshed {
+        }
+        if let Some(refreshed) = config.targets.get(target_template_id).and_then(|template| {
+            runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
+        }) {
             return Ok(std::borrow::Cow::Owned(refreshed));
         }
         return Ok(std::borrow::Cow::Borrowed(runtime));

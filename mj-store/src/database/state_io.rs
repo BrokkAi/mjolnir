@@ -1407,6 +1407,20 @@ pub(super) fn read_targets(
     rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
 }
 
+/// The optional machine id in column `index`.
+pub(super) fn decode_machine(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<MachineId>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|text| {
+            MachineId::new(text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(index, Type::Text, error.into())
+            })
+        })
+        .transpose()
+}
+
 pub(super) fn decode_target(
     row: &rusqlite::Row<'_>,
     start: usize,
@@ -1683,18 +1697,36 @@ const REMOTE_TARGET_KINDS: &str =
 /// session placements filled so the caller can update its copies.
 ///
 /// A local placement is on `local` by its kind. An SSH or legacy EC2
-/// placement takes the machine of its target template, `templates`, when that
-/// template still exists. A placement whose template is gone stays `NULL`:
-/// nothing else records which machine it ran on, and a guess could send
-/// sessions to the wrong host. Only rows still `NULL` change, so a concurrent
-/// writer's value is kept.
+/// placement takes the machine of its target template, from `templates`, only
+/// when that machine is where the placement itself says it runs
+/// ([`machine_hosts_placement`]): a template repointed to another host since
+/// the placement was made would otherwise hand the placement the wrong
+/// machine. A placement whose template is gone, or whose template no longer
+/// names its host, stays `NULL`: nothing else records which machine it ran
+/// on, and a guess could send sessions to the wrong host. Only rows still
+/// `NULL` change, so a concurrent writer's value is kept.
 pub fn backfill_machine_ids(
-    templates: &BTreeMap<String, MachineId>,
+    templates: &BTreeMap<String, (MachineId, Machine)>,
 ) -> Result<BTreeMap<String, MachineId>> {
     let templates = templates.clone();
     submit_database_write("backfill_machine_ids", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let candidate =
+            |template_id: &str,
+             host: Option<&str>,
+             runtime_json: Option<&str>|
+             -> Result<Option<MachineId>> {
+                let Some((machine_id, machine)) = templates.get(template_id) else {
+                    return Ok(None);
+                };
+                let runtime: Option<mj_core::state::TargetRuntimeSettings> = runtime_json
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("read placement access settings for its machine")?;
+                Ok(machine_hosts_placement(machine, host, runtime.as_ref())
+                    .then(|| machine_id.clone()))
+            };
         let mut filled = BTreeMap::new();
         {
             let mut local = tx.prepare(&format!(
@@ -1704,18 +1736,25 @@ pub fn backfill_machine_ids(
                 filled.insert(session_id?, MachineId::local());
             }
             let mut remote = tx.prepare(&format!(
-                "SELECT t.session_id, s.target_template_id FROM session_targets t
-                 JOIN sessions s USING(session_id)
+                "SELECT t.session_id, s.target_template_id, t.host, s.target_runtime_json
+                 FROM session_targets t JOIN sessions s USING(session_id)
                  WHERE t.machine_id IS NULL AND t.kind IN ({REMOTE_TARGET_KINDS})"
             ))?;
             let rows = remote
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            for (session_id, template_id) in rows {
-                if let Some(machine_id) = templates.get(&template_id) {
-                    filled.insert(session_id, machine_id.clone());
+            for (session_id, template_id, host, runtime) in rows {
+                if let Some(machine_id) =
+                    candidate(&template_id, host.as_deref(), runtime.as_deref())?
+                {
+                    filled.insert(session_id, machine_id);
                 }
             }
         }
@@ -1731,17 +1770,23 @@ pub fn backfill_machine_ids(
         )?;
         let workers = {
             let mut statement = tx.prepare(&format!(
-                "SELECT lease_id, target_template_id FROM environment_workers
+                "SELECT lease_id, target_template_id, host, runtime_json FROM environment_workers
                  WHERE machine_id IS NULL AND kind IN ({REMOTE_TARGET_KINDS})"
             ))?;
             statement
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (lease_id, template_id) in workers {
-            if let Some(machine_id) = templates.get(&template_id) {
+        for (lease_id, template_id, host, runtime) in workers {
+            if let Some(machine_id) = candidate(&template_id, host.as_deref(), runtime.as_deref())?
+            {
                 tx.execute(
                     "UPDATE environment_workers SET machine_id = ?2 WHERE lease_id = ?1 AND machine_id IS NULL",
                     params![lease_id, machine_id.as_str()],

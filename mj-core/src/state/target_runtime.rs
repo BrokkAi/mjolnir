@@ -160,14 +160,7 @@ impl TargetRuntimeSettings {
         if self.kind != current.kind || recorded == now {
             return None;
         }
-        let location = |ssh: &SshConnection| super::ManagedWorktreeTarget::Ssh {
-            destination: match &ssh.user {
-                Some(user) => format!("{user}@{}", ssh.host),
-                None => ssh.host.clone(),
-            },
-            ssh_args: ssh.extra_args.clone(),
-        };
-        if !location(recorded).same_location(&location(now)) {
+        if !same_ssh_place(recorded, now) {
             return None;
         }
         let mut refreshed = self.clone();
@@ -182,18 +175,87 @@ impl TargetRuntimeSettings {
     }
 }
 
+/// Whether two SSH connections reach the same place: the same host, login
+/// user and port. The other options say how to connect, not where.
+fn same_ssh_place(recorded: &SshConnection, now: &SshConnection) -> bool {
+    let location = |ssh: &SshConnection| super::ManagedWorktreeTarget::Ssh {
+        destination: match &ssh.user {
+            Some(user) => format!("{user}@{}", ssh.host),
+            None => ssh.host.clone(),
+        },
+        ssh_args: ssh.extra_args.clone(),
+    };
+    location(recorded).same_location(&location(now))
+}
+
 impl TargetRuntimeSettings {
-    /// These recorded settings with the SSH options `machine` now has, or
-    /// `None` when `machine` is not an SSH machine, these settings do not
-    /// reach it by SSH, or there is nothing new to take. The same rules as
-    /// [`Self::with_current_ssh_options`] decide whether it is the same place.
-    pub fn with_current_machine_ssh_options(&self, machine: &Machine) -> Option<Self> {
+    /// These recorded settings as `machine` now configures them, or `None`
+    /// when `machine` is not where these settings reach: not an SSH machine,
+    /// or another host, user or port. `Some` means the machine answers for
+    /// this placement, whether or not its SSH options changed, so a caller
+    /// stops there instead of asking the target template.
+    pub fn following_machine(&self, machine: &Machine) -> Option<Self> {
         let Machine::Ssh { ssh, .. } = machine else {
             return None;
         };
-        let mut current = self.clone();
-        current.connection = TargetConnection::Ssh { ssh: ssh.clone() };
-        self.with_current_ssh_options(&current)
+        let TargetConnection::Ssh { ssh: recorded } = &self.connection else {
+            return None;
+        };
+        if !same_ssh_place(recorded, ssh) {
+            return None;
+        }
+        let mut refreshed = self.clone();
+        refreshed.connection = TargetConnection::Ssh {
+            ssh: SshConnection {
+                identity_file: ssh.identity_file.clone(),
+                extra_args: ssh.extra_args.clone(),
+                ..recorded.clone()
+            },
+        };
+        Some(refreshed)
+    }
+}
+
+/// Whether `machine` is where a stored placement runs, judged from what the
+/// placement itself recorded: the locator's SSH `host` and the frozen access
+/// settings. A template that was repointed since the placement was made names
+/// a machine that fails this test, and the placement stays unassigned rather
+/// than taking the wrong machine. A legacy EC2 placement is recognised only
+/// by its frozen settings, since its locator names an instance, not a host.
+#[must_use]
+pub fn machine_hosts_placement(
+    machine: &Machine,
+    locator_host: Option<&str>,
+    runtime: Option<&TargetRuntimeSettings>,
+) -> bool {
+    match machine {
+        Machine::Local { .. } => false,
+        Machine::Ssh { ssh, .. } => {
+            if locator_host != Some(ssh.host.as_str()) {
+                return false;
+            }
+            match runtime.map(|runtime| &runtime.connection) {
+                Some(TargetConnection::Ssh { ssh: recorded }) => same_ssh_place(recorded, ssh),
+                Some(_) => false,
+                None => true,
+            }
+        }
+        Machine::AwsEc2 {
+            aws_profile,
+            region,
+            ssh_user,
+            ..
+        } => matches!(
+            runtime.map(|runtime| &runtime.connection),
+            Some(TargetConnection::Aws {
+                profile: recorded_profile,
+                region: recorded_region,
+                ssh_user: recorded_user,
+                ..
+            }) if recorded_profile == aws_profile.as_deref().unwrap_or("default")
+                && recorded_region == region
+                && recorded_user == ssh_user
+        ),
     }
 }
 

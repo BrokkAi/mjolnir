@@ -3208,7 +3208,8 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
 /// Revision 160 leaves SSH placements without a machine. Loading the daemon
 /// state fills each from the machine its target template names, fills local
 /// placements by kind, and leaves a placement whose template was removed
-/// unknown rather than guessing a host.
+/// unknown rather than guessing a host. So does one whose template now names
+/// another host than the placement recorded.
 #[test]
 fn load_fills_placement_machines_from_surviving_templates_only() {
     const MARKER: &str = "MJ_TEST_PLACEMENT_MACHINE_CHILD";
@@ -3223,20 +3224,26 @@ fn load_fills_placement_machines_from_surviving_templates_only() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     let mut config = registration_config();
-    let TargetTemplate::SshPodman { ssh, .. } = durable_remote_template("builder.test") else {
-        unreachable!("the fixture is an ssh-podman template")
-    };
-    config.machines.insert(
-        mj_core::config::MachineId::new("builder").unwrap(),
-        mj_core::config::Machine::Ssh {
-            ssh,
-            workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
-            build_cache: None,
-        },
-    );
+    for (machine, host) in [("builder", "builder.test"), ("other", "other.test")] {
+        let TargetTemplate::SshPodman { ssh, .. } = durable_remote_template(host) else {
+            unreachable!("the fixture is an ssh-podman template")
+        };
+        config.machines.insert(
+            mj_core::config::MachineId::new(machine).unwrap(),
+            mj_core::config::Machine::Ssh {
+                ssh,
+                workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+                build_cache: None,
+            },
+        );
+    }
     config
         .targets
         .insert("podman".into(), durable_remote_template("builder.test"));
+    // Repointed after the placement below was made on builder.test.
+    config
+        .targets
+        .insert("repointed".into(), durable_remote_template("other.test"));
     config.save().unwrap();
     let mut controller = Controller {
         config,
@@ -3274,6 +3281,17 @@ fn load_fills_placement_machines_from_surviving_templates_only() {
             },
             None,
         ),
+        (
+            "0123456789abcdef0123456789abcde4",
+            "repointed",
+            TargetLocator::SshPodman {
+                host: "builder.test".into(),
+                container_id: "repointed-container".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            None,
+        ),
     ];
     for (id, template, target, _) in &placements {
         let mut session = super::test_support::checkpoint_test_session(id);
@@ -3304,7 +3322,7 @@ fn load_fills_placement_machines_from_surviving_templates_only() {
         .collect();
 
     let mut loaded = Controller::load().unwrap();
-    assert_eq!(machines(&loaded.state), [None, None, None]);
+    assert_eq!(machines(&loaded.state), [None, None, None, None]);
     loaded.prepare_persisted_sessions().unwrap();
     assert_eq!(machines(&loaded.state), expected);
     assert_eq!(
@@ -3312,6 +3330,29 @@ fn load_fills_placement_machines_from_surviving_templates_only() {
         expected,
         "the filled machines are stored, not only held in memory"
     );
+    // Environment retirement reads the machine back from the lease.
+    for ((id, ..), machine) in placements.iter().zip(&expected) {
+        let environment = crate::database::session_environment(id).unwrap().unwrap();
+        assert_eq!(
+            environment
+                .placement
+                .machine_id
+                .as_ref()
+                .map(|machine| machine.as_str().to_owned()),
+            *machine
+        );
+        let workers = crate::database::environment_workers(&environment.id).unwrap();
+        assert_eq!(
+            workers
+                .iter()
+                .map(|worker| worker
+                    .machine_id
+                    .as_ref()
+                    .map(|machine| machine.as_str().to_owned()))
+                .collect::<Vec<_>>(),
+            std::slice::from_ref(machine)
+        );
+    }
     // The environment's worker leases follow the same rule as the sessions.
     let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
     let mut statement = connection

@@ -835,16 +835,18 @@ impl Controller {
 
     /// Fill the machine on placements that have none: local placements by
     /// kind, SSH and legacy EC2 placements from the machine their target
-    /// template names. A placement whose template was removed keeps no
-    /// machine; migrate maps those by hand.
+    /// template names, when that machine is where the placement recorded
+    /// itself to be. A placement whose template was removed or repointed keeps
+    /// no machine; migrate maps those by hand.
     fn backfill_machine_ids(&mut self) -> Result<()> {
         let templates = self
             .config
             .targets
             .keys()
             .filter_map(|id| {
-                let machine = self.config.template_machine_id(id)?;
-                (!machine.is_local()).then(|| (id.clone(), machine))
+                let machine_id = self.config.template_machine_id(id)?;
+                let machine = self.config.machines.get(&machine_id)?;
+                (!machine_id.is_local()).then(|| (id.clone(), (machine_id, machine.clone())))
             })
             .collect();
         for (session_id, machine_id) in crate::database::backfill_machine_ids(&templates)? {

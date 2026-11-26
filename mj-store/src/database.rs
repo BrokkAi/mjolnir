@@ -15,13 +15,13 @@ use chrono::Utc;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use mj_core::config::MachineId;
+use mj_core::config::{Machine, MachineId};
 use mj_core::state::{
     CheckpointMetadata, HostContainerSize, ManagedWorktree, MaterializedExecutionState,
     MaterializedQueuedPrompt, MaterializedSession, MaterializedSessionSummary, MaterializedTurn,
     MaterializedTurnOutcome, OperatorPresence, ProjectionWindow, SessionRecord,
     SessionResourceAllocation, SessionState, State, TargetLocator, TranscriptBody, TranscriptItem,
-    validate_relay_event_digest, validate_relay_event_frontier,
+    machine_hosts_placement, validate_relay_event_digest, validate_relay_event_frontier,
 };
 use mj_core::subagent::SubagentRecord;
 

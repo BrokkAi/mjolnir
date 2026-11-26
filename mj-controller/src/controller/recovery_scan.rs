@@ -363,6 +363,9 @@ impl Controller {
                             .into_owned()
                             .into(),
                     );
+                    // The adoption template was validated against the locator,
+                    // so its machine is the placement's.
+                    record.machine_id = self.config.template_machine_id(target_id);
                     record.no_github_credentials = no_github_credentials;
                     record.container_workspace = container_workspace;
                     record.project = Some(project.into());

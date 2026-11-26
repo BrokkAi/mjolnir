@@ -8472,9 +8472,11 @@ mod reader_tests {
                 .resource_allocation,
             expected_snapshot
         );
-        let environment = super::super::environments::read_environment(&raw, &environment_id)
-            .unwrap()
-            .unwrap();
+        // This store is mid-migration, before `machine_id` exists.
+        let environment =
+            super::super::environments::read_environment_before_machine_id(&raw, &environment_id)
+                .unwrap()
+                .unwrap();
         assert_eq!(
             environment
                 .placement

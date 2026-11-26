@@ -2655,4 +2655,27 @@ fn target_runtime_follows_the_recorded_machine_when_its_template_is_gone() {
         Some("/keys/old".into()),
         "a machine that is gone leaves the frozen settings"
     );
+
+    // The template now names the same host with another key. While the
+    // recorded machine reaches the placement it answers, even when its own
+    // options have not changed since the placement was frozen.
+    let repointed: crate::config::TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind": "ssh-podman", "host": "builder.test", "user": "dev",
+        "identity_file": "/keys/other", "extra_args": ["-p", "2222"], "image": "test"
+    }))
+    .unwrap();
+    config.targets.insert("deleted-template".into(), repointed);
+    assert_eq!(
+        identity(&config),
+        Some("/keys/other".into()),
+        "with no machine, the template refreshes the placement"
+    );
+    config
+        .machines
+        .insert(machine_id.clone(), machine("/keys/old"));
+    assert_eq!(
+        identity(&config),
+        Some("/keys/old".into()),
+        "a machine that reaches the placement is not overridden by the template"
+    );
 }
