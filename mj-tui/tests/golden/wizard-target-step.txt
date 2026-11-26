@@ -1,4 +1,4 @@
-=== review_warns_once_and_offers_a_sandboxed_target (140x32) ===
+=== new_review_allows_mjolnir_guardian_on_raw_hosts (140x32) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
 ╰─────────────────────────                                                                                                                 │
@@ -13,12 +13,12 @@
 │                           │ ☐ Create isolated checkout                                                       │                           │
 │                           │ Use the selected directory directly.                                             │                           │
 │                           │                                                                                  │                           │
-│                           │ ! Kimi Code runs directly on the host. Use a sandbox to isolate its actions.     │                           │
-│                           │ No compatible sandbox is available. Check Runtimes in Settings.                  │                           │
-│                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
 │                           │ Sub-agents Native ▾                                                              │                           │
-│                           │ Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile                │                           │
+│                           │ Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile                │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
@@ -31,7 +31,7 @@
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
-=== review_warns_once_and_offers_a_sandboxed_target (140x32) ===
+=== new_review_allows_mjolnir_guardian_on_raw_hosts (140x32) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
 ╰─────────────────────────                                                                                                                 │
@@ -46,12 +46,12 @@
 │                           │ ☐ Create isolated checkout                                                       │                           │
 │                           │ Use the selected directory directly.                                             │                           │
 │                           │                                                                                  │                           │
-│                           │ ! Kimi Code runs directly on the host. Use a sandbox to isolate its actions.     │                           │
-│                           │   Use podman instead (sandboxed)                                                 │                           │
-│                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
 │                           │ Sub-agents Native ▾                                                              │                           │
-│                           │ Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile                │                           │
+│                           │ Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile                │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
@@ -59,46 +59,13 @@
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │   Cancel     Back     Create                                                     │                           │
-│                           ╰──────────────────────────────────────────────────────────────────────────────────╯  ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▄ ╮
-│                                                                                                                                          │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
-=== review_warns_once_and_offers_a_sandboxed_target (140x32) ===
-╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ≡ ││                                                                                            │
-╰─────────────────────────                                                                                                                 │
-╭ Sessions ───────────────                                                                                                                 │
-│ Create   Open   Filter:   ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
-│No sessions yet            │                                                                                  │                           │
-│Create new work or open a  │   TARGET     KIND          CPU     MEM (GiB)     STATUS                          │                           │
-│                           │   localhost  localhost     —       —                                             │                           │
-│                           │   podman     local Podman  4       8                                             │                           │
-│                           │ ☐ Save as default sizing                                                         │                           │
-│                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ─────────────────────────╮
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
-│                           │                                                                                  │                           │
-│                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
-│                           │                                                                                  │                           │
-│                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯  ─────────────────────────╯
 │                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 action: None
-=== resume_review_keeps_the_sandbox_button_as_its_last_row (140x40) ===
+=== resume_review_allows_mjolnir_guardian_on_raw_hosts (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
@@ -114,8 +81,8 @@ action: None
 │                           │ Target: localhost (localhost)                                                    │                           │
 │                           │ Compute: fixed/default resources                                                 │                           │
 │                           │                                                                                  │                           │
-│                           │ ! Kimi Code runs directly on the host. Use a sandbox to isolate its actions.     │                           │
-│                           │   Use docker instead (sandboxed)                                                 │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │

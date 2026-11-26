@@ -353,6 +353,27 @@ fn sample_state() -> State {
     }
 }
 
+/// Stored rows from builds that recorded the creation image still load: the
+/// field is gone, so it is ignored whether it holds an image or `null`.
+#[test]
+fn container_settings_ignore_the_retired_default_image_field() {
+    for recorded in [
+        serde_json::json!("ghcr.io/brokkai/mjolnir/session-base:latest"),
+        serde_json::Value::Null,
+    ] {
+        let settings: ContainerSettings = serde_json::from_value(serde_json::json!({
+            "additional_mounts": [],
+            "resource_allocation": null,
+            "default_image": recorded,
+        }))
+        .unwrap();
+        assert!(settings.additional_mounts.is_empty());
+        assert_eq!(settings.resource_allocation, None);
+        let rewritten = serde_json::to_value(&settings).unwrap();
+        assert!(rewritten.get("default_image").is_none());
+    }
+}
+
 #[test]
 fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children() {
     let state = sample_state();

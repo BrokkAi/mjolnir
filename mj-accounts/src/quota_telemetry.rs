@@ -897,7 +897,6 @@ impl QuotaTelemetryStore {
     pub fn draw_and_reserve<T: AsRef<crate::profile_scheduler::ScheduledCandidate>>(
         &self,
         candidates: &mut Vec<T>,
-        execution_policy: mj_core::config::ExecutionPolicy,
         placement: crate::profile_scheduler::Placement,
         category: Option<&str>,
         ranking_anchor: Option<&str>,
@@ -911,7 +910,6 @@ impl QuotaTelemetryStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let snapshot = guard.build_snapshot();
         let ctx = crate::profile_scheduler::SchedulingContext {
-            execution_policy,
             placement,
             category,
             ranking_anchor,
@@ -1687,7 +1685,7 @@ mod tests {
         use crate::power_ranking::PowerRankingSnapshot;
         use crate::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
         use crate::quota::QuotaWindow;
-        use mj_core::config::{ExecutionPolicy, HarnessKind};
+        use mj_core::config::HarnessKind;
 
         let store = QuotaTelemetryStore::new();
         let now = 1_700_000_000;
@@ -1723,7 +1721,6 @@ mod tests {
             let reservation = store
                 .draw_and_reserve(
                     &mut cands,
-                    ExecutionPolicy::Unconstrained,
                     Placement::Child,
                     Some("subtle"),
                     None,
@@ -1757,7 +1754,6 @@ mod tests {
                 let res = store
                     .draw_and_reserve(
                         &mut cands,
-                        ExecutionPolicy::Unconstrained,
                         Placement::Child,
                         Some("subtle"),
                         None,
@@ -1804,7 +1800,6 @@ mod tests {
         moved
             .draw_and_reserve(
                 &mut candidates,
-                ExecutionPolicy::Unconstrained,
                 Placement::Child,
                 Some("primary"),
                 None,

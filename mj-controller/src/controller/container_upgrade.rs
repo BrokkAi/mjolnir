@@ -457,11 +457,10 @@ impl Controller {
         };
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());
         let root = targets::worker_root(&backend, session_id)?;
-        let image = mj_core::state::ContainerSettings::upgrade_image(session, &container.image);
         let mut plan = targets::inspect_retained_container(
             &backend,
             session_id,
-            image,
+            &container.image,
             operation_id,
             Path::new(&workspace),
             Path::new(&root),
@@ -503,17 +502,14 @@ impl Controller {
             .target_runtime
             .as_mut()
             .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
+            && plan.replaces_settings()
         {
-            if plan.replaces_settings() {
-                settings
-                    .resource_allocation
-                    .clone_from(&record.resource_allocation);
-                settings
-                    .additional_mounts
-                    .clone_from(&record.additional_mounts);
-            } else if plan.image_changed() {
-                settings.record_upgrade_image(&plan.target_image);
-            }
+            settings
+                .resource_allocation
+                .clone_from(&record.resource_allocation);
+            settings
+                .additional_mounts
+                .clone_from(&record.additional_mounts);
         }
         self.persist_session_state(session_id)
     }

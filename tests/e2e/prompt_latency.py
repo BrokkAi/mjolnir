@@ -180,7 +180,7 @@ def main():
                 + '"]\n    insteadOf = https://github.com/hel-latency/fixture.git\n'
             )
             (lab.runtime_root / "Containerfile").write_text(
-                "FROM ghcr.io/brokkai/mjolnir/agent-dev:latest\nUSER root\n"
+                "FROM ghcr.io/brokkai/mjolnir/session-base:latest\nUSER root\n"
                 + f"COPY . {lab.runtime_root}/\nCOPY gitconfig /etc/gitconfig\n"
                 + f"RUN chmod -R a+rwX {lab.runtime_root}\n"
             )

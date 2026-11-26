@@ -37,7 +37,7 @@ The target accepts the common container fields:
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `image` | no | Linux image used for every new session; defaults to `docker.io/library/buildpack-deps:noble`. |
+| `image` | no | Linux image used for every new session; defaults to `ghcr.io/brokkai/mjolnir/session-base:latest`, Mjolnir's Ubuntu 24.04-based default session image with pinned Node.js and agent harnesses preinstalled. |
 | `pull_policy` | no | `auto` (default), `always`, `newer`, `missing`, or `never`. |
 | `platform` | no | Explicit image platform when runtime selection needs it. |
 | `cpus` | no | Backend CPU fallback when an API launch omits a per-session allocation. |

@@ -66,7 +66,6 @@ fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry()
     .container_settings = Some(mj_core::state::ContainerSettings {
         resource_allocation: applied_size.clone(),
         additional_mounts: applied_mounts.clone(),
-        default_image: None,
     });
     operation.selection.resource_allocation = requested_size.clone();
     operation.selection.additional_mounts = Some(requested_mounts.clone());

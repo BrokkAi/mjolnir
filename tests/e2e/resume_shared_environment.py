@@ -583,7 +583,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
-    parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/agent-dev:latest")
+    parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/session-base:latest")
     parser.add_argument("--instance", required=True)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--bare-only", action="store_true", help="rerun the bare-runtime recovery regression")

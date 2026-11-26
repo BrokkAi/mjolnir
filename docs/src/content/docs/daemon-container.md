@@ -34,8 +34,10 @@ and the container, and starts `mj daemon-run` inside it. Releases use their
 version tag and development builds use `:latest`. Later starts reuse the same
 container and volume. `mj daemon status` reports the container name.
 
-This default is separate from the `buildpack-deps:noble` default for session
-containers. Changing a session target image does not change the daemon image.
+This default is separate from `ghcr.io/brokkai/mjolnir/session-base:latest`,
+Mjolnir's Ubuntu 24.04-based default session image with pinned Node.js and
+agent harnesses preinstalled. Changing a session target image does not change
+the daemon image.
 
 The image carries the daemon and session worker. Sessions targeting
 `localhost` run their worker inside the daemon container. Mjolnir prepares

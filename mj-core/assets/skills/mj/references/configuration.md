@@ -1134,7 +1134,7 @@ work when Git is older.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `image` | string | no | the project image or `docker.io/library/buildpack-deps:noble` | A non-blank reference pins the session image. |
+| `image` | string | no | the project image or `ghcr.io/brokkai/mjolnir/session-base:latest` | A non-blank reference pins the session image. |
 | `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |

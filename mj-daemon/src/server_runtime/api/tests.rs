@@ -685,11 +685,7 @@ async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
     assert_eq!(candidates.unavailable[0].0, "codex-high");
     let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
     let error = crate::server::api::resolve_reviewer_model_profile_selection(
-        &backend,
-        "luna",
-        None,
-        mj_core::config::ExecutionPolicy::Unconstrained,
-        "reviewer",
+        &backend, "luna", None, "reviewer",
     )
     .await
     .unwrap_err();

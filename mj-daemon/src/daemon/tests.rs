@@ -5078,38 +5078,9 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
         container: serde_json::from_value(serde_json::json!({})).unwrap(),
     };
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
-    let mut applied = mj_core::state::ContainerSettings::requested(&session);
-    applied.default_image = Some(Some("ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into()));
-    runtime.container_settings = Some(applied);
+    runtime.container_settings = Some(mj_core::state::ContainerSettings::requested(&session));
     session.target_runtime = Some(runtime.into());
     mj_controller::database::save_session(&session).unwrap();
-    // A historical default marker survives persistence and follows the
-    // retained agent-dev tag.
-    let recorded = mj_controller::database::load_session_record("session-1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        mj_core::state::ContainerSettings::requested(&recorded).default_image,
-        Some(Some(
-            mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE.to_owned()
-        ))
-    );
-    // Hard-won: review of a13f351: upgrading an agent-dev session onto buildpack-deps lost its hel account, home and control directory.
-    assert_eq!(
-        mj_core::state::ContainerSettings::upgrade_image(
-            &recorded,
-            mj_core::config::DEFAULT_SESSION_IMAGE
-        ),
-        mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE
-    );
-    let mut refreshed = mj_core::state::ContainerSettings::requested(&recorded);
-    refreshed.record_upgrade_image(mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE);
-    assert_eq!(
-        refreshed.default_image,
-        Some(Some(
-            mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE.to_owned()
-        ))
-    );
     let state = test_runtime_state();
     let controller = Controller {
         config: Config::default(),
@@ -5670,10 +5641,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         container: serde_json::from_value(serde_json::json!({})).unwrap(),
     };
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
-    let applied = mj_core::state::ContainerSettings::applied(
-        &session,
-        mj_core::config::DEFAULT_SESSION_IMAGE,
-    );
+    let applied = mj_core::state::ContainerSettings::requested(&session);
     runtime.container_settings = Some(applied.clone());
     session.target_runtime = Some(runtime.into());
     mj_controller::database::save_session(&session).unwrap();

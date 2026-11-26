@@ -99,7 +99,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mj", type=pathlib.Path, required=True)
     parser.add_argument("--worker", type=pathlib.Path, required=True)
-    parser.add_argument("--base-image", default="ghcr.io/brokkai/mjolnir/agent-dev:latest")
+    parser.add_argument("--base-image", default="ghcr.io/brokkai/mjolnir/session-base:latest")
     args = parser.parse_args()
     os.environ["MJ_WORKER_BINARY"] = str(args.worker.resolve())
     lab = Lab(args.mj, "profile-transfer", 1, watchdog=False)

@@ -108,7 +108,6 @@ pub(crate) enum WizardControl {
     Oracle,
     Orchestrators,
     CreateManagedWorktree,
-    UseSandboxedTarget,
     DiscardQueue,
     Cancel,
     Back,

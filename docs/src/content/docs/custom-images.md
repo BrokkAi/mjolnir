@@ -3,8 +3,10 @@ title: Custom container images
 description: What a container image must provide to work with any local or SSH container runtime.
 ---
 
-Mjolnir uses `docker.io/library/buildpack-deps:noble` for container sessions
-by default. Use `mj image build` to build a per-bundle image from the
+Mjolnir uses `ghcr.io/brokkai/mjolnir/session-base:latest` for container
+sessions by default. That image is Mjolnir's Ubuntu 24.04-based default
+session image, with pinned Node.js and agent harnesses preinstalled. Use
+`mj image build` to build a per-bundle image from the
 repository's mise recipe or set a target's `image` to a custom image that
 meets the contract below. [Daemon-container mode](/daemon-container/) has
 its own image and configuration.
@@ -192,7 +194,7 @@ those before starting a container.
 ```toml
 [targets.podman]
 kind = "podman"
-image = "docker.io/library/buildpack-deps:noble"
+image = "ghcr.io/brokkai/mjolnir/session-base:latest"
 # Selects the image platform and the matching mj worker architecture.
 platform = "linux/amd64"
 cpus = "8"

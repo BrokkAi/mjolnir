@@ -87,9 +87,10 @@ a native `mj-worker` for local bare sessions.
 
 ## Session images
 
-The default session image is `docker.io/library/buildpack-deps:noble`, Ubuntu
-24.04 with Git, compilers and common development headers. Mjolnir installs its
-matching worker and the selected harness, including Node.js when needed.
+The default session image is `ghcr.io/brokkai/mjolnir/session-base:latest`,
+Mjolnir's Ubuntu 24.04-based default session image with pinned Node.js and
+agent harnesses preinstalled. Mjolnir installs its matching worker in the
+session.
 After cloning, **Install project tools** asks mise what the repository's
 recipe and version files, such as `mise.toml`, `rust-toolchain.toml` and
 `.nvmrc`, declare that the image lacks. The harness starts at once and the
@@ -139,9 +140,8 @@ Upgrading `mj` reconnects to compatible existing workers and preserves their
 containers. Supported worker-only upgrades happen inside the existing container
 under the worker's atomic idle reservation. New sessions use the new default
 image; existing sessions keep their image until an explicit user operation.
-An explicit upgrade of a session recorded on the old default agent-dev image
-moves it to the current session default and installs its project tools after
-the checkout is reattached.
+An explicit container upgrade uses the target's resolved image and installs
+its project tools after the checkout is reattached.
 **Restart agent** always retains the current container and its filesystem.
 
 **Upgrade container and restart…** is available from the session menu and as an

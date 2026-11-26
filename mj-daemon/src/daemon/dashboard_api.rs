@@ -15,22 +15,14 @@ impl DashboardBackend for RuntimeState {
     ) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             let config = self.owner().controller().config.clone();
-            let policy = request
-                .target_template_id
-                .as_ref()
-                .map(|id| {
-                    config
-                        .targets
-                        .get(id)
-                        .with_context(|| format!("target {id} is no longer configured"))
-                })
-                .transpose()?
-                .map_or(mj_core::config::ExecutionPolicy::Unconstrained, |target| {
-                    target.execution_policy()
-                });
+            if let Some(id) = &request.target_template_id {
+                ensure!(
+                    config.targets.contains_key(id),
+                    "target {id} is no longer configured"
+                );
+            }
             if let Some(id) = &request.profile_id
-                && let Some(profile) = config.enabled_profile(id)
-                && mj_controller::profile_scheduler::guardian_eligible(profile.kind, policy)
+                && config.enabled_profile(id).is_some()
             {
                 return Ok(id.clone());
             }
@@ -41,7 +33,6 @@ impl DashboardBackend for RuntimeState {
                 &backend,
                 &config,
                 &request.provider,
-                policy,
                 None,
             )
             .await
