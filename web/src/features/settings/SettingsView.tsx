@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ApiError,
   editSettings,
   getSettings,
   getSettingsPage,
@@ -64,6 +65,37 @@ function choiceKey(value: JsonValue): string {
   return JSON.stringify(value);
 }
 
+function normalized(value: JsonValue, top = false): JsonValue {
+  if (Array.isArray(value)) return value.map(item => normalized(item));
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.keys(value)
+    .filter(key => !top || !key.startsWith('_')).sort().map(key => [key, normalized(value[key])]));
+  return value;
+}
+
+function object(value: JsonValue | undefined): Record<string, JsonValue> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function optionsPending(options: JsonValue | undefined, entries: JsonValue | undefined): boolean {
+  const values = object(options);
+  return Array.isArray(entries) && entries.some((_, index) => {
+    const option = values[String(index)];
+    return option == null || object(option).efforts_pending === true;
+  });
+}
+
+function discoveryPending(page: SettingsPage, draft: JsonValue, subagents: JsonValue, reviewers: JsonValue): boolean {
+  const data = object(draft);
+  if (page.path[0] === 'review') return pageActions(page).some(action => action.disabled_reason === 'Checking reviewer models…') || optionsPending(reviewers, object(data.review).reviewers);
+  if (page.path[0] === 'subagents') {
+    const tasks = object(data.subagents);
+    const options = object(subagents);
+    const names = page.path[1] && page.path[1] in tasks ? [page.path[1]] : Object.keys(tasks);
+    return names.some(name => optionsPending(options[name], tasks[name]));
+  }
+  return false;
+}
+
 function pageActions(page: SettingsPage): SettingsActionView[] {
   if (!Array.isArray(page.actions)) return [];
   return (page.actions as unknown as SettingsActionView[]).filter(
@@ -81,41 +113,74 @@ function pageAdd(page: SettingsPage): SettingsAddView | null {
   return { label: record.label, named: record.named === true };
 }
 
+type EditOutcome = 'accepted' | 'refused' | 'failed';
+
 function TextControl({
   row,
   disabled,
   onSet,
+  onClearError,
+  hidden = false,
 }: {
   row: TextSettingRow;
   disabled: boolean;
-  onSet: (text: string) => void;
+  onSet: (text: string) => Promise<EditOutcome>;
+  onClearError: () => void;
+  hidden?: boolean;
 }) {
   const [value, setValue] = useState(row.value);
-  // A server answer may replace the value (for example after an edit).
-  useEffect(() => setValue(row.value), [row.value]);
+  const valueRef = useRef(value);
+  const inFlightCountRef = useRef(0);
+  const queuedValueRef = useRef<string | null>(null);
+  const dirtyLocalRef = useRef(false);
+
+  useEffect(() => {
+    if (inFlightCountRef.current === 0 && !dirtyLocalRef.current) {
+      valueRef.current = row.value;
+      setValue(row.value);
+    }
+  }, [row.value]);
 
   const apply = () => {
-    if (value !== row.value) onSet(value);
+    const baseline = inFlightCountRef.current > 0 ? queuedValueRef.current : row.value;
+    if (value === baseline) {
+      dirtyLocalRef.current = false;
+      if (inFlightCountRef.current === 0) onClearError();
+      return;
+    }
+    if (hidden && value === '') return;
+    dirtyLocalRef.current = false;
+    inFlightCountRef.current += 1;
+    queuedValueRef.current = value;
+    void onSet(value).then(outcome => {
+      inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
+      if (inFlightCountRef.current === 0) queuedValueRef.current = null;
+      if (hidden && outcome === 'accepted' && valueRef.current === value) {
+        valueRef.current = '';
+        setValue('');
+      }
+    });
   };
 
   return (
     <input
-      type={row.number ? 'number' : 'text'}
+      type={hidden ? 'password' : row.number ? 'number' : 'text'}
+      autoComplete={hidden ? 'new-password' : undefined}
       inputMode={row.number ? 'decimal' : undefined}
       aria-label={row.label}
       value={value}
       placeholder={row.placeholder}
       disabled={disabled}
-      onChange={event => setValue(event.target.value)}
+      onChange={event => { dirtyLocalRef.current = true; valueRef.current = event.target.value; setValue(event.target.value); }}
       onBlur={apply}
       onKeyDown={event => {
         if (event.key === 'Enter') {
           event.preventDefault();
           apply();
         }
-        if (event.key === 'Escape') setValue(row.value);
+        if (event.key === 'Escape') { dirtyLocalRef.current = false; valueRef.current = row.value; setValue(row.value); onClearError(); }
       }}
-      className="h-10 w-full rounded-lg border border-line bg-bg px-2.5 text-sm text-fg disabled:opacity-60 sm:w-56"
+      className="h-10 min-w-0 w-full rounded-lg border border-line bg-bg px-2.5 text-sm text-fg disabled:opacity-60 sm:w-56"
     />
   );
 }
@@ -135,7 +200,7 @@ function ChoiceControl({
       <div
         role="radiogroup"
         aria-label={row.label}
-        className="flex flex-wrap gap-1 rounded-lg bg-raised p-1"
+        className="flex min-w-0 max-w-full flex-wrap gap-1 rounded-lg bg-raised p-1"
       >
         {row.choices.map(choice => {
           const selected = choiceKey(choice.value) === current;
@@ -149,7 +214,7 @@ function ChoiceControl({
               onClick={() => {
                 if (!selected) onSet(choice.value);
               }}
-              className={`h-8 rounded-md px-3 text-xs font-medium disabled:opacity-60 ${
+              className={`min-h-8 min-w-0 max-w-full break-all rounded-md px-3 text-xs font-medium disabled:opacity-60 ${
                 selected ? 'bg-surface text-fg shadow-sm' : 'text-muted hover:text-fg'
               }`}
             >
@@ -169,7 +234,7 @@ function ChoiceControl({
         const chosen = row.choices.find(choice => choiceKey(choice.value) === event.target.value);
         if (chosen) onSet(chosen.value);
       }}
-      className="h-10 w-full rounded-lg border border-line bg-bg px-2 text-sm text-fg disabled:opacity-60 sm:w-56"
+      className="h-10 min-w-0 w-full rounded-lg border border-line bg-bg px-2 text-sm text-fg disabled:opacity-60 sm:w-56"
     >
       {row.choices.map(choice => (
         <option key={choiceKey(choice.value)} value={choiceKey(choice.value)}>
@@ -227,17 +292,20 @@ function SettingRowView({
   disabled,
   onEdit,
   onNavigate,
+  onClearError,
+  error,
 }: {
   row: SettingsRow;
   disabled: boolean;
-  onEdit: (edit: SettingsEdit) => void;
+  onEdit: (edit: SettingsEdit) => Promise<EditOutcome>;
   onNavigate: (path: string[]) => void;
+  onClearError: (path: string[]) => void;
+  error?: string;
 }) {
-  if (row.control === 'hidden') return null;
 
   const label = (
     <div className="min-w-0">
-      <p className="truncate text-sm font-medium text-fg">{row.label}</p>
+      <p className="break-words text-sm font-medium text-fg">{row.label}</p>
       {row.help && <p className="mt-0.5 text-xs text-muted">{row.help}</p>}
     </div>
   );
@@ -246,11 +314,12 @@ function SettingRowView({
     return (
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onNavigate(row.path)}
-        className="flex w-full items-center gap-3 rounded-lg border border-line bg-surface p-3 text-left hover:bg-raised"
+        className="flex w-full items-center gap-3 rounded-lg border border-line bg-surface p-3 text-left hover:bg-raised disabled:opacity-60"
       >
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-fg">{row.label}</p>
+          <p className="break-words text-sm font-medium text-fg">{row.label}</p>
           <p className="mt-0.5 truncate text-xs text-muted">{row.summary}</p>
           {row.help && <p className="mt-0.5 text-xs text-muted">{row.help}</p>}
         </div>
@@ -296,19 +365,25 @@ function SettingRowView({
             row={row}
             disabled={disabled}
             onSet={text => onEdit({ kind: 'set', path: row.path, text })}
+            onClearError={() => onClearError(row.path)}
           />
         );
+      case 'hidden':
+        return <TextControl row={{ ...row, control: 'text', value: '', placeholder: 'Hidden · type to replace', number: false }} hidden disabled={disabled} onSet={text => onEdit({ kind: 'set', path: row.path, text })} onClearError={() => onClearError(row.path)} />;
       case 'read_only':
-        return <span className="text-sm text-muted">{row.text}</span>;
+        return <span className="min-w-0 break-words text-sm text-muted">{row.text}</span>;
       default:
         return null;
     }
   })();
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface p-3">
-      {label}
-      <div className="flex min-w-0 items-center justify-end">{control}</div>
+    <div className="min-w-0 rounded-lg border border-line bg-surface p-3">
+      <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        {label}
+        <div className="flex min-w-0 w-full items-center sm:w-auto sm:justify-end">{control}</div>
+      </div>
+      {error && <p role="alert" className="mt-2 break-words text-xs text-danger">{error}</p>}
     </div>
   );
 }
@@ -346,6 +421,8 @@ export default function SettingsView({ path }: SettingsViewProps) {
 
   const requestedPath = JSON.parse(JSON.stringify(path)) as string[];
   const pathKey = JSON.stringify(requestedPath);
+  const pathKeyRef = useRef(pathKey);
+  pathKeyRef.current = pathKey;
   const requestedPathRef = useRef(requestedPath);
   requestedPathRef.current = requestedPath;
 
@@ -358,131 +435,278 @@ export default function SettingsView({ path }: SettingsViewProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadNonce, setLoadNonce] = useState(0);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const fieldErrorsRef = useRef<Record<string, string>>({});
+  const [resetFields, setResetFields] = useState(0);
+  const [subagentOptions, setSubagentOptions] = useState<JsonValue>(null);
+  const [reviewerOptions, setReviewerOptions] = useState<JsonValue>(null);
+  const [pollGeneration, setPollGeneration] = useState(0);
 
   const pagePathRef = useRef<string>('[]');
-  const syncedPathRef = useRef<string | null>(null);
   const draftRef = useRef<JsonValue>(null);
+  const originalRef = useRef<JsonValue>(null);
+  // The persisted original omits defaults that the editable draft expands.
+  const cleanDraftRef = useRef<JsonValue>(null);
+  const queueRef = useRef<Promise<void>>(Promise.resolve());
+  const epochRef = useRef(0);
+  const pageRef = useRef<SettingsPage | null>(null);
+  const pollWindowRef = useRef<{ key: string; generation: number; deadline: number } | null>(null);
+  const pollSuppressedRef = useRef(false);
+  const lastRouteRef = useRef(pathKey);
+
+  const enqueue = useCallback((work: (valid: () => boolean) => Promise<void>) => {
+    const epoch = epochRef.current;
+    const valid = () => epoch === epochRef.current;
+    const next = queueRef.current.then(async () => { if (valid()) await work(valid); });
+    queueRef.current = next.catch(() => {});
+    return next;
+  }, []);
 
   const applyPage = useCallback((next: SettingsPage) => {
     pagePathRef.current = JSON.stringify(next.path);
+    pageRef.current = next;
     setPage(next);
   }, []);
 
+  const applyOptions = useCallback((draft: JsonValue) => {
+    const data = object(draft);
+    setSubagentOptions(data._subagent_options ?? null);
+    setReviewerOptions(data._reviewer_options ?? null);
+  }, []);
+
   useEffect(() => {
-    const controller = new AbortController();
-    let cancelled = false;
+    ++epochRef.current;
     setLoading(true);
     setLoadError(null);
-    getSettings(controller.signal)
-      .then(result => {
-        if (cancelled) return;
+    void enqueue(async valid => {
+      try {
+        const result = await getSettings();
+        if (!valid()) return;
         setDocument(result);
         draftRef.current = result.draft;
+        originalRef.current = result.original;
+        cleanDraftRef.current = result.draft;
+        applyOptions(result.draft);
         applyPage(result.page);
         setLoading(false);
-      })
-      .catch(failure => {
-        if (cancelled || controller.signal.aborted) return;
-        setLoadError(describe(failure));
-        setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [applyPage, loadNonce]);
+      } catch (failure) {
+        if (valid()) { setLoadError(describe(failure)); setLoading(false); }
+      }
+    });
+    return () => { ++epochRef.current; };
+  }, [applyOptions, applyPage, enqueue, loadNonce]);
 
-  // The route owns the page path. Load that page from the server whenever the
-  // hash names one this draft has not rendered yet.
   useEffect(() => {
     if (loading || !document) return;
-    if (syncedPathRef.current === pathKey) return;
+    if (lastRouteRef.current !== pathKey) {
+      lastRouteRef.current = pathKey;
+      pollSuppressedRef.current = false;
+    }
     if (pagePathRef.current === pathKey) {
-      syncedPathRef.current = pathKey;
+      setPageLoading(false);
       return;
     }
-    const controller = new AbortController();
     let cancelled = false;
+    const target = requestedPathRef.current;
     setPageLoading(true);
     setLoadError(null);
-    getSettingsPage(draftRef.current, requestedPathRef.current, controller.signal)
-      .then(result => {
-        if (cancelled) return;
-        syncedPathRef.current = pathKey;
+    setPollGeneration(value => value + 1);
+    void enqueue(async valid => {
+      if (cancelled) return;
+      try {
+        const result = await getSettingsPage(draftRef.current, target);
+        if (!valid() || cancelled) return;
         applyPage(result.page);
-        setPageLoading(false);
-      })
-      .catch(failure => {
-        if (cancelled || controller.signal.aborted) return;
-        setLoadError(describe(failure));
-        setPageLoading(false);
-      });
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [applyPage, document, loading, pathKey]);
-
-  const dirty =
-    document !== null && JSON.stringify(document.draft) !== JSON.stringify(document.original);
-
-  const runEdit = async (edit: SettingsEdit) => {
-    if (!document || !page || busy) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await editSettings(document.draft, page.path, edit);
-      draftRef.current = result.draft;
-      setDocument(current => (current ? { ...current, draft: result.draft } : current));
-      applyPage(result.page);
-      if (result.error) setError(result.error);
-      else if (result.notice) setNotice(result.notice);
-      if (JSON.stringify(result.page.path) !== JSON.stringify(page.path)) {
-        navigate({ name: 'settings', path: result.page.path });
+        setSubagentOptions(result.subagent_options);
+        setReviewerOptions(result.reviewer_options);
+      } catch (failure) {
+        if (!valid() || cancelled) return;
+        if (failure instanceof ApiError && failure.status === 404 && target.length) {
+          navigate({ name: 'settings', path: [] });
+        } else setLoadError(describe(failure));
+      } finally {
+        if (valid() && !cancelled) setPageLoading(false);
       }
-    } catch (failure) {
-      setError(describe(failure));
-    } finally {
-      setBusy(false);
+    });
+    return () => { cancelled = true; };
+  }, [applyPage, document, enqueue, loading, navigate, pathKey]);
+
+  const dirty = document !== null && JSON.stringify(normalized(document.draft, true)) !== JSON.stringify(normalized(cleanDraftRef.current, true));
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
+  useEffect(() => {
+    if (pollSuppressedRef.current || !page || pagePathRef.current !== pathKey || !discoveryPending(page, draftRef.current, subagentOptions, reviewerOptions)) return;
+    let cancelled = false;
+    if (pollWindowRef.current?.key !== pathKey || pollWindowRef.current.generation !== pollGeneration) {
+      pollWindowRef.current = { key: pathKey, generation: pollGeneration, deadline: Date.now() + 30_000 };
     }
+    const deadline = pollWindowRef.current.deadline;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      if (!cancelled && Date.now() < deadline) timer = setTimeout(poll, 1000);
+    };
+    const poll = () => {
+      void enqueue(async valid => {
+        if (cancelled || Date.now() >= deadline || pagePathRef.current !== pathKey) return;
+        try {
+          const result = await getSettingsPage(draftRef.current, page.path);
+          if (!valid() || cancelled || pagePathRef.current !== pathKey) return;
+          applyPage(result.page);
+          setSubagentOptions(result.subagent_options);
+          setReviewerOptions(result.reviewer_options);
+          if (discoveryPending(result.page, draftRef.current, result.subagent_options, result.reviewer_options)) schedule();
+        } catch (failure) {
+          if (valid() && !cancelled) {
+            if (failure instanceof ApiError && failure.status === 404) navigate({ name: 'settings', path: [] });
+            else setError(describe(failure));
+          }
+        }
+      });
+    };
+    schedule();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [page, pathKey, pollGeneration, enqueue, applyPage, navigate, subagentOptions, reviewerOptions]);
+
+  const clearFieldError = (path: string[]) => {
+    const key = JSON.stringify(path);
+    if (!(key in fieldErrorsRef.current)) return;
+    const next = { ...fieldErrorsRef.current };
+    delete next[key];
+    fieldErrorsRef.current = next;
+    setFieldErrors(next);
   };
 
-  const discard = async () => {
-    if (!document || !page || busy) return;
+  const runEdit = async (edit: SettingsEdit): Promise<EditOutcome> => {
+    const editPage = pageRef.current?.path;
+    if (!editPage) return 'failed';
+    const editPageKey = JSON.stringify(editPage);
+    const structural = edit.kind === 'add' || edit.kind === 'remove' || edit.kind === 'action';
+    if (structural) setBusy(true);
+    setError(null);
+    setNotice(null);
+    pollSuppressedRef.current = false;
+    setPollGeneration(value => value + 1);
+    let outcome: EditOutcome = 'failed';
+    await enqueue(async valid => {
+      try {
+        if (JSON.stringify(pageRef.current?.path ?? []) !== editPageKey || pathKeyRef.current !== editPageKey) return;
+        const result = await editSettings(draftRef.current, editPage, edit);
+        if (!valid()) return;
+        draftRef.current = result.draft;
+        setDocument(current => current ? { ...current, draft: result.draft } : current);
+        applyOptions(result.draft);
+        if (edit.kind === 'set' || edit.kind === 'toggle') {
+          const key = JSON.stringify(edit.path);
+          const next = { ...fieldErrorsRef.current };
+          if (result.error) next[key] = result.error; else delete next[key];
+          fieldErrorsRef.current = next;
+          setFieldErrors(next);
+        } else if (result.error) setError(result.error);
+        if (!result.error && edit.kind === 'remove') {
+          const prefix = /^\d+$/.test(edit.path.at(-1) ?? '') ? edit.path.slice(0, -1) : edit.path;
+          const next = Object.fromEntries(Object.entries(fieldErrorsRef.current).filter(([key]) => {
+            const path = JSON.parse(key) as string[];
+            return !prefix.every((segment, index) => path[index] === segment);
+          }));
+          fieldErrorsRef.current = next;
+          setFieldErrors(next);
+        }
+        if (!result.error && result.notice) setNotice(result.notice);
+        if (pathKeyRef.current === editPageKey) {
+          applyPage(result.page);
+          if (JSON.stringify(result.page.path) !== editPageKey) navigate({ name: 'settings', path: result.page.path });
+        }
+        outcome = result.error ? 'refused' : 'accepted';
+      } catch (failure) {
+        if (valid()) {
+          const message = describe(failure);
+          setError(message);
+          if (edit.kind === 'set' || edit.kind === 'toggle') {
+            const next = { ...fieldErrorsRef.current, [JSON.stringify(edit.path)]: message };
+            fieldErrorsRef.current = next;
+            setFieldErrors(next);
+          }
+        }
+      } finally {
+        if (valid() && structural) setBusy(false);
+      }
+    });
+    return outcome;
+  };
+
+  const discard = () => {
+    ++epochRef.current;
     setBusy(true);
     setError(null);
     setNotice(null);
-    try {
-      const result = await getSettingsPage(document.original, page.path);
-      draftRef.current = document.original;
-      setDocument({ ...document, draft: document.original });
-      applyPage(result.page);
-      setNotice('Changes discarded.');
-    } catch (failure) {
-      setError(describe(failure));
-    } finally {
-      setBusy(false);
-    }
+    fieldErrorsRef.current = {};
+    setFieldErrors({});
+    pollSuppressedRef.current = true;
+    setPollGeneration(value => value + 1);
+    void enqueue(async valid => {
+      try {
+        const currentPath = pageRef.current?.path ?? [];
+        let result;
+        try {
+          result = await getSettingsPage(cleanDraftRef.current, currentPath);
+        } catch (pageFailure) {
+          if (pageFailure instanceof ApiError && pageFailure.status === 404 && currentPath.length) {
+            result = await getSettingsPage(cleanDraftRef.current, []);
+          } else {
+            throw pageFailure;
+          }
+        }
+        if (!valid()) return;
+        draftRef.current = cleanDraftRef.current;
+        setDocument(current => current ? { ...current, draft: cleanDraftRef.current } : current);
+        applyPage(result.page);
+        setSubagentOptions(result.subagent_options);
+        setReviewerOptions(result.reviewer_options);
+        setResetFields(value => value + 1);
+        setNotice('Changes discarded.');
+        if (JSON.stringify(result.page.path) !== JSON.stringify(currentPath)) {
+          navigate({ name: 'settings', path: result.page.path });
+        }
+      } catch (failure) { if (valid()) setError(describe(failure)); }
+      finally { if (valid()) setBusy(false); }
+    });
   };
 
-  const save = async () => {
-    if (!document || !page || busy) return;
+  const save = () => {
     setBusy(true);
     setError(null);
     setNotice(null);
-    try {
-      const saved = await saveSettings(document.original, document.draft, page.path);
-      draftRef.current = saved.draft;
-      setDocument(saved);
-      applyPage(saved.page);
-      setNotice('Settings saved.');
-      pushToast('success', 'Settings saved.');
-    } catch (failure) {
-      setError(describe(failure));
-    } finally {
-      setBusy(false);
-    }
+    void enqueue(async valid => {
+      try {
+        if (Object.keys(fieldErrorsRef.current).length) {
+          setError('Fix the rejected settings before saving.');
+          return;
+        }
+        const currentPath = pageRef.current?.path ?? [];
+        const saved = await saveSettings(originalRef.current, draftRef.current, currentPath);
+        if (!valid()) return;
+        draftRef.current = saved.draft;
+        originalRef.current = saved.original;
+        cleanDraftRef.current = saved.draft;
+        setDocument(saved);
+        applyOptions(saved.draft);
+        applyPage(saved.page);
+        fieldErrorsRef.current = {};
+        setFieldErrors({});
+        setNotice('Settings saved.');
+        pushToast('success', 'Settings saved.');
+        if (JSON.stringify(saved.page.path) !== JSON.stringify(currentPath)) {
+          navigate({ name: 'settings', path: saved.page.path });
+        }
+      } catch (failure) { if (valid()) setError(describe(failure)); }
+      finally { if (valid()) setBusy(false); }
+    });
   };
 
   const navigateTo = (next: string[]) => navigate({ name: 'settings', path: next });
@@ -597,16 +821,18 @@ export default function SettingsView({ path }: SettingsViewProps) {
       {actions.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {actions.map(action => (
+            <div key={action.id} className="min-w-0">
             <button
-              key={action.id}
               type="button"
-              disabled={busy || Boolean(action.disabled_reason)}
+              disabled={busy || pageLoading || Boolean(action.disabled_reason)}
               title={action.disabled_reason}
               onClick={() => void runEdit({ kind: 'action', id: action.id })}
               className="h-10 rounded-lg border border-line px-3 text-sm font-medium text-fg hover:bg-raised disabled:opacity-50"
             >
               {action.label}
             </button>
+            {action.disabled_reason && <p className="mt-1 max-w-xs break-words text-xs text-muted">{action.disabled_reason}</p>}
+            </div>
           ))}
         </div>
       )}
@@ -625,11 +851,13 @@ export default function SettingsView({ path }: SettingsViewProps) {
           <div className="flex flex-col gap-2">
             {group.rows.map(row => (
               <SettingRowView
-                key={JSON.stringify(row.path)}
+                key={`${JSON.stringify(row.path)}-${resetFields}`}
                 row={row}
-                disabled={busy}
-                onEdit={edit => void runEdit(edit)}
+                error={fieldErrors[JSON.stringify(row.path)]}
+                disabled={busy || pageLoading}
+                onEdit={runEdit}
                 onNavigate={navigateTo}
+                onClearError={clearFieldError}
               />
             ))}
           </div>
@@ -640,7 +868,7 @@ export default function SettingsView({ path }: SettingsViewProps) {
         <section aria-label="Add entry" className="flex flex-col gap-2">
           <AddEntryControl
             add={add}
-            disabled={busy}
+            disabled={busy || pageLoading}
             onAdd={name => void runEdit({ kind: 'add', path: page.path, name })}
           />
         </section>
@@ -649,7 +877,7 @@ export default function SettingsView({ path }: SettingsViewProps) {
       {page.removable && (
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || pageLoading}
           onClick={() => void runEdit({ kind: 'remove', path: page.path })}
           className="h-10 self-start rounded-lg border border-danger/40 px-3 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
         >

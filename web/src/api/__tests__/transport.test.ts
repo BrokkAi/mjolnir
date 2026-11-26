@@ -194,6 +194,18 @@ describe('ViewerEventStream', () => {
     expect(FakeEventSource.instances).toHaveLength(2);
   });
 
+  it('reconnects from the applied cursor after offline even if the open stream never errors', () => {
+    stream.start();
+    const first = FakeEventSource.last;
+    first.emit('runtime', { kind: 'snapshot', cursor: cursor(5), snapshot: snapshot([], { sequence: 5 }) });
+    window.dispatchEvent(new Event('offline'));
+    expect(first.closed).toBe(true);
+    expect(statuses.at(-1)).toBe('offline');
+    window.dispatchEvent(new Event('online'));
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.last.url).toContain('since=inc%3A5');
+  });
+
   it('asks for a fresh snapshot when a frame throws an unknown-reference error', () => {
     let throwNext = true;
     const local = new ViewerEventStream(

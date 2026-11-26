@@ -47,12 +47,14 @@ describe('Workspaces dashboard', () => {
     hydrate([
       liveRow('a', { title: 'Alpha session', workspace_id: 'w1' }),
       liveRow('b', { title: 'Beta session', workspace_id: 'w2' }),
+      liveRow('stopped', { title: 'Stopped session', workspace_id: 'w1', verdict: { ...liveRow('stopped').verdict, live_dashboard: false } }),
     ]);
     mockFetch({});
     render(<DashboardView workspaceId="w1" />);
 
     expect(screen.getByTestId('session-card-a')).toBeInTheDocument();
     expect(screen.queryByTestId('session-card-b')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-card-stopped')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Alpha' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /New session/ })).toHaveAttribute(
       'href',

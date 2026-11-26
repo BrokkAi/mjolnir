@@ -185,6 +185,13 @@ test('expanding a tool card releases follow and keeps the card header anchored',
       }
       return { json: body };
     });
+    server.handle('GET', '/api/v1/sessions/s1/items/tool-card-1/detail', () => ({
+      json: {
+        status: 'full', stable_id: 'tool-card-1',
+        entry: { tool_content: [], tool_input: { command: 'npm test' } },
+        body: { kind: 'system', text: '' }, call: {}, diffs: [], terminal_outputs: [],
+      },
+    }));
     await openConversation(page);
 
     const card = page.getByTestId('tool-card');

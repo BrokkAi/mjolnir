@@ -205,6 +205,13 @@ export class ViewerEventStream {
   }
 
   private onOffline(): void {
-    if (this.source) this.setStatus('offline');
+    if (!this.running) return;
+    // A connection open when the browser goes offline may never report an
+    // error. Close it and resume from the applied cursor when connectivity returns.
+    const fresh = this.owed?.fresh ?? (this.timer !== undefined && this.timerFresh);
+    this.clearTimer();
+    this.closeSource();
+    this.owed = { fresh };
+    this.setStatus('offline');
   }
 }

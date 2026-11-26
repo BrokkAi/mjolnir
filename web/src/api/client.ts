@@ -445,8 +445,7 @@ export const suspendPreflight = (
   query: SuspendPreflightQuery = {},
   signal?: AbortSignal,
 ) =>
-  apiFetch<SuspendPreflight>(`/api/v1/sessions/${seg(id)}/lifecycle/suspend-preflight`, {
-    method: 'POST',
+  apiFetch<SuspendPreflight>(`/api/v1/sessions/${seg(id)}/suspend-preflight`, {
     query: { ...query },
     signal,
   });

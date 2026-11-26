@@ -16,8 +16,8 @@ import { describeError, formatDuration } from './format';
  * One tool call, one line until tapped.
  *
  * The expanded body is never rendered before the tap and never while
- * collapsed, which keeps long-output rows cheap. A trimmed row fetches its
- * full output only while expanded and keeps a full response in the module
+ * collapsed, which keeps long-output rows cheap. A row fetches its
+ * full detail only while expanded and keeps a full response in the module
  * cache, keyed by the entry version, so collapsing and reopening an unchanged
  * card costs nothing while a later update to the same call fetches fresh
  * output. An unavailable response is never cached, so reopening retries.
@@ -262,7 +262,7 @@ export function ToolCard({ entry, sessionId, onBeforeExpand }: ToolCardProps) {
     sessionId,
     stableId,
     toolDetailVersion(entry),
-    expanded && trimmed,
+    expanded,
   );
 
   const onToggle = () => {
@@ -336,13 +336,13 @@ export function ToolCard({ entry, sessionId, onBeforeExpand }: ToolCardProps) {
               {entry.lines.join('\n')}
             </pre>
           )}
-          {trimmed && stableId && loading && (
+          {stableId && loading && (
             <p className="flex items-center gap-2 text-xs text-muted" role="status">
               <LoaderCircle className="size-3.5 animate-spin" aria-hidden />
               Loading full tool output…
             </p>
           )}
-          {trimmed && stableId && detailError && (
+          {stableId && detailError && (
             <div className="rounded-md border border-danger/40 bg-danger/10 p-2">
               <p role="alert" className="text-[12px] text-danger">
                 Could not load the full tool output: {detailError}
