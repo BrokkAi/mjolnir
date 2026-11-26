@@ -38,6 +38,8 @@ enum ViewerFrame {
     Snapshot {
         cursor: RuntimeCursor,
         snapshot: Box<Value>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        conversation_seqs: BTreeMap<String, u64>,
     },
     Delta {
         from: RuntimeCursor,
@@ -46,6 +48,8 @@ enum ViewerFrame {
         sessions: Vec<(String, Option<Value>)>,
         detail_changed: Vec<String>,
         interned: BTreeMap<String, Value>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        conversation_seqs: BTreeMap<String, u64>,
     },
     ResetRequired,
 }
@@ -54,6 +58,10 @@ enum ViewerFrame {
 pub(super) struct ViewerFeed {
     previous: Option<(RuntimeCursor, Arc<ViewerSnapshot>)>,
     known_interned: BTreeSet<String>,
+    /// Transcript cursors already sent to this client. Transcripts publish on
+    /// their own watch channel, so they can move while the runtime cursor
+    /// stays put.
+    previous_conversation_seqs: BTreeMap<String, u64>,
 }
 
 impl ViewerFeed {
@@ -61,6 +69,7 @@ impl ViewerFeed {
         &mut self,
         views: BrowserViews,
         reconnect: Option<RuntimeCursor>,
+        conversation_seqs: BTreeMap<String, u64>,
     ) -> Result<Vec<EncodedFrame>> {
         let BrowserViews {
             cursor,
@@ -78,10 +87,33 @@ impl ViewerFeed {
             if self.known_interned.is_empty() {
                 self.known_interned = viewer_wire::interned_keys_from_sessions(&base.sessions)?;
             }
+            let changed_seqs = self.take_changed_seqs(&conversation_seqs);
             if from.sequence == cursor.sequence {
-                return Ok(Vec::new());
+                if changed_seqs.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // Only a transcript moved: wake the client without a runtime row.
+                return self.encode_frame(
+                    cursor.clone(),
+                    ViewerFrame::Delta {
+                        from,
+                        cursor,
+                        metadata: Map::new(),
+                        sessions: Vec::new(),
+                        detail_changed: Vec::new(),
+                        interned: BTreeMap::new(),
+                        conversation_seqs: changed_seqs,
+                    },
+                );
             }
-            return self.delta(&base, &current, from, cursor);
+            return self.delta(
+                &base,
+                &current,
+                from,
+                cursor,
+                changed_seqs,
+                conversation_seqs,
+            );
         }
 
         let body = viewer_wire::snapshot(&current, &cursor, mj_core::clock::epoch_millis())?;
@@ -91,7 +123,31 @@ impl ViewerFeed {
             .keys()
             .cloned()
             .collect();
-        Ok(vec![self.snapshot_frame(cursor, body)?])
+        self.previous_conversation_seqs = conversation_seqs.clone();
+        Ok(vec![self.snapshot_frame(
+            cursor,
+            body,
+            conversation_seqs,
+        )?])
+    }
+
+    /// Entries whose `latest_seq` is new or advanced since the last frame.
+    /// Records `current` as sent.
+    fn take_changed_seqs(&mut self, current: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+        let changed = current
+            .iter()
+            .filter(|(id, seq)| self.previous_conversation_seqs.get(*id) != Some(seq))
+            .map(|(id, seq)| (id.clone(), *seq))
+            .collect();
+        self.previous_conversation_seqs = current.clone();
+        changed
+    }
+
+    fn encode_frame(&self, cursor: RuntimeCursor, frame: ViewerFrame) -> Result<Vec<EncodedFrame>> {
+        Ok(vec![EncodedFrame {
+            id: cursor_text(&cursor),
+            data: serde_json::to_string(&frame)?,
+        }])
     }
 
     fn delta(
@@ -100,6 +156,8 @@ impl ViewerFeed {
         current: &ViewerSnapshot,
         from: RuntimeCursor,
         cursor: RuntimeCursor,
+        changed_seqs: BTreeMap<String, u64>,
+        all_seqs: BTreeMap<String, u64>,
     ) -> Result<Vec<EncodedFrame>> {
         let now = mj_core::clock::epoch_millis();
         let metadata = changed_metadata(previous, current, now)?;
@@ -143,6 +201,7 @@ impl ViewerFeed {
             sessions,
             detail_changed,
             interned,
+            conversation_seqs: changed_seqs,
         };
         let data = serde_json::to_string(&delta)?;
         if data.len() <= MAX_DELTA_BYTES {
@@ -166,16 +225,22 @@ impl ViewerFeed {
             id: cursor_text(&cursor),
             data: reset,
         };
-        let snapshot_frame = self.snapshot_frame(cursor, body)?;
+        let snapshot_frame = self.snapshot_frame(cursor, body, all_seqs)?;
         Ok(vec![reset_frame, snapshot_frame])
     }
 
-    fn snapshot_frame(&self, cursor: RuntimeCursor, body: Value) -> Result<EncodedFrame> {
+    fn snapshot_frame(
+        &self,
+        cursor: RuntimeCursor,
+        body: Value,
+        conversation_seqs: BTreeMap<String, u64>,
+    ) -> Result<EncodedFrame> {
         Ok(EncodedFrame {
             id: cursor_text(&cursor),
             data: serde_json::to_string(&ViewerFrame::Snapshot {
                 cursor,
                 snapshot: Box::new(body),
+                conversation_seqs,
             })?,
         })
     }
@@ -252,6 +317,14 @@ mod tests {
         }
 
         fn update(&mut self, snapshot: ViewerSnapshot) -> Result<Vec<EncodedFrame>> {
+            self.update_with_seqs(snapshot, BTreeMap::new())
+        }
+
+        fn update_with_seqs(
+            &mut self,
+            snapshot: ViewerSnapshot,
+            seqs: BTreeMap<String, u64>,
+        ) -> Result<Vec<EncodedFrame>> {
             let current = Arc::new(snapshot);
             self.feed.encode(
                 BrowserViews {
@@ -265,8 +338,16 @@ mod tests {
                     base: None,
                 },
                 None,
+                seqs,
             )
         }
+    }
+
+    fn seqs(entries: &[(&str, u64)]) -> BTreeMap<String, u64> {
+        entries
+            .iter()
+            .map(|(id, seq)| ((*id).into(), *seq))
+            .collect()
     }
 
     fn row(id: &str, lifecycle: &str) -> crate::server::ViewerSession {
@@ -325,6 +406,7 @@ mod tests {
                         base,
                     },
                     Some(from.clone()),
+                    BTreeMap::new(),
                 )
                 .unwrap();
             assert_eq!(encoded[0].id, "runtime:8");
@@ -421,5 +503,76 @@ mod tests {
         let frame = decode(&feed.update(snapshot(41, vec![changed])).unwrap()[0]);
         assert!(frame["sessions"].as_array().unwrap().is_empty());
         assert_eq!(frame["detail_changed"], serde_json::json!(["a"]));
+    }
+
+    #[test]
+    fn conversation_seqs_ride_snapshots_and_list_only_advanced_sessions_in_deltas() {
+        let mut feed = TestFeed::default();
+        let first = decode(
+            &feed
+                .update_with_seqs(snapshot(50, Vec::new()), seqs(&[("a", 3), ("b", 7)]))
+                .unwrap()[0],
+        );
+        assert_eq!(first["kind"], "snapshot");
+        assert_eq!(
+            first["conversation_seqs"],
+            serde_json::json!({"a": 3, "b": 7})
+        );
+
+        // "a" advances, "b" is unchanged, "c" is new.
+        let delta = decode(
+            &feed
+                .update_with_seqs(
+                    snapshot(51, Vec::new()),
+                    seqs(&[("a", 4), ("b", 7), ("c", 1)]),
+                )
+                .unwrap()[0],
+        );
+        assert_eq!(delta["kind"], "delta");
+        assert_eq!(
+            delta["conversation_seqs"],
+            serde_json::json!({"a": 4, "c": 1})
+        );
+
+        // No transcript moved: the field is omitted, not sent empty.
+        let quiet = decode(
+            &feed
+                .update_with_seqs(
+                    snapshot(52, Vec::new()),
+                    seqs(&[("a", 4), ("b", 7), ("c", 1)]),
+                )
+                .unwrap()[0],
+        );
+        assert!(quiet.get("conversation_seqs").is_none());
+
+        let empty = decode(
+            &TestFeed::default()
+                .update(snapshot(60, Vec::new()))
+                .unwrap()[0],
+        );
+        assert!(empty.get("conversation_seqs").is_none());
+    }
+
+    #[test]
+    fn same_cursor_publication_emits_only_when_a_transcript_advanced() {
+        let mut feed = TestFeed::default();
+        feed.update_with_seqs(snapshot(70, Vec::new()), seqs(&[("a", 1)]))
+            .unwrap();
+        let unchanged = feed
+            .update_with_seqs(snapshot(70, Vec::new()), seqs(&[("a", 1)]))
+            .unwrap();
+        assert!(unchanged.is_empty());
+
+        let advanced = feed
+            .update_with_seqs(snapshot(70, Vec::new()), seqs(&[("a", 2)]))
+            .unwrap();
+        assert_eq!(advanced.len(), 1);
+        assert_eq!(advanced[0].id, "test:70");
+        let frame = decode(&advanced[0]);
+        assert_eq!(frame["kind"], "delta");
+        assert_eq!(frame["from"]["sequence"], 70);
+        assert_eq!(frame["cursor"]["sequence"], 70);
+        assert_eq!(frame["conversation_seqs"], serde_json::json!({"a": 2}));
+        assert!(frame["sessions"].as_array().unwrap().is_empty());
     }
 }

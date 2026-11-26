@@ -1,0 +1,63 @@
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { emptyTranscript, useTranscriptStore } from '../../../stores/useTranscriptStore';
+import { useSessionStore } from '../../../stores/useSessionStore';
+import { entry, jsonResponse, liveRow, mockFetch, snapshot } from '../../../test-utils';
+import ConversationView from '../ConversationView';
+
+/**
+ * The view reads transcript state; the shell's route hook owns opening and
+ * closing the conversation. This smoke test pins that division so a future
+ * change cannot start a second fetch or close the conversation on unmount.
+ */
+
+beforeEach(() => {
+  useSessionStore.getState().handleSignedOut();
+  useTranscriptStore.getState().clearAll();
+  useSessionStore.getState().applySnapshot(snapshot([liveRow('s1', { title: 'Build the thing' })]));
+  useTranscriptStore.setState({
+    entries: {
+      s1: {
+        ...emptyTranscript('s1'),
+        hasLoaded: true,
+        latestSeq: 1,
+        orderedIds: ['ordinal:1'],
+        entriesById: { 'ordinal:1': entry(1, { lines: ['Hello from the agent'] }) },
+      },
+    },
+    order: ['s1'],
+    activeId: 's1',
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  useSessionStore.getState().handleSignedOut();
+  useTranscriptStore.getState().clearAll();
+  vi.unstubAllGlobals();
+});
+
+describe('ConversationView', () => {
+  it('renders the single-scrollport conversation without opening or closing it', () => {
+    const fetchMock = mockFetch({
+      '/api/v1/sessions/s1/client-state': () =>
+        jsonResponse({ draft: '', through_event_ordinal: 0 }),
+    });
+
+    const { unmount } = render(
+      <ConversationView sessionId="s1" subagentParentId={undefined} />,
+    );
+
+    expect(screen.getByTestId('conversation-view')).toHaveClass('overflow-hidden');
+    expect(screen.getByTestId('conversation-scroll')).toBeInTheDocument();
+    expect(screen.getByText('Hello from the agent')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Build the thing');
+    expect(screen.getByTestId('composer')).toBeInTheDocument();
+
+    // No conversation fetch: the shell already opened this transcript.
+    expect(fetchMock.urls().filter(url => url.includes('/api/v1/conversations/'))).toHaveLength(0);
+
+    unmount();
+    expect(useTranscriptStore.getState().activeId).toBe('s1');
+  });
+});

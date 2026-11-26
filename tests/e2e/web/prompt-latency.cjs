@@ -11,7 +11,7 @@ const { chromium } = require('@playwright/test');
     if (response.status() !== 204) throw new Error(`Login failed: ${response.status()}`);
     const page = await context.newPage();
     await page.goto(`${baseUrl}/#conversation/${sessionId}`);
-    const prompt = page.locator('#prompt-text');
+    const prompt = page.getByLabel('Message', { exact: true });
     await prompt.waitFor({ state: 'visible' });
     const rows = [];
     for (let index = 0; index < Number(count); index++) {
@@ -33,17 +33,17 @@ const { chromium } = require('@playwright/test');
       await prompt.fill(text);
       await page.evaluate(text => {
         window.latencyResult = null;
-        const feed = document.querySelector('#conversation-feed');
+        const feed = document.querySelector('[data-testid="transcript-rows"]');
         const observer = new MutationObserver(() => {
-          const found = [...feed.querySelectorAll('[data-entry-id]')].some(node =>
-            !node.dataset.entryId.startsWith('pending') && node.textContent.includes(text));
+          const found = [...feed.querySelectorAll('article')].some(node =>
+            !node.closest('[data-testid="pending-prompt"]') && node.textContent.includes(text));
           if (found) {
             window.latencyResult = performance.now() - window.latencyStart;
             observer.disconnect();
           }
         });
         observer.observe(feed, { childList: true, subtree: true, characterData: true, attributes: true });
-        document.querySelector('#prompt-text').addEventListener('keydown', () => {
+        document.querySelector('textarea[aria-label="Message"]').addEventListener('keydown', () => {
           window.latencyStart = performance.now();
         }, { once: true, capture: true });
       }, text);
