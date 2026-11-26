@@ -2036,7 +2036,7 @@ const QUEUED_WAKE_TEST_CHILD: &str = "MJ_TEST_QUEUED_WAKE_CHILD";
 /// replaced, and a failed replacement leaves its launch and relay intact.
 // Hard-won: #1594: a queued mailbox wake failed every checkpoint export with "has no content".
 // Hard-won: pending handoff text was absent from suspend checkpoints.
-// Hard-won: 39722ace5: checkpoint mailbox read failed beyond one relay frame.
+// Hard-won: 39722ace5: checkpoint mailbox read failed when prompt contexts or retained input exceeded one relay frame.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
@@ -2175,9 +2175,32 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     for directory in [&relay_root, &profile_home] {
         std::fs::create_dir_all(directory).unwrap();
     }
+    let peer_mail = |index: usize| mj_core::mailbox::MailboxEvent {
+        key: format!("peer-mail-{index}"),
+        source: "peer".into(),
+        wake: false,
+        created_at_ms: 2,
+        body: mj_core::mailbox::MailboxEventBody::PlainText {
+            text: format!("{index}: {}", "東京".repeat(30_000)),
+        },
+    };
+    // Mail a queued prompt already claimed is bound to it and has no byte
+    // budget of its own, like retained quota input. From protocol 97 the read
+    // pages, so the mailbox alone may exceed a frame; older workers answer in
+    // one frame and must stay below it.
+    let claimed_context = format!(
+        "claimed-context-marker {}",
+        "東京".repeat(
+            if protocol >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL {
+                mj_core::relay::MAX_FRAME_BYTES / 4
+            } else {
+                500_000
+            }
+        )
+    );
     // A parent's waking message started a turn, and the worker restarted
     // before it finished.
-    let mut wake_prompt = {
+    let wake_prompt = {
         let mut relay =
             mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
                 .unwrap();
@@ -2217,7 +2240,10 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                         wake: true,
                         created_at_ms: 1,
                         body: mj_core::mailbox::MailboxEventBody::PlainText {
-                            text: "Review the migration and report what breaks.".into(),
+                            text: format!(
+                                "Review the migration and report what breaks. {}",
+                                "東京".repeat(60_000)
+                            ),
                         },
                     },
                 },
@@ -2232,7 +2258,26 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             panic!("expected only the mailbox wake to start: {started:?}");
         };
         assert!(matches!(wake.command, RelayCommand::MailboxWake { .. }));
-        wake.command.prompt_blocks().unwrap().into_owned()
+        let wake_prompt = wake.command.prompt_blocks().unwrap().into_owned();
+        // Peer mail accepted while the wake's turn runs, through the worker's
+        // own admission, so it stays within the mailbox budget.
+        for index in 0..3 {
+            let delivered = relay.handle(mj_core::relay::RelayRequestEnvelope {
+                request_id: format!("deliver-peer-mail-{index}"),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: mj_core::relay::RelayRequest::Submit {
+                    command_id: format!("deliver-peer-mail-{index}"),
+                    command: RelayCommand::DeliverMailboxEvent {
+                        event: peer_mail(index),
+                    },
+                },
+            });
+            assert!(
+                matches!(delivered.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+                "{delivered:?}"
+            );
+        }
+        wake_prompt
     };
     drop(mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap());
     // Exercise the paged cut read with input larger than one relay frame.
@@ -2247,43 +2292,14 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             )];
         let queued_id = snapshot.queued_prompts[0].command_id.clone();
         snapshot.steered_prompt_contexts.insert(
-            queued_id,
+            queued_id.clone(),
             vec![agent_client_protocol::v1::schema::ContentBlock::from(
                 "saved injected steering",
             )],
         );
-        // Accepted mail and the wake's prompt, each larger than one relay frame.
-        if protocol >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL {
-            let mail_text = "東京".repeat(mj_core::relay::MAX_FRAME_BYTES / 12);
-            snapshot.pending_mailbox_events = (0..3)
-                .map(|index| mj_core::mailbox::MailboxEvent {
-                    key: format!("large-peer-mail-{index}"),
-                    source: "peer".into(),
-                    wake: false,
-                    created_at_ms: 2,
-                    body: mj_core::mailbox::MailboxEventBody::PlainText {
-                        text: format!("{index}: {mail_text}"),
-                    },
-                })
-                .collect();
-            let queued_id = snapshot.queued_prompts[0].command_id.clone();
-            let mj_core::relay::RelayCommand::MailboxWake { events } =
-                &mut snapshot.dispatches.get_mut(&queued_id).unwrap().command
-            else {
-                panic!("the queued continuation does not carry the mailbox wake");
-            };
-            events[0].body = mj_core::mailbox::MailboxEventBody::PlainText {
-                text: "東京".repeat(mj_core::relay::MAX_FRAME_BYTES / 6 + 1_000),
-            };
-            wake_prompt = snapshot.dispatches[&queued_id]
-                .command
-                .prompt_blocks()
-                .unwrap()
-                .into_owned();
-            assert!(
-                serde_json::to_vec(&wake_prompt).unwrap().len() > mj_core::relay::MAX_FRAME_BYTES
-            );
-        }
+        snapshot
+            .mailbox_prompt_contexts
+            .insert(queued_id, claimed_context.clone());
         std::fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
     }
 
@@ -2440,37 +2456,38 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             serde_json::from_value(input.pending[0].clone()).unwrap();
         assert_eq!(
             block,
-            agent_client_protocol::v1::schema::ContentBlock::from(quota_text)
+            agent_client_protocol::v1::schema::ContentBlock::from(quota_text.clone())
         );
         assert!(
             serde_json::to_string(&input.steered)
                 .unwrap()
                 .contains("saved injected steering")
         );
+        // Every accepted message and claimed context, in order and once, from a
+        // read that together exceeds one relay frame.
+        let mailbox = spec.canonical_session.mailbox.as_ref().unwrap();
+        assert_eq!(
+            mailbox.pending_events,
+            (0..3).map(peer_mail).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            mailbox.prompt_contexts,
+            [(
+                spec.canonical_session.queued_prompts[0].command_id.clone(),
+                claimed_context.clone()
+            )]
+            .into()
+        );
         if protocol >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL {
-            // Every accepted message, in order and once, though together they
-            // exceed one relay frame.
-            let mail = &spec
-                .canonical_session
-                .mailbox
-                .as_ref()
-                .unwrap()
-                .pending_events;
-            let texts: Vec<String> = mail
-                .iter()
-                .map(|event| match &event.body {
-                    mj_core::mailbox::MailboxEventBody::PlainText { text } => text.clone(),
-                    other => panic!("unexpected mailbox body {other:?}"),
-                })
-                .collect();
-            let mail_text = "東京".repeat(mj_core::relay::MAX_FRAME_BYTES / 12);
-            assert_eq!(
-                texts,
-                (0..3)
-                    .map(|index| format!("{index}: {mail_text}"))
-                    .collect::<Vec<_>>()
+            let without_quota_input = mj_core::archive::CanonicalMailbox {
+                quota_input: Default::default(),
+                ..mailbox.clone()
+            };
+            assert!(
+                serde_json::to_vec(&without_quota_input).unwrap().len()
+                    > mj_core::relay::MAX_FRAME_BYTES,
+                "the mailbox fits one relay frame, so it does not exercise paging"
             );
-            assert!(texts.iter().map(String::len).sum::<usize>() > mj_core::relay::MAX_FRAME_BYTES);
         }
         let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
             &spec.canonical_session,
@@ -2479,6 +2496,69 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         )
         .unwrap();
         assert_eq!(seed.mailbox.unwrap().quota_input, *input);
+        // A destination relay restored from the archive admits all of it, and
+        // delivers the wake, claimed context and quota input once while the
+        // peer mail waits for the next prompt.
+        let destination_root = data_directory.join("destination-relay");
+        std::fs::create_dir_all(&destination_root).unwrap();
+        let restored = mj_checkpoint::checkpoint::relay_seed_for_restore(
+            &spec.canonical_session,
+            true,
+            mj_checkpoint::checkpoint::QueueRestorePolicy::Restore,
+        )
+        .unwrap();
+        std::fs::write(
+            mj_core::relay::restored_relay_seed_path(&destination_root),
+            serde_json::to_vec(&restored).unwrap(),
+        )
+        .unwrap();
+        let mut destination =
+            mj_worker::relay::DurableRelay::open(&destination_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        destination
+            .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            destination
+                .operational_state()
+                .undelivered_mailbox_event_keys,
+            ["peer-mail-0", "peer-mail-1", "peer-mail-2"]
+        );
+        let started = destination.claim_pending_commands(true).unwrap();
+        let [started] = started.as_slice() else {
+            panic!("expected only the restored wake to start: {started:?}");
+        };
+        assert_eq!(
+            started.command_id,
+            spec.canonical_session.queued_prompts[0].command_id
+        );
+        assert_eq!(
+            started.command.prompt_blocks().unwrap().into_owned(),
+            wake_prompt
+        );
+        assert_eq!(
+            started
+                .hidden_prompt_context
+                .as_deref()
+                .unwrap()
+                .matches("claimed-context-marker")
+                .count(),
+            1
+        );
+        assert_eq!(
+            started.quota_interrupted_input,
+            [agent_client_protocol::v1::schema::ContentBlock::from(
+                quota_text
+            )]
+        );
+        assert_eq!(
+            destination
+                .operational_state()
+                .undelivered_mailbox_event_keys,
+            ["peer-mail-0", "peer-mail-1", "peer-mail-2"]
+        );
         let discarded = mj_checkpoint::checkpoint::relay_seed_for_restore(
             &spec.canonical_session,
             true,
