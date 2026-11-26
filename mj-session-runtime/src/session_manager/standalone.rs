@@ -969,6 +969,18 @@ impl StandaloneSession {
             .await
     }
 
+    /// The whole mailbox and the queued mailbox wakes' prompts at a ready
+    /// checkpoint barrier's cut (protocol 97).
+    pub async fn read_checkpoint_mailbox_pages(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+    ) -> Result<mj_core::relay::CheckpointMailboxRead> {
+        self.client
+            .read_checkpoint_mailbox_pages(barrier_command_id, cut)
+            .await
+    }
+
     pub async fn read_checkpoint_quota_input(
         &mut self,
         barrier_command_id: String,

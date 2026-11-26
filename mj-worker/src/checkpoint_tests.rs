@@ -407,6 +407,31 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     let pending = vec![parent_mail("first", false), parent_mail("second", false)];
     assert_eq!(mailbox.pending_events, pending);
     assert!(mailbox.delivered_event_keys.contains_key("delivered"));
+    // The paged read serves the same mail from one serialization of the cut.
+    let read_page_at_cut = |relay: &mut DurableRelay| {
+        relay
+            .handle(relay_request(
+                "read-mail-page",
+                RelayRequest::ReadCheckpointMailboxPage {
+                    barrier_command_id: "suspend-barrier".into(),
+                    cut: cut.clone(),
+                    offset: 0,
+                },
+            ))
+            .body
+    };
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::CheckpointMailboxPage {
+                page,
+                next_offset: None,
+            },
+    } = read_page_at_cut(&mut source)
+    else {
+        panic!("the relay refused to page its mail at the ready cut");
+    };
+    let paged: mj_core::relay::CheckpointMailboxRead = serde_json::from_str(&page).unwrap();
+    assert_eq!(paged.mailbox, mailbox);
     // Mail accepted after the cut moves the relay past it, as it would refuse
     // a Close there; the cut's mail can no longer be read.
     submit_relay(
@@ -416,6 +441,11 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     );
     let RelayResponseBody::Error { error } = read_at_cut(&mut source) else {
         panic!("the relay reported mail for a cut it has moved past");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
+    // The serialization the relay cached for the cut is not served past it.
+    let RelayResponseBody::Error { error } = read_page_at_cut(&mut source) else {
+        panic!("the relay paged mail for a cut it has moved past");
     };
     assert_eq!(error.code, RelayErrorCode::InvalidState);
 

@@ -405,6 +405,9 @@ pub struct DurableRelay {
     /// The barrier whose cut background work started after. See
     /// `checkpoint_hold`.
     cut_spoiled_for: Option<String>,
+    /// The serialized mailbox read of the ready barrier's cut. See
+    /// `checkpoint_hold`.
+    checkpoint_mailbox_text: Option<checkpoint_hold::CheckpointMailboxText>,
     /// The background work the relay last saw, to tell work that starts from
     /// work already running. See `checkpoint_hold`.
     known_background_work: BTreeSet<String>,
@@ -1162,6 +1165,7 @@ impl DurableRelay {
             held_writes: VecDeque::new(),
             hold_ended_for: None,
             cut_spoiled_for: None,
+            checkpoint_mailbox_text: None,
             known_background_work: BTreeSet::new(),
             #[cfg(test)]
             stage_snapshot_every_append: false,

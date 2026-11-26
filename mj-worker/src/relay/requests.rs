@@ -340,6 +340,50 @@ impl DurableRelay {
                 }
                 page(best)
             }
+            RelayRequest::ReadCheckpointMailboxPage {
+                barrier_command_id,
+                cut,
+                offset,
+            } => {
+                let text = match self.checkpoint_mailbox_text(barrier_command_id, cut)? {
+                    Ok(text) => text,
+                    Err(message) => {
+                        return Ok(relay_error(
+                            RelayErrorCode::InvalidState,
+                            message,
+                            false,
+                            None,
+                        ));
+                    }
+                };
+                let Some(offset) = usize::try_from(*offset)
+                    .ok()
+                    .filter(|&offset| offset <= text.len() && text.is_char_boundary(offset))
+                else {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidRequest,
+                        "invalid checkpoint mailbox offset",
+                        false,
+                        None,
+                    ));
+                };
+                match checkpoint_hold::checkpoint_mailbox_page(
+                    text,
+                    offset,
+                    &envelope.request_id,
+                    envelope.protocol_version,
+                )? {
+                    Ok(payload) => payload,
+                    Err(message) => {
+                        return Ok(relay_error(
+                            RelayErrorCode::InvalidState,
+                            message,
+                            false,
+                            None,
+                        ));
+                    }
+                }
+            }
             RelayRequest::ReadCheckpointNativeUse {
                 barrier_command_id,
                 cut,
