@@ -554,12 +554,18 @@ impl DashboardState {
         self.refresh_notification_cards();
     }
 
-    pub fn set_conversations_on_screen(&mut self, sessions: impl IntoIterator<Item = String>) {
+    /// Records the conversations the last frame drew; reports whether that
+    /// changed the cards readers see.
+    pub fn set_conversations_on_screen(
+        &mut self,
+        sessions: impl IntoIterator<Item = String>,
+    ) -> bool {
         let sessions: BTreeSet<String> = sessions.into_iter().collect();
-        if self.conversations_on_screen != sessions {
-            self.conversations_on_screen = sessions;
-            self.refresh_notification_cards();
+        if self.conversations_on_screen == sessions {
+            return false;
         }
+        self.conversations_on_screen = sessions;
+        self.refresh_notification_cards()
     }
 
     /// Derives the cards every reader sees from the published ones and this
@@ -569,7 +575,7 @@ impl DashboardState {
     /// is_unread`) to its own frontier instead of showing a card for a
     /// conversation it has already read. Call after anything that changes
     /// either input.
-    pub(crate) fn refresh_notification_cards(&mut self) {
+    pub(crate) fn refresh_notification_cards(&mut self) -> bool {
         let cards = self.published_cards.as_ref().map(|published| {
             let mut cards = published.clone();
             for (id, card) in published.iter() {
@@ -595,8 +601,17 @@ impl DashboardState {
             }
             cards
         });
+        // A skip follows the daemon's card, not this client's filtered view:
+        // a card hidden only while its conversation is on screen keeps its
+        // place behind the others.
+        let published = &self.published_cards;
+        self.notifications.prune_published_skips(|id| {
+            published
+                .as_ref()
+                .is_some_and(|cards| cards.contains_key(id))
+        });
         if self.notification_cards == cards {
-            return;
+            return false;
         }
         if let Some(cards) = &cards {
             for (id, detail) in self.session_details.iter_mut() {
@@ -616,9 +631,8 @@ impl DashboardState {
                 .errors
                 .retain(|id, _| previous.and_then(|cards| cards.get(id)) == cards.get(id));
         }
-        self.notifications
-            .prune_published_skips(|id| cards.as_ref().is_some_and(|cards| cards.contains_key(id)));
         self.notification_cards = cards;
+        true
     }
 
     pub fn set_session_attention_for(
