@@ -13,6 +13,8 @@ The Usage by session dialog currently filters its table to one clock hour. Enabl
 - [x] (2026-11-25) Implement the shared query, exact accounting, quota selection, and HTTP compatibility coverage.
 - [x] (2026-11-25) Implement modifier clicks, range anchor, rendering, and regenerated golden coverage.
 - [x] (2026-11-25) Run targeted boundary tests and affected-crate clippy through the build owner; five focused tests and clippy passed.
+- [x] (2026-11-25) Commit the integrated feature as ef4afc441 and request review.
+- [x] (2026-11-25) Fix accepted review findings: reconcile selections when graph hours roll forward and clear keyboard cursor on Enter; affected TUI golden and clippy passed.
 - [ ] Review the integrated diff, commit, obtain required review, and push to origin/master.
 
 ## Surprises & Discoveries
@@ -33,11 +35,13 @@ Represent the selected set in `SessionUsageQuery.hour_starts_ms: Option<BTreeSet
 
 Keep the graph's 24 bars independent of the selected set. Apply the selection only to report rows and cost, model, role, profile, coverage, and quota totals. Scalar report bounds can describe the enclosing span, but cannot be used alone to count usage within gaps. Preserve graph refresh and request-generation cancellation. Avoid changing generic form controls, stored schemas, build paths, or go/.
 
+Accepted review fixes: a refreshed graph is the owner of which hours are selectable. Reconcile the explicit set with its hour starts when accepting a response; if hours expire, advance the existing request generation and reload the filtered report instead of displaying totals for hidden hours. Clear expired anchors/cursors, and clear the cursor on Enter to restore navigation from the latest bar. This keeps rollover within the existing request lifecycle, with no new background mechanism.
+
 The backend child owns non-TUI code and its boundary tests; the TUI child owns mj-tui changes and the small human documentation passage. Neither builds while both edit. A single validation child will own builds after both slices are ready. The parent owns this plan, final design decisions, integrated review, commits, review requests, and push.
 
 ## Outcomes & Retrospective
 
-Both implementation slices and validation are complete. The initial integrated diff review found no required design changes. The golden and its state/style assertions cover contiguous and discontiguous selections, empty selection, Enter reset, and narrow hit testing. Store and quota checks prove gaps do not count. HTTP checks preserve legacy single-hour requests and distinguish omitted and empty sets. Commit, required review, and push remain.
+The initial feature is committed and its targeted validation passed. Both accepted review findings are corrected and verified: expired selections trigger a fresh request without showing obsolete totals, and Enter resets the navigation cursor immediately. The golden now also covers rollover, stale-response rejection, replacement acceptance and expiry to empty. Store and quota checks prove gaps do not count. HTTP checks preserve legacy single-hour requests and distinguish omitted and empty sets. Another required review and push remain.
 
 ## Context and Orientation
 
@@ -73,6 +77,8 @@ These edits require no stored-data migration or installation. Tests use isolated
 
 Initial checkout was clean on master at ae3157fad. The combined dev-profile clippy passed with `mbx clippy -p brokk-mj-core -p brokk-mj-store -p brokk-mj-accounts -p brokk-mj-server -p brokk-mj-daemon -p brokk-mjolnir -p brokk-mj-tui --all-targets -- -D warnings`. All eight changed Rust files passed `rustup run 1.99.1 rustfmt --edition 2024 --check`; git diff --check passed. Detailed backend/clippy logs are in `.mj/agents/e5aa307e9e1afcf072ab1bbd65ef1e60/` and TUI golden logs in `.mj/agents/e2b42a643e499be2e989ec893c504443/`. These untracked logs are supplementary; all decisive outcomes are recorded above.
 
+Review fixes passed `TZ=UTC mbx test -p brokk-mj-tui golden_dashboard_dialogs` (1 passed, 627 filtered) and `mbx clippy -p brokk-mj-tui --all-targets -- -D warnings`. The expected golden did not change. Supplementary logs are `rollover-golden-test.log` and `rollover-clippy-passed.log` in the TUI child's report directory. Passed backend checks were reused.
+
 ## Interfaces and Dependencies
 
 Use the existing MouseEvent.modifiers, KeyModifiers, Form hit testing, BTreeSet, serde, reqwest query serialization, Axum extraction, SQLite report loader, and quota-history estimator. Add `SessionUsageQuery.hour_starts_ms: Option<BTreeSet<i64>>` with string serialization suitable for an HTTP query. Preserve `hour_start_ms`. Share normalization/interval interpretation between consumers and keep routine helper details near existing usage types. No new dependencies or crate are expected.
@@ -82,3 +88,7 @@ Revision note: Initial plan records the agreed behavior and ownership before imp
 Revision note: Both implementation slices are ready; one build owner now runs the focused validation. Shared interpretation merges adjacent intervals and quota reads one bracketing history to avoid rounding or coverage changes at artificial hour boundaries.
 
 Revision note: All targeted tests, affected-crate clippy, feature formatting and diff checks passed. Record the narrow-modal fixture constraint and the unrelated whole-workspace formatting limitation; proceed to commit and required review.
+
+Revision note: Initial review accepted two interaction fixes. Use the existing request generation to reconcile rolling chart selection and restore Enter's prior keyboard-cursor behavior; rerun only the affected TUI checks.
+
+Revision note: Both accepted review fixes pass the focused TUI golden and clippy. The existing form selection is updated immediately so the next key event is correct even before redraw.

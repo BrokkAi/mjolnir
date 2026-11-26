@@ -1712,6 +1712,70 @@ fn golden_dashboard_dialogs() {
     let (_, query) = usage.session_usage_request().unwrap();
     assert_eq!(query.hour_start_ms, None);
     assert_eq!(query.hour_starts_ms, None);
+    // Enter resets the cursor immediately, even before another render.
+    usage.handle_key(key(KeyCode::Left));
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[22])
+    );
+    usage.handle_key(key(KeyCode::Enter));
+
+    // A refreshed graph can expire selected hours and their range anchor.
+    let oldest = ((column - 2 * pitch) as u16, base_row as u16);
+    click(&mut usage, at(2), KeyModifiers::NONE);
+    click(&mut usage, oldest, KeyModifiers::CONTROL);
+    let (old_request, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.hour_starts_ms, selected(&[0, 2]));
+    let mut rolled = codex_report.clone();
+    rolled.hours.remove(0);
+    let mut newest = *rolled.hours.last().unwrap();
+    newest.start_ms = hour(24);
+    rolled.hours.push(newest);
+    usage.apply_session_usage_result(old_request, Ok(rolled.clone()));
+    let (replacement, query) = usage.session_usage_request().unwrap();
+    assert_ne!(replacement, old_request);
+    assert_eq!(query.hour_starts_ms, selected(&[2]));
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.apply_session_usage_result(old_request, Ok(codex_report.clone()));
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.apply_session_usage_result(replacement, Ok(rolled.clone()));
+    assert_eq!(usage.session_usage_request().unwrap().0, replacement);
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_some()));
+    drawn(&mut usage, 120, 36);
+    // The expired anchor is cleared: Shift establishes a new singleton.
+    click(&mut usage, at(2), KeyModifiers::SHIFT);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[3])
+    );
+    click(&mut usage, oldest, KeyModifiers::CONTROL);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[1, 3])
+    );
+    // Expiring the last member preserves an explicit empty selection.
+    click(&mut usage, oldest, KeyModifiers::NONE);
+    let (old_request, _) = usage.session_usage_request().unwrap();
+    rolled.hours.remove(0);
+    let mut newest = *rolled.hours.last().unwrap();
+    newest.start_ms = hour(25);
+    rolled.hours.push(newest);
+    usage.apply_session_usage_result(old_request, Ok(rolled.clone()));
+    let (replacement, query) = usage.session_usage_request().unwrap();
+    assert_ne!(replacement, old_request);
+    assert_eq!(query.hour_starts_ms, selected(&[]));
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.apply_session_usage_result(replacement, Ok(rolled));
+    assert_eq!(usage.session_usage_request().unwrap().0, replacement);
+    drawn(&mut usage, 120, 36);
+    click(&mut usage, oldest, KeyModifiers::CONTROL);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[2])
+    );
+    usage.handle_key(key(KeyCode::Enter));
+    let (all_request, _) = usage.session_usage_request().unwrap();
+    usage.apply_session_usage_result(all_request, Ok(codex_report.clone()));
     // The full dashboard requires 60 columns; render the modal by itself to
     // exercise hidden-hour mapping at a width where bars actually disappear.
     let mut narrow_terminal = Terminal::new(TestBackend::new(28, 36)).unwrap();

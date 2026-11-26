@@ -110,6 +110,30 @@ impl DashboardState {
         if let Mode::SessionUsageReport(dialog) = &mut self.mode {
             if let Ok(report) = &result {
                 dialog.hours = report.hours.clone();
+                let graph_hours: BTreeSet<_> =
+                    report.hours.iter().map(|hour| hour.start_ms).collect();
+                if dialog
+                    .hour_anchor
+                    .is_some_and(|hour| !graph_hours.contains(&hour))
+                {
+                    dialog.hour_anchor = None;
+                }
+                if dialog
+                    .hour_cursor
+                    .is_some_and(|hour| !graph_hours.contains(&hour))
+                {
+                    dialog.hour_cursor = None;
+                }
+                let visible_hours =
+                    &dialog.hours[dialog.hidden_hours.get().min(dialog.hours.len())..];
+                let cursor = visible_hours
+                    .iter()
+                    .position(|hour| Some(hour.start_ms) == dialog.hour_cursor)
+                    .unwrap_or(visible_hours.len().saturating_sub(1));
+                dialog
+                    .form
+                    .get_mut()
+                    .set_selected(UsageControl::Hours, cursor);
                 dialog.profiles = dialog
                     .profiles
                     .iter()
@@ -118,6 +142,17 @@ impl DashboardState {
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
+                if let Some(selected) = &mut dialog.query.hour_starts_ms {
+                    let before = selected.len();
+                    selected.retain(|hour| graph_hours.contains(hour));
+                    if selected.len() != before {
+                        self.usage_request_generation =
+                            self.usage_request_generation.wrapping_add(1);
+                        dialog.generation = self.usage_request_generation;
+                        dialog.report = None;
+                        return;
+                    }
+                }
             }
             dialog.report = Some(result);
         }
@@ -204,6 +239,14 @@ impl DashboardState {
                 let had_legacy_hour = dialog.query.hour_start_ms.take().is_some();
                 reload = had_selection || had_legacy_hour;
                 dialog.hour_anchor = None;
+                dialog.hour_cursor = None;
+                dialog.form.get_mut().set_selected(
+                    UsageControl::Hours,
+                    dialog
+                        .hours
+                        .len()
+                        .saturating_sub(dialog.hidden_hours.get() + 1),
+                );
             }
             Some(Interaction::Toggle(UsageControl::Suspended)) => {
                 dialog.query.include_suspended = !dialog.query.include_suspended;
