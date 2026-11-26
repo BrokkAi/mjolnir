@@ -450,6 +450,44 @@ impl Default for AwsCliEc2Client {
 }
 
 impl AwsCliEc2Client {
+    /// IPv4 networks admitting SSH, including wider port ranges and all-protocol rules.
+    pub fn describe_ssh_ingress_cidrs(
+        &self,
+        group_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
+    ) -> std::result::Result<Vec<String>, Ec2ApiError> {
+        let response = self.ec2(
+            "describe-security-groups",
+            region,
+            aws_profile,
+            json!({ "GroupIds": [group_id] }),
+        )?;
+        let groups = response["SecurityGroups"].as_array().ok_or_else(|| {
+            Ec2ApiError::Other("describe-security-groups omitted SecurityGroups".into())
+        })?;
+        let mut cidrs = Vec::new();
+        for group in groups {
+            for permission in group["IpPermissions"].as_array().into_iter().flatten() {
+                let protocol = permission["IpProtocol"].as_str();
+                let admits = protocol == Some("-1")
+                    || (matches!(protocol, Some("tcp" | "6"))
+                        && permission["FromPort"]
+                            .as_i64()
+                            .is_some_and(|port| port <= 22)
+                        && permission["ToPort"].as_i64().is_some_and(|port| port >= 22));
+                if admits {
+                    for range in permission["IpRanges"].as_array().into_iter().flatten() {
+                        if let Some(cidr) = range["CidrIp"].as_str() {
+                            cidrs.push(cidr.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(cidrs)
+    }
+
     fn ec2(
         &self,
         operation: &str,

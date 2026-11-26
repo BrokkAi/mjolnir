@@ -1902,7 +1902,7 @@ pub(super) fn raw_checkout_position_with_checkout(
                 ("local-bare", mj_core::state::TargetConnection::Local) => {
                     ManagedWorktreeTarget::Local
                 }
-                ("ssh-bare", mj_core::state::TargetConnection::Ssh { ssh }) => {
+                ("ssh-bare" | "ssh-host-bare", mj_core::state::TargetConnection::Ssh { ssh }) => {
                     let ssh = targets::SshTarget::from(ssh);
                     ManagedWorktreeTarget::Ssh {
                         destination: ssh.destination,

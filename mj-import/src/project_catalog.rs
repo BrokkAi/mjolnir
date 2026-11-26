@@ -202,7 +202,11 @@ fn reconcile_config(
                                     && has_no_recorded_checkout_directory(&state, session)
                             })
                             .filter_map(|session| {
-                                Some((session, state.checkout(&session.id).ok()?))
+                                Some((
+                                    session,
+                                    state.checkout(&session.id).ok()?,
+                                    state.workspace_owner(&session.id).ok(),
+                                ))
                             })
                             .collect::<Vec<_>>(),
                     )?;
@@ -415,7 +419,15 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                     let checkout = stored_state
                         .checkout(&session.id)
                         .unwrap_or_else(|_| session.checkout());
-                    migrate_memory(&project, None, &[(session, checkout)])?;
+                    migrate_memory(
+                        &project,
+                        None,
+                        &[(
+                            session,
+                            checkout,
+                            stored_state.workspace_owner(&session.id).ok(),
+                        )],
+                    )?;
                 }
                 database::bind_session_project(&change.session_id, &id, &project)?;
                 if matches!(target, TargetTemplate::LocalBare) {
@@ -446,7 +458,11 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
 fn migrate_memory(
     project: &ProjectBundleSnapshot,
     bundle: Option<&ProjectBundle>,
-    sessions: &[(&mj_core::state::SessionRecord, mj_core::state::Checkout<'_>)],
+    sessions: &[(
+        &mj_core::state::SessionRecord,
+        mj_core::state::Checkout<'_>,
+        Option<&mj_core::state::SessionRecord>,
+    )],
 ) -> Result<()> {
     use mj_core::project_memory::{
         ProjectMemoryIdentity as Project, RepositoryMemoryIdentity as Repository,
@@ -469,8 +485,23 @@ fn migrate_memory(
             .collect::<Result<Vec<_>>>()?;
         legacy.push(Project::bundle(primary, members).key()?);
     }
-    for (session, checkout) in sessions {
-        legacy.push(Project::for_legacy_session(session, checkout, bundle, None)?.key()?);
+    for (session, checkout, owner) in sessions {
+        let pinned = if session.project.is_none() {
+            let key = database::read_pinned_memory_key(&session.id)?;
+            if key.is_some() {
+                key
+            } else if let Some(owner) = owner.filter(|owner| owner.id != session.id) {
+                database::read_pinned_memory_key(&owner.id)?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        legacy.push(match pinned {
+            Some(key) => key,
+            None => Project::for_legacy_session(session, checkout, bundle, None)?.key()?,
+        });
     }
     for key in legacy {
         for conflict in
@@ -701,9 +732,11 @@ mod tests {
         .unwrap()
         .key()
         .unwrap();
+        let pinned_key = "b".repeat(64);
+        assert_ne!(raw_key, pinned_key);
         let raw_root = mj_core::config::DataLayout::current()
             .projects_dir()
-            .join(raw_key)
+            .join(&pinned_key)
             .join("memory");
         let memory = ProjectMemorySnapshot {
             files: BTreeMap::from([("/notes.md".into(), "Keep this raw-session memory".into())]),
@@ -712,6 +745,7 @@ mod tests {
             .install_snapshot(&memory)
             .unwrap();
         database::save_session(&record).unwrap();
+        database::pin_session_memory_key(&record.id, &pinned_key).unwrap();
 
         let missing = root.path().join("deleted-checkout");
         let nongit = root.path().join("not-a-repository");

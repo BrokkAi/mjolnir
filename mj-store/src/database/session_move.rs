@@ -345,7 +345,7 @@ fn decode_move_operation(
 /// Older Move intents can hold the opt-in in the sealed selection, its
 /// preparation receipt, and the rollback snapshot. Translate those stored
 /// fields at the reader boundary so strict public requests keep one policy.
-fn normalize_stored_move<'a>(
+pub(super) fn normalize_stored_move<'a>(
     connection: &Connection,
     session_id: &str,
     json: &'a str,
@@ -806,7 +806,7 @@ pub fn retired_login_move_active(session_id: &str, operation_id: &str) -> Result
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::database) mod tests {
     use super::*;
     use mj_core::state::{MovePhase, MoveSelection, ResumeQueueDisposition};
 
@@ -873,7 +873,7 @@ mod tests {
         assert_eq!(without_snapshot.selection, restored.selection);
     }
 
-    fn operation(session: &SessionRecord) -> MoveOperation {
+    pub(in crate::database) fn operation(session: &SessionRecord) -> MoveOperation {
         MoveOperation {
             quota_stop_reason: None,
             quota_continuation: None,
@@ -930,6 +930,84 @@ mod tests {
             updated_at: session.updated_at.clone(),
             error: None,
         }
+    }
+
+    #[test]
+    fn migration_preconditions_carry_terminal_moves_and_block_active_or_owned_moves() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.sqlite3");
+        let session = super::super::tests::session("source", "project");
+        save_session_to(&path, &session).unwrap();
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute("DELETE FROM session_targets", [])
+            .unwrap();
+        let mut intent = operation(&session);
+        intent.recovery_session = None;
+        intent.phase = MovePhase::Completed;
+        connection.execute("INSERT INTO session_moves(session_id,operation_id,operation_json) VALUES (?1,?2,?3)", params![session.id,intent.operation_id,serde_json::to_string(&intent).unwrap()]).unwrap();
+        let inspect = || inspect_migration_preconditions(&connection, root.path()).unwrap();
+        let carried = inspect();
+        assert_eq!(carried.carried_moves, 1);
+        assert!(carried.blockers.is_empty(), "{:?}", carried.blockers);
+        intent.phase = MovePhase::Failed;
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?1",
+                [serde_json::to_string(&intent).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(inspect().carried_moves, 1);
+        intent.phase = MovePhase::Cancelled;
+        intent.queue_admission_finished = true;
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?1",
+                [serde_json::to_string(&intent).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(inspect().carried_moves, 1);
+        intent.phase = MovePhase::Capturing;
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?1",
+                [serde_json::to_string(&intent).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(inspect().blockers.len(), 1);
+        intent.phase = MovePhase::Failed;
+        intent.in_place = true;
+        intent.in_place_expected_store_id = Some("worker-store".into());
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?1",
+                [serde_json::to_string(&intent).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(inspect().blockers.len(), 1);
+        let mut legacy = serde_json::to_value(&intent).unwrap();
+        legacy["phase"] = "closing_source".into();
+        legacy["in_place"] = false.into();
+        legacy["selection"] = serde_json::Value::Null;
+        assert!(matches!(
+            StoredMoveOperation::decode_json(&legacy.to_string()).unwrap(),
+            StoredMoveOperation::Legacy(_)
+        ));
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?1",
+                [legacy.to_string()],
+            )
+            .unwrap();
+        assert_eq!(inspect().blockers.len(), 1);
+        legacy["phase"] = "completed".into();
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?1",
+                [legacy.to_string()],
+            )
+            .unwrap();
+        assert_eq!(inspect().carried_moves, 1);
     }
 
     #[test]

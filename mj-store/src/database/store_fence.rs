@@ -11,7 +11,7 @@ use super::*;
 
 /// Where and why a store was fenced. The host and data directory say where the
 /// row was written, so a copy can tell it is not the original.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoreFenceRecord {
     pub destination: String,
     pub fenced_at: String,
@@ -21,6 +21,14 @@ pub struct StoreFenceRecord {
 }
 
 impl StoreFenceRecord {
+    /// Match the source snapshot identity; the optional note is informational.
+    pub fn matches_snapshot(&self, other: &Self) -> bool {
+        self.destination == other.destination
+            && self.fenced_at == other.fenced_at
+            && self.fenced_host == other.fenced_host
+            && self.fenced_data_dir == other.fenced_data_dir
+    }
+
     /// The refusal a daemon or client at `current_data_dir` on this host gets.
     pub fn refusal(&self, current_data_dir: &Path) -> StoreFenced {
         StoreFenced::new(

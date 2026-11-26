@@ -295,6 +295,19 @@ pub(crate) fn session_index_dir_for(
         .map(|data| DataLayout::at(data).sessionwiki_dir())
 }
 
+/// Resolve the SessionWiki database without creating or migrating its directory.
+pub fn session_index_db_path() -> anyhow::Result<PathBuf> {
+    let explicit = std::env::var_os(SESSION_INDEX_ENV);
+    let override_data = env_override_os("DATA_DIR");
+    let default = with_instance_dir(default_data_dir(), instance_name().as_deref());
+    let directory = explicit
+        .map(PathBuf::from)
+        .or_else(|| session_index_dir_for(None, override_data.as_deref(), &default))
+        .or_else(|| dirs::data_dir().map(|root| root.join("sessionwiki")))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine SessionWiki data directory"))?;
+    Ok(directory.join("index.db"))
+}
+
 /// Whether process startup has chosen where the session index lives.
 ///
 /// Only [`apply_instance_flag`] sets this, and only a real Mjolnir binary runs

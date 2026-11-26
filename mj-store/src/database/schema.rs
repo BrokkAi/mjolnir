@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 163;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 164;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3891,6 +3891,23 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
     if version < 163 {
         migrate_host_bare_target_kind(connection)?;
     }
+    // Revision 164 is breaking: older readers ignore pinned legacy project-memory
+    // identities and compute different directories after migration. O(1) DDL.
+    if version < 164 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_memory_keys (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 memory_key TEXT NOT NULL CHECK(length(trim(memory_key)) > 0)
+             ) STRICT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 164 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (164, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=164;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5142,6 +5159,48 @@ mod reader_tests {
     }
 
     #[test]
+    fn memory_key_sidecar_upgrades_163_and_raises_compatibility_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        save_session_to(&path, &super::super::tests::session("kept", "project")).unwrap();
+        stamp_schema_version(&path, 163);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        migrate_schema(&connection, None).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 164);
+        assert_eq!(state.minimum_compatible, Some(164));
+        assert!(state.ensure_supported_by(163).is_err());
+        state.ensure_supported_by(164).unwrap();
+        super::super::pin_session_memory_key_with(&connection, "kept", "pinned").unwrap();
+        assert_eq!(
+            super::super::read_pinned_memory_key_with(&connection, "kept")
+                .unwrap()
+                .as_deref(),
+            Some("pinned")
+        );
+        connection
+            .execute(
+                "UPDATE sessions SET title='old writer' WHERE session_id='kept'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            super::super::read_pinned_memory_key_with(&connection, "kept")
+                .unwrap()
+                .as_deref(),
+            Some("pinned")
+        );
+        connection
+            .execute("DELETE FROM sessions WHERE session_id='kept'", [])
+            .unwrap();
+        assert_eq!(
+            super::super::read_pinned_memory_key_with(&connection, "kept").unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn host_bare_migration_preserves_leases_and_rejects_invalid_rows() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("upgrade.sqlite3");
@@ -5178,7 +5237,7 @@ mod reader_tests {
         migrate_schema(&connection, None).unwrap();
         assert_eq!(
             read_schema_state(&connection).unwrap().minimum_compatible,
-            Some(163)
+            Some(164)
         );
         assert_eq!(
             connection
@@ -6511,7 +6570,7 @@ mod reader_tests {
         let unfenced = directory.path().join("unfenced").join("mj.sqlite3");
         for path in [&fenced, &unfenced] {
             save_session_to(path, &super::super::tests::session("kept", "project")).unwrap();
-            stamp_schema_version(path, SCHEMA_VERSION - 1);
+            stamp_schema_version(path, 161);
         }
         let previous = Connection::open(&fenced).unwrap();
         previous
@@ -6540,7 +6599,7 @@ mod reader_tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(revision, SCHEMA_VERSION - 1, "refused before migrating");
+        assert_eq!(revision, 161, "refused before migrating");
         // Readers still open a fenced store.
         assert!(read_store_fence_at(&fenced).unwrap().is_some());
 
@@ -6548,7 +6607,7 @@ mod reader_tests {
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
-        assert!(state.ensure_supported_by(SCHEMA_VERSION - 1).is_err());
+        assert!(state.ensure_supported_by(161).is_err());
         assert!(
             super::super::store_fence::read_store_fence(&upgraded)
                 .unwrap()
@@ -7359,6 +7418,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 164 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS session_memory_keys;")
+                .unwrap();
+        }
         if version < 163 {
             restore_v162_targets(&connection);
         }

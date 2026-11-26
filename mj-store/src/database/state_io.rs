@@ -122,7 +122,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     load_state_with(&connection, &sessions_root_for(path))
 }
 
-pub(super) fn load_state_with(connection: &Connection, sessions_root: &Path) -> Result<State> {
+pub fn load_state_with(connection: &Connection, sessions_root: &Path) -> Result<State> {
     let mut state = State {
         operator_presence: connection.query_row(
             "SELECT away,revision FROM operator_away WHERE singleton=1",
