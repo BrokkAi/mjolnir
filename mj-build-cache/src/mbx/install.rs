@@ -1517,7 +1517,11 @@ mod tests {
                 local
                     .env
                     .insert("HOME".into(), self.home.to_string_lossy().into_owned());
-                local.env.insert("PATH".into(), "/usr/bin:/bin".into());
+                local.env.insert("SHELL".into(), "/bin/sh".into());
+                local.env.insert(
+                    "PATH".into(),
+                    format!("{}:/usr/bin:/bin", self.home.join("bin").display()),
+                );
                 local.env.insert(
                     "XDG_DATA_HOME".into(),
                     self.home.join("data").to_string_lossy().into_owned(),
@@ -1541,6 +1545,25 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("remote home with quotes '");
         std::fs::create_dir_all(&home).unwrap();
+        #[cfg(unix)]
+        {
+            let tools = home.join("bin");
+            std::fs::create_dir(&tools).unwrap();
+            mj_core::test_hooks::install_fake_command(
+                &tools,
+                "uname",
+                "#!/bin/sh\ncase $1 in -sm) echo 'Linux x86_64';; -m) echo x86_64;; *) exit 1;; esac\n",
+            );
+            if cfg!(target_os = "macos") {
+                // The simulated Linux host has flock; retain the real fd lock
+                // when running its shell script on a Mac without that utility.
+                mj_core::test_hooks::install_fake_command(
+                    &tools,
+                    "flock",
+                    "#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = -x ] && [ \"$2\" = 9 ] || exit 1\nexec /usr/bin/python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'\n",
+                );
+            }
+        }
         let binary = temp.path().join("downloaded-mbx");
         let mut bytes = format!("#!/bin/sh\ncase $1 in --version) echo 'mbx {MBX_VERSION}';; setup) touch \"$HOME/setup-ran\";; esac\n").into_bytes();
         bytes.extend_from_slice(format!("#{}\n", "padding".repeat(20000)).as_bytes());

@@ -1406,6 +1406,7 @@ test('a moved parent keeps 23 native histories without claiming any are working'
   await expect(page.getByRole('heading', { name: 'History and availability unknown' })).toBeVisible();
 });
 
+// Hard-won: fd153196e: an in-flight acceptance snapshot overwrote the mock reconnect update.
 test('suspension remains pending after acceptance and exposes failure after reconnect', async ({ page }) => {
   const state = await mount(page, [session('suspend-me', 'project', 'Project', { capabilities: { suspend: true, destroy: true } })]);
   const current = card(page, 'suspend-me');
@@ -1417,6 +1418,7 @@ test('suspension remains pending after acceptance and exposes failure after reco
   expect(state.actions).toHaveLength(0);
   await current.locator('button[aria-label^="Actions for"]').click();
   await current.getByRole('menuitem', { name: 'Suspend session…' }).click();
+  await page.evaluate(() => { window.fixtureBeforeSuspend = window.fixtureEvents; });
   await dialog.getByRole('button', { name: 'Suspend session', exact: true }).click();
   await expect.poll(() => state.actions.length).toBe(1);
   expect(state.actions[0]).toEqual({
@@ -1426,6 +1428,9 @@ test('suspension remains pending after acceptance and exposes failure after reco
   await expect(current.locator('.session-activity')).toHaveText('Suspending…');
   await current.locator('button[aria-label^="Actions for"]').click();
   await expect(current.getByRole('menuitem', { name: 'Suspend session…' })).toBeDisabled();
+  // The mock stream cannot replay an update after the acceptance refresh replaces it.
+  await expect.poll(() => state.snapshots).toBeGreaterThan(1);
+  await expect.poll(() => page.evaluate(() => window.fixtureEvents !== window.fixtureBeforeSuspend)).toBe(true);
   const saved = state.snapshot.sessions[0];
   saved.launch_error = 'the suspension did not finish: checkpoint unavailable';
   saved.has_error = true;

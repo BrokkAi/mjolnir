@@ -16,6 +16,28 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove the accepted model and/or effort from durable configuration values.
+/// A harness may record a selector under its own option id, which
+/// `AcceptedSessionConfig::from_configuration` also reads, so both go.
+fn retire_selector_values(
+    values: &mut BTreeMap<String, String>,
+    options: &[agent_client_protocol::v1::schema::SessionConfigOption],
+    model: bool,
+    effort: bool,
+) -> bool {
+    let mut changed = false;
+    for (canonical, retire) in [("model", model), ("effort", effort)] {
+        if !retire {
+            continue;
+        }
+        changed |= values.remove(canonical).is_some();
+        if let Some(option) = mj_core::acp::find_session_config_option(options, canonical) {
+            changed |= values.remove(&option.id.to_string()).is_some();
+        }
+    }
+    changed
+}
+
 impl DurableRelay {
     /// Claim destination ownership before recording its identity or changing input.
     pub fn begin_pending_parked_move(&mut self) -> Result<()> {
@@ -69,6 +91,13 @@ impl DurableRelay {
             .map_err(|error| anyhow!("apply parked Move continuation: {}", error.message))?;
         }
         let mut next = self.snapshot.clone();
+        // A Move that starts a fresh native conversation booted without the
+        // accepted pair (`accepted_config_for_boot`). Retire it from the
+        // journal with the Move, or the next worker start restores it (#1704).
+        if parked.discard_native_session_id.is_some() {
+            let options = next.config_options.clone();
+            retire_selector_values(&mut next.config, &options, true, true);
+        }
         if let Some(handoff) = &parked.prompt_context {
             anyhow::ensure!(
                 !handoff.trim().is_empty(),
@@ -101,6 +130,60 @@ impl DurableRelay {
         next.handled_commands
             .insert(marker, self.parked_move_receipt());
         self.commit_snapshot(next)
+    }
+
+    /// Make `launch` the launch the accepted model and effort belong to,
+    /// retiring whatever it makes stale from the journal and from the
+    /// runtime's shared view in one step. Another harness cannot restore this
+    /// harness's model or effort, and a launch that names a new initial model
+    /// supersedes the accepted model.
+    ///
+    /// Call with every committed launch: at worker start, after any committed
+    /// reload has rolled forward, and when a reload commits in this process.
+    /// The journal records the launch it last adopted, so a crash between a
+    /// reload's commit and this call is settled by the next start (#1704).
+    pub fn adopt_launch(
+        &mut self,
+        launch: &mj_core::worker_launch::WorkerLaunchConfig,
+    ) -> Result<()> {
+        let previous = self.snapshot.accepted_launch.clone();
+        let (model, effort) = match &previous {
+            // A journal from before the record: which launch accepted its
+            // pair is unknown, so keep it and start recording.
+            None => (false, false),
+            Some(previous) if previous.harness != launch.harness => (true, true),
+            Some(previous) => (
+                launch.initial_model.is_some() && launch.initial_model != previous.initial_model,
+                false,
+            ),
+        };
+        let adopted = mj_core::relay::AcceptedLaunch {
+            harness: launch.harness,
+            initial_model: launch.initial_model.clone().or_else(|| {
+                previous
+                    .filter(|previous| previous.harness == launch.harness)
+                    .and_then(|previous| previous.initial_model)
+            }),
+        };
+        if self.snapshot.accepted_launch.as_ref() == Some(&adopted) {
+            return Ok(());
+        }
+        let mut next = self.snapshot.clone();
+        let options = next.config_options.clone();
+        retire_selector_values(&mut next.config, &options, model, effort);
+        next.accepted_launch = Some(adopted);
+        self.commit_snapshot(next)?;
+        let mut accepted = self
+            .accepted_config
+            .lock()
+            .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?;
+        if model {
+            accepted.model = None;
+        }
+        if effort {
+            accepted.effort = None;
+        }
+        Ok(())
     }
 
     /// The destination has opened; commit the Move before permitting any work.
