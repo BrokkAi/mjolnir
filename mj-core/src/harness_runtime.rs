@@ -371,10 +371,10 @@ fn dsh_acp_launch_script_with_baked(include_baked: bool) -> String {
     let baked_check = if include_baked {
         let baked = baked_harness_install_dir(Path::new(BAKED_HARNESS_ROOT), HarnessKind::Dsh)
             .join(pin(HarnessKind::Dsh).entrypoint);
+        let baked = crate::target_path::text(&baked);
         format!(
             "elif [ -x '{}' ] && command -v node >/dev/null 2>&1 && {node_check}; then set -- '{}'; ",
-            baked.display(),
-            baked.display()
+            baked, baked
         )
     } else {
         String::new()
@@ -703,6 +703,14 @@ mod tests {
     #[test]
     fn dsh_launch_precedence_is_path_then_baked_then_npx() {
         let script = dsh_acp_launch_script();
+        let baked = format!(
+            "{BAKED_HARNESS_ROOT}/harnesses/{}/{}/{}",
+            HarnessKind::Dsh.id(),
+            pin(HarnessKind::Dsh).install_id,
+            pin(HarnessKind::Dsh).entrypoint
+        );
+        assert!(script.contains(&format!("[ -x '{baked}' ]")));
+        assert!(script.contains(&format!("set -- '{baked}'")));
         assert!(
             script.find("command -v dsh-acp").unwrap() < script.find("/opt/mj-harnesses/").unwrap()
         );

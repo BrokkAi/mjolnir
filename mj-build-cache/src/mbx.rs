@@ -790,7 +790,7 @@ fn parse_native_probe_output(stdout: &[u8]) -> Result<NativeMbx> {
         .next_back()
         .context("mbx version probe gave an empty version")?;
     ensure!(
-        Path::new(program).is_absolute(),
+        mj_core::target_path::is_absolute(Path::new(program)),
         "mbx version probe returned a non-absolute executable path {program:?}"
     );
     Ok(NativeMbx {
@@ -1049,10 +1049,11 @@ pub fn effective_target_root(config_file: &str, directory: &Path) -> PathBuf {
         .map_err(|error| tracing::warn!("the host mbx configuration is unreadable: {error:#}"))
         .ok()
         .and_then(|config| config.target_root);
-    mj_core::target_path::normalize(&match configured {
+    let path = mj_core::target_path::normalize(&match configured {
         Some(root) => mj_core::target_path::join(directory, &root),
         None => directory.join("targets"),
-    })
+    });
+    PathBuf::from(mj_core::target_path::text(&path))
 }
 
 const NEAREST_ANCESTOR_SCRIPT: &str = r#"d=$1
@@ -1081,7 +1082,7 @@ fn nearest_existing_ancestor(
     let output = checked(executor.execute(&command)?, &command)?;
     let path = PathBuf::from(String::from_utf8(output.stdout).context("decode cache ancestor")?);
     ensure!(
-        path.is_absolute(),
+        mj_core::target_path::is_absolute(&path),
         "build cache volume {} is not absolute",
         path.display()
     );
@@ -1787,8 +1788,17 @@ mod tests {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
         let mut mounts = Vec::new();
+        // A Windows controller can share a Linux SSH host's cache, but not
+        // its own local host cache with a Linux container.
+        let target = TargetTemplate::SshPodman {
+            ssh: SshTarget {
+                destination: "builder@linux.test".into(),
+                ssh_args: vec![],
+            },
+            container: container(None),
+        };
         let build_cache = prepare(
-            &podman(None),
+            &target,
             &session(Some("/workspace/session-1")),
             &mut mounts,
             &executor,

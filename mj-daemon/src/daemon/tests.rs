@@ -19095,8 +19095,9 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
     ] {
         let mut record = runtime_test_session(id, &workspace.id, state);
         record.project_directory = Some(data.clone());
+        // This only publishes target records; no worker is started or read.
         record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-            worker_root: data.join(id),
+            worker_root: format!("/mj-test/workers/{id}").into(),
         }));
         mj_controller::database::save_new_session(&record, None, false, false).unwrap();
     }

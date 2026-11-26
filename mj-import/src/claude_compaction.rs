@@ -1193,10 +1193,8 @@ mod tests {
         let inherited = inherited_environment(&host, &vertex);
 
         assert_eq!(
-            inherited["GOOGLE_APPLICATION_CREDENTIALS"],
-            gcloud
-                .join("application_default_credentials.json")
-                .to_string_lossy()
+            Path::new(&inherited["GOOGLE_APPLICATION_CREDENTIALS"]),
+            gcloud.join("application_default_credentials.json")
         );
         assert_eq!(inherited["CLOUD_ML_REGION"], "us-east5");
         assert!(
@@ -1298,6 +1296,7 @@ mod tests {
 
     #[test]
     fn cloud_credential_paths_are_absolute_once_the_cli_runs_in_the_sandbox() {
+        let absolute = std::env::temp_dir().join("already").join("absolute.json");
         let backend = ClaudePrintCompactionBackend::new(
             PathBuf::from("/pinned/claude"),
             &BTreeMap::new(),
@@ -1312,7 +1311,7 @@ mod tests {
                 ("CLAUDE_CODE_USE_BEDROCK", "1"),
                 ("AWS_SHARED_CREDENTIALS_FILE", "relative/credentials"),
                 ("CLOUDSDK_CONFIG", "relative/gcloud"),
-                ("GOOGLE_APPLICATION_CREDENTIALS", "/already/absolute.json"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", absolute.to_str().unwrap()),
             ]),
             auth: ClaudeAuth::Environment,
             choose_model: true,
@@ -1324,10 +1323,13 @@ mod tests {
         for name in ["AWS_SHARED_CREDENTIALS_FILE", "CLOUDSDK_CONFIG"] {
             assert!(Path::new(&environment[name]).is_absolute(), "{name}");
         }
-        assert!(environment["AWS_SHARED_CREDENTIALS_FILE"].ends_with("relative/credentials"));
+        assert!(
+            Path::new(&environment["AWS_SHARED_CREDENTIALS_FILE"])
+                .ends_with(Path::new("relative").join("credentials"))
+        );
         assert_eq!(
-            environment["GOOGLE_APPLICATION_CREDENTIALS"],
-            "/already/absolute.json"
+            Path::new(&environment["GOOGLE_APPLICATION_CREDENTIALS"]),
+            absolute
         );
     }
 
@@ -1338,7 +1340,13 @@ mod tests {
                 "CLAUDE_CODE_EXECUTABLE".to_owned(),
                 "/pinned/claude".to_owned(),
             ),
-            ("PATH".to_owned(), "/pinned/node/bin:/usr/bin".to_owned()),
+            (
+                "PATH".to_owned(),
+                std::env::join_paths(["/pinned/node/bin", "/usr/bin"])
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         ]);
         let candidate = ClaudeCandidate {
             profile_id: "profile".into(),

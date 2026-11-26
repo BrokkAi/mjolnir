@@ -32,7 +32,7 @@ pub(super) fn directory_from_probe(output: CommandOutput) -> Result<PathBuf> {
     let path =
         PathBuf::from(String::from_utf8(output.stdout).context("decode mbx configuration path")?);
     ensure!(
-        path.is_absolute(),
+        mj_core::target_path::is_absolute(&path),
         "host mbx configuration directory is not absolute"
     );
     Ok(path)
