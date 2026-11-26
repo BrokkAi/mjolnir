@@ -579,7 +579,7 @@ fn host_owned_pending_cache_edits_are_discarded_before_saving_from_another_page(
     for (reply_on_cache_page, save_started) in [(true, false), (false, false), (false, true)] {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.config.machines.insert(
-            "builder".into(),
+            mj_core::config::MachineId::new("builder").unwrap(),
             serde_json::from_value(json!({"kind":"ssh", "host":"builder"})).unwrap(),
         );
         dashboard.begin_setup();
@@ -691,7 +691,7 @@ fn mbx_install_completion_refreshes_its_machine_after_navigation() {
     {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.config.machines.insert(
-            "builder".into(),
+            mj_core::config::MachineId::new("builder").unwrap(),
             serde_json::from_value(json!({"kind":"ssh", "host":"builder"})).unwrap(),
         );
         dashboard.begin_setup();

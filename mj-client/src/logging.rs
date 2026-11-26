@@ -240,14 +240,14 @@ impl Write for DeferredLogFile {
 
 impl ControllerLog {
     pub fn start(command: &'static str, kind: ProcessKind) -> Result<Self> {
-        let data_dir = mj_core::config::data_dir();
-        let directory = data_dir.join("logs");
+        let layout = mj_core::config::DataLayout::current();
+        let directory = layout.logs_dir();
         if let Err(error) =
             mj_core::config::create_owner_only_directory(&directory).and_then(|()| {
                 prune_logs(
                     &directory,
                     RETAINED_LOGS.saturating_sub(1),
-                    current_daemon_pid(&data_dir),
+                    current_daemon_pid(layout.root()),
                 )
                 .with_context(|| format!("prune diagnostic logs in {}", directory.display()))
             })
@@ -314,7 +314,7 @@ fn log_filename(kind: ProcessKind) -> String {
 /// an error: absence just means no daemon has started under this data
 /// directory yet, or its metadata predates this process.
 fn current_daemon_pid(data_dir: &Path) -> Option<u32> {
-    let path = data_dir.join("daemon.json");
+    let path = mj_core::config::DataLayout::at(data_dir).daemon_json();
     let body = fs::read(path).ok()?;
     let metadata: crate::daemon::DaemonMetadata = serde_json::from_slice(&body).ok()?;
     Some(metadata.pid)
@@ -346,7 +346,7 @@ fn log_timestamp(name: &str) -> Option<String> {
 }
 
 pub fn daemon_log_path(data_dir: &Path, pid: u32) -> Result<Option<PathBuf>> {
-    let directory = data_dir.join("logs");
+    let directory = mj_core::config::DataLayout::at(data_dir).logs_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

@@ -403,7 +403,7 @@ mod tests {
              VALUES ('root','recent',1,?1)",
             [&body],
         )?;
-        schema::migrate_schema(&connection)?;
+        schema::migrate_schema(&connection, None)?;
         schema::read_schema_state(&connection)?
             .ensure_supported_by(super::super::SCHEMA_VERSION)?;
 
@@ -509,7 +509,7 @@ mod tests {
         )?;
         let floor = schema::read_schema_state(&connection)?.minimum_compatible;
         // Test revision 135's compatibility before the separate brief fence.
-        let error = schema::migrate_schema(&connection).unwrap_err();
+        let error = schema::migrate_schema(&connection, None).unwrap_err();
         assert!(
             error
                 .to_string()

@@ -941,7 +941,7 @@ mod tests {
         use mj_core::state::SessionState;
         let mut config = Config::default();
         for id in ["source", "destination"] {
-            let home = mj_core::config::data_dir().join(id);
+            let home = mj_core::config::DataLayout::current().root().join(id);
             std::fs::create_dir_all(&home).unwrap();
             config
                 .profiles
@@ -950,7 +950,9 @@ mod tests {
         let workspace = mj_core::workspace::DEFAULT_WORKSPACE_ID;
         let mut parent = runtime_test_session("parent-session", workspace, SessionState::Running);
         parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join("parent-session"),
+            worker_root: mj_core::config::DataLayout::current()
+                .root()
+                .join("parent-session"),
         }));
         let mut owner = runtime_test_session("owner-session", workspace, SessionState::Parked);
         owner.harness_kind = HarnessKind::Claude;
@@ -958,12 +960,16 @@ mod tests {
         config
             .targets
             .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
-        let checkout = mj_core::config::data_dir().join("checkout");
+        let checkout = mj_core::config::DataLayout::current()
+            .root()
+            .join("checkout");
         std::fs::create_dir_all(&checkout).unwrap();
         parent.project_directory = Some(checkout.clone());
         owner.project_directory = Some(checkout);
         owner.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join("owner-session"),
+            worker_root: mj_core::config::DataLayout::current()
+                .root()
+                .join("owner-session"),
         }));
         mj_controller::database::save_session(&parent).unwrap();
         mj_controller::database::register_subagent_with_startup(

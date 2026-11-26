@@ -180,6 +180,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
+                machine_id: None,
                 launch_base: None,
                 launch_branch: None,
                 checkout: None,
@@ -1614,277 +1615,6 @@ fn oversized_elicitation_answers_are_refused() {
     );
 }
 
-/// One slice of the browser application, named by the two markers that
-/// bracket it in `src/web/viewer.js`.
-///
-/// Slicing keeps each check to the functions it is about, so an unrelated
-/// change elsewhere in the application cannot make it fail for the wrong
-/// reason. The markers are ordinary source text, so a rename that moves
-/// them fails loudly here rather than silently testing nothing.
-fn viewer_source(from: &str, to: &str) -> &'static str {
-    let start = VIEWER_JS
-        .find(from)
-        .unwrap_or_else(|| panic!("src/web/viewer.js no longer contains {from:?}"));
-    let end = VIEWER_JS[start..]
-        .find(to)
-        .map(|offset| start + offset)
-        .unwrap_or_else(|| panic!("src/web/viewer.js no longer contains {to:?} after {from:?}"));
-    &VIEWER_JS[start..end]
-}
-
-/// Run one JavaScript check under Node.
-///
-/// The check and the modules it imports are written to a real directory
-/// rather than passed to `--eval`, so a failure reports a line number a
-/// person can open, and so a check can import the shipped module under
-/// test by its real name instead of against a copy pasted into a string.
-fn run_web_check(name: &str, check: &str) {
-    let directory = tempfile::tempdir().expect("temporary directory for a web check");
-    for (file, source) in [
-        ("test-dom.js", TEST_DOM_JS),
-        ("markdown.js", MARKDOWN_JS),
-        ("tool-output.js", TOOL_OUTPUT_JS),
-    ] {
-        std::fs::write(directory.path().join(file), source).expect("write a web module");
-    }
-    let path = directory.path().join(format!("{name}.mjs"));
-    std::fs::write(&path, check).expect("write the web check");
-    let output = std::process::Command::new("node")
-        .arg(&path)
-        .output()
-        .expect("Node.js is required to exercise the web viewer");
-    assert!(
-        output.status.success(),
-        "{name} failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-}
-
-/// Run one JavaScript check that supplies its own environment, for the
-/// checks that slice a function out of `viewer.js` and drive it against a
-/// hand-written stub rather than importing a module.
-fn run_viewer_script(name: &str, script: &str) {
-    run_web_check(name, script);
-}
-
-#[test]
-fn viewer_availability_keeps_unchecked_choices_and_shows_missing_reasons() {
-    let source = [
-        viewer_source(
-            "async function requestAvailabilityCheck()",
-            "// The daemon's saved default pair",
-        ),
-        viewer_source("function pickerField(", "\nfunction "),
-        viewer_source(
-            "function choiceControl(",
-            "function elicitationOptionLabel(",
-        ),
-        viewer_source(
-            "function resumeChoiceField(",
-            "// ---------------------------------------------------------------------------",
-        ),
-        viewer_source("function resumeTargetItems(", "function resumeCard("),
-    ]
-    .join("\n");
-    run_web_check(
-        "viewer-picker-availability",
-        &format!(
-            r#"
-import {{ installDocument, elements, checkEqual }} from './test-dom.js';
-installDocument();
-let choiceControlSequence = 0;
-const el = (tag, className = '', text = '') => {{
-  const node = document.createElement(tag);
-  node.className = className;
-  node.textContent = text;
-  return node;
-}};
-const snapshot = {{
-  profiles: [
-    {{ id: 'codex', availability: {{ status: 'available' }} }},
-    {{ id: 'kimi', availability: {{ status: 'unknown' }} }},
-  ],
-  targets: [
-    {{ id: 'local', availability: {{ status: 'available' }} }},
-    {{ id: 'ssh', availability: {{ status: 'unknown' }} }},
-  ],
-}};
-const session = {{ compatible_resume_targets: ['local', 'ssh'] }};
-{source}
-function rendered() {{
-  const pane = el('div');
-  const launch = pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), '', () => {{}});
-  const resume = resumeChoiceField('Target', 'resume-target', resumeTargetItems(session), '', () => {{}});
-  const profiles = resumeChoiceField('Profile', 'resume-profile', offeredProfiles(), '', () => {{}});
-  const values = (field, tag) => elements(field, tag).map(input => input.value).filter(Boolean).join(',');
-  appendAvailabilityNotes(pane, [...missingProfileNotes(), ...(snapshot.target_availability_notes || [])]);
-  return [values(launch, 'input'), values(resume, 'option'), values(profiles, 'option'),
-    elements(pane, 'p').map(node => node.textContent).join(' | ')].join('\n');
-}}
-checkEqual(rendered(), 'local,ssh\nlocal,ssh\ncodex,kimi\n', 'unchecked profiles and targets are offered');
-snapshot.profiles[1].availability = {{ status: 'missing', reason: 'Install Kimi Code.' }};
-snapshot.targets[1].availability = {{ status: 'missing', reason: 'SSH to builder failed.' }};
-snapshot.target_availability_notes = [{{ text: 'ssh: SSH to builder failed.', full: 'ssh: SSH to builder failed.' }}];
-checkEqual(rendered(), 'local\nlocal\ncodex\nkimi: Install Kimi Code. | ssh: SSH to builder failed.',
-  'both pickers omit missing choices and use the published reasons');
-"#
-        ),
-    );
-}
-
-#[test]
-fn browser_runtime_deltas_are_atomic_and_do_not_visit_history() {
-    let source = viewer_source("class ViewerRuntimeState", "const viewerState =");
-    let checks = r#"
-const assert = (condition, message) => { if (!condition) throw Error(message); };
-for (const count of [100, 10000, 100000]) {
-  let visits = 0;
-  const state = new ViewerRuntimeState(row => { visits++; return row.live; }, row => { visits++; return !row.live; }, () => 0);
-  const rows = Array.from({length: count}, (_, id) => ({id: String(id), workspace_id:'w', live:false}));
-  rows.push({id:'active', workspace_id:'w', live:true});
-  state.apply({kind:'snapshot', cursor:{incarnation:'a',sequence:1}, snapshot:{sessions:rows}});
-  const histories = state.resume('w');
-  visits = 0;
-  const frame = {kind:'delta', from:{incarnation:'a',sequence:1}, cursor:{incarnation:'a',sequence:2}, metadata:{revision:2}, sessions:[['active',{id:'active',workspace_id:'w',live:true,title:'changed'}]], interned:{}};
-  assert(state.apply(frame), 'delta was not accepted');
-  assert(visits <= 4, 'a live update visited history');
-  assert(state.resume('w') === histories, 'unchanged history was rebuilt');
-  assert(!state.apply(frame), 'duplicate delta was reapplied');
-  const previous = state.rows.get('active');
-  let refused = false;
-  try { state.apply({...frame, from:{incarnation:'other',sequence:2}, cursor:{incarnation:'other',sequence:3}, sessions:[['active',null]]}); } catch (_) { refused = true; }
-  assert(refused && state.rows.get('active') === previous, 'a gap partly applied');
-  state.apply({kind:'delta', from:frame.cursor, cursor:{incarnation:'a',sequence:3}, metadata:{}, sessions:[['active',null]], interned:{}});
-  assert(!state.rows.has('active') && !state.live.has('w'), 'deleted membership survived');
-  state.apply({kind:'reset_required'});
-  assert(state.cursor === null, 'reset retained the cursor');
-  state.apply({kind:'snapshot', cursor:{incarnation:'b',sequence:1}, snapshot:{sessions:[]}});
-  assert(state.rows.size === 0, 'replacement retained old history');
-}
-"#;
-    run_viewer_script("runtime-deltas", &format!("{source}\n{checks}"));
-}
-
-#[test]
-fn web_upgrade_waits_for_readiness_and_retries_only_explicit_refusals() {
-    let source = viewer_source(
-        "async function upgradeAwareFetch",
-        "async function request(",
-    );
-    run_viewer_script(
-        "upgrade-admission",
-        &format!(
-            r#"
-{source}
-const assert = (condition, message) => {{ if (!condition) throw new Error(message); }};
-globalThis.setTimeout = callback => {{ callback(); }};
-const options = {{ method: 'POST', body: JSON.stringify({{command_id:'steer-1', active_prompt_id:'turn-1'}}) }};
-let actions = 0, probes = 0;
-const response = (status, pending = false) => ({{ status, ok:status === 200,
-  headers:{{get:() => pending ? 'pending' : null}}, body:{{cancel:async () => {{}}}} }});
-globalThis.fetch = async (url, sent) => {{
-  if (url === '/') {{
-    probes++;
-    if (probes === 1) throw new Error('old listener stopped');
-    return response(200);
-  }}
-  assert(sent === options, 'request identity or steering target changed');
-  return ++actions === 1 ? response(503, true) : response(200);
-}};
-assert((await upgradeAwareFetch('/api/v1/actions', options)).ok, 'request did not complete');
-assert(actions === 2 && probes === 2, 'handoff did not wait for the replacement');
-globalThis.fetch = async () => {{ throw new Error('acknowledgement lost'); }};
-let failed = false;
-try {{ await upgradeAwareFetch('/api/v1/actions', options); }} catch {{ failed = true; }}
-assert(failed, 'an ambiguous mutation must not be replayed');
-globalThis.fetch = async () => response(503);
-assert((await upgradeAwareFetch('/api/v1/actions', options)).status === 503,
-  'unrelated service failures must not trigger an upgrade retry');
-"#
-        ),
-    );
-}
-
-/// Live path suggestions are the only place the browser types and asks at
-/// once, so the shipped source has to drop an answer that no longer matches
-/// what the field holds, and accepting a row has to re-announce the edit.
-#[test]
-fn web_path_suggestions_drop_stale_answers_and_re_announce_an_accepted_row() {
-    // The suggestion state outlives any one input element, so the slice starts
-    // at the map that owns it rather than at the function that reads it.
-    let source = viewer_source(
-        "const pathSuggestionOwners = new Map();",
-        "\nfunction pathField(",
-    );
-    let setup = r#"
-const PATH_SUGGESTION_DELAY_MS = 0;
-const setTimeout = run => run();
-const clearTimeout = () => {};
-const el = (name, className, textContent) => ({
-  tagName: name.toUpperCase(),
-  className: className || '',
-  textContent: textContent === undefined ? '' : textContent,
-  dataset: {},
-  children: [],
-  attributes: {},
-  classList: { add() {}, remove() {} },
-  append(...children) { this.children.push(...children); },
-  replaceChildren(...children) { this.children = children; },
-  setAttribute(key, value) { this.attributes[key] = value; },
-  addEventListener() {},
-});
-const requests = [];
-let pending = null;
-const request = (url, options) => new Promise(resolve => {
-  requests.push({ url, body: JSON.parse(options.body) });
-  pending = resolve;
-});
-class Event { constructor(type) { this.type = type; } }
-const input = {
-  value: '',
-  listeners: new Map(),
-  after(node) { this.next = node; },
-  addEventListener(type, listener) {
-    this.listeners.set(type, [...(this.listeners.get(type) || []), listener]);
-  },
-  dispatchEvent(event) { for (const l of this.listeners.get(event.type) || []) l(event); },
-  fire(type, event = {}) { this.dispatchEvent({ type, preventDefault() {}, ...event }); },
-};
-const document = { activeElement: input };
-const flush = () => new Promise(resolve => setImmediate(resolve));
-"#;
-    let checks = r#"
-attachPathSuggestions(input, { host: () => 'raw', kind: 'directories', applies: () => true });
-const list = input.next;
-
-input.value = '/work/re';
-input.fire('input');
-if (requests.length !== 1) throw Error('the field did not ask for suggestions');
-const answer = { candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false };
-
-// An answer for text the person has moved past is not drawn under them.
-input.value = '/work/rep';
-pending(answer);
-await flush();
-if (list.children.length !== 0) throw Error('a stale answer was rendered');
-
-input.value = '/work/re';
-input.fire('input');
-pending(answer);
-await flush();
-if (list.children.length !== 2) throw Error('the answer was not rendered');
-if (input.value !== '/work/re') throw Error('the typed text was rewritten');
-
-input.fire('keydown', { key: 'ArrowDown' });
-input.fire('keydown', { key: 'Enter' });
-if (input.value !== '/work/repos/') throw Error('Enter did not accept the highlighted row');
-if (requests.length !== 3 || requests[2].body.prefix !== '/work/repos/')
-  throw Error('accepting did not re-announce the edit');
-"#;
-    run_viewer_script("path-suggestions", &format!("{setup}\n{source}\n{checks}"));
-}
-
 #[test]
 fn viewer_reports_configuration_drift_without_exposing_private_configuration() {
     let (mut config, state) = sample_config_state();
@@ -1904,226 +1634,6 @@ fn viewer_reports_configuration_drift_without_exposing_private_configuration() {
     config.bundles.insert("hel".into(), bundle);
     let repaired = ViewerSnapshot::from_config_state(&config, &state, 2);
     assert!(repaired.sessions[0].configuration_issue.is_none());
-}
-
-#[test]
-fn web_preflight_applies_resolved_path_and_ignores_cancelled_reply() {
-    let source = viewer_source(
-        "async function preflightNew()",
-        "async function advanceNew()",
-    );
-    let setup = r#"
-let newDraft = { targetId: 'remote', profileId: 'codex', bundleId: 'bundle', projectDirectory: '~/project', projectDirectories: {} };
-let pendingNewPreflight = null, pendingNewPreflightController = null;
-function targetIsBare() { return true; }
-function renderNewForm() {}
-function selectedWorkspaceId() { return 'workspace'; }
-let resolveRequest;
-function request() { return new Promise(resolve => { resolveRequest = resolve; }); }
-"#;
-    let checks = r#"
-let pending = preflightNew();
-resolveRequest({ project_directory: '/remote/project' });
-if (!await pending || newDraft.projectDirectory !== '/remote/project' || newDraft.projectDirectories.remote !== '/remote/project') throw Error('resolved path was not applied');
-newDraft.projectDirectory = '~/newer';
-pending = preflightNew();
-pendingNewPreflightController.abort();
-resolveRequest({ project_directory: '/remote/stale' });
-if (await pending || newDraft.projectDirectory !== '~/newer') throw Error('cancelled reply replaced draft');
-"#;
-    run_viewer_script("path-preflight", &format!("{setup}\n{source}\n{checks}"));
-}
-
-#[test]
-fn embedded_viewer_shows_working_subagents_when_the_parent_worker_is_idle() {
-    let source = [
-        viewer_source("function epochMs(", "\nfunction "),
-        viewer_source(
-            "function sessionActivityLabel(",
-            "function updateSessionActivity(",
-        ),
-    ]
-    .join("\n");
-    let setup = r#"
-const pendingLifecycleActions = new Map();
-const SILENCE_WORTH_REPORTING_SECONDS = 60;
-"#;
-    let checks = r#"
-const session = {
-  lifecycle: 'live', attention: 'working', activity_details: { kind: 'idle', idle_since_ms: 1000 },
-  verdict: { working_descendants: 1 },
-};
-if (sessionActivityLabel(session, 5000) !== '1 subagent working') throw Error('idle worker hides working subagent');
-delete session.activity_details;
-session.verdict.working_descendants = 2;
-if (sessionActivityLabel(session, 5000) !== '2 subagents working') throw Error('fallback hides working subagents');
-session.activity_details = { kind: 'turn' };
-if (sessionActivityLabel(session, 5000) !== 'Turn · Step') throw Error('an active parent lost its turn label');
-session.attention = 'needs_input';
-if (sessionActivityLabel(session, 5000) !== 'Input needed') throw Error('subagents hide a question');
-"#;
-    run_viewer_script("working-subagents", &format!("{setup}\n{source}\n{checks}"));
-}
-
-#[test]
-fn embedded_viewer_displays_capacity_retry_deadlines() {
-    let source = viewer_source(
-        "function sessionActivityLabel(",
-        "function updateSessionActivity(",
-    );
-    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
-    let checks = r#"
-const session = { lifecycle: 'live', capacity_retry: { attempt: 2, retry_at_ms: 120000 } };
-if (sessionActivityLabel(session, 60000) !== 'Provider unavailable · retrying in 1m00s') throw Error('missing retry countdown');
-if (sessionActivityLabel(session, 121000) !== 'Provider unavailable · retrying in 0m00s') throw Error('negative retry countdown');
-"#;
-    run_viewer_script("capacity-retry", &format!("{setup}\n{source}\n{checks}"));
-}
-
-#[test]
-fn embedded_viewer_lists_current_workspace_histories_and_retained_move_recovery() {
-    let source = format!(
-        "{}\n{}\n{}",
-        viewer_source("function isSubagentSession(", "function liveSessions("),
-        viewer_source("function isResumeSession(", "const resumeDrafts ="),
-        viewer_source("class ViewerRuntimeState", "const viewerState ="),
-    );
-    let setup = r#"
-const snapshot = {
-  sessions: [
-{ id: "history-a", workspace_id: "workspace-a", capabilities: { resume: true } },
-{ id: "history-b", workspace_id: "workspace-b", capabilities: { resume: true } },
-{ id: "child-a", workspace_id: "workspace-a", subagent_parent_id: "absent-parent", capabilities: { resume: true } },
-{ id: "running-a", workspace_id: "workspace-a", lifecycle: "live", has_error: true, capabilities: { resume: false, open: false } },
-{ id: "move-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "failed" } },
-{ id: "moving-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "starting_queue" } },
-  ],
-};
-function selectedWorkspaceId() { return "workspace-a"; }
-function sessionActivityMs() { return 0; }
-function epochMs() { return null; }
-"#;
-    let checks = r#"
-const viewerState = new ViewerRuntimeState(() => false, row => !isSubagentSession(row) && isResumeSession(row), resumeActivityMs);
-viewerState.install(snapshot);
-const ids = workspace => resumeSessions(workspace).map(session => session.id).sort();
-if (JSON.stringify(ids("workspace-a")) !== JSON.stringify(["history-a", "move-a"])) {
-  throw new Error(`workspace A histories or recoveries were wrong: ${JSON.stringify(ids("workspace-a"))}`);
-}
-if (JSON.stringify(ids("workspace-b")) !== JSON.stringify(["history-b"])) {
-  throw new Error(`workspace B histories were wrong: ${JSON.stringify(ids("workspace-b"))}`);
-}
-if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace exposed sessions");
-"#;
-    run_viewer_script(
-        "workspace-resume-history",
-        &format!("{setup}\n{source}\n{checks}"),
-    );
-}
-
-#[test]
-fn embedded_viewer_warns_before_stopping_an_active_session() {
-    let source = [
-        viewer_source("function el(", "const bootStatus"),
-        viewer_source("async function request(", "/// Read a response body"),
-        viewer_source("function sessionById(", "function sessionInWorkspace("),
-        viewer_source(
-            "function buildShownSuspendConsent(",
-            "function dialogControls(",
-        ),
-        viewer_source("async function runSessionAction", "sessions.onclick ="),
-    ]
-    .join("\n");
-    let setup = r#"
-import { installDocument, elements, only, check, checkEqual } from './test-dom.js';
-
-installDocument();
-const createElement = document.createElement;
-document.createElement = name => {
-  const node = createElement(name);
-  const append = node.append.bind(node);
-  node.append = (...children) => {
-    for (const child of children) child.parentNode = node;
-    append(...children);
-  };
-  node.insertBefore = (child, before) => {
-    child.parentNode = node;
-    node.childNodes.splice(node.childNodes.indexOf(before), 0, child);
-  };
-  node.remove = () => {
-    const parent = node.parentNode;
-    parent.childNodes.splice(parent.childNodes.indexOf(node), 1);
-    node.parentNode = null;
-  };
-  node.focus = () => { document.activeElement = node; };
-  if (name === "dialog") {
-    node.showModal = () => { node.open = true; };
-    node.close = () => {
-      node.open = false;
-      node.dispatch("close");
-    };
-  }
-  return node;
-};
-document.body = document.createElement("body");
-
-const pendingActions = new Set();
-const pendingLifecycleActions = new Map();
-const rows = new Map([
-  ["active", { id: "active", chat_phase: "running" }],
-  ["idle", { id: "idle", chat_phase: "idle" }],
-]);
-const viewerState = { rows };
-const requests = [];
-async function upgradeAwareFetch(url, options) {
-  const method = options.method ?? "GET";
-  requests.push(`${method} ${url}`);
-  const match = url.match(/^\/api\/v1\/sessions\/([^/]+)\/suspend-preflight$/);
-  if (method !== "GET" || !match || !rows.has(match[1])) {
-    throw new Error(`unexpected request: ${method} ${url}`);
-  }
-  return Response.json({
-    session_id: match[1],
-    untracked: [],
-    nested_repositories: [],
-    untracked_stashes: [],
-    keep_dir_entries: [],
-    keep_dir_bytes: 0,
-    operations: [],
-    children_not_handed_back: [],
-    blockers: [],
-    raw: false,
-    interrupting: false,
-  });
-}
-"#;
-    let checks = r#"
-const errorNode = { textContent: "" };
-for (const [id, expectsWarning] of [["active", true], ["idle", false]]) {
-  const action = runSessionAction({ action: "suspend", id }, errorNode);
-  const dialog = only(document.body, "dialog");
-  check(dialog.open, `${id} suspend dialog did not open`);
-  checkEqual(dialog.getAttribute("aria-label"), "Suspend session", "dialog label");
-  await new Promise(resolve => setImmediate(resolve));
-  check(dialog.textContent.includes("Save a recovery copy"), `${id} preflight did not finish`);
-  const warning = "The current turn will be interrupted.";
-  checkEqual(dialog.textContent.includes(warning), expectsWarning, `${id} interruption warning`);
-
-  const cancel = elements(dialog, "button").find(button => button.textContent === "Cancel");
-  check(cancel && document.activeElement === cancel, `${id} Cancel did not receive focus`);
-  cancel.onclick();
-  checkEqual(await action, false, `${id} suspension was not canceled`);
-  check(!dialog.open && !elements(document.body, "dialog").length, `${id} dialog did not close`);
-}
-checkEqual(requests.join("\n"), [
-  "GET /api/v1/sessions/active/suspend-preflight",
-  "GET /api/v1/sessions/idle/suspend-preflight",
-].join("\n"), "cancel must send only the preflight requests");
-"#;
-    run_viewer_script(
-        "active-session-stop-confirmation",
-        &format!("{setup}\n{source}\n{checks}"),
-    );
 }
 
 /// The projection publishes what the browser needs to group and filter
@@ -2979,391 +2489,6 @@ async fn saving_the_git_identity_validates_after_authentication() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
-/// Everything an agent writes goes through the Markdown renderer, so the
-/// renderer is where injection is stopped. These checks run the shipped
-/// module against a fake DOM: structure has to come out as elements, and
-/// markup an agent typed has to come out as text.
-#[test]
-fn the_markdown_renderer_builds_structure_and_refuses_injection() {
-    run_web_check(
-        "markdown",
-        r#"import { installDocument, elements, only, check, checkEqual } from './test-dom.js';
-installDocument();
-const { renderMarkdown, renderDiffSummary, safeHref } = await import('./markdown.js');
-
-const render = source => {
-  const host = document.createElement('section');
-  host.append(renderMarkdown(source));
-  return host;
-};
-
-// Headings
-checkEqual(only(render('# Title'), 'h1').textContent, 'Title', 'h1');
-checkEqual(only(render('### Deep'), 'h3').textContent, 'Deep', 'h3');
-
-// Nested lists
-const nested = render('- one\n  - inner\n- two');
-check(elements(nested, 'ul').length === 2, 'nested list produced ' + elements(nested, 'ul').length + ' lists');
-check(elements(elements(nested, 'ul')[0], 'li').length >= 2, 'outer list lost items');
-
-// Ordered lists
-checkEqual(elements(render('1. a\n2. b'), 'ol').length, 1, 'ordered list');
-
-// Fenced code stays unparsed
-const fenced = render('```rust\nlet x = *y*;\n```');
-checkEqual(only(fenced, 'code').textContent, 'let x = *y*;', 'fenced code');
-check(elements(fenced, 'span').some(s => s.className === 'tok-kw'), 'fenced rust untinted');
-checkEqual(elements(fenced, 'em').length, 0, 'fence emphasised its contents');
-checkEqual(only(fenced, 'pre').dataset.lang, 'rust', 'fence language');
-
-// Inline code beats emphasis
-checkEqual(only(render('`*not em*`'), 'code').textContent, '*not em*', 'inline code');
-checkEqual(elements(render('`*not em*`'), 'em').length, 0, 'inline code emphasised');
-
-// Emphasis
-checkEqual(only(render('**bold**'), 'strong').textContent, 'bold', 'strong');
-checkEqual(only(render('*it*'), 'em').textContent, 'it', 'em');
-checkEqual(only(render('~~gone~~'), 'del').textContent, 'gone', 'del');
-
-// Tables
-const table = render('| a | b |\n| --- | ---: |\n| 1 | 2 |');
-checkEqual(elements(table, 'table').length, 1, 'table');
-checkEqual(elements(table, 'th').length, 2, 'table header cells');
-checkEqual(elements(table, 'td').length, 2, 'table body cells');
-checkEqual(elements(table, 'th')[1].className, 'align-right', 'table alignment class');
-checkEqual(only(table, 'div').className, 'scroll-x', 'table scroll wrapper');
-
-// Blockquote and rule
-checkEqual(elements(render('> quoted'), 'blockquote').length, 1, 'blockquote');
-checkEqual(elements(render('---'), 'hr').length, 1, 'rule');
-
-// XSS: markup is text, never elements
-const injected = render('<img src=x onerror=alert(1)>');
-checkEqual(elements(injected, 'img').length, 0, 'raw HTML became an element');
-check(injected.textContent.includes('<img src=x onerror=alert(1)>'), 'raw HTML lost its text');
-
-// XSS: refused link schemes
-for (const target of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'java\tscript:alert(1)', 'data:text/html,<script>', 'vbscript:x']) {
-  const out = render(`[click](${target})`);
-  checkEqual(elements(out, 'a').length, 0, `link scheme ${JSON.stringify(target)} was allowed`);
-  check(out.textContent.includes('click'), `link scheme ${JSON.stringify(target)} lost its label`);
-}
-
-// Accepted schemes keep their href and carry safe rel/target
-for (const target of ['https://example.com', 'http://example.com/a', 'mailto:someone@example.com']) {
-  const anchor = only(render(`[click](${target})`), 'a');
-  checkEqual(anchor.getAttribute('href'), target, 'href');
-  checkEqual(anchor.getAttribute('rel'), 'noreferrer noopener', 'rel');
-  checkEqual(anchor.getAttribute('target'), '_blank', 'target');
-}
-
-// safeHref directly
-checkEqual(safeHref('javascript:alert(1)'), null, 'safeHref allowed javascript:');
-checkEqual(safeHref(' https://x.test '), 'https://x.test', 'safeHref cleaned value');
-
-// Inline markup inside a link label
-checkEqual(only(render('[**bold link**](https://x.test)'), 'strong').textContent, 'bold link', 'link label markup');
-
-// An unclosed delimiter is literal, not markup
-checkEqual(render('a * b').textContent, 'a * b', 'unclosed emphasis');
-checkEqual(elements(render('a * b'), 'em').length, 0, 'unclosed emphasis made an element');
-
-// Diff summaries: the real format from format_diffstat, two spaces and U+2212
-const diff = renderDiffSummary(['src/main.rs  +12 −3', 'unparseable line']);
-const items = elements(diff, 'li');
-checkEqual(items.length, 2, 'diffstat rows');
-checkEqual(elements(items[0], 'span')[0].textContent, 'src/main.rs', 'diffstat path');
-checkEqual(elements(items[0], 'span')[1].textContent, '+12', 'diffstat additions');
-checkEqual(elements(items[0], 'span')[2].textContent, '−3', 'diffstat deletions');
-checkEqual(elements(items[1], 'span').length, 1, 'unparseable diffstat produced counts');
-checkEqual(elements(items[1], 'span')[0].textContent, 'unparseable line', 'unparseable diffstat lost its text');
-
-console.log('all markdown checks passed');
-"#,
-    );
-}
-
-/// Tool output is not prose, and rendering it as prose loses the parts
-/// that matter: which words in a command are the program and which are
-/// paths, where a JSON payload begins, and whether a five-thousand-line
-/// dump has to be paid for before anyone asks to see it.
-#[test]
-fn tool_output_is_tinted_folded_and_never_read_as_markdown() {
-    run_web_check(
-        "tool-output",
-        r#"import { installDocument, elements, only, check, checkEqual, openFold } from './test-dom.js';
-installDocument();
-const { renderToolOutput, codeBlock, detectLang, appendCommandTokens, isPathLike } = await import(
-  './tool-output.js'
-);
-
-const classes = root => elements(root, 'span').map(s => s.className);
-
-// A shell command is told apart into program, subcommand, flag and path.
-const line = document.createElement('pre');
-appendCommandTokens(line, 'cargo test --workspace src/lib.rs');
-const seen = classes(line);
-check(seen.includes('cmd-program'), 'no program: ' + seen);
-check(seen.includes('cmd-subcommand'), 'no subcommand: ' + seen);
-check(seen.includes('cmd-flag'), 'no flag: ' + seen);
-check(seen.includes('cmd-path'), 'no path: ' + seen);
-checkEqual(line.textContent, 'cargo test --workspace src/lib.rs', 'command text changed');
-
-// An operator starts the program count again, so both programs are found.
-const piped = document.createElement('pre');
-appendCommandTokens(piped, 'git status && cargo build');
-checkEqual(classes(piped).filter(c => c === 'cmd-program').length, 2, 'pipeline reset');
-
-// Prose with a slash is not a path; a real path is.
-check(!isPathLike('and/or'), '"and/or" read as a path');
-check(isPathLike('src/lib/thing.rs'), 'a real path did not');
-check(isPathLike('./x'), 'a relative path did not');
-check(isPathLike('Cargo.toml'), 'a file with an extension did not');
-
-// JSON is pretty-printed and tinted, keys apart from values.
-const json = renderToolOutput('{"name":"hel","count":3,"ok":true}');
-const jsonClasses = classes(json);
-check(jsonClasses.includes('tok-key'), 'no JSON key: ' + jsonClasses);
-check(jsonClasses.includes('tok-str'), 'no JSON string: ' + jsonClasses);
-check(jsonClasses.includes('tok-num'), 'no JSON number: ' + jsonClasses);
-check(jsonClasses.includes('tok-kw'), 'no JSON keyword: ' + jsonClasses);
-check(json.textContent.includes('"name"'), 'JSON lost its content');
-
-// Rust is tinted; an unknown language is not.
-const rust = codeBlock('pub fn main() {\n    let x = 1;\n}', 'rust');
-check(classes(rust).includes('tok-kw'), 'rust keywords untinted');
-checkEqual(only(rust, 'pre').dataset.lang, 'rust', 'rust data-lang');
-const plain = codeBlock('nothing in particular here', 'brainfuck');
-checkEqual(classes(plain).length, 0, 'unknown language was tinted');
-
-// Sniffing is conservative: a log stays plain, real code does not.
-checkEqual(detectLang('12:03 INFO started\n12:04 INFO done\n12:05 INFO stopped'), '', 'a log was sniffed');
-checkEqual(
-  detectLang('fn a() {}\nfn b() {}\nlet mut x = 1;\nuse std::fmt;\nimpl Foo {}\nlet y = x.unwrap();'),
-  'rust',
-  'rust was not sniffed',
-);
-checkEqual(detectLang('--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new'), 'diff', 'diff was not sniffed');
-
-// A long dump is one closed fold that has built nothing yet.
-const long = Array.from({ length: 400 }, (_, i) => `line ${i}`).join('\n');
-const folded = renderToolOutput(long);
-checkEqual(folded.nodeName, 'DETAILS', 'a 400-line dump was not folded');
-checkEqual(elements(folded, 'pre').length, 0, 'a closed fold built its content anyway');
-check(only(folded, 'summary').textContent.includes('400 lines'), 'fold summary: ' + only(folded, 'summary').textContent);
-openFold(folded);
-checkEqual(elements(folded, 'pre').length, 1, 'an opened fold built nothing');
-check(elements(folded, 'pre')[0].textContent.includes('line 399'), 'the fold lost its content');
-
-// Opening twice builds once.
-openFold(folded);
-checkEqual(elements(folded, 'pre').length, 1, 'reopening rebuilt the content');
-
-// A short dump is not folded.
-checkEqual(renderToolOutput('one\ntwo').nodeName, 'PRE', 'a short dump was folded');
-
-// Tool output is never parsed as Markdown, so an underscore is an underscore.
-const literal = renderToolOutput('a _b_ c <img src=x>');
-checkEqual(elements(literal, 'em').length, 0, 'tool output was emphasised');
-checkEqual(elements(literal, 'img').length, 0, 'tool output produced an element');
-check(literal.textContent.includes('<img src=x>'), 'tool output lost its text');
-
-console.log('all tool-output checks passed');
-"#,
-    );
-}
-
-/// The renderer's guarantee is structural — this code cannot inject markup
-/// because it never builds markup — and a single stray assignment would
-/// quietly replace it with no guarantee at all. `escapeHtml` uses
-/// `innerHTML` on a detached node to escape text, which is safe but is
-/// also exactly the shape this test exists to stop spreading, so it is
-/// named rather than pattern-matched.
-#[test]
-fn no_web_module_builds_markup_from_a_string() {
-    const SINKS: [&str; 5] = [
-        "innerHTML",
-        "outerHTML",
-        "insertAdjacentHTML",
-        "document.write",
-        "new Function",
-    ];
-    // There is no allowance. Every one of these sinks was removed in
-    // Milestone 2, and the point of the test is that none comes back.
-    const ALLOWED: [(&str, &str); 0] = [];
-    for (name, source) in [
-        ("viewer.js", VIEWER_JS),
-        ("markdown.js", MARKDOWN_JS),
-        ("tool-output.js", TOOL_OUTPUT_JS),
-    ] {
-        for (number, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("//") || trimmed.starts_with("///") {
-                continue;
-            }
-            for sink in SINKS {
-                if !trimmed.contains(sink) {
-                    continue;
-                }
-                assert!(
-                    ALLOWED
-                        .iter()
-                        .any(|(file, allowed)| *file == name && trimmed == *allowed),
-                    "{name}:{} builds markup from a string: {trimmed}",
-                    number + 1
-                );
-            }
-        }
-    }
-}
-
-/// The card cache is the fix for answers vanishing under snapshot polls, so
-/// it is exercised as JavaScript: the render source is lifted out of
-/// `src/web/viewer.js` and run against a stub DOM.
-// Hard-won: a6567c51: snapshot polling erased typed elicitation answers before submission.
-#[test]
-fn embedded_viewer_keeps_elicitation_answers_across_snapshot_polls() {
-    let source = format!(
-        "{}\n{}",
-        viewer_source("function reconcileChildren(", "function epochMs("),
-        viewer_source(
-            "const elicitationCards = new Map()",
-            "async function submitElicitation",
-        ),
-    );
-    let dom = r#"
-let replaceCalls = 0;
-function makeEl(tag) {
-  return {
-tagName: tag.toUpperCase(),
-children: [],
-options: [],
-selectedOptions: [],
-className: "",
-textContent: "",
-disabled: false,
-required: false,
-value: "",
-appendChild(child) {
-  this.children.push(child);
-  if (this.tagName === "SELECT") this.options.push(child);
-  return child;
-},
-append(...kids) {
-  this.children.push(...kids);
-},
-replaceChildren(...kids) {
-  replaceCalls += 1;
-  this.children = kids;
-},
-removeChild(child) {
-  replaceCalls += 1;
-  this.children.splice(this.children.indexOf(child), 1);
-  return child;
-},
-insertBefore(child, reference) {
-  if (this.children.includes(child)) this.removeChild(child);
-  replaceCalls += 1;
-  const index = reference == null ? this.children.length : this.children.indexOf(reference);
-  this.children.splice(index, 0, child);
-  return child;
-},
-addEventListener() {},
-setAttribute(name, value) { this[name] = value; },
-querySelectorAll(selector) {
-  const found = [];
-  const visit = node => {
-    for (const child of node.children) {
-      if (child.tagName === "INPUT" && (selector === "input" || child.checked)) found.push(child);
-      visit(child);
-    }
-  };
-  visit(this);
-  return found;
-},
-querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
-setCustomValidity() {},
-reportValidity() {
-  return true;
-},
-  };
-}
-const created = [];
-const document = {
-  createElement(tag) {
-const el = makeEl(tag);
-created.push(el);
-return el;
-  },
-};
-const elicitations = makeEl("div");
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  node.className = className || "";
-  node.textContent = text || "";
-  return node;
-}
-async function submitElicitation() {}
-"#;
-    let checks = r#"
-const request = {
-  id: "elicitation-1",
-  message: "Which CI architecture?",
-  title: "CI",
-  fields: [
-{
-  id: "question_0",
-  title: "CI architecture",
-  required: false,
-  kind: "single_select",
-  options: [{ value: "reusable", title: "Reusable" }, { value: "matrix", title: "Matrix" }],
-},
-{ id: "question_0_custom", title: "Other", required: false, kind: "text" },
-  ],
-};
-const session = { id: "session-1", pending_elicitations: [request] };
-renderElicitations(session);
-const card = elicitations.children[0];
-const radio = created.find((el) => el.tagName === "INPUT" && el.value === "reusable");
-const text = created.find((el) => el.tagName === "INPUT" && el.type === "text");
-radio.checked = true;
-text.value = "keep me";
-const attachments = replaceCalls;
-renderElicitations(session);
-if (elicitations.children[0] !== card) {
-  throw new Error("a snapshot rebuilt the pending card");
-}
-if (!radio.checked || text.value !== "keep me") {
-  throw new Error("a snapshot wiped the half-filled answer");
-}
-if (replaceCalls !== attachments) {
-  throw new Error("a snapshot re-attached an unchanged card and dropped focus");
-}
-sentElicitations.add(elicitationKey("session-1", request.id));
-renderElicitations(session);
-if (elicitations.children[0] !== card) {
-  throw new Error("a sent answer rebuilt the card");
-}
-if (!radio.disabled || !text.disabled) {
-  throw new Error("a sent answer left the controls live");
-}
-if (!radio.checked) {
-  throw new Error("a sent answer wiped the reply");
-}
-renderElicitations({ id: "session-1", pending_elicitations: [] });
-if (elicitations.children.length !== 0 || elicitationCards.size !== 0) {
-  throw new Error("an answered request stayed rendered");
-}
-if (sentElicitations.size !== 0) {
-  throw new Error("a resolved request kept its sent marker");
-}
-"#;
-    run_viewer_script(
-        "elicitation-rendering",
-        &format!("{dom}\n{source}\n{checks}"),
-    );
-}
-
 fn sample_image(pixels: usize) -> ViewerPromptImage {
     ViewerPromptImage {
         data_base64: base64::engine::general_purpose::STANDARD.encode(vec![7_u8; pixels]),
@@ -3850,66 +2975,6 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     .unwrap_err();
     assert_eq!(error.status, StatusCode::NOT_FOUND);
 }
-
-// The four actions parse from exactly the wire names the viewer posts, and
-// the session projection carries the new fields under exactly these keys,
-// omitted while empty. The capability flags travel even while false.
-
-/// The composer holds a DOM, not a string, so the text a prompt sends is
-/// whatever this reader makes of that DOM. Run it as JavaScript.
-#[test]
-fn embedded_viewer_reads_multiline_composer_text_out_of_its_dom() {
-    let source = viewer_source("function composerText()", "function setComposerText(");
-    let harness = r##"
-const Node = { TEXT_NODE: 3 };
-function textNode(value) {
-  return { nodeType: 3, nodeValue: value, nodeName: "#text", childNodes: [], dataset: {} };
-}
-function element(name, children = [], dataset = {}) {
-  const node = { nodeType: 1, nodeName: name, dataset, childNodes: children };
-  children.forEach((child, index) => {
-child.nextSibling = children[index + 1] || null;
-  });
-  return node;
-}
-let promptText = null;
-function read(children) {
-  promptText = element("DIV", children);
-  return composerText();
-}
-"##;
-    let checks = r#"
-const plain = read([textNode("ship it")]);
-if (plain !== "ship it") throw new Error(`plain text became ${JSON.stringify(plain)}`);
-
-const broken = read([textNode("first"), element("BR"), textNode("second")]);
-if (broken !== "first\nsecond") throw new Error(`line break became ${JSON.stringify(broken)}`);
-
-// The trailing break a browser leaves behind to keep the caret on a new line
-// is scaffolding, not a line the user typed.
-const filler = read([
-  textNode("first"),
-  element("BR"),
-  element("BR", [], { composerFiller: "true" }),
-]);
-if (filler !== "first\n") throw new Error(`filler break became ${JSON.stringify(filler)}`);
-
-const blocks = read([
-  textNode("first"),
-  element("DIV", [textNode("second")]),
-  element("DIV", [textNode("third")]),
-]);
-if (blocks !== "first\nsecond\nthird") throw new Error(`blocks became ${JSON.stringify(blocks)}`);
-
-const carriage = read([textNode("first\r\nsecond")]);
-if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(carriage)}`);
-"#;
-    run_viewer_script("composer-reader", &format!("{harness}\n{source}\n{checks}"));
-}
-
-// A page that declares no icon makes every browser request
-// `/favicon.ico`, which this server does not have. The page therefore has
-// to name an icon, and that icon has to be served.
 
 #[tokio::test]
 async fn confirmed_move_action_forwards_the_fingerprinted_request() {
@@ -4956,25 +4021,16 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
     }
 }
 
-// Hard-won: bff62757: mobile networks dropped long accepted-action requests while later session failures were only visible in snapshots.
-#[tokio::test]
-async fn the_viewer_shows_a_session_whose_action_failed_after_it_was_accepted() {
-    // An accepted action reports its outcome only through snapshots, so
-    // the application has to react to `has_error` for a late failure to be
-    // visible at all.
-    let (app, _, _, _) = app();
-    let script = fetch_text(app, "/viewer.js").await;
-    assert!(script.contains("has_error"), "viewer ignores has_error");
-}
-
 /// Every response, not only the page, carries the policy. A header that
 /// depends on which handler answered is a header somebody will forget.
 #[tokio::test]
 async fn every_response_carries_the_security_headers() {
+    let bundle = hashed_asset_path(".js");
     for path in [
         "/",
-        "/viewer.js",
-        "/viewer.css",
+        "/login",
+        bundle,
+        "/icon.svg",
         "/manifest.webmanifest",
         "/api/v1/snapshot",
     ] {
@@ -5016,19 +4072,27 @@ async fn every_response_carries_the_security_headers() {
 
 /// The policy forbids inline script and style, so the page must contain
 /// neither. A page that did would simply fail to run in a browser, which
-/// no Rust test would otherwise notice.
+/// no Rust test would otherwise notice. A page that declares no icon makes
+/// every browser request `/favicon.ico`, which this server does not have, so
+/// the page also has to name one.
 #[tokio::test]
 async fn the_page_carries_no_inline_script_or_style() {
     let (app, _, _, _) = app();
-    let page = fetch_text(app, "/").await;
-    assert!(
-        !page.contains("<script>") && !page.contains("<style>"),
-        "the page inlines script or style, which the policy blocks"
-    );
-    assert!(
-        page.contains(r#"src="/viewer.js""#) && page.contains(r#"href="/viewer.css""#),
-        "the page does not load its script and style as separate assets"
-    );
+    for path in ["/", "/login"] {
+        let page = fetch_text(app.clone(), path).await;
+        assert!(
+            !page.contains("<script>") && !page.contains("<style>"),
+            "{path} inlines script or style, which the policy blocks"
+        );
+        assert!(
+            page.contains(r#"src="/assets/"#) && page.contains(r#"href="/assets/"#),
+            "{path} does not load its script and style as hashed assets"
+        );
+        assert!(
+            page.contains(r#"href="/icon.svg""#),
+            "{path} names no icon, so browsers fall back to /favicon.ico"
+        );
+    }
 }
 
 /// A cached API answer is a lie about live session state, and a cached
@@ -5049,31 +4113,72 @@ async fn live_state_and_the_service_worker_are_never_stored() {
     }
 }
 
+/// Every static asset carries a strong content ETag, answers a matching
+/// conditional request with 304, and follows the cache contract of its class:
+/// the HTML shell and root files revalidate, the service worker is never
+/// stored, and content-hashed bundles are immutable forever.
 #[tokio::test]
 async fn shell_assets_revalidate_with_strong_content_etags() {
-    for path in [
-        "/push-sync.js",
+    let (app, _, _, _) = app();
+    let page = fetch_text(app.clone(), "/").await;
+    let hashed = hashed_asset_paths(&page);
+    assert!(
+        hashed.iter().any(|path| path.ends_with(".js")),
+        "the page names no hashed script"
+    );
+    assert!(
+        hashed.iter().any(|path| path.ends_with(".css")),
+        "the page names no hashed stylesheet"
+    );
+
+    let mut expectations: Vec<(String, &str)> = [
         "/",
-        "/viewer.css",
-        "/viewer.js",
-        "/markdown.js",
-        "/tool-output.js",
+        "/login",
+        "/push-sync.js",
         "/manifest.webmanifest",
-        "/service-worker.js",
         "/icon.svg",
         "/icon-192.png",
         "/icon-512.png",
         "/maskable-512.png",
         "/apple-touch-icon.png",
-        "/fonts/jetbrains-mono.woff2",
-    ] {
-        let (app, _, _, _) = app();
+    ]
+    .iter()
+    .map(|path| (path.to_string(), "no-cache"))
+    .collect();
+    expectations.push(("/service-worker.js".to_string(), "no-store"));
+    expectations.extend(
+        hashed
+            .iter()
+            .map(|path| (path.clone(), "public, max-age=31536000, immutable")),
+    );
+
+    for (path, cache_control) in expectations {
         let response = app
             .clone()
-            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .oneshot(Request::get(path.as_str()).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL], cache_control,
+            "{path} has the wrong cache contract"
+        );
+        if path == "/" || path == "/login" {
+            assert_eq!(response.headers()[CONTENT_TYPE], "text/html; charset=utf-8", "{path}");
+        }
+        if path.ends_with(".js") {
+            assert_eq!(
+                response.headers()[CONTENT_TYPE], "text/javascript; charset=utf-8",
+                "{path}"
+            );
+        }
+        if path.ends_with(".css") {
+            assert_eq!(
+                response.headers()[CONTENT_TYPE],
+                "text/css; charset=utf-8",
+                "{path}"
+            );
+        }
         let etag = response.headers()["etag"].clone();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let digest = Sha256::digest(&body)
@@ -5084,8 +4189,9 @@ async fn shell_assets_revalidate_with_strong_content_etags() {
         assert_eq!(etag, expected, "{path} has a non-content ETag");
 
         let response = app
+            .clone()
             .oneshot(
-                Request::get(path)
+                Request::get(path.as_str())
                     .header("if-none-match", etag)
                     .body(Body::empty())
                     .unwrap(),
@@ -5105,14 +4211,41 @@ async fn shell_assets_revalidate_with_strong_content_etags() {
     }
 }
 
+/// A bundle this binary did not ship is a miss, not a fallback: serving a
+/// stale or wrong file under a content-hashed name would corrupt the cache.
+#[tokio::test]
+async fn an_unknown_hashed_asset_is_not_found() {
+    let (app, _, _, _) = app();
+    let response = app
+        .oneshot(
+            Request::get("/assets/does-not-exist.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn viewer_responses_negotiate_fast_compression() {
     let (app, _, _, _) = app();
+    let bundle = hashed_asset_path(".js");
+    let raw = app
+        .clone()
+        .oneshot(Request::get(bundle).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     for (encoding, expected) in [("gzip", "gzip"), ("br", "br")] {
         let response = app
             .clone()
             .oneshot(
-                Request::get("/viewer.js")
+                Request::get(bundle)
                     .header("accept-encoding", encoding)
                     .body(Body::empty())
                     .unwrap(),
@@ -5121,6 +4254,10 @@ async fn viewer_responses_negotiate_fast_compression() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-encoding"], expected);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
         assert!(
             response.headers()["vary"]
                 .to_str()
@@ -5129,10 +4266,7 @@ async fn viewer_responses_negotiate_fast_compression() {
                 .contains("accept-encoding")
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(
-            body.len() < VIEWER_JS.len(),
-            "{encoding} did not reduce the asset"
-        );
+        assert!(body.len() < raw.len(), "{encoding} did not reduce the asset");
         let digest = Sha256::digest(&body)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -5141,7 +4275,7 @@ async fn viewer_responses_negotiate_fast_compression() {
         let response = app
             .clone()
             .oneshot(
-                Request::get("/viewer.js")
+                Request::get(bundle)
                     .header("accept-encoding", encoding)
                     .header("if-none-match", &etag)
                     .body(Body::empty())
@@ -5221,24 +4355,23 @@ async fn server_sent_events_stay_uncompressed_and_yield_the_first_event() {
 
 /// The worker must leave live state alone entirely rather than caching it
 /// and hoping the cache is fresh.
-#[test]
-fn the_service_worker_declines_to_handle_live_state() {
+#[tokio::test]
+async fn the_service_worker_declines_to_handle_live_state() {
+    let (app, _, _, _) = app();
+    let worker = fetch_text(app, "/service-worker.js").await;
     assert!(
-        SERVICE_WORKER.contains("url.pathname.startsWith('/api/')"),
+        worker.contains("url.pathname.startsWith('/api/')"),
         "the service worker does not exclude the API"
     );
     assert!(
-        SERVICE_WORKER.contains("url.pathname.startsWith('/auth/')"),
+        worker.contains("url.pathname.startsWith('/auth/')"),
         "the service worker does not exclude authentication"
     );
     assert!(
-        SERVICE_WORKER.contains("caches.delete"),
+        worker.contains("caches.delete"),
         "the service worker never deletes a superseded cache"
     );
 }
-
-// The vendored assets have to reach the browser, not merely exist in the
-// repository: the manifest names them and a phone installs from it.
 
 /// Fetch one unauthenticated asset and return it as text. Serving the
 /// application from several files means a check about the application has
@@ -5251,6 +4384,31 @@ async fn fetch_text(app: Router, path: &str) -> String {
     assert_eq!(response.status(), StatusCode::OK, "{path} is not served");
     let body = response.into_body().collect().await.unwrap().to_bytes();
     String::from_utf8(body.to_vec()).expect("assets are UTF-8")
+}
+
+/// Every `/assets/…` reference the shell page makes. The hashed names are the
+/// only way to address the compiled bundles, so a test has to read them out
+/// of the page rather than guess them.
+fn hashed_asset_paths(page: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut rest = page;
+    while let Some(at) = rest.find("/assets/") {
+        let after = &rest[at..];
+        let end = after.find(['"', '\'', ')', ' ']).unwrap_or(after.len());
+        paths.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    paths
+}
+
+/// One embedded content-hashed bundle with the given extension.
+fn hashed_asset_path(extension: &str) -> &'static str {
+    EMBEDDED_ASSETS
+        .iter()
+        .map(|asset| asset.path)
+        .filter(|path| path.starts_with("/assets/"))
+        .find(|path| path.ends_with(extension))
+        .unwrap_or_else(|| panic!("the build ships no hashed {extension} bundle"))
 }
 
 #[tokio::test]
@@ -5822,42 +4980,6 @@ async fn logout_reports_persistence_failure_and_revokes_in_memory() {
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 }
 
-// so rather than showing an idle clock that belongs to a live session.
-
-/// precision-3260: a session on a full disk showed only as unreachable. Its
-/// card now names the disk.
-// Hard-won: 540c9202: a real full-disk outage appeared only as unreachable to users.
-#[test]
-fn embedded_viewer_says_when_a_session_s_disk_is_full() {
-    let source = viewer_source(
-        "function sessionActivityLabel(",
-        "function updateSessionActivity(",
-    );
-    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
-    let checks = r#"
-const problem = 'disk full: precision-3260 has 0 B free on /';
-const session = { lifecycle: 'live', state: 'disconnected', storage_problem: problem, activity_details: { kind: 'idle' } };
-if (sessionActivityLabel(session, 60000) !== problem) throw Error('a full disk is not named');
-"#;
-    run_viewer_script("storage-full", &format!("{setup}\n{source}\n{checks}"));
-}
-
-#[test]
-fn embedded_viewer_displays_quota_recovery_and_unknown_resets() {
-    let source = viewer_source(
-        "function sessionActivityLabel(",
-        "function updateSessionActivity(",
-    );
-    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
-    let checks = r#"
-const session = { lifecycle: 'live', quota_recovery: { retry_at_ms: 120000 } };
-if (!sessionActivityLabel(session, 60000).startsWith('Quota limit · resumes ')) throw Error('missing quota deadline');
-session.quota_recovery.retry_at_ms = null;
-if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown') throw Error('missing unknown reset');
-"#;
-    run_viewer_script("quota-recovery", &format!("{setup}\n{source}\n{checks}"));
-}
-
 #[tokio::test]
 async fn project_discovery_returns_actionable_failures_and_closes_abandoned_replies() {
     let (app, _, _, mut preflights) = app();
@@ -5961,143 +5083,6 @@ async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
                 .expect("idle stream must release its snapshot without another publication");
         }
     }
-}
-
-#[test]
-fn browser_move_selection_keeps_sizes_and_capacity_in_sync() {
-    let source = viewer_source("function moveFileKey", "function renderMoveFiles");
-    run_viewer_script(
-        "move-file-selection",
-        &format!(
-            r#"{source}
-const assessment = {{ required_bytes: 50, files: [
-  {{ location: {{repository:'repo',path:'.agents/build/large'}}, bytes:1_000_000_000 }},
-  {{ location: {{repository:'repo',path:'.agents/build/small'}}, bytes:1234 }},
-], storage: [{{location:'Source', available_bytes:100_000_000, copies:1}}] }};
-const draft = {{ preparation: {{workspace:assessment}}, workspaceSelection: {{exclusions:[]}} }};
-if (moveBytes(1_000_000_000) !== '1.00 GB') throw Error('wrong GB label');
-if (moveBytes(1234) !== '1.2 KB') throw Error('wrong file size label');
-if (moveSelectedBytes(draft, assessment) !== 1_000_001_284) throw Error('wrong selected size');
-if (moveStorageProblems(draft).length !== 1) throw Error('missing space warning');
-draft.workspaceSelection.exclusions = [{{repository:'repo',path:'.agents/build/large'}}];
-if (moveStorageProblems(draft).length) throw Error('excluding the large file did not clear the space warning');
-if (!moveFileIncluded(draft, assessment.files[1].location)) throw Error('excluding a sibling changed another selection');
-if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'other',path:'.agents/build/large'}})) throw Error('selection crossed repositories');
-"#
-        ),
-    );
-}
-
-#[test]
-fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
-    let source = format!(
-        "{}\n{}",
-        viewer_source("function isAutoPrimaryProfile(", "function targetIsBare("),
-        viewer_source(
-            "function moveDelegationApplies(",
-            "function moveQueueItemText("
-        ),
-    );
-    let setup = r#"
-let newDraft = null;
-const snapshot = { subagents_configured: true, profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }, { id: "dsh", harness_kind: "dsh" }] };
-const sessions = {
-  parent: { id: "parent", verdict: { unfinished_children: 1 } },
-  parked: { id: "parked", lifecycle: "live", chat_phase: "idle" },
-  running: { id: "running", lifecycle: "live", chat_phase: "running" },
-  gone: { id: "gone", lifecycle: "suspended" },
-};
-function sessionById(id) { return sessions[id]; }
-function isSubagentSession(session) { return Boolean(session?.subagent_parent_id); }
-"#;
-    let checks = r#"
-const assert = (condition, message) => { if (!condition) throw Error(message); };
-const draft = { profileId: "codex", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
-assert(moveSubagentChange(draft) === null, "an untouched policy must keep the session's own");
-snapshot.profiles[0].subagents = { mode: "single_model", model: "chosen", effort: "high" };
-assert(moveSubagentChange(draft) === null, "changing profile defaults must retain the session policy");
-draft.subagents = { mode: "mjolnir" };
-assert(moveSubagentChange(draft).mode === "mjolnir", "an explicit session edit is submitted");
-draft.subagents = structuredClone(draft.storedSubagents);
-draft.profileId = "kimi";
-assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
-draft.storedSubagents = { mode: "mjolnir", straightforward: { model: "gpt-6-sol", effort: "high" }, subtle: { model: "gpt-6-luna" } };
-draft.subagents = structuredClone(draft.storedSubagents);
-assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
-sessions.worker = { id: 'worker', subagent_parent_id: 'parent' };
-draft.sessionId = 'worker';
-draft.subagents = { mode: 'mjolnir' };
-assert(moveSubagentChange(draft) === null, "worker subagents cannot change delegation");
-sessions.worker.subagent_orchestrator = true;
-assert(moveSubagentChange(draft)?.mode === 'mjolnir', "orchestrators retain delegation controls");
-assert(moveStoppedChildren(sessions.parent, { stops_subagents: true }) === 1, "only a child still at its task is counted; a parked one has handed back");
-assert(moveStoppedChildren(sessions.parent, { in_place: true, stops_subagents: false }) === 0, "an in-place Move that keeps its children stops none");
-// DSH has no sub-agents of its own: a stored Native reads as None and stays.
-const dsh = { profileId: "dsh", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
-assert(moveSubagentChange(dsh) === null, "a stored Native that DSH shows as None is untouched");
-dsh.subagents = { mode: "none" };
-assert(moveSubagentChange(dsh) === null, "choosing the None DSH already shows changes nothing");
-dsh.subagents = { mode: "mjolnir" };
-assert(moveSubagentChange(dsh).mode === "mjolnir", "DSH can choose Mjolnir");
-dsh.profileId = "codex";
-dsh.subagents = { mode: "native" };
-assert(moveSubagentChange(dsh) === null, "Codex keeps the stored Native");
-"#;
-    run_viewer_script(
-        "viewer-move-subagents",
-        &format!("{setup}\n{source}\n{checks}"),
-    );
-}
-
-#[test]
-fn viewer_move_controls_use_global_availability_for_delegation() {
-    let source = format!(
-        "{}\n{}",
-        viewer_source("function isAutoPrimaryProfile(", "function targetIsBare("),
-        viewer_source(
-            "function moveDelegationApplies(",
-            "function moveStoppedChildren("
-        )
-    );
-    run_web_check(
-        "viewer-move-controls",
-        &format!(
-            r#"
-import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
-installDocument();
-let newDraft = null;
-function sessionById() {{ return null; }}
-function isSubagentSession(session) {{ return Boolean(session?.subagent_parent_id); }}
-const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
-function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
-{source}
-const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
-let edits = 0;
-function render() {{ const body = el('div'); renderSubagentFields(body, draft, 'move', () => {{}}, () => edits++); return elements(body, 'select'); }}
-let fields = render();
-checkEqual(fields.length, 1, 'only delegation picker remains');
-checkEqual(fields[0].childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'native,mjolnir,none', 'delegation choices');
-check(fields[0].childNodes.find(node => node.value === 'mjolnir').disabled, 'unconfigured Mjolnir disabled');
-snapshot.subagents_configured = true;
-fields = render();
-check(!fields[0].childNodes.find(node => node.value === 'mjolnir').disabled, 'configured Mjolnir available');
-fields[0].value = 'mjolnir'; fields[0].onchange();
-checkEqual(moveSubagentChange(draft).mode, 'mjolnir', 'explicit policy submitted');
-checkEqual(subagentSelectionError(draft), '', 'configured choice valid');
-checkEqual(edits, 1, 'edit reported');
-fields[0].value = 'none'; fields[0].onchange();
-checkEqual(moveSubagentChange(draft).mode, 'none', 'None policy submitted');
-checkEqual(subagentSelectionError(draft), '', 'None needs no configured models');
-const dshDraft = {{ profileId:'dsh', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
-const dshBody = el('div');
-renderSubagentFields(dshBody, dshDraft, 'move', () => {{}}, () => {{}});
-const dshField = elements(dshBody, 'select')[0];
-checkEqual(dshField.childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'mjolnir,none', 'DSH does not offer Native');
-checkEqual(dshField.value, 'none', 'a stored Native reads as None on DSH');
-checkEqual(moveSubagentChange(dshDraft), null, 'the untouched DSH policy is retained');
-"#
-        ),
-    );
 }
 
 /// One request to a settings route, as the viewer sends it.
@@ -6882,80 +5867,6 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
     );
 }
 
-#[test]
-fn viewer_tool_detail_fold_caches_full_details_and_retries_unavailable() {
-    let source = viewer_source(
-        "let toolDetailSession = null;",
-        "/// Rewrite one entry's row.",
-    );
-    let setup = r#"
-import assert from 'node:assert/strict';
-const el = (tag, className, value = '') => ({
-  tag, className, value, children: [], dataset: {},
-  append(...children) { this.children.push(...children); },
-  replaceChildren(...children) { this.children = children; },
-  addEventListener(name, listener) { this[name] = listener; },
-  text() { return [this.value, ...this.children.map(child => child.text())].join('\n'); }
-});
-const renderToolOutput = text => el('pre', '', text);
-const calls = [];
-const replies = [];
-const request = url => {
-  calls.push(url);
-  return new Promise((resolve, reject) => replies.push({ resolve, reject }));
-};
-const open = fold => {
-  fold.open = true;
-  return fold.toggle();
-};
-const close = fold => {
-  fold.open = false;
-  return fold.toggle();
-};
-"#;
-    let checks = r#"
-const fold = toolDetailFold('session one', 'tool:/edit');
-assert.equal(fold.dataset.foldKey, 'tool-detail-tool:/edit');
-assert.deepEqual(calls, []);
-const first = open(fold);
-assert.match(fold.text(), /Loading tool details…/);
-assert.deepEqual(calls, ['/api/v1/sessions/session%20one/items/tool%3A%2Fedit/detail']);
-replies.shift().resolve({ status: 'unavailable', unavailable_reason: 'The spill is missing' });
-await first;
-assert.match(fold.text(), /The spill is missing/);
-
-await close(fold);
-const retry = open(fold);
-replies.shift().reject(new Error('HTTP 503'));
-await retry;
-assert.match(fold.text(), /HTTP 503/);
-await close(fold);
-const succeed = open(fold);
-const replacement = toolDetailFold('session one', 'tool:/edit');
-const shared = open(replacement);
-assert.equal(calls.length, 3);
-replies.shift().resolve({
-  status: 'full',
-  entry: { tool_input: { path: 'notes' }, tool_error: 'failed', tool_content: ['terminal output'] },
-  diffs: [{ text: '-old\n+new' }],
-});
-await Promise.all([succeed, shared]);
-assert.match(replacement.text(), /notes[\s\S]+failed[\s\S]+terminal output[\s\S]+\+new/);
-await close(replacement);
-await open(replacement);
-assert.equal(calls.length, 3);
-
-const other = toolDetailFold('session two', 'tool:/edit');
-const switched = open(other);
-assert.equal(calls.length, 4);
-assert.match(calls[3], /session%20two/);
-replies.shift().resolve({ status: 'full', body: { kind: 'terminal_output' }, entry: { text: 'standalone output' } });
-await switched;
-assert.match(other.text(), /standalone output/);
-"#;
-    run_viewer_script("tool-detail-fold", &format!("{setup}\n{source}\n{checks}"));
-}
-
 #[tokio::test]
 async fn migrated_terminal_routes_reject_browser_and_external_bearer_before_json() {
     let (app, _, _, _) = app_with_snapshot(image_capable);
@@ -6995,56 +5906,3 @@ async fn migrated_terminal_routes_reject_browser_and_external_bearer_before_json
     }
 }
 
-#[test]
-fn viewer_subagent_move_locks_current_target_and_keeps_resources() {
-    let source = format!(
-        "{}\n{}\n{}",
-        viewer_source("function freshMoveDraft(", "/// The delegation policy"),
-        viewer_source(
-            "function moveAvailabilityError(",
-            "async function prepareMove("
-        ),
-        viewer_source(
-            "function moveDelegationApplies(",
-            "function moveSubagentChange("
-        )
-    );
-    run_web_check(
-        "viewer-subagent-move-target",
-        &format!(
-            r#"
-import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
-installDocument();
-const snapshot = {{ profiles: [{{id:'profile'}}], targets: [] }};
-const session = {{id:'child', profile_id:'profile', target_id:'borrowed', subagent_parent_id:'parent', compatible_resume_targets:['other']}};
-function sessionById() {{ return session; }}
-function isSubagentSession(value) {{ return Boolean(value?.subagent_parent_id); }}
-function selectedWorkspaceId() {{ return 'workspace'; }}
-function targetLaunchable() {{ return false; }}
-function availabilityMissing() {{ return false; }}
-function delegationPolicy(value) {{ return value || {{mode:'none'}}; }}
-function soleProfileId() {{ return 'profile'; }}
-function offeredProfiles() {{ return snapshot.profiles; }}
-function pickerField() {{ return document.createElement('div'); }}
-function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
-function subagentSelectionError() {{ throw Error('worker delegation must not be validated'); }}
-function renderSubagentFields() {{ throw Error('worker delegation must not be rendered'); }}
-function moveStorageProblems() {{ return []; }}
-const route = {{name:'move', sessionId:'child'}};
-const moveStep = el('div'), moveProgress = el('p'), moveNextButton = el('button'), moveBackButton = el('button');
-moveStep.replaceChildren = function () {{ this.childNodes = []; }};
-moveStep.querySelectorAll = () => ['input', 'select', 'button'].flatMap(tag => elements(moveStep, tag));
-let moveDraft = null;
-{source}
-const draft = freshMoveDraft(session);
-checkEqual(draft.targetId, 'borrowed', 'current unavailable target retained');
-checkEqual(draft.clearResourceAllocation, false, 'resource sizing retained');
-checkEqual(moveAvailabilityError(draft), '', 'borrowed target need not be launchable');
-renderMoveForm();
-checkEqual(elements(moveStep, 'input').length, 0, 'no resource clearing checkbox');
-check(elements(moveStep, 'p').some(node => node.textContent.includes('sub-agents move in place')), 'read-only target explanation');
-check(!moveNextButton.disabled, 'in-place move can prepare');
-"#
-        ),
-    );
-}

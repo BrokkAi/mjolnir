@@ -8,6 +8,7 @@ use mj_core::targets::SshTrafficClass;
 pub fn provision_plan(
     template: &TargetTemplate,
     session_id: &str,
+    instance: &str,
     bundle: &ProjectBundleSpec,
     additional_mounts: &[AdditionalMount],
     container_workspace: Option<&Path>,
@@ -15,6 +16,7 @@ pub fn provision_plan(
     provision_plan_named(
         template,
         session_id,
+        instance,
         bundle,
         additional_mounts,
         container_workspace,
@@ -29,9 +31,15 @@ pub struct ProvisionOptions<'a> {
     pub nitro_mbx_remote: Option<&'a NitroMbxRemote<'a>>,
 }
 
+/// `instance` is the owning daemon's ownership identity, stamped on the
+/// session's container.
+// Each argument is an independent input of one container's creation; the
+// owning instance's identity is one more of them.
+#[allow(clippy::too_many_arguments)]
 pub fn provision_plan_named(
     template: &TargetTemplate,
     session_id: &str,
+    instance: &str,
     bundle: &ProjectBundleSpec,
     additional_mounts: &[AdditionalMount],
     container_workspace: Option<&Path>,
@@ -72,6 +80,7 @@ pub fn provision_plan_named(
                 container,
                 name,
                 session_id,
+                instance,
                 additional_mounts,
                 None,
                 &workspace,
@@ -111,11 +120,19 @@ pub fn provision_plan_named(
                     container,
                     name,
                     session_id,
+                    instance,
                     additional_mounts,
                     &workspace,
                 )?
             } else {
-                docker_container_run(container, name, session_id, additional_mounts, &workspace)?
+                docker_container_run(
+                    container,
+                    name,
+                    session_id,
+                    instance,
+                    additional_mounts,
+                    &workspace,
+                )?
             };
             commands.push(run);
             commands.extend(
@@ -162,6 +179,7 @@ pub fn provision_plan_named(
                 container,
                 name,
                 session_id,
+                instance,
                 additional_mounts,
                 ssh,
                 &workspace,
@@ -190,6 +208,7 @@ pub fn provision_plan_named(
                 container,
                 name,
                 session_id,
+                instance,
                 additional_mounts,
                 Some(ssh),
                 &workspace,
@@ -272,6 +291,7 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
             container,
             &name,
             smoke_id,
+            SETUP_SMOKE_INSTANCE,
             &[],
             ssh,
             CONTAINER_WORKSPACE,
@@ -317,7 +337,15 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
 
     let (run, locator) = match engine {
         "podman" => (
-            podman_container_run(container, &name, smoke_id, &[], None, CONTAINER_WORKSPACE)?,
+            podman_container_run(
+                container,
+                &name,
+                smoke_id,
+                SETUP_SMOKE_INSTANCE,
+                &[],
+                None,
+                CONTAINER_WORKSPACE,
+            )?,
             Some(TargetLocator::LocalPodman {
                 borrowed_from: None,
                 container_id: name.clone(),
@@ -325,14 +353,29 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
             }),
         ),
         "docker" => (
-            docker_container_run(container, &name, smoke_id, &[], CONTAINER_WORKSPACE)?,
+            docker_container_run(
+                container,
+                &name,
+                smoke_id,
+                SETUP_SMOKE_INSTANCE,
+                &[],
+                CONTAINER_WORKSPACE,
+            )?,
             Some(TargetLocator::LocalDocker {
                 borrowed_from: None,
                 container_id: name.clone(),
             }),
         ),
         _ => (
-            container_run(engine, container, &name, smoke_id, &[], CONTAINER_WORKSPACE)?,
+            container_run(
+                engine,
+                container,
+                &name,
+                smoke_id,
+                SETUP_SMOKE_INSTANCE,
+                &[],
+                CONTAINER_WORKSPACE,
+            )?,
             None,
         ),
     };
@@ -617,6 +660,7 @@ fn run_docker_attachment_smoke_test(
             container,
             &name,
             smoke_id,
+            SETUP_SMOKE_INSTANCE,
             &[mount],
             CONTAINER_WORKSPACE,
         )?)

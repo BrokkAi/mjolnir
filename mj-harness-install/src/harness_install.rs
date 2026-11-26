@@ -398,10 +398,8 @@ async fn locate_in_image(
             let reported = String::from_utf8_lossy(&output.stdout);
             ensure!(
                 output.status.success()
-                    && mj_core::harness_runtime::dsh_acp_version_supports_native_instructions(
-                        &reported
-                    ),
-                "the daemon's image carries {}, which cannot load AGENTS.md; it needs dsh-acp {} or newer",
+                    && mj_core::harness_runtime::dsh_acp_version_supported(&reported),
+                "the daemon's image carries {}; it needs dsh-acp {} or newer",
                 reported.trim(),
                 mj_core::harness_runtime::DSH_ACP_VERSION
             );

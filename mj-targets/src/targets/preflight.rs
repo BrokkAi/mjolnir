@@ -7,12 +7,20 @@ pub(super) enum ManagedResourceKind {
     Container,
 }
 
+/// The `dev.mj.instance` label on disposable setup smoke containers. `mj setup`
+/// and `mj doctor` run without a daemon, so there is no store identity to
+/// stamp; no instance owns these containers, and each smoke test removes its
+/// own.
+pub const SETUP_SMOKE_INSTANCE: &str = "setup-smoke";
+
 /// Build command-line fragments that identify resources Hel owns for a session.
+/// `instance` is the owning daemon's ownership identity, resolved once by its
+/// controller guard; setup smoke tests pass [`SETUP_SMOKE_INSTANCE`].
 pub(super) fn managed_resource_identity_args(
     kind: ManagedResourceKind,
     session_id: &str,
+    instance: &str,
 ) -> Vec<String> {
-    let instance = mj_core::config::instance_identity();
     match kind {
         ManagedResourceKind::Container => vec![
             "--label".to_owned(),

@@ -38,9 +38,6 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
 /// state to release.
 const ABSENT: &str = "mj-mbx: absent";
 
-/// Failed releases, one JSON object per line, under the data directory.
-const FAILURES_FILE: &str = "mbx-release-failures.jsonl";
-
 /// The journal starts over past this size; it reports recent failures, not
 /// history.
 const FAILURES_MAX_BYTES: u64 = 256 * 1024;
@@ -295,7 +292,7 @@ impl BuildStateRelease {
             .collect::<Vec<_>>();
         let legacy_mbx_root = match (&store, &host) {
             (Store::Shared { .. }, CacheHost::Local) => {
-                Some(mj_core::config::data_dir().join("mbx"))
+                Some(mj_core::config::DataLayout::current().mbx_dir())
             }
             _ => None,
         };
@@ -547,8 +544,9 @@ struct Failure {
     remediation: String,
 }
 
+/// Failed releases, one JSON object per line, under the data directory.
 fn failures_path() -> PathBuf {
-    mj_core::config::data_dir().join(FAILURES_FILE)
+    mj_core::config::DataLayout::current().mbx_release_failures()
 }
 
 /// Append one line. A line this short is one `write` on an append-mode file,

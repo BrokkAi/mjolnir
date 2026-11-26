@@ -125,12 +125,23 @@ impl DashboardContext {
     /// terminal output. That is why the loop does not track which mutations
     /// were visible; it only paces how often background changes are drawn.
     pub(crate) fn draw(&mut self) -> Result<()> {
+        // The cards follow the conversations a frame draws. When this frame
+        // changed that set, draw once more so the screen shows the cards that
+        // input already acts on. The second frame draws the same set.
+        if self.draw_frame()? {
+            self.draw_frame()?;
+        }
+        Ok(())
+    }
+
+    /// Draws one frame; reports whether it changed the notification cards.
+    fn draw_frame(&mut self) -> Result<bool> {
         if let Some(splash) = &self.splash {
             if !splash.finished() {
                 // Nothing behind the splash has been seen, so nothing is
                 // acknowledged as drawn.
                 self.terminal.draw(|frame| splash.render(frame))?;
-                return Ok(());
+                return Ok(false);
             }
             self.splash = None;
         }
@@ -186,6 +197,8 @@ impl DashboardContext {
         // The modal obscures its center while leaving the dashboard visible
         // around it. Do not advance read receipts for a covered conversation.
         self.drawn_chat_sessions = if login_open { Vec::new() } else { drawn };
+        let on_screen = self.conversations_on_screen();
+        let cards_changed = self.dashboard.set_conversations_on_screen(on_screen);
         self.dashboard.acknowledge_render();
         if !login_open {
             for action in self.dashboard.take_drawn_failure_dismissals() {
@@ -206,7 +219,7 @@ impl DashboardContext {
         if invalidated && self.selection.active_surface() == Some(SurfaceId::Transcript) {
             self.selection.clear();
         }
-        Ok(())
+        Ok(cards_changed)
     }
 
     /// Reports sessions that started needing a person since the last frame:

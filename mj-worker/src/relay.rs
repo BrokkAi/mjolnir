@@ -340,6 +340,12 @@ pub struct DurableRelay {
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
+    /// The accepted model and effort the ACP runtime starts each bridge from.
+    /// Shared with the runtime, but only this relay retires values from it,
+    /// in the same step that retires them from the snapshot's durable
+    /// `config`. A reset held only in memory came back at the next worker
+    /// start (#1704).
+    accepted_config: Arc<std::sync::Mutex<crate::acp::AcceptedSessionConfig>>,
     pub(crate) jev_disabled: bool,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
@@ -1098,6 +1104,7 @@ impl DurableRelay {
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
             verdict_harness: None,
+            accepted_config: Default::default(),
             jev_disabled: mj_core::jev::disabled_by_environment(),
             authentication_login_path: None,
             login_identity: Default::default(),
@@ -1844,6 +1851,12 @@ impl DurableRelay {
 
     pub fn turn_context(&self) -> mj_transcript::turn_context::TurnContext {
         self.turn_context.clone()
+    }
+
+    /// The accepted model and effort shared with the ACP runtime. See
+    /// [`DurableRelay::adopt_launch`].
+    pub fn accepted_config(&self) -> Arc<std::sync::Mutex<crate::acp::AcceptedSessionConfig>> {
+        self.accepted_config.clone()
     }
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {

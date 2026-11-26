@@ -277,7 +277,9 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 31 is breaking: older readers cannot replay CancelTurnTarget commands.
 // Revision 32 is breaking: older readers cannot preserve delegated authorization
 // or replay a PostToolUse lease that claims the non-parent partition.
-pub const RELAY_STATE_VERSION: u32 = 32;
+// Revision 33 is breaking: older readers reject `accepted_launch`, and older
+// writers would drop it, so a later start could restore another harness's model.
+pub const RELAY_STATE_VERSION: u32 = 33;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

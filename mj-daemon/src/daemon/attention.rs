@@ -710,13 +710,7 @@ fn project_states(
                 None
             };
             if let Some(card) = &mut card {
-                card.since_ms = card
-                    .entries
-                    .iter()
-                    .map(|entry| entry.completed_at_ms)
-                    .chain(card.form.iter().map(|form| form.raised_at_ms))
-                    .min()
-                    .unwrap_or(0);
+                card.since_ms = card.oldest_item_ms();
             }
             let state = match card.as_ref().map(|card| card.badge) {
                 Some(NotificationKind::NeedsInput) => NeedsInput,
@@ -861,12 +855,7 @@ fn notification_card(
         let entries: Vec<_> = stack
             .entries
             .iter()
-            .filter(|entry| match entry.kind {
-                NotificationKind::Important => {
-                    entry.completed_ordinal > record.viewed_through_event_ordinal
-                }
-                NotificationKind::NeedsInput => true,
-            })
+            .filter(|entry| entry.is_unread(record.viewed_through_event_ordinal))
             .cloned()
             .collect();
         let dismissal = if entries

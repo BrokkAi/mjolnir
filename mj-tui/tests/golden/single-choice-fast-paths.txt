@@ -7,12 +7,6 @@
 │No se  │ Absolute project directory on this machine:                                      │       │
 │Creat  │                                                                                  │       │
 │       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
 │       │                                                                                  │  ─────╮
 │       │                                                                                  │       │
@@ -24,9 +18,15 @@
 ╭ Prof  │                                                                                  │     ▄ ╮
 │ANTHR  │                                                                                  │       │
 │ + re  │                                                                                  │       │
-╰─────  │   Cancel     Create                                                              │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Create                                                              │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: ValidateProjectDirectory { target_template_id: "local", directory: "/work/project" }
@@ -39,12 +39,6 @@ action: ValidateProjectDirectory { target_template_id: "local", directory: "/wor
 │No se  │ Checking prerequisites…                                                          │       │
 │Creat  │                                                                                  │       │
 │       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
 │       │                                                                                  │  ─────╮
 │       │                                                                                  │       │
@@ -56,9 +50,15 @@ action: ValidateProjectDirectory { target_template_id: "local", directory: "/wor
 ╭ Prof  │                                                                                  │     ▄ ╮
 │ANTHR  │                                                                                  │       │
 │ + re  │                                                                                  │       │
-╰─────  │   Cancel                                                                         │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel                                                                         │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateSession with managed worktree enabled
@@ -71,13 +71,7 @@ action: CreateSession with managed worktree enabled
 │No sessions yet  │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                 │
 │Create new work  │   podman  local Podman  4       8                                                │                 │
 │                 │ ☐ Save as default sizing                                                         │                 │
-│                 │ Host totals unavailable; resource limits cannot be checked.                      │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │ Host totals unavailable; resource limits cannot be checked.                      │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -88,8 +82,14 @@ action: CreateSession with managed worktree enabled
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -103,14 +103,8 @@ action: None
 │No sessions yet  │ hel  BrokkAi/hel                                                        Add…     │                 │
 │Create new work  │                                                                         Remove   │                 │
 │                 │ hel · 1 repository                                                               │                 │
-│                 │                                                                                  │                 │
-│                 │   BrokkAi/hel                                                                    │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │   BrokkAi/hel                                                                    │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
@@ -120,8 +114,14 @@ action: None
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Next                                                       │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Back     Next                                                       │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -134,25 +134,25 @@ action: None
 │No sessions yet  │ Profile: claude-1                                                                │                 │
 │Create new work  │ Project: hel                                                                     │                 │
 │                 │ Target: podman (local Podman)                                                    │                 │
-│                 │ Compute: 4 CPU / 8.0G                                                            │                 │
-│                 │                                                                                  │                 │
+│                 │ Compute: 4 CPU / 8.0G                                                            │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │ Attached directories: 0                                                          │                 │
 │                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │ Sub-agents Native ▾                                                              │                 │
-│                 │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │  ───────────────╯
+│                 │ Sub-agents Native ▾                                                              │  ──────── ▁   ▄ ╮
+│                 │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Add directory…     Create                                  │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │   Cancel     Back     Add directory…     Create                                  │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -166,14 +166,8 @@ action: PreflightResumeRepositories
 │proje  │ Checking prerequisites…                                                          │       │
 │› ■ A  │                                                                                  │       │
 │  Sto  │                                                                                  │       │
-│  │ N  │                                                                                  │       │
-│  │    │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │  ─────╮
+│  │ N  │                                                                                  │  ─────╯
+│  │    │                                                                                  │  ─────╮
 │       │                                                                                  │       │
 │       │                                                                                  │  .    │
 ╰─────  │                                                                                  │  ─────╯
@@ -183,8 +177,14 @@ action: PreflightResumeRepositories
 ╭ Prof  │                                                                                  │     ▄ ╮
 │ANTHR  │                                                                                  │       │
 │ + re  │                                                                                  │       │
-╰─────  │   Cancel                                                                         │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel                                                                         │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette

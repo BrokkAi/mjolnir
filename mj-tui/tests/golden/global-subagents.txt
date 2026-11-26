@@ -14,13 +14,6 @@
 │                     │   Oracle                          0 entries  ›                                               │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -33,9 +26,16 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -56,13 +56,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -74,10 +67,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │ Choose a model for Straightforward entry 1, or remove it.                                    │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -98,13 +98,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -117,9 +110,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -140,13 +140,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -159,9 +152,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -182,13 +182,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -201,9 +194,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -224,13 +224,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │   Oracle                          1 entry  ›                                                 │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -242,10 +235,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │ Saving settings…                                                                             │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -266,13 +266,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │   Oracle                          1 entry  ›                                                 │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -283,11 +276,18 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │ Could not save: [subagents.subtle] requires [subagents.straightforward]; configure           │                     │
 │                     │ straightforward alone or both                                                                │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette

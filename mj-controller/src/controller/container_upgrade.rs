@@ -102,7 +102,7 @@ impl Controller {
                         plan.capture_control_state(executor)?;
                     }
                     executor.end_resumable_work("replace session container")?;
-                    plan.replace(session_id, executor)?;
+                    plan.replace(session_id, crate::database::ownership_identity()?.as_str(), executor)?;
                     executor.begin_resumable_work()?;
                     let liveness = probe_worker_liveness(executor, &backend, session_id, &root)?;
                     ensure!(liveness.status == 0, "cannot establish replacement worker liveness; environment retained");
@@ -290,6 +290,7 @@ impl Controller {
             &locator,
             template,
             session_id,
+            crate::database::ownership_identity()?.as_str(),
             &mounts,
             &targets::container_workspace_root(record.container_workspace.as_deref()),
             for_resume,

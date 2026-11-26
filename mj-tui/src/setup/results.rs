@@ -398,7 +398,7 @@ impl DashboardState {
                             {
                                 rejected_runtimes.push(RejectedRuntime {
                                     kind: String::new(),
-                                    label: probe.machine_id.clone(),
+                                    label: probe.machine_id.to_string(),
                                     detail: detail.clone(),
                                     remediation: Some(remediation.clone()),
                                 });

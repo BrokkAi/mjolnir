@@ -738,7 +738,7 @@ fn claude_setup_token_reads_and_writes_refuse_symlink_destinations() {
 fn a_profile_setup_token_lives_beside_the_configuration_not_in_the_profile_home() {
     let path = claude_oauth_token_path("claude-max");
     assert!(path.ends_with("profiles/claude-max/claude-oauth-token"));
-    assert!(path.starts_with(crate::config::config_dir()));
+    assert!(path.starts_with(crate::config::ConfigLayout::current().root()));
 }
 
 #[cfg(unix)]

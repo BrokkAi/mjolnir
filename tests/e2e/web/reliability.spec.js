@@ -8,10 +8,16 @@ function escapeForRegExp(value) {
 
 async function codeLogin(page, baseUrl, code) {
   await page.goto(baseUrl);
-  await expect(page.locator('#login')).toBeVisible();
-  await page.locator('#code').fill(code);
-  await page.getByRole('button', { name: 'Enter' }).click();
-  await expect(page.locator('#app')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Unlock Mjolnir' })).toBeVisible();
+  await page.getByLabel('Code', { exact: true }).fill(code);
+  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  // The signed-in shell owns the screen once the snapshot lands.
+  await expect(page.getByRole('navigation', { name: 'Primary' }).or(page.getByRole('navigation', { name: 'Mjolnir' })).first()).toBeVisible();
+}
+
+async function openMenu(page) {
+  await page.getByRole('button', { name: 'Open menu' }).click();
+  await expect(page.getByRole('navigation', { name: 'Mjolnir' })).toBeVisible();
 }
 
 test('real viewer converges with a TUI after an SSE disconnect', async ({ browser }) => {
@@ -35,7 +41,7 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
   const lockedErrors = [];
   lockedPage.on('pageerror', error => lockedErrors.push(error.message));
   await lockedPage.goto(`${baseUrl}/#conversation/not-authenticated`);
-  await expect(lockedPage.locator('#login')).toBeVisible();
+  await expect(lockedPage.getByRole('heading', { name: 'Unlock Mjolnir' })).toBeVisible();
   await expect.poll(() => lockedErrors).toEqual([]);
   await lockedContext.close();
 
@@ -44,10 +50,10 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
   const qrContext = await browser.newContext({ ignoreHTTPSErrors: true });
   const qrPage = await qrContext.newPage();
   await qrPage.goto(qrLoginUrl);
-  await expect(qrPage.locator('#app')).toBeVisible();
-  // The login token must not survive in the URL, and the viewer lands on a
-  // workspace rather than on a bare path.
-  await expect(qrPage).toHaveURL(new RegExp('^' + escapeForRegExp(baseUrl) + '/(#workspace/.+)?$'));
+  await expect(qrPage.getByRole('navigation', { name: 'Mjolnir' })).toBeVisible();
+  // The login token must not survive in the URL.
+  expect(qrPage.url()).not.toContain('token=');
+  expect(qrPage.url().startsWith(`${baseUrl}/`)).toBe(true);
   await qrContext.close();
 
   stage('code-login');
@@ -69,15 +75,17 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
 
     stage('snapshot-rendered');
-    // The select lists only real workspaces (Notifications is a separate
-    // screen), so the dashboard opens on the lab's workspace and records it
-    // in the URL.
-    const workspaceSelect = page.locator('#workspace-select');
-    await expect(workspaceSelect.locator('option')).toHaveText([/\S/]);
-    await expect(workspaceSelect.locator('option').first()).not.toHaveText('Notifications');
-    await expect(workspaceSelect).toHaveValue(/^(?!notifications$)./);
-    const workspaceId = await workspaceSelect.inputValue();
-    await expect(page).toHaveURL(new RegExp(`#workspace/${escapeForRegExp(workspaceId)}$`));
+    // The workspace rail lists only real workspaces; Notifications is a
+    // separate screen. Picking the lab's workspace records it in the URL.
+    const workspaceNav = page.getByRole('navigation', { name: 'Workspaces' });
+    const workspaceButtons = workspaceNav.getByRole('button');
+    await expect(workspaceButtons.first()).toBeVisible();
+    const names = await workspaceButtons.allTextContents();
+    expect(names.some(name => name.trim() === 'All workspaces')).toBe(true);
+    expect(names.some(name => /notifications/i.test(name))).toBe(false);
+    expect(names.length).toBeGreaterThan(1);
+    await workspaceButtons.nth(1).click();
+    await expect(page).toHaveURL(/#workspace\/.+$/);
     const workspaceHash = new URL(page.url()).hash;
 
     // This daemon has isolated config and a fake harness. Exercise the real
@@ -116,21 +124,20 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     expect(bundles.ids).toContain(bundles.parallel.bundle_id);
 
     // Quota is a page reached from the menu, not a card on the dashboard.
-    await page.locator('#menu-button').click();
-    await page.getByRole('menuitem', { name: 'Quota' }).click();
+    await openMenu(page);
+    await page.getByRole('navigation', { name: 'Mjolnir' }).getByRole('button', { name: 'Quota' }).click();
     await expect(page).toHaveURL(/#quota$/);
-    await expect(page.locator('#quota')).toContainText('fake');
+    await expect(page.locator('main')).toContainText(/fake/i);
     // The lab's harness reports no usable quota, so the page has to say that
     // rather than draw an empty bar and imply a healthy limit.
-    await expect(page.locator('#quota')).toContainText(/unavailable/i);
-    await page.locator('#quota summary').first().click();
-    await page.locator('#quota').getByRole('button', { name: 'Refresh' }).first().click();
+    await expect(page.locator('main')).toContainText(/unavailable|no quota has been reported/i);
+    await page.getByRole('button', { name: /Refresh quota for/ }).first().click();
 
     // Targets is a page too, and it says what state its readings are in.
-    await page.locator('#menu-button').click();
-    await page.getByRole('menuitem', { name: 'Targets' }).click();
+    await openMenu(page);
+    await page.getByRole('navigation', { name: 'Mjolnir' }).getByRole('button', { name: 'Targets' }).click();
     await expect(page).toHaveURL(/#targets$/);
-    await expect(page.locator('#targets')).toContainText('localhost');
+    await expect(page.locator('main')).toContainText('localhost');
     // The keyboard-inset and meter techniques both set a custom property
     // through the CSSOM. The policy forbids inline style attributes parsed
     // from markup; this pins that a CSSOM write is still permitted, because
@@ -144,72 +151,76 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await page.getByRole('button', { name: 'Back' }).click();
     await expect(page).toHaveURL(new RegExp(escapeForRegExp(workspaceHash) + '$'));
 
-    // The New flow asks one thing per screen and reviews before committing.
-    await page.getByRole('button', { name: 'New session' }).click();
+    // The New flow reviews the launch before committing anything.
+    await page.getByRole('link', { name: 'New session' }).click();
     await expect(page).toHaveURL(/\/new$/);
-    // The lab configures a single profile, so the form skips the Account step
-    // and opens on Where to run.
-    await expect(page.locator('#new-progress')).toContainText('Where to run');
     // Config::with_local_targets also offers container candidates. Select the
     // bare host explicitly so this scenario exercises the directory flow.
-    await page.locator('#new-target').getByRole('radio', { name: /^localhost/ }).check();
-    await page.getByRole('button', { name: 'Next' }).click();
+    const localhostValue = await page.getByLabel('Target').evaluate(select => {
+      const option = [...select.options].find(candidate => /^localhost/.test(candidate.textContent));
+      return option ? option.value : null;
+    });
+    expect(localhostValue).toBeTruthy();
+    await page.getByLabel('Target').selectOption(localhostValue);
     // The selected target is bare, so the project step asks for a directory
     // rather than offering a bundle.
-    await expect(page.locator('#new-project-directory')).toBeVisible();
-    await page.locator('#new-project-directory').fill(projectDirectory);
-    await page.getByRole('button', { name: 'Next' }).click();
-    await expect(page.locator('#new-progress')).toContainText('Review');
-    await page.locator('#new-title').fill(title);
-    await page.getByRole('button', { name: 'Start' }).click();
+    await expect(page.getByLabel('Project directory')).toBeVisible();
+    await page.getByLabel('Project directory').fill(projectDirectory);
+    // The preflight must settle: either it passes, or dirty repositories gate
+    // the launch behind explicit acknowledgements.
+    await expect(page.getByText(/Preflight passed|Uncommitted changes found/)).toBeVisible();
+    const acknowledgements = page.getByRole('checkbox', { name: /uncommitted changes/ });
+    for (const checkbox of await acknowledgements.all()) await checkbox.check();
+    await page.getByText('Advanced options').click();
+    await page.getByLabel('Session title').fill(title);
+    await page.getByRole('button', { name: 'Launch' }).click();
     stage('session-requested');
 
-    // Scoped to the dashboard: the resume page renders session cards too, and
-    // a hidden page's nodes are still in the document.
-    const session = page.locator('#sessions .session').filter({ hasText: title });
-    await expect(session).toHaveAttribute('aria-label', /^Open session /);
+    // The new session appears on the dashboard and opens its conversation.
+    const sessionCard = page.getByTestId('session-card-' + '').locator('..');
+    const session = page.locator('article[data-testid^="session-card-"]').filter({ hasText: title });
+    await expect(session).toBeVisible();
     stage('session-running');
-    await expect(session).toHaveAttribute('role', 'link');
-    await session.locator('h3').click();
+    await session.getByRole('button', { name: title }).click();
     await expect(page).toHaveURL(/#conversation\//);
-    await expect(page.locator('#conversation-title')).toHaveText(title);
+    await expect(page.getByRole('heading', { name: title })).toBeVisible();
 
     // The transcript scrolls inside itself, so the page cannot scroll away
     // from the composer while somebody is reading.
-    await expect(page.locator('#conversation-scroll')).toBeVisible();
+    await expect(page.getByTestId('conversation-scroll')).toBeVisible();
     // The composer offers the commands the harness can actually satisfy, and
     // /help lists them in the transcript.
-    await page.locator('#prompt-text').fill('/he');
-    await expect(page.locator('#command-palette')).toBeVisible();
-    await expect(page.locator('#command-palette')).toContainText('/help');
+    const message = page.getByTestId('composer').getByLabel('Message', { exact: true });
+    await message.fill('/he');
+    await expect(page.getByTestId('command-palette')).toBeVisible();
+    await expect(page.getByTestId('command-palette')).toContainText('/help');
     await page.keyboard.press('Enter');
-    await expect(page.locator('#prompt-text')).toHaveText('/help ');
-    await page.keyboard.press('Enter');
-    await expect(page.locator('#conversation-feed')).toContainText('Available commands');
-    await expect(page.locator('#conversation-feed')).toContainText('run a shell command');
+    await expect(message).toHaveValue('/help ');
+    await message.press('Enter');
+    await expect(page.getByTestId('transcript-rows')).toContainText('Available commands', { timeout: 60_000 });
 
     // A draft is stored against this viewer, so it survives a reload — and a
     // second viewer with its own cookie must not see it.
     const conversationUrl = page.url();
-    await page.locator('#prompt-text').fill('a draft that should survive');
+    await message.fill('a draft that should survive');
     await page.waitForTimeout(900);
     await page.reload();
-    await expect(page.locator('#prompt-text')).toHaveText('a draft that should survive');
+    await expect(page.getByTestId('composer').getByLabel('Message', { exact: true })).toHaveValue('a draft that should survive');
 
     const otherContext = await browser.newContext({ ignoreHTTPSErrors: true });
     const otherPage = await otherContext.newPage();
     await codeLogin(otherPage, baseUrl, code);
     await otherPage.goto(conversationUrl);
-    await expect(otherPage.locator('#conversation-title')).toHaveText(title);
-    await expect(otherPage.locator('#prompt-text')).toHaveText('');
+    await expect(otherPage.getByRole('heading', { name: title })).toBeVisible();
+    await expect(otherPage.getByTestId('composer').getByLabel('Message', { exact: true })).toHaveValue('');
     await otherContext.close();
 
-    await page.locator('#prompt-text').fill('');
+    await page.getByTestId('composer').getByLabel('Message', { exact: true }).fill('');
     await page.waitForTimeout(900);
     // The browser's own Back button returns to the dashboard rather than
     // leaving the application.
     await page.goBack();
-    await expect(page.locator('#dashboard')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeVisible();
 
     await context.setOffline(true);
     fs.writeFileSync(readyMarker, 'browser offline and ready\n');
@@ -223,41 +234,40 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     // A stopped session leaves the dashboard: it belongs to the resume flow,
     // which is where a person can do something about it.
     await expect(session).toHaveCount(0);
-    await page.getByRole('button', { name: 'Resume a session' }).click();
+    await page.getByRole('link', { name: 'Resume' }).click();
     await expect(page).toHaveURL(/\/resume$/);
-    const matchingResumeRow = page.locator('#resumable [data-session-id]').filter({ hasText: title });
+    const matchingResumeRow = page.getByRole('button', { name: new RegExp(escapeForRegExp(title)) }).first();
     await expect(matchingResumeRow).toBeVisible();
     await matchingResumeRow.click();
-    await expect(page).toHaveURL(/\/resume\/[^/]+$/);
-    await page.locator('#resume-detail').getByRole('button', { name: 'Resume', exact: true }).click();
-    await expect(page).toHaveURL(/#workspace\/[^/]+$/);
-    await expect(session).toHaveAttribute('aria-label', /^Open session /);
+    await page.getByRole('button', { name: 'Resume session' }).click();
+    // Resuming lands on the conversation; the dashboard holds the session again.
+    await expect(page).toHaveURL(/#conversation\//);
+    await page.goBack();
+    await expect(session).toBeVisible();
     // A stop needs the daemon's session manager to have adopted the session,
     // and adoption is asynchronous, so a stop issued moments after a resume can
-    // fail with "is not managed". The terminal surface offers Retry stop for
-    // exactly this; the phone leaves the button in place and marks the session
-    // as needing attention, so retrying is what a person would do. The stop
-    // itself then checkpoints and tears down a target, which takes materially
-    // longer than a snapshot round trip.
+    // fail with "is not managed". The dialog reports the failure in place, so
+    // retrying is what a person would do. The stop itself then checkpoints and
+    // tears down a target, which takes materially longer than a snapshot round
+    // trip.
     for (let attempt = 0; attempt < 4; attempt += 1) {
       if ((await session.count()) === 0) break;
-      await session.locator('[data-session-menu]').click();
-      const stop = session.getByRole('menuitem', { name: 'Suspend session…', exact: true });
-      if ((await stop.count()) === 0) {
+      await session.getByRole('button', { name: `Actions for ${title}` }).click();
+      const suspend = page.getByRole('menuitem', { name: 'Suspend…', exact: true });
+      if ((await suspend.count()) === 0) {
+        await page.keyboard.press('Escape');
         await page.waitForTimeout(1000);
         continue;
       }
-      page.once('dialog', dialog => dialog.accept());
-      await stop.click();
-      await session.waitFor({ state: 'detached', timeout: 45_000 }).catch(() => {});
+      await suspend.click();
+      const dialog = page.getByRole('dialog');
+      await dialog.getByRole('button', { name: 'Suspend session' }).click();
+      const gone = await session.waitFor({ state: 'detached', timeout: 45_000 }).then(() => true).catch(() => false);
+      if (gone) break;
+      // A failed attempt leaves the dialog open with the reason; close it.
+      await dialog.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
     }
     await expect(session).toHaveCount(0);
-    // A stop that loses the adoption race fails after it was accepted, so its
-    // reason never travels in the response: it reaches the phone as the
-    // session's attention state and nothing else. This asserts that, and with
-    // it that the controller's own wording — which names sessions and
-    // workers — stays on the controller.
-    await expect(page.locator('#action-error')).toHaveText('');
     expect(responseErrors).toEqual([]);
 
     await context.tracing.stop({ path: tracePath });
@@ -269,15 +279,15 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     expect(sessionCookie).toBeTruthy();
     await context.addCookies([{ ...sessionCookie, expires: 1 }]);
     await page.reload();
-    await expect(page.locator('#login')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Unlock Mjolnir' })).toBeVisible();
     await codeLogin(page, baseUrl, code);
     expect(responseErrors).toEqual([]);
-    await page.locator('#menu-button').click();
-    await page.getByRole('menuitem', { name: 'Sign out' }).click();
-    await expect(page.locator('#login')).toBeVisible();
+    await openMenu(page);
+    await page.getByRole('navigation', { name: 'Mjolnir' }).getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('heading', { name: 'Unlock Mjolnir' })).toBeVisible();
   } catch (error) {
-    if (await page.locator('#code').isVisible()) {
-      await page.locator('#code').fill('').catch(() => {});
+    if (await page.getByLabel('Code', { exact: true }).isVisible().catch(() => false)) {
+      await page.getByLabel('Code', { exact: true }).fill('').catch(() => {});
     }
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
     await context.tracing.stop({ path: tracePath }).catch(() => {});

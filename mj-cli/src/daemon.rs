@@ -1,6 +1,6 @@
 //! Application-owned daemon startup and attachment maintenance.
 use mj_controller::controller::ControllerStoreGuard;
-use mj_core::config::{DaemonRuntime, data_dir};
+use mj_core::config::{ConfigLayout, DaemonRuntime, DataLayout};
 use mj_core::daemon_exit::{
     DaemonExitRecord, daemon_exits_dir, format_exit_reason, read_daemon_exit_record,
 };
@@ -323,7 +323,7 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
 }
 
 async fn connect_or_start_local() -> Result<DaemonClient> {
-    let lock_path = data_dir().join("daemon-start.lock");
+    let lock_path = DataLayout::current().daemon_start_lock();
     // Most clients find a daemon they can use. Deciding that needs only a
     // shared hold, so a burst of clients reconnecting after a handoff checks
     // the daemon side by side instead of one at a time, which multiplied each
@@ -378,11 +378,12 @@ async fn connect_or_start_prepared(
     // Do not launch a child that can only fail to acquire that lock. A
     // container daemon owns a store in its volume, so the host guard is not
     // about it at all.
-    let configured_container = load_daemon_config()
-        .await
-        .map(|daemon| daemon.runtime.engine().is_some())
-        .unwrap_or(false);
+    let configured_container = daemon_configured_for_container().await;
     if !configured_container {
+        // A fenced store must not get a daemon. The fence is read under the
+        // start lock that `mj daemon fence` holds while it writes the row, so
+        // a client that waited for the fence sees it here instead of spawning.
+        ensure_store_not_fenced().await?;
         let released = Instant::now();
         let handoff_deadline = released + STOP_TIMEOUT;
         loop {
@@ -416,7 +417,7 @@ async fn connect_or_start_prepared(
         }
     }
 
-    let log_path = data_dir().join("daemon.log");
+    let log_path = DataLayout::current().daemon_log();
     let launched = launch_daemon(&log_path, prior_unpublished.as_ref(), prepared).await?;
     let launched_at = Instant::now();
     let label = launched.label();
@@ -728,12 +729,12 @@ fn configure_host_daemon_environment(
         command.env_clear().envs(environment);
     }
     // Resolve against the client's cwd before the child changes directory.
-    // config_dir/data_dir own override and named-instance precedence.
+    // ConfigLayout/DataLayout own override and named-instance precedence.
     command.env(
         "MJ_CONFIG_DIR",
-        std::path::absolute(mj_core::config::config_dir())?,
+        std::path::absolute(ConfigLayout::current().root())?,
     );
-    let data = std::path::absolute(data_dir())?;
+    let data = std::path::absolute(DataLayout::current().root())?;
     command.env("MJ_DATA_DIR", &data);
     if let Some(instance) = std::env::var_os("MJ_INSTANCE") {
         command.env("MJ_INSTANCE", instance);
@@ -825,7 +826,7 @@ fn host_daemon_command(
     use std::process::Command;
 
     let executable = daemon_launch_executable()?;
-    let exit_dir = std::path::absolute(daemon_exits_dir(&data_dir()))?;
+    let exit_dir = std::path::absolute(DataLayout::current().daemon_exits_dir())?;
     let mut command = Command::new(&executable);
     command
         .args(["daemon-wait-exit", "--exit-dir"])
@@ -915,7 +916,8 @@ fn daemon_scope_launcher(
 /// gone and before its replacement starts, retires it. Delete this once no
 /// supported upgrade starts from those releases.
 fn retire_legacy_node() {
-    let data = data_dir();
+    let layout = DataLayout::current();
+    let data = layout.root();
     for name in ["node-endpoint.json", "node-id", "node.lock"] {
         match fs::remove_file(data.join(name)) {
             Ok(()) => {}
@@ -1532,17 +1534,26 @@ const RESTART_ATTEMPTS: usize = 2;
 /// while another client is still launching it. Returns whether a running
 /// daemon was stopped.
 pub(crate) async fn stop_instance(force: bool) -> Result<bool> {
-    mj_core::config::ensure_may_control_store(&data_dir(), "stop the Mjolnir daemon")?;
-    let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    mj_core::config::ensure_may_control_store(
+        DataLayout::current().root(),
+        "stop the Mjolnir daemon",
+    )?;
+    let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
+    stop_instance_holding(&startup, force).await
+}
+
+/// [`stop_instance`] for a caller that already holds the startup lock and
+/// needs it held after the stop, as `mj daemon fence` does.
+async fn stop_instance_holding(startup: &DaemonStartGuard, force: bool) -> Result<bool> {
     let fallback = if force {
         StopFallback::Force
     } else {
         StopFallback::Graceful
     };
     let stopped = match read_metadata_any() {
-        Ok(metadata) => stop_daemon(&startup, &metadata, fallback).await?,
+        Ok(metadata) => stop_daemon(startup, &metadata, fallback).await?,
         Err(error) if daemon_not_running(&error).is_some() => match read_container_owner() {
-            Ok(Some(record)) => stop_pending_container(&startup, &record, force).await?,
+            Ok(Some(record)) => stop_pending_container(startup, &record, force).await?,
             Ok(None) => false,
             Err(_) if force => {
                 clear_unreadable_container_owner()?;
@@ -1615,11 +1626,14 @@ async fn stop_pending_container(
 /// that, an attached client running an older build wins the gap and the
 /// restart reports someone else's daemon as the one it was asked for.
 pub async fn restart_daemon() -> Result<RestartedDaemon> {
-    mj_core::config::ensure_may_control_store(&data_dir(), "restart the Mjolnir daemon")?;
+    mj_core::config::ensure_may_control_store(
+        DataLayout::current().root(),
+        "restart the Mjolnir daemon",
+    )?;
     // A daemon that cannot read its configuration exits at once. Find that out
     // while the old one still runs.
     ensure_config_loads(&mj_core::config::config_path(), "restarted")?;
-    let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
     let mut prepared = PreparedDaemonLaunch::default();
     for attempt in 1..=RESTART_ATTEMPTS {
         prepared.resolve(host_daemon_login_environment).await?;
@@ -2034,7 +2048,7 @@ async fn replace_daemon_with_resolver(
     + 'static,
 ) -> Result<()> {
     mj_core::config::ensure_may_control_store(
-        &data_dir(),
+        DataLayout::current().root(),
         &format!(
             "replace Mjolnir daemon {} (build {})",
             metadata.pid, metadata.build_version
@@ -2364,6 +2378,101 @@ enum StopFallback {
     Graceful,
     Force,
     Restart,
+}
+
+/// Whether the configured daemon runs in a container, whose store lives in
+/// the container's volume rather than in this data directory.
+async fn daemon_configured_for_container() -> bool {
+    load_daemon_config()
+        .await
+        .map(|daemon| daemon.runtime.engine().is_some())
+        .unwrap_or(false)
+}
+
+/// The fence on this data directory's store, read without creating or
+/// migrating anything.
+pub(crate) async fn read_store_fence() -> Result<Option<mj_controller::database::StoreFenceRecord>>
+{
+    mj_core::runtime::spawn_blocking(mj_controller::database::read_configured_store_fence)
+        .await
+        .context("read store fence task failed")?
+}
+
+/// Refuse with [`mj_core::storage::StoreFenced`] when the store is fenced.
+async fn ensure_store_not_fenced() -> Result<()> {
+    match read_store_fence().await? {
+        Some(fence) => Err(fence.refusal(DataLayout::current().root()).into()),
+        None => Ok(()),
+    }
+}
+
+/// What `mj daemon fence` did.
+#[derive(Debug)]
+pub(crate) struct FencedStore {
+    pub fence: mj_controller::database::StoreFenceRecord,
+    pub replaced: Option<mj_controller::database::StoreFenceRecord>,
+    pub stopped_daemon: bool,
+}
+
+/// Stop the daemon and mark the store so no daemon starts on it.
+///
+/// The startup lock is held from before the stop until the fence row is
+/// written. Every client that starts a daemon takes that lock first, so none
+/// can start one in the gap between the stop and the fence: the gap does not
+/// exist, rather than being narrow. A client that waited for the lock then
+/// reads the fence and refuses instead of spawning.
+pub(crate) async fn fence_store(destination: String, note: Option<String>) -> Result<FencedStore> {
+    mj_core::config::ensure_may_control_store(
+        DataLayout::current().root(),
+        "fence the Mjolnir store",
+    )?;
+    // Checked here, before the daemon is stopped, so a bad argument changes nothing.
+    ensure!(
+        !destination.trim().is_empty(),
+        "`mj daemon fence --to` needs a destination, such as the new host's name"
+    );
+    ensure!(
+        !daemon_configured_for_container().await,
+        "this instance runs its daemon in a container, so its store is in the container's volume \
+         and `mj daemon fence` cannot mark it"
+    );
+    let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
+    let stopped_daemon = stop_instance_holding(&startup, false).await?;
+    let fenced = mj_core::runtime::spawn_blocking(move || {
+        // The daemon has released the store; hold it while the row is written.
+        let _store = ControllerStoreGuard::acquire()?;
+        mj_controller::database::fence_configured_store(&destination, note.as_deref())
+    })
+    .await
+    .context("fence store task failed")??;
+    drop(startup);
+    Ok(FencedStore {
+        fence: fenced.0,
+        replaced: fenced.1,
+        stopped_daemon,
+    })
+}
+
+/// Remove the fence, under the same locks as [`fence_store`]. Starts no
+/// daemon. Returns the fence that was removed, or `None` if the store was not
+/// fenced (in which case nothing is opened for writing).
+pub(crate) async fn unfence_store() -> Result<Option<mj_controller::database::StoreFenceRecord>> {
+    mj_core::config::ensure_may_control_store(
+        DataLayout::current().root(),
+        "unfence the Mjolnir store",
+    )?;
+    let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
+    let removed = mj_core::runtime::spawn_blocking(|| {
+        if mj_controller::database::read_configured_store_fence()?.is_none() {
+            return Ok(None);
+        }
+        let _store = ControllerStoreGuard::acquire()?;
+        mj_controller::database::unfence_configured_store()
+    })
+    .await
+    .context("unfence store task failed")??;
+    drop(startup);
+    Ok(removed)
 }
 
 async fn stop_daemon(
@@ -2918,11 +3027,12 @@ esac
         }
 
         fn engine_state(state: &str) {
-            fs::write(data_dir().join("engine.state"), state).unwrap();
+            fs::write(DataLayout::current().root().join("engine.state"), state).unwrap();
         }
 
         fn calls() -> String {
-            fs::read_to_string(data_dir().join("engine.calls")).unwrap_or_default()
+            fs::read_to_string(DataLayout::current().root().join("engine.calls"))
+                .unwrap_or_default()
         }
 
         async fn configure_container() -> Box<container::ContainerSpec> {
@@ -2960,7 +3070,7 @@ esac
 
         fn set_endpoint(listener: &tokio::net::TcpListener) {
             fs::write(
-                data_dir().join("engine.endpoint"),
+                DataLayout::current().root().join("engine.endpoint"),
                 listener.local_addr().unwrap().to_string(),
             )
             .unwrap();
@@ -2995,7 +3105,7 @@ esac
                 ("legacy-idle", false, true),
             ] {
                 engine_state(state);
-                fs::write(data_dir().join("engine.calls"), "").unwrap();
+                fs::write(DataLayout::current().root().join("engine.calls"), "").unwrap();
                 let spec = configure_container().await;
                 let (listener, metadata) = fake_daemon(0).await;
                 set_endpoint(&listener);
@@ -3010,7 +3120,7 @@ esac
                         runtime: Some(RUNTIME),
                     },
                 };
-                let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+                let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
                     .await
                     .unwrap();
                 let (opened, _stream) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -3079,13 +3189,13 @@ esac
                 ("worker", CONTAINER_ID),
             ] {
                 engine_state(state);
-                fs::write(data_dir().join("engine.calls"), "").unwrap();
+                fs::write(DataLayout::current().root().join("engine.calls"), "").unwrap();
                 let (old, metadata) = fake_daemon(0).await;
                 let (ready, _) = fake_daemon(0).await;
                 let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let api_address = api.local_addr().unwrap();
                 fs::write(
-                    data_dir().join("engine.api-endpoint"),
+                    DataLayout::current().root().join("engine.api-endpoint"),
                     api_address.to_string(),
                 )
                 .unwrap();
@@ -3113,7 +3223,7 @@ esac
                     DaemonRelease::Exited
                 ));
 
-                let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+                let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
                     .await
                     .unwrap();
                 let identity = DaemonIdentity {
@@ -3176,7 +3286,8 @@ esac
                 assert_eq!(endpoint.pid, 0);
                 assert_eq!(record.api_token.as_deref(), Some(endpoint.token.as_str()));
                 assert_eq!(
-                    fs::read_to_string(data_dir().join("exec.api-token")).unwrap(),
+                    fs::read_to_string(DataLayout::current().root().join("exec.api-token"))
+                        .unwrap(),
                     endpoint.token
                 );
                 let preserve = state == "worker";
@@ -3212,7 +3323,7 @@ esac
                 decide_existing_daemon().await.unwrap(),
                 ExistingDaemon::Unanswered(_)
             ));
-            let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+            let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
                 .await
                 .unwrap();
             assert!(
@@ -3273,7 +3384,7 @@ esac
             assert!(format!("{error:#}").contains("daemon-container.json"));
 
             fs::remove_file(container_owner_path()).unwrap();
-            let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+            let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
                 .await
                 .unwrap();
             let Err(error) = connect_or_start_holding(&startup).await else {
@@ -3300,7 +3411,7 @@ esac
             let spec = configure_container().await;
             let (listener, _) = fake_daemon(0).await;
             set_endpoint(&listener);
-            let lock = data_dir().join("daemon-start.lock");
+            let lock = DataLayout::current().daemon_start_lock();
             let launcher = acquire_start_guard(lock.clone()).await.unwrap();
             let launch = container::launch(&spec, None).await.unwrap();
             assert!(!metadata_path().exists());
@@ -3400,13 +3511,15 @@ esac
                 // token authenticates, regardless of what the retry wrote.
                 assert_eq!(ping.token, prior.token);
                 assert_eq!(
-                    fs::read_to_string(data_dir().join("exec.token")).unwrap(),
+                    fs::read_to_string(DataLayout::current().root().join("exec.token")).unwrap(),
                     prior.token
                 );
                 let record = read_container_owner().unwrap().unwrap();
                 assert_eq!(record.token, prior.token);
                 assert_eq!(record.api_token, prior.api_token);
-                let api_token = fs::read_to_string(data_dir().join("exec.api-token")).unwrap();
+                let api_token =
+                    fs::read_to_string(DataLayout::current().root().join("exec.api-token"))
+                        .unwrap();
                 assert_eq!(Some(&api_token), prior.api_token.as_ref());
                 assert!(!calls().contains(&api_token));
                 answer(&mut stream, ping, Ok(DaemonReply::Pong)).await;
@@ -3423,7 +3536,7 @@ esac
                 )
                 .await;
             };
-            let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+            let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
                 .await
                 .unwrap();
             let (connected, ()) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -3456,7 +3569,7 @@ esac
             };
             write_launcher_metadata(&metadata).unwrap();
             engine_state("ps-error");
-            let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+            let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
                 .await
                 .unwrap();
             let error = tokio::time::timeout(
@@ -3678,7 +3791,7 @@ esac
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
-        let path = data_dir().join("daemon-start.lock");
+        let path = DataLayout::current().daemon_start_lock();
         let held = acquire_start_guard(path.clone()).await.unwrap();
         let (listener, metadata) = fake_daemon(std::process::id()).await;
         fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
@@ -4122,7 +4235,7 @@ esac
             }
         });
         let (_route, mut notices) = StartupNoticeRoute::open();
-        let path = data_dir().join("daemon-start.lock");
+        let path = DataLayout::current().daemon_start_lock();
         let held = acquire_start_guard(path.clone()).await.unwrap();
         for queued in [false, true] {
             let metadata = metadata.clone();
@@ -4257,7 +4370,7 @@ esac
             return;
         }
         let (listener, metadata) = fake_daemon(std::process::id()).await;
-        let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+        let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
             .await
             .unwrap();
         let mut prepared = PreparedDaemonLaunch::default();
@@ -4356,7 +4469,11 @@ esac
             }
             assert_eq!(
                 command.get_current_dir(),
-                Some(std::path::absolute(data_dir()).unwrap().as_path())
+                Some(
+                    std::path::absolute(DataLayout::current().root())
+                        .unwrap()
+                        .as_path()
+                )
             );
             return;
         }
@@ -4510,7 +4627,7 @@ esac
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
-        let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+        let startup = acquire_start_guard(DataLayout::current().daemon_start_lock())
             .await
             .unwrap();
         assert!(!metadata_path().exists());
@@ -4583,7 +4700,7 @@ esac
         // this file. Its absence is the proof that no start was attempted;
         // the missing metadata alone would only prove none succeeded.
         assert!(
-            !data_dir().join("daemon-start.lock").exists(),
+            !DataLayout::current().daemon_start_lock().exists(),
             "the keep-alive must never attempt to start a daemon"
         );
         assert!(

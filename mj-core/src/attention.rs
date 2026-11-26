@@ -41,6 +41,18 @@ pub struct NotificationStackEntry {
     pub message: EntryMessage,
 }
 
+impl NotificationStackEntry {
+    /// Whether a reader whose receipt is `viewed_through` still owes this entry
+    /// a card. The daemon and the TUI both apply this one rule, each against
+    /// its own read frontier.
+    pub fn is_unread(&self, viewed_through: u64) -> bool {
+        match self.kind {
+            NotificationKind::Important => self.completed_ordinal > viewed_through,
+            NotificationKind::NeedsInput => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryMessage {

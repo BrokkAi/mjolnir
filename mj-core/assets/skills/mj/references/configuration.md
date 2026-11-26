@@ -536,10 +536,9 @@ command-line tool must match the version Mjolnir links.
 A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn_worker` tool. Create and Move offer
 Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
 as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
-no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
-for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
-last choice was Mjolnir and it is configured; a DSH session's None does not
-change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
+no steering), and loses its own `subagent` tool unless the choice is Native. DSH's
+runtime has sub-agents of its own: Mjolnir removes their plugins unless the
+choice is Native, so a Mjolnir or None session has no second delegation tree. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
 session override. The subtle choice is optional, but cannot be configured
 without straightforward. Each category holds one or more equal-peer `(model, effort)`
@@ -594,7 +593,7 @@ and effort with the strongest quota headroom paced against its reset times.
 The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Mjolnir. If Mjolnir delegation is unconfigured or unavailable, Create reports
-a notice and uses `native` where supported or `none` on DSH and Antigravity.
+a notice and uses `native` where supported or `none` on Antigravity.
 An explicit `--subagents mjolnir` or `--orchestrators` requires Mjolnir
 delegation to be available. `mj move --subagents native|mjolnir|none` retains
 the recorded policy when omitted, including any session override.
@@ -695,7 +694,7 @@ dsh-acp settings may go in
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
 cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
-only when it is 0.8.0 or newer, otherwise the pinned npm package. Containers
+only when it is at least the pinned version (0.8.1), otherwise the pinned npm package. Containers
 use their image-provided runtime or the documented installer fallback. The
 `mj login` command invokes the harness's canonical controller-side command from
 `PATH`.

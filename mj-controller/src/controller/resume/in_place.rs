@@ -271,6 +271,7 @@ impl Controller {
                     .as_ref()
                     .and_then(|runtime| runtime.container_settings.clone());
                 record.target_runtime = Some(runtime.into());
+                record.machine_id = self.config.template_machine_id(target_template_id);
                 record.native_session_id = verified_archive
                     .native_session_to_load(native_continuity)
                     .map(str::to_owned);

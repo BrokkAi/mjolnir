@@ -624,14 +624,14 @@ impl HarnessKind {
     /// below the configuration directory identifies Mjolnir, rather than the
     /// harness's own installation, as the owner of the login and native data.
     pub fn managed_profile_home(self, profile_id: &str) -> PathBuf {
-        self.managed_profile_home_in(&super::config_dir(), profile_id)
+        self.managed_profile_home_in(super::ConfigLayout::current().root(), profile_id)
     }
 
     /// [`Self::managed_profile_home`] with an explicit configuration root for
     /// tests and callers that are already operating on another instance.
     pub fn managed_profile_home_in(self, config_root: &Path, profile_id: &str) -> PathBuf {
-        config_root
-            .join("profiles")
+        super::ConfigLayout::at(config_root)
+            .profiles_dir()
             .join(profile_id)
             .join(self.id())
     }
@@ -1393,10 +1393,11 @@ impl HarnessKind {
     }
 
     /// Whether the harness has sub-agents of its own, which the Native
-    /// delegation choice keeps. dsh-acp has none, so Native would do nothing
-    /// for DSH and is not offered there.
+    /// delegation choice keeps. Antigravity has none that Mjolnir offers, so
+    /// Native would do nothing for it. DSH's runtime has its own sub-agents;
+    /// Mjolnir removes their plugins unless the session keeps Native.
     pub const fn has_native_subagents(self) -> bool {
-        !matches!(self, Self::Dsh | Self::Antigravity)
+        !matches!(self, Self::Antigravity)
     }
 
     /// The harness-home-relative directories that hold its native session

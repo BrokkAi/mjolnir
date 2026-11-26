@@ -68,6 +68,102 @@ impl std::fmt::Display for StoreSchemaMismatch {
 
 impl std::error::Error for StoreSchemaMismatch {}
 
+/// A store that `mj daemon fence` marked, so no daemon may write it. The fence
+/// row travels with a copied database, so a copy refuses too until someone
+/// unfences it there. `is_copy` only chooses the wording: the refusal is the
+/// same either way, so a host-name collision cannot weaken it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreFenced {
+    pub destination: String,
+    pub fenced_at: String,
+    pub fenced_host: String,
+    pub fenced_data_dir: std::path::PathBuf,
+    pub note: Option<String>,
+    pub is_copy: bool,
+}
+
+impl StoreFenced {
+    /// Compare where the fence was written with where the store is now.
+    pub fn new(
+        destination: String,
+        fenced_at: String,
+        fenced_host: String,
+        fenced_data_dir: std::path::PathBuf,
+        note: Option<String>,
+        current_host: &str,
+        current_data_dir: &std::path::Path,
+    ) -> Self {
+        let is_copy = fenced_host != current_host || fenced_data_dir != current_data_dir;
+        Self {
+            destination,
+            fenced_at,
+            fenced_host,
+            fenced_data_dir,
+            note,
+            is_copy,
+        }
+    }
+}
+
+impl std::fmt::Display for StoreFenced {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_copy {
+            write!(
+                formatter,
+                "This Mjolnir store is a copy fenced on {} at {}. Finish editing it, then run `mj daemon unfence` to activate it here.",
+                self.fenced_host,
+                self.fenced_data_dir.display()
+            )?;
+        } else {
+            write!(
+                formatter,
+                "This Mjolnir store was moved to {} on {}. No daemon will start here.",
+                self.destination, self.fenced_at
+            )?;
+        }
+        if let Some(note) = &self.note {
+            write!(formatter, " Note: {note}")?;
+        }
+        write!(
+            formatter,
+            " If you are an agent running inside a Mjolnir session, `mj` commands on this host no longer reach a daemon. Do not run `mj daemon unfence`; tell the user."
+        )
+    }
+}
+
+impl std::error::Error for StoreFenced {}
+
+/// This machine's host name, for recording where a fence was written.
+/// `unknown` when the system does not report one.
+pub fn local_host_name() -> String {
+    #[cfg(unix)]
+    {
+        let mut buffer = [0_u8; 256];
+        // SAFETY: `buffer` is writable for its full length, and `gethostname`
+        // writes at most that many bytes.
+        let status = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+        if status == 0 {
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
+            if let Ok(name) = std::str::from_utf8(&buffer[..end])
+                && !name.is_empty()
+            {
+                return name.to_owned();
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if let Some(name) = std::env::var_os("COMPUTERNAME")
+        && let Some(name) = name.to_str()
+        && !name.is_empty()
+    {
+        return name.to_owned();
+    }
+    "unknown".to_owned()
+}
+
 /// How far a prompt search reaches. Wider scopes list the asking session's
 /// matches first, then the rest of the project's, then other projects', each
 /// newest first.

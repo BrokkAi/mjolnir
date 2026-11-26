@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{SessionRecord, SessionResourceAllocation, TargetLocator};
 use crate::config::{
-    Environment, EnvironmentValue, ExecutionPolicy, SshConnection, TargetTemplate,
+    Environment, EnvironmentValue, ExecutionPolicy, Machine, SshConnection, TargetTemplate,
 };
 use crate::targets::AdditionalMount;
 
@@ -160,14 +160,7 @@ impl TargetRuntimeSettings {
         if self.kind != current.kind || recorded == now {
             return None;
         }
-        let location = |ssh: &SshConnection| super::ManagedWorktreeTarget::Ssh {
-            destination: match &ssh.user {
-                Some(user) => format!("{user}@{}", ssh.host),
-                None => ssh.host.clone(),
-            },
-            ssh_args: ssh.extra_args.clone(),
-        };
-        if !location(recorded).same_location(&location(now)) {
+        if !same_ssh_place(recorded, now) {
             return None;
         }
         let mut refreshed = self.clone();
@@ -179,6 +172,77 @@ impl TargetRuntimeSettings {
             },
         };
         Some(refreshed)
+    }
+}
+
+/// Whether two SSH connections reach the same place: the same host, login
+/// user and port. The other options say how to connect, not where.
+fn same_ssh_place(recorded: &SshConnection, now: &SshConnection) -> bool {
+    let location = |ssh: &SshConnection| super::ManagedWorktreeTarget::Ssh {
+        destination: match &ssh.user {
+            Some(user) => format!("{user}@{}", ssh.host),
+            None => ssh.host.clone(),
+        },
+        ssh_args: ssh.extra_args.clone(),
+    };
+    location(recorded).same_location(&location(now))
+}
+
+impl TargetRuntimeSettings {
+    /// These recorded settings as `machine` now configures them, or `None`
+    /// when `machine` is not where these settings reach: not an SSH machine,
+    /// or another host, user or port. `Some` means the machine answers for
+    /// this placement, whether or not its SSH options changed, so a caller
+    /// stops there instead of asking the target template.
+    pub fn following_machine(&self, machine: &Machine) -> Option<Self> {
+        let Machine::Ssh { ssh, .. } = machine else {
+            return None;
+        };
+        let TargetConnection::Ssh { ssh: recorded } = &self.connection else {
+            return None;
+        };
+        if !same_ssh_place(recorded, ssh) {
+            return None;
+        }
+        let mut refreshed = self.clone();
+        refreshed.connection = TargetConnection::Ssh {
+            ssh: SshConnection {
+                identity_file: ssh.identity_file.clone(),
+                extra_args: ssh.extra_args.clone(),
+                ..recorded.clone()
+            },
+        };
+        Some(refreshed)
+    }
+}
+
+/// Whether `machine` is where a stored placement runs, judged from what the
+/// placement itself recorded: the locator's SSH `host` and the frozen access
+/// settings. A template that was repointed since the placement was made names
+/// a machine that fails this test, and the placement stays unassigned rather
+/// than taking the wrong machine. A legacy EC2 placement is never assigned:
+/// its frozen settings hold the AWS profile, region and user but not the
+/// launch template, so they cannot tell two machines in one account apart.
+#[must_use]
+pub fn machine_hosts_placement(
+    machine: &Machine,
+    locator_host: Option<&str>,
+    runtime: Option<&TargetRuntimeSettings>,
+) -> bool {
+    match machine {
+        Machine::Local { .. } => false,
+        Machine::Ssh { ssh, .. } => {
+            if locator_host != Some(ssh.host.as_str()) {
+                return false;
+            }
+            match runtime.map(|runtime| &runtime.connection) {
+                Some(TargetConnection::Ssh { ssh: recorded }) => same_ssh_place(recorded, ssh),
+                // Without recorded access settings only the host name is known,
+                // which cannot tell users or ports on one host apart.
+                Some(_) | None => false,
+            }
+        }
+        Machine::AwsEc2 { .. } => false,
     }
 }
 

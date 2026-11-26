@@ -1314,7 +1314,10 @@ mod delegation_replay_tests {
         let mut config = Config::default();
         config.profiles.insert(
             "kimi".into(),
-            HarnessProfile::new(HarnessKind::Kimi, mj_core::config::data_dir().join("kimi")),
+            HarnessProfile::new(
+                HarnessKind::Kimi,
+                mj_core::config::DataLayout::current().root().join("kimi"),
+            ),
         );
         config
             .targets
@@ -1395,7 +1398,10 @@ mod delegation_replay_tests {
         ] {
             config.profiles.insert(
                 name.into(),
-                HarnessProfile::new(harness, mj_core::config::data_dir().join(name)),
+                HarnessProfile::new(
+                    harness,
+                    mj_core::config::DataLayout::current().root().join(name),
+                ),
             );
         }
         config
@@ -1473,8 +1479,8 @@ mod delegation_replay_tests {
                 "dsh",
                 None,
                 None,
-                SubagentPolicy::None,
-                Some(("none", "[subagents.straightforward]")),
+                SubagentPolicy::Native,
+                Some(("native", "[subagents.straightforward]")),
                 None,
             ),
             (
@@ -1624,7 +1630,9 @@ mod delegation_replay_tests {
                 legacy_subagents: None,
                 ..mj_core::config::HarnessProfile::new(
                     mj_core::config::HarnessKind::Codex,
-                    mj_core::config::data_dir().join("unused-profile-home"),
+                    mj_core::config::DataLayout::current()
+                        .root()
+                        .join("unused-profile-home"),
                 )
             },
         );
@@ -1805,7 +1813,9 @@ mod delegation_replay_tests {
                 legacy_subagents: None,
                 ..mj_core::config::HarnessProfile::new(
                     mj_core::config::HarnessKind::Codex,
-                    mj_core::config::data_dir().join("missing-profile-home"),
+                    mj_core::config::DataLayout::current()
+                        .root()
+                        .join("missing-profile-home"),
                 )
             },
         );

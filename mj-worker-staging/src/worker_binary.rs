@@ -14,7 +14,9 @@ use sha2::{Digest, Sha256};
 use crate::targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, ProvisionStageGuard, SshTarget,
 };
-use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, atomic_write, data_dir};
+use mj_core::config::{
+    ConfigLayout, DataLayout, HarnessKind, HarnessProfile, ProjectBundle, atomic_write,
+};
 #[cfg(all(test, unix))]
 use mj_core::harness_runtime::CODEX_ACP_VERSION;
 use mj_core::project_memory::ProjectMemoryIdentity;

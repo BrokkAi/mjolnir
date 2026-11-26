@@ -741,9 +741,10 @@ fn golden_machines_without_runtimes() {
     let mut output = String::new();
     let mut dashboard = dashboard_with_session(stopped_session());
     let mut config = (*dashboard.config).clone();
-    config
-        .machines
-        .insert("nas".into(), machine("nas.example.test"));
+    config.machines.insert(
+        mj_core::config::MachineId::new("nas").unwrap(),
+        machine("nas.example.test"),
+    );
     dashboard.set_config(config);
     crate::test_support::answer_availability(&mut dashboard, |dashboard| {
         crate::test_support::availability_answer(dashboard, &[], &["nas"])
@@ -796,7 +797,7 @@ fn golden_machines_without_runtimes() {
             rejected_runtimes: Vec::new(),
             machines: vec![
                 crate::MachineRuntimeProbe {
-                    machine_id: "builder".into(),
+                    machine_id: mj_core::config::MachineId::new("builder").unwrap(),
                     machine: machines[0].1.clone(),
                     finding: crate::MachineFinding::Answered {
                         runtimes: vec![
@@ -835,7 +836,7 @@ fn golden_machines_without_runtimes() {
                     },
                 },
                 crate::MachineRuntimeProbe {
-                    machine_id: "nas".into(),
+                    machine_id: mj_core::config::MachineId::new("nas").unwrap(),
                     machine: machines[1].1.clone(),
                     finding: crate::MachineFinding::Unreachable {
                         answered_nothing: true,

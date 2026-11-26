@@ -28,7 +28,7 @@ pub const SECRETS_FILE: &str = "secrets.toml";
 
 /// This instance's secrets file.
 pub fn secrets_path() -> PathBuf {
-    super::config_dir().join(SECRETS_FILE)
+    super::ConfigLayout::current().secrets_toml()
 }
 
 /// The secrets file beside a configuration file.

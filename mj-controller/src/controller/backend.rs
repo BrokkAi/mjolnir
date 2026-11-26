@@ -10,7 +10,7 @@ pub(super) use crate::targets::recorded_backend_locator;
 
 use anyhow::{Context, Result, bail};
 
-use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
+use mj_core::config::{Config, DataLayout, ProjectBundle, TargetTemplate};
 use mj_core::state::{
     PodmanWorkspaceLocator, SessionRecord, SessionResourceAllocation, TargetLocator,
 };
@@ -461,7 +461,7 @@ fn build_cache_directory(template: &TargetTemplate) -> Option<String> {
 fn local_storage_paths(template: &TargetTemplate, mbx_paths: &[PathBuf]) -> Vec<String> {
     use mj_core::targets::storage::{ContainerStorage, TEMPORARY_DIRECTORY, local_home_path};
     let mut paths = vec![
-        data_dir().to_string_lossy().into_owned(),
+        DataLayout::current().root().to_string_lossy().into_owned(),
         TEMPORARY_DIRECTORY.to_owned(),
     ];
     paths.extend(
@@ -1050,7 +1050,7 @@ pub(super) fn locator_after_provision_named(
 
     Ok(match canonical {
         TargetTemplate::LocalBare => TargetLocator::LocalBare {
-            worker_root: data_dir().join("workers").join(session_id),
+            worker_root: DataLayout::current().worker_root(session_id),
         },
         TargetTemplate::LocalPodman { .. } => {
             let targets::TargetTemplate::LocalPodman(container) = backend else {

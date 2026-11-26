@@ -5,16 +5,10 @@
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
-│› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │                 │
-│  Idle  podman   │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │  ───────────────╯
+│  Idle  podman   │   ▸ OPENAI     codex-1   refreshing                                              │  ───────────────╮
 │  │ No messages  │                                                                                  │                 │
 │  │              │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
@@ -24,8 +18,14 @@
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
@@ -37,16 +37,10 @@ action: None
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
-│› · ACP pretty   │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
-│  Idle  podman   │                claude-1  refreshing                                              │                 │
+│› · ACP pretty   │   ▾ ANTHROPIC  claude-1  refreshing                                              │  ───────────────╯
+│  Idle  podman   │                claude-1  refreshing                                              │  ───────────────╮
 │  │ No messages  │   ▸ OPENAI     codex-1   refreshing                                              │                 │
 │  │              │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
@@ -56,8 +50,14 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
@@ -68,16 +68,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
-│› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │                 │
-│  Idle  podman   │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │  ───────────────╯
+│  Idle  podman   │   ▸ OPENAI     codex-1   refreshing                                              │  ───────────────╮
 │  │ No messages  │                                                                                  │                 │
 │  │              │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
@@ -87,8 +81,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
@@ -99,18 +99,12 @@ action: None
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
-│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
+│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │  ───────────────╯
+│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │  ───────────────╮
 │                 │                claude-1  refreshing                                              │                 │
 │                 │   ▸ OPENAI     codex-1   refreshing                                              │                 │
-│                 │   ▾ MOONSHOT   kimi-1    refreshing                                              │                 │
-│                 │                kimi-1    refreshing                                              │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │   ▾ MOONSHOT   kimi-1    refreshing                                              │  ───────────────╯
+│                 │                kimi-1    refreshing                                              │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──── ▁   ▄   □ ╮
@@ -119,8 +113,14 @@ action: None
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -131,17 +131,11 @@ action: None
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
-│› · ACP pretty   │   ▾ ANTHROPIC  claude-1  63%         40%                                         │                 │
+│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │  ───────────────╯
+│› · ACP pretty   │   ▾ ANTHROPIC  claude-1  63%         40%                                         │  ───────────────╮
 │  Idle  podman   │                claude-1  63%         40%                                         │                 │
 │  │ No messages  │   ▸ OPENAI     codex-1   refreshing                                              │                 │
-│  │              │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│  │              │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
@@ -151,33 +145,39 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === resume_profile_step_aligns_its_columns (120x24) ===
 ╭ Workspaces ───                                                                                        ────── ◇   ⋯───╮
 │ default                                                                                                              │
-╰───────────────  ╭ × Resume · 1/3 profile (cross-harness supported) ────────────────────────────────╮                 │
-╭ Sessions ─────  │                                                                                  │                 │
+╰───────────────  ╭ × Resume · 1/3 profile (cross-harness supported) ────────────────────────────────╮  ───────────────╯
+╭ Sessions ─────  │                                                                                  │  ───────────────╮
 │ Create   Open   │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
 │hel ───────────  │   claude-1  Claude Code  refreshing      (lossy: text-only transcript)           │                 │
 │› ■ ACP pretty   │   codex-1   Codex        refreshing                                              │  ───────────────╯
-│  Stopped  podm  │   codex-2   Codex        refreshing                                              │  ───────────────╮
+│  Stopped  podm  │   codex-2   Codex        refreshing                                              │  ──────── ▁   ▄ ╮
 │  │ No messages  │   kimi-1    Kimi Code    refreshing      (lossy: text-only transcript)           │                 │
-│  │              │                                                                                  │                 │
-│                 │ Same agent: the conversation continues natively.                                 │  ───────────────╯
+│  │              │                                                                                  │  ───────────────╯
+│                 │ Same agent: the conversation continues natively.                                 │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──── ▁   ▄   □ ╮
-│                 │                                                                                  │                 ▐
-│                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │   Cancel     Next                                                                │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / s                                                                                        / ? palette
@@ -188,28 +188,28 @@ action: None
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
-│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
+│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │  ───────────────╯
+│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │  ───────────────╮
 │                 │                claude-1  refreshing                                              │                 │
 │                 │   ▸ OPENAI     codex-1   refreshing                                              │                 │
-│                 │                                                                                  │                 │
-│                 │ kimi-1: Kimi Code is not installed here: /profiles/kimi does not exist and       │                 │
-│                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │  ───────────────╯
-│                 │ › Profiles.                                                                      │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▄ ╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │ kimi-1: Kimi Code is not installed here: /profiles/kimi does not exist and       │  ──────── ▁   ▄ ╮
+│                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │                 │
+│                 │ › Profiles.                                                                      │  ───────────────╯
 │                 │                                                                                  │  ──── ▁   ▄   □ ╮
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette

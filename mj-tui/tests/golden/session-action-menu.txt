@@ -14,29 +14,29 @@
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === session facts (120x40) ===
@@ -55,29 +55,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === sub-agent CPU coverage (120x40) ===
@@ -96,29 +96,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === single-session CPU (120x40) ===
@@ -137,29 +137,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === CPU not measured (120x40) ===
@@ -178,29 +178,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === row context menu, nothing to dismiss (120x40) ===
@@ -209,20 +209,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│ ╭Session──────────────────────────╮  ││                                                                              │
+│ ╭Session──────────────────────────╮  ││                  Select a session to open its conversation.                  │
 │ │Dismiss notification             │  ││                                                                              │
-│ │Copy session ID                  │  ││                               ✦  M J O L N I R                               │
+│ │Copy session ID                  │  ││                                                                              │
 │ │New session with these settings  │  ││                                                                              │
-│ ╰─────────────────────────────────╯  ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│ ╰─────────────────────────────────╯  ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -242,6 +235,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 disabled context Dismiss click: None
@@ -254,18 +254,11 @@ context menu Enter opens on Copy: CopySessionId { session_id: "session-1" }
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -287,6 +280,13 @@ context menu Enter opens on Copy: CopySessionId { session_id: "session-1" }
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === workspace menu, no dismissible notifications (120x40) ===
@@ -295,18 +295,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰╭Workspace────────────╮───────────────╯│                                                                              │
 ╭│Clear notifications  │──── ▁   ▄   □ ╮│                                                                              │
 │╰─────────────────────╯: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -328,6 +321,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === copy session ID menu row (120x40) ===
@@ -346,29 +346,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 action: CopySessionId { session_id: "session-1" }
@@ -378,18 +378,11 @@ action: CopySessionId { session_id: "session-1" }
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -411,6 +404,13 @@ action: CopySessionId { session_id: "session-1" }
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 keyboard selection after skipping disabled Dismiss: Some(RenameSession)
@@ -433,29 +433,29 @@ selection after disabled click: Some(RenameSession)
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │  Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │  Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │› Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │› Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Give the selected session your own title.                                           │  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Give the selected session your own title.                                           │                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === workspace menu, dismissible notification (120x40) ===
@@ -464,12 +464,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰╭Workspace────────────╮───────────────╯│                                                                              │
 ╭│Clear notifications  │──── ▁   ▄   □ ╮│                                                                              │
 │╰─────────────────────╯: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› ? ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
-│  Question  podman  codex-1           ││                                                                              │
-│  │ Waiting on you to choose a target.││                  Select a session to open its conversation.                  │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Question  podman  codex-1           ││                  Select a session to open its conversation.                  │
+│  │ Waiting on you to choose a target.││                                                                              │
 │  │                                   ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -495,6 +494,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││ Waiting on you to choose a target.                                           │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
 │                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
@@ -507,14 +507,13 @@ notice after a refused workspace clear: Some("Could not dismiss 1 notification: 
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› ? ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
-│ ╭Session──────────────────────────╮  ││                                                                              │
-│ │Dismiss notification             │t.││                  Select a session to open its conversation.                  │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│ ╭Session──────────────────────────╮  ││                  Select a session to open its conversation.                  │
+│ │Dismiss notification             │t.││                                                                              │
 │ │Copy session ID                  │  ││                                                                              │
 │ │New session with these settings  │  ││                                                                              │
 │ ╰─────────────────────────────────╯  ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -536,6 +535,7 @@ notice after a refused workspace clear: Some("Could not dismiss 1 notification: 
 │                                      ││? ACP pretty name · hel · <age>                                               │
 │                                      ││                                                                              │
 │                                      ││ Could not clear: daemon refused                                              │
+│                                      ││ Waiting on you to choose a target.                                           │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
@@ -558,22 +558,22 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │› Dismiss notification                                                              │                │
-│                │  Ignore                                                                            │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │  ──────────────╯
-│                │  Change Workspace › — There is no other workspace.                                 │  ─────── ▁   ▄ ╮
+│                │› Dismiss notification                                                              │  ──────────────╯
+│                │  Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╯
-│                │  Container settings                                                                │  ─────── ▁   ▄ ╮
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
+│                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
 │                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)…                                              │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Dismiss this notification without sending input or granting approval.               │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Dismiss this notification without sending input or granting approval.               │                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -600,29 +600,29 @@ dismiss exact question: DismissNotification { session_id: "session-1", target: Q
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — Dismissing notification.                                   │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — Dismissing notification.                                   │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)…                                              │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) clearing… ────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 dismissal failure: Some("Could not dismiss notification: Worker disconnected")
@@ -642,29 +642,29 @@ dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore                                                                            │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │  ──────────────╯
+│                │› Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
-│                │  Pin…                                                                              │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
 │                │  Change Workspace › — There is no other workspace.                                 │                │
 │                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Notification dismissed.
 publication before acknowledgement: Some("Notification dismissed.")
