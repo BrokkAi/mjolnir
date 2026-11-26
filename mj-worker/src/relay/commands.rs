@@ -938,7 +938,7 @@ impl DurableRelay {
         Ok(())
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(unix)]
     pub(crate) fn reconcile_committed_reload(&mut self, operation_id: &str) -> Result<()> {
         if let Some(hold) = self.snapshot.in_place_move_hold.as_mut()
             && hold.operation_id == operation_id
@@ -951,7 +951,7 @@ impl DurableRelay {
         Ok(())
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(unix)]
     pub(crate) fn finish_committed_reload(&mut self) -> Result<()> {
         if let Some((operation, store)) = self.committed_reload_operation() {
             self.set_reload_phase(
@@ -963,7 +963,7 @@ impl DurableRelay {
         Ok(())
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(unix)]
     pub(crate) fn committed_reload_operation(&self) -> Option<(String, String)> {
         let hold = self.snapshot.in_place_move_hold.as_ref()?;
         matches!(
