@@ -631,7 +631,7 @@ impl RetainedContainer {
         let mut args = vec![
             "sh".into(),
             "-c".into(),
-            "set -eu; mkdir -p -- \"$1\"; chmod 700 -- \"$1\"; shift; exec \"$@\"".into(),
+            "set -eu; mkdir -p -- \"$1\"; chmod -- 700 \"$1\"; shift; exec \"$@\"".into(),
             "mj-container-control-state".into(),
             state.staging_directory.clone(),
             "tar".into(),

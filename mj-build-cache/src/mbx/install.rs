@@ -419,7 +419,7 @@ impl PreparedMbx {
                 .context("the selected mbx path has no parent directory")?;
             let script = format!(
                 r#"{}
-probe publish sh -c 'chmod 755 -- "$1" && mv -f -- "$1" "$2"' hel-mbx-publish {} {} || exit 0
+probe publish sh -c 'chmod -- 755 "$1" && mv -f -- "$1" "$2"' hel-mbx-publish {} {} || exit 0
 probe setup {} setup --yes || exit 0
 probe profile sh -c {} hel-mbx-profile update {} {} {} {} || exit 0
 probe native sh -c {}
@@ -508,7 +508,7 @@ exit 0"#,
             });
         }
         let command = host.shell_command(
-            r#"chmod 755 -- "$1" && mv -f -- "$1" "$2""#,
+            r#"chmod -- 755 "$1" && mv -f -- "$1" "$2""#,
             "hel-mbx-install-publish",
             [
                 mj_core::target_path::text(staged),
