@@ -216,6 +216,23 @@ describe('useConversationScroll', () => {
     expect(apiRef.current?.mode).toBe('detached');
   });
 
+  it('anchors a prepend to where the reader is now when they scrolled while earlier history loaded', () => {
+    const apiRef: { current: ConversationScroll | null } = { current: null };
+    const geometry = { scrollHeight: 1000, clientHeight: 500 };
+    const { rerender } = render(<Harness apiRef={apiRef} olderCount={0} contentVersion="v1" />);
+    const scroller = screen.getByTestId('conversation-scroll');
+    installGeometry(scroller, geometry);
+    scrollTo(scroller, 0);
+    runFrames();
+
+    // The request is in flight; the reader scrolls on before it lands.
+    scrollTo(scroller, 300);
+    geometry.scrollHeight = 1400;
+    rerender(<Harness apiRef={apiRef} olderCount={1} contentVersion="v1" />);
+
+    expect(scroller.scrollTop).toBe(700); // 300 live + 400 prepended, not 0 + 400
+  });
+
   it('re-checks end-follow and tall-reply pause when throttled DOM growth arrives after the rAF', () => {
     let resizeCallback: ResizeObserverCallback | null = null;
     class FakeResizeObserver {

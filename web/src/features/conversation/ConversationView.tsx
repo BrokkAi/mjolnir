@@ -4,7 +4,7 @@ import { isSummaryRow } from '../../api/types';
 import type { ViewerSession } from '../../api/types';
 import { ElicitationHost } from '../elicitation/ElicitationHost';
 import { useSessionStore } from '../../stores/useSessionStore';
-import { useTranscriptStore, visibleOlderItems } from '../../stores/useTranscriptStore';
+import { isHistoryOnly, useTranscriptStore, visibleOlderItems } from '../../stores/useTranscriptStore';
 import { Composer } from './Composer';
 import { ConversationHeader } from './ConversationHeader';
 import { LiveActivityBars } from './LiveActivityBars';
@@ -211,7 +211,11 @@ export default function ConversationView({ sessionId, subagentParentId, childKin
       ) : (
         <div className="shrink-0 border-t border-line bg-surface px-3 pt-3 pb-keyboard pb-safe">
           <p className="mx-auto w-full max-w-3xl text-center text-[11.5px] text-muted">
-            {detail ? notLiveMessage(detail) : 'This session is not live.'}
+            {session && isHistoryOnly(session)
+              ? 'This session has stopped. Its stored history is shown read-only.'
+              : detail
+                ? notLiveMessage(detail)
+                : 'This session is not live.'}
           </p>
         </div>
       )}

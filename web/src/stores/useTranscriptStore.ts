@@ -128,6 +128,14 @@ function isReadable(row: SessionRow | undefined): boolean {
   return Boolean(row && row.capabilities.open && !row.verdict.transition);
 }
 
+/**
+ * A stopped sub-agent or reviewer: the daemon serves its stored history but no
+ * live conversation (`read_history` without `open`).
+ */
+export function isHistoryOnly(row: SessionRow | undefined): boolean {
+  return Boolean(row && row.capabilities.read_history && !row.capabilities.open);
+}
+
 interface TranscriptState {
   entries: Record<string, CachedTranscript>;
   /** Least recently used first. */
@@ -178,11 +186,37 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
       return { order, entries };
     });
 
+  /** Show a stopped session's stored history as its whole transcript. */
+  async function loadStoredHistory(id: string, epoch: number): Promise<boolean> {
+    try {
+      const page = await getHistory(id);
+      if (epochOf(id) !== epoch) return true;
+      patch(id, current => ({
+        ...current,
+        olderItems: page.items,
+        historyCursor: page.before,
+        hasMoreHistory: page.before !== null,
+        hasLoaded: true,
+        loading: false,
+        error: null,
+        blocked: null,
+      }));
+      return true;
+    } catch (error) {
+      if (epochOf(id) !== epoch) return true;
+      patch(id, { loading: false, error: error instanceof Error ? error.message : String(error) });
+      return !(error instanceof ApiError && error.status === 401);
+    }
+  }
+
   async function fetchOnce(id: string): Promise<boolean> {
     const cached = get().entries[id];
     if (!cached) return true;
     const epoch = epochOf(id);
     patch(id, { loading: true, error: null });
+    if (!cached.hasLoaded && isHistoryOnly(useSessionStore.getState().sessionsById[id])) {
+      return loadStoredHistory(id, epoch);
+    }
     try {
       const response = await getConversation(
         id,
@@ -206,6 +240,10 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
         return true;
       }
       if (error instanceof ApiError && error.status === 404) {
+        // No live conversation, but the daemon may still hold stored history for it.
+        if (!cached.hasLoaded && useSessionStore.getState().sessionsById[id]?.capabilities.read_history) {
+          return loadStoredHistory(id, epoch);
+        }
         patch(id, { loading: false, blocked: 'unavailable', error: null });
         return true;
       }
@@ -238,6 +276,9 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
       }
       const cached = get().entries[id];
       if (!cached) return Promise.resolve();
+      const row = useSessionStore.getState().sessionsById[id];
+      // Stored history of a stopped session never changes: read it once.
+      if (!force && isHistoryOnly(row) && cached.hasLoaded) return Promise.resolve();
       if (!force && !needsSync(cached, useSessionStore.getState().conversationSeqs[id])) {
         return Promise.resolve();
       }

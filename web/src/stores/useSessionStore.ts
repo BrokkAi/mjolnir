@@ -202,7 +202,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
     if (frame.kind !== 'delta') throw new Error('Unknown runtime publication');
     const state = get();
-    if (sameCursor(state.cursor, frame.cursor)) return false;
+    if (sameCursor(state.cursor, frame.cursor)) {
+      // A transcript-only frame advances conversation sequences without moving the runtime
+      // cursor (from == cursor). Any other repeat of the current cursor is a duplicate.
+      const seqs = Object.entries(frame.conversation_seqs ?? {});
+      if (seqs.length === 0 || !sameCursor(state.cursor, frame.from)) return false;
+      set(current => {
+        const conversationSeqs = { ...current.conversationSeqs };
+        for (const [id, seq] of seqs) {
+          if (current.sessionsById[id]) conversationSeqs[id] = seq;
+        }
+        return { conversationSeqs };
+      });
+      return true;
+    }
     if (!sameCursor(state.cursor, frame.from)) throw new Error('Runtime cursor gap');
     if (
       !frame.cursor ||

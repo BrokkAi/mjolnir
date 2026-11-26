@@ -5,6 +5,9 @@ import { emptyTranscript, useTranscriptStore } from '../../../stores/useTranscri
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { jsonResponse, liveRow, mockFetch } from '../../../test-utils';
 import { Composer } from '../Composer';
+import { resetDraftQueueForTests } from '../draftQueue';
+
+const flushPromises = () => new Promise<void>(resolve => setTimeout(resolve, 20));
 
 type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
@@ -29,6 +32,7 @@ function session(overrides: Partial<ViewerSession> = {}): ViewerSession {
 }
 
 beforeEach(() => {
+  resetDraftQueueForTests();
   useSessionStore.getState().handleSignedOut();
   useTranscriptStore.getState().clearAll();
   useTranscriptStore.setState({
@@ -46,6 +50,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetDraftQueueForTests();
   useSessionStore.getState().handleSignedOut();
   useTranscriptStore.getState().clearAll();
   vi.unstubAllGlobals();
@@ -100,6 +105,86 @@ describe('Composer', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
     expect(textarea.value).toBe('second');
+  });
+
+  describe('draft persistence', () => {
+    const draftBodies = (calls: { url: string; init?: RequestInit }[]) =>
+      calls
+        .filter(call => call.url === '/api/v1/sessions/s1/draft')
+        .map(call => (JSON.parse(String(call.init?.body)) as { draft: string }).draft);
+
+    /** A draft route whose PUTs finish only when the test says so; tracks overlap. */
+    function gatedDrafts() {
+      const gates: ((response: Response | Error) => void)[] = [];
+      let active = 0;
+      let maxActive = 0;
+      const handler: Handler = () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        return new Promise<Response>((resolve, reject) => {
+          gates.push(result => {
+            active -= 1;
+            if (result instanceof Error) reject(result);
+            else resolve(result);
+          });
+        });
+      };
+      return { handler, gates, maxActive: () => maxActive };
+    }
+    const ok = () => new Response(null, { status: 202 });
+
+    it('flushes text typed within the debounce window when the composer unmounts', async () => {
+      const fetchMock = installRoutes();
+      const view = render(<Composer session={session()} />);
+      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'half-typed' } });
+      view.unmount();
+      await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['half-typed']));
+    });
+
+    it('serializes overlapping saves and prompt-submit clears, ending with the final value', async () => {
+      const drafts = gatedDrafts();
+      const fetchMock = installRoutes({ '/api/v1/sessions/s1/draft': drafts.handler });
+      const first = render(<Composer session={session()} />);
+      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'one' } });
+      first.unmount(); // PUT "one" is now in flight and unresolved
+      await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['one']));
+
+      // Re-entering before the PUT lands shows the newest local text, not the server's older draft.
+      render(<Composer session={session()} />);
+      const textarea = screen.getByLabelText('Message') as HTMLTextAreaElement;
+      expect(textarea.value).toBe('one');
+      await waitFor(() => expect(fetchMock.urls()).toContain('/api/v1/sessions/s1/client-state'));
+      await waitFor(() => expect(textarea.value).toBe('one'));
+
+      fireEvent.keyDown(textarea, { key: 'Enter' }); // sends "one" and clears the draft
+      await waitFor(() => expect(actionBodies(fetchMock.calls)).toHaveLength(1));
+      await waitFor(() => expect(textarea.value).toBe(''));
+      expect(draftBodies(fetchMock.calls)).toEqual(['one']); // the clear waits for the PUT in flight
+
+      drafts.gates[0](ok());
+      await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['one', '']));
+      drafts.gates[1](ok());
+      await flushPromises();
+      expect(draftBodies(fetchMock.calls)).toEqual(['one', '']);
+      expect(drafts.maxActive()).toBe(1);
+    });
+
+    it('does not record a failed save as saved, so the same text is written again', async () => {
+      const drafts = gatedDrafts();
+      const fetchMock = installRoutes({ '/api/v1/sessions/s1/draft': drafts.handler });
+      const first = render(<Composer session={session()} />);
+      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'keep' } });
+      first.unmount();
+      await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['keep']));
+      drafts.gates[0](new TypeError('network down'));
+      await flushPromises();
+
+      const second = render(<Composer session={session()} />);
+      expect((screen.getByLabelText('Message') as HTMLTextAreaElement).value).toBe('keep');
+      second.unmount();
+      await waitFor(() => expect(draftBodies(fetchMock.calls)).toEqual(['keep', 'keep']));
+      drafts.gates[1](ok());
+    });
   });
 
   it('runs a !command through run-shell with its own command_id', async () => {

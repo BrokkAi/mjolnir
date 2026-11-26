@@ -19,7 +19,7 @@ import {
   Square,
   X,
 } from 'lucide-react';
-import { getClientState, putDraft, uploadAttachment } from '../../api/client';
+import { getClientState, uploadAttachment } from '../../api/client';
 import type {
   FileAttachmentRef,
   UploadedAttachment,
@@ -31,6 +31,7 @@ import { useSessionStore } from '../../stores/useSessionStore';
 import { useTranscriptStore } from '../../stores/useTranscriptStore';
 import { CommandPalette, paletteMatches, type PaletteItem } from './CommandPalette';
 import { PromptHistoryModal } from './PromptHistoryModal';
+import { flushDraftSave, getPendingDraft, noteServerDraft, scheduleDraftSave, writeDraftNow } from './draftQueue';
 import { describeError } from './format';
 
 /**
@@ -43,7 +44,6 @@ import { describeError } from './format';
  * `body`.
  */
 
-const DRAFT_SAVE_DELAY_MS = 600;
 const MAX_TEXTAREA_HEIGHT_PX = 160;
 const MIN_TEXTAREA_HEIGHT_PX = 36;
 
@@ -139,10 +139,14 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
   const canType = canPrompt || canShell;
   const coarsePointer = useCoarsePointer();
 
-  const [text, setTextState] = useState('');
-  const textRef = useRef('');
-  const setText = useCallback((next: string) => {
+  // Text the reader left unsent survives leaving and re-entering the session.
+  const [text, setTextState] = useState(() => getPendingDraft(session.id) ?? '');
+  const textRef = useRef(text);
+  // True once the reader (not the server draft) has changed the text.
+  const userEdited = useRef(false);
+  const setText = useCallback((next: string, fromUser = true) => {
     textRef.current = next;
+    if (fromUser) userEdited.current = true;
     setTextState(next);
   }, []);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -161,26 +165,27 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const draftLoaded = useRef(false);
-  const lastSavedDraft = useRef<string | null>(null);
 
   // Load the server draft once per session open. Text typed while the request
   // is in flight wins: the draft must never overwrite the reader's words.
+  // Cleanup flushes unsaved text so leaving the session never loses an edit.
   useEffect(() => {
+    const id = session.id;
     draftLoaded.current = false;
-    lastSavedDraft.current = null;
+    userEdited.current = false;
+    setText(getPendingDraft(id) ?? '', false);
     let cancelled = false;
-    getClientState(session.id)
+    getClientState(id)
       .then(state => {
         if (cancelled) return;
         const serverDraft = state.draft ?? '';
         draftLoaded.current = true;
-        lastSavedDraft.current = serverDraft;
-        if (serverDraft && !textRef.current) {
-          setText(serverDraft);
-        } else if (textRef.current && textRef.current !== serverDraft) {
+        noteServerDraft(id, serverDraft);
+        if (userEdited.current) {
           // The reader typed while the draft was loading; their text is newer.
-          lastSavedDraft.current = textRef.current;
-          void putDraft(session.id, textRef.current).catch(() => {});
+          if (textRef.current !== serverDraft) writeDraftNow(id, textRef.current);
+        } else if (getPendingDraft(id) === null && serverDraft && !textRef.current) {
+          setText(serverDraft, false);
         }
       })
       .catch(() => {
@@ -189,19 +194,13 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
       });
     return () => {
       cancelled = true;
+      flushDraftSave(id);
     };
   }, [session.id, setText]);
 
   useEffect(() => {
-    if (!draftLoaded.current) return;
-    if (lastSavedDraft.current === text) return;
-    const timer = setTimeout(() => {
-      lastSavedDraft.current = text;
-      void putDraft(session.id, text).catch(() => {
-        // The next keystroke retries; a lost draft is not a blocked composer.
-      });
-    }, DRAFT_SAVE_DELAY_MS);
-    return () => clearTimeout(timer);
+    if (!draftLoaded.current && !userEdited.current) return;
+    scheduleDraftSave(session.id, text);
   }, [text, session.id]);
 
   // Grow the textarea in place. CSSOM assignment is allowed under the strict
@@ -345,8 +344,7 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
       // flight belong to the next message and must survive its response.
       if (textRef.current === value) {
         setText('');
-        lastSavedDraft.current = '';
-        void putDraft(session.id, '').catch(() => {});
+        writeDraftNow(session.id, '');
       }
       setAttachments(current => current.filter(item => !items.includes(item)));
       revokePreviews(items);

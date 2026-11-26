@@ -186,8 +186,14 @@ export function relativeTime(timestamp: number | undefined | null, now: number):
   return new Date(timestamp).toLocaleDateString();
 }
 
-/** The destination for Open: Resume a suspended session, else its conversation. */
+/**
+ * The destination for Open: its conversation when the daemon serves one live
+ * (`open`) or serves stored history only (`read_history` without `resume`, a
+ * stopped sub-agent or reviewer); otherwise Resume a suspended session.
+ */
 export function openRouteFor(row: SessionRow): 'conversation' | 'resume' {
+  if (row.capabilities.open) return 'conversation';
+  if (row.capabilities.read_history && !row.capabilities.resume) return 'conversation';
   if (row.lifecycle === 'suspended') return 'resume';
   if (!row.capabilities.open && row.lifecycle !== 'live') return 'resume';
   return 'conversation';

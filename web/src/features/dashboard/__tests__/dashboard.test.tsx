@@ -72,6 +72,25 @@ describe('Workspaces dashboard', () => {
     expect(screen.getByTestId('session-card-b')).toBeInTheDocument();
   });
 
+  it('opens a stopped sub-agent from its card as a conversation, not a resume', () => {
+    const live = liveRow('c1');
+    hydrate([
+      liveRow('p', { title: 'Parent session', workspace_id: 'w1', subagent_session_ids: ['c1'] }),
+      liveRow('c1', {
+        title: 'Stopped child',
+        workspace_id: 'w1',
+        subagent_parent_id: 'p',
+        lifecycle: 'suspended',
+        capabilities: { ...live.capabilities, open: false, read_history: true, resume: false },
+      }),
+    ]);
+    mockFetch({});
+    render(<DashboardView subagentParentId="p" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stopped child' }));
+    expect(useUiStore.getState().route).toEqual({ name: 'conversation', sessionId: 'c1' });
+  });
+
   it('shows a parent virtual sub-agent workspace and breadcrumbs back to the parent', () => {
     hydrate([
       liveRow('p', {

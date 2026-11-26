@@ -156,7 +156,7 @@ export function TranscriptFeed({ sessionId, cached, scroll, streamingKey, onLoad
               <PendingPromptRow key={prompt.commandId} prompt={prompt} />
             ))}
           </div>
-          {entries.length === 0 && pending.length === 0 && !cached.loading && <EmptyFeed />}
+          {entries.length === 0 && pending.length === 0 && older.length === 0 && !cached.loading && <EmptyFeed />}
         </div>
       </div>
       {scroll.showJumpPill && (

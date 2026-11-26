@@ -60,4 +60,33 @@ describe('ConversationView', () => {
     unmount();
     expect(useTranscriptStore.getState().activeId).toBe('s1');
   });
+
+  it('shows a stopped session\u2019s stored history with a read-only notice instead of a composer', () => {
+    const row = liveRow('c1', { title: 'Stopped child', lifecycle: 'suspended' });
+    useSessionStore.getState().applySnapshot(
+      snapshot([
+        { ...row, capabilities: { ...row.capabilities, open: false, read_history: true, resume: false } },
+      ]),
+    );
+    useTranscriptStore.setState({
+      entries: {
+        c1: {
+          ...emptyTranscript('c1'),
+          hasLoaded: true,
+          hasMoreHistory: false,
+          olderItems: [{ stable_id: 'user:1', position: 1, role: 'user', text: 'stored question' }],
+        },
+      },
+      order: ['c1'],
+      activeId: 'c1',
+    });
+    mockFetch({});
+
+    render(<ConversationView sessionId="c1" />);
+
+    expect(screen.getByText('stored question')).toBeInTheDocument();
+    expect(screen.queryByText(/No messages yet/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('composer')).not.toBeInTheDocument();
+    expect(screen.getByText(/stored history is shown read-only/)).toBeInTheDocument();
+  });
 });

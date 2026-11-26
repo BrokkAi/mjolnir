@@ -178,6 +178,10 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
   const onScroll = useCallback(() => {
     const element = scrollerRef.current;
     if (!element) return;
+    // Keep the prepend anchor on the live position: a reader who scrolls while
+    // an earlier-history request is in flight is restored from where they are now.
+    previousTop.current = element.scrollTop;
+    previousHeight.current = element.scrollHeight;
     const distance = distanceFromEnd(element);
     const current = stateRef.current;
     if (distance > BOTTOM_BAND_PX) {
@@ -264,7 +268,8 @@ export function useConversationScroll(options: ConversationScrollOptions): Conve
   // before paint, so restoring the delta cannot produce a visible jump.
   useLayoutEffect(() => {
     const element = scrollerRef.current;
-    const prepended = olderCount > previousOlder.current;
+    // The first load of a session is snapped to the end, not anchored.
+    const prepended = olderCount > previousOlder.current && snappedSession.current === sessionId;
     if (element) {
       if (prepended) {
         element.scrollTop = previousTop.current + (element.scrollHeight - previousHeight.current);

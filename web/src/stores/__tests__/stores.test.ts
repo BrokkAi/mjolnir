@@ -221,6 +221,71 @@ describe('conversation fetch gating', () => {
     expect(conversationCalls()).toEqual(['/api/v1/conversations/s1?after_seq=3&presentation_key=k']);
   });
 
+  it('applies a transcript-only frame whose runtime cursor did not move, and ignores a bare repeat', async () => {
+    await open('s1');
+    net.calls.length = 0;
+    expect(sessions().applyFrame(delta(1, 1))).toBe(false);
+    await flush();
+    expect(conversationCalls()).toHaveLength(0);
+
+    expect(sessions().applyFrame(delta(1, 1, { conversation_seqs: { s1: 4, gone: 9 } }))).toBe(true);
+    expect(sessions().conversationSeqs.s1).toBe(4);
+    expect(sessions().conversationSeqs.gone).toBeUndefined();
+    expect(sessions().cursor).toEqual(cursor(1));
+    await flush();
+    expect(conversationCalls()).toEqual(['/api/v1/conversations/s1?after_seq=3&presentation_key=k']);
+  });
+
+  describe('stopped sessions with stored history only', () => {
+    const page = (before: { position: number; stable_id: string } | null = null) => ({
+      items: [
+        { stable_id: 'user:1', position: 1, role: 'user', text: 'do it' },
+        { stable_id: 'agent:2', position: 2, role: 'agent', text: 'done' },
+      ],
+      before,
+      frontier: 2,
+    });
+    const stopped = (id: string) => {
+      const row = liveRow(id, { lifecycle: 'suspended', subagent_parent_id: 's1' });
+      return {
+        ...row,
+        capabilities: { ...row.capabilities, open: false, read_history: true, resume: false },
+      };
+    };
+
+    it('reads GET /sessions/{id}/history once and never asks for a live conversation', async () => {
+      sessions().applySnapshot(snapshot([liveRow('s1'), stopped('c1')], { sequence: 1 }));
+      net = mockFetch({ '/api/v1/sessions/c1/history': () => jsonResponse(page()) });
+      await open('c1');
+      const cached = transcripts().entries.c1;
+      expect(cached.hasLoaded).toBe(true);
+      expect(cached.blocked).toBeNull();
+      expect(cached.olderItems.map(item => item.stable_id)).toEqual(['user:1', 'agent:2']);
+      expect(cached.hasMoreHistory).toBe(false);
+      expect(visibleOlderItems(cached)).toHaveLength(2);
+
+      await open('c1');
+      expect(net.urls()).toEqual(['/api/v1/sessions/c1/history']);
+    });
+
+    it('falls back to stored history when the live conversation answers 404', async () => {
+      const row = liveRow('c2');
+      sessions().applySnapshot(
+        snapshot([{ ...row, capabilities: { ...row.capabilities, read_history: true } }], { sequence: 1 }),
+      );
+      net = mockFetch({
+        '/api/v1/conversations/c2': () => jsonResponse({ error: 'gone' }, { status: 404 }),
+        '/api/v1/sessions/c2/history': () => jsonResponse(page({ position: 1, stable_id: 'user:1' })),
+      });
+      await open('c2');
+      const cached = transcripts().entries.c2;
+      expect(cached.blocked).toBeNull();
+      expect(cached.hasLoaded).toBe(true);
+      expect(cached.olderItems).toHaveLength(2);
+      expect(cached.hasMoreHistory).toBe(true);
+    });
+  });
+
   it('merges the incremental answer by stable identity and keeps order', async () => {
     await open('s1');
     net = mockFetch({
