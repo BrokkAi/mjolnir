@@ -4774,9 +4774,11 @@ mod tests {
     fn safe_suspend_remediation_skips_worktrees_when_managed_destination_escapes() {
         for symlink_dot_mj in [false, true] {
             let repo = Repo::new();
-            let outside = repo.temp.path().join("outside-target");
+            // Git reports canonical worktree paths, including macOS /private/var.
+            let fixture_root = fs::canonicalize(repo.temp.path()).unwrap();
+            let outside = fixture_root.join("outside-target");
             fs::create_dir(&outside).unwrap();
-            let external = repo.temp.path().join("external/lane");
+            let external = fixture_root.join("external/lane");
             fs::create_dir_all(external.parent().unwrap()).unwrap();
             git(
                 &repo.checkout,
@@ -4825,9 +4827,35 @@ mod tests {
     #[test]
     fn safe_suspend_remediation_preserves_non_utf8_path_bytes() {
         use std::os::unix::ffi::OsStrExt;
+        struct NonUtf8Index;
+        impl GitCommandRunner for NonUtf8Index {
+            fn run(&self, _: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
+                assert_eq!(command.arguments, ["ls-files", "-v", "-z"]);
+                Ok(crate::archive::GitOutput {
+                    status: 0,
+                    stdout: b"S non-utf8-\xff\0".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let listed =
+            crate::archive::git::hidden_tracked_paths(&NonUtf8Index, Path::new("/")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].as_os_str().as_bytes(), b"non-utf8-\xff");
+
         let repo = Repo::new();
-        let name = std::ffi::OsStr::from_bytes(b"non-utf8-\xff");
-        fs::write(repo.checkout.join(name), "content").unwrap();
+        let raw_name = std::ffi::OsStr::from_bytes(b"non-utf8-\xff");
+        let name = match fs::write(repo.checkout.join(raw_name), "content") {
+            Ok(()) => raw_name,
+            Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+                // Some filesystems require valid UTF-8 names. Still exercise
+                // remediation with a real Unicode path after checking raw Git bytes.
+                let name = std::ffi::OsStr::new("unicode-資料");
+                fs::write(repo.checkout.join(name), "content").unwrap();
+                name
+            }
+            Err(error) => panic!("create non-UTF-8 fixture: {error}"),
+        };
         let run = |args: Vec<OsString>| {
             let output = FileGit
                 .run(
@@ -4876,6 +4904,8 @@ mod tests {
     #[test]
     fn safe_suspend_remediation_clears_each_index_and_moves_colliding_worktrees() {
         let root = Repo::new();
+        let fixture_root = fs::canonicalize(root.temp.path()).unwrap();
+        let checkout_root = fs::canonicalize(&root.checkout).unwrap();
         let module = Repo::new();
         let sub = add_submodule(&root, &module);
         let inside = root.checkout.join(".mj/worktrees/inside");
@@ -4901,9 +4931,9 @@ mod tests {
             );
         }
         let external = [
-            root.temp.path().join("a/lane"),
-            root.temp.path().join("b/lane"),
-            root.temp.path().join("locked"),
+            fixture_root.join("a/lane"),
+            fixture_root.join("b/lane"),
+            fixture_root.join("locked"),
         ];
         for path in &external {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -4936,7 +4966,7 @@ mod tests {
         assert_eq!(fixed.skipped_worktrees.len(), 1);
         assert_ne!(fixed.moved_worktrees[0].to, fixed.moved_worktrees[1].to);
         for tree in &fixed.moved_worktrees {
-            assert!(tree.to.starts_with(root.checkout.join(".mj/worktrees")));
+            assert!(tree.to.starts_with(checkout_root.join(".mj/worktrees")));
             assert!(tree.to.join("file").exists());
         }
         assert!(external[2].exists());

@@ -1057,11 +1057,18 @@ mod tests {
         let mut record = crate::database::test_session("managed-gone", "legacy-raw");
         record.project_directory = None;
         record.target_template_id = "localhost".into();
+        // The saved descriptor names a POSIX target. A Windows controller's
+        // native temporary directory is only a host I/O path, not that target.
+        let source_repository = if cfg!(windows) {
+            std::path::PathBuf::from("/fixture/source")
+        } else {
+            repository.clone()
+        };
         record.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
             kind: mj_core::state::ManagedCheckoutKind::Clone,
-            source_project_directory: repository.clone(),
-            source_repository: repository.clone(),
-            worktree_root: repository.join(".mj/clones/managed-gone"),
+            source_project_directory: source_repository.clone(),
+            source_repository: source_repository.clone(),
+            worktree_root: source_repository.join(".mj/clones/managed-gone"),
             branch: "main".into(),
             target: mj_core::state::ManagedWorktreeTarget::Local,
             base_commit: None,
@@ -1077,18 +1084,33 @@ mod tests {
                 .sessions
                 .contains_key(&record.id)
         );
-
-        let errors = refresh(
-            &CancellableProcessExecutor::with_timeout(Duration::from_secs(30)),
-            false,
-        )
-        .unwrap();
-        assert!(errors.is_empty(), "{errors:?}");
-        let view = database::read_project_catalog().unwrap();
-        assert_eq!(view.locations.len(), 1);
+        let queued = database::project_discovery_changes(false).unwrap();
+        assert_eq!(queued.len(), 1);
         assert_eq!(
-            view.locations[0].repository_root,
-            repository.canonicalize().unwrap()
+            queued[0]
+                .managed_worktree
+                .as_ref()
+                .unwrap()
+                .source_project_directory,
+            source_repository
         );
+
+        // Local discovery operates on the actual POSIX target's files. Windows
+        // still exercises the durable queued descriptor and session deletion.
+        #[cfg(unix)]
+        {
+            let errors = refresh(
+                &CancellableProcessExecutor::with_timeout(Duration::from_secs(30)),
+                false,
+            )
+            .unwrap();
+            assert!(errors.is_empty(), "{errors:?}");
+            let view = database::read_project_catalog().unwrap();
+            assert_eq!(view.locations.len(), 1);
+            assert_eq!(
+                view.locations[0].repository_root,
+                repository.canonicalize().unwrap()
+            );
+        }
     }
 }

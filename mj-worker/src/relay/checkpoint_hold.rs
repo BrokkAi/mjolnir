@@ -78,8 +78,9 @@ impl DurableRelay {
         if !self.at_checkpoint_cut(barrier_command_id, expected) {
             return Some("close does not match the current checkpoint cut");
         }
-        (self.cut_spoiled_for.as_deref() == self.snapshot.checkpoint_barrier.as_deref())
-            .then_some("background work started after the checkpoint cut")
+        (self.cut_spoiled_for.as_deref() == self.snapshot.checkpoint_barrier.as_deref()).then_some(
+            "background work started after the checkpoint cut or checkpoint state changed",
+        )
     }
 
     /// Whether relay state is still exactly the cut this barrier made: the
@@ -133,21 +134,34 @@ impl DurableRelay {
         Ok(Ok(mailbox))
     }
 
-    /// The worker-owned native-session-use evidence at a ready barrier's cut.
+    /// The worker-owned native-use evidence and pending context at the same cut.
     pub(super) fn checkpoint_native_use(
         &self,
         barrier_command_id: &str,
         cut: &RelayCursor,
-    ) -> std::result::Result<Option<mj_core::relay::NativeSessionUseEvidence>, &'static str> {
-        if !self.at_checkpoint_cut(barrier_command_id, cut) {
+    ) -> std::result::Result<
+        (
+            Option<mj_core::relay::NativeSessionUseEvidence>,
+            Option<&str>,
+        ),
+        &'static str,
+    > {
+        if !self.at_checkpoint_cut(barrier_command_id, cut)
+            || self.cut_spoiled_for.as_deref() == Some(barrier_command_id)
+        {
             return Err("the relay is no longer at this checkpoint cut");
         }
-        Ok(self.snapshot.native_use_evidence.clone())
+        Ok((
+            self.snapshot.native_use_evidence.clone(),
+            self.snapshot
+                .pending_prompt_context
+                .as_ref()
+                .map(|context| context.text.as_str()),
+        ))
     }
 
-    /// Spoil the ready barrier's cut: end its hold and remember that work
-    /// started after it, which a journal frontier cannot show.
-    fn spoil_checkpoint_cut(&mut self) -> Result<()> {
+    /// Spoil the ready barrier's cut for changes the frontier cannot show.
+    pub(super) fn spoil_checkpoint_cut(&mut self) -> Result<()> {
         if self.snapshot.checkpoint_ready_through.is_none() {
             return Ok(());
         }

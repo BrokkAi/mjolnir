@@ -32,7 +32,7 @@ pub(super) fn directory_from_probe(output: CommandOutput) -> Result<PathBuf> {
     let path =
         PathBuf::from(String::from_utf8(output.stdout).context("decode mbx configuration path")?);
     ensure!(
-        path.is_absolute(),
+        mj_core::target_path::is_absolute(&path),
         "host mbx configuration directory is not absolute"
     );
     Ok(path)
@@ -46,7 +46,7 @@ pub fn read_file(
     let command = host.shell_command(
         READ_CONFIG_SCRIPT,
         LABEL,
-        [path.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(path)],
         READ_PURPOSE,
     );
     let output = executor.execute(&command)?;

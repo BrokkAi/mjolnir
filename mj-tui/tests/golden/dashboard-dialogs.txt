@@ -808,8 +808,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -846,8 +846,8 @@ Ent
 │    │Straightforward subagents  $1.000+                                                                          │    │
 │    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -870,8 +870,8 @@ Ent
    │                                                              │
    │Primary agents  $7.200+                                       │
    │  claude-opus-5-5  $6.200+                                    │
-   │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │
-   │Sub-agents included · profile filters turns · + partial · base│
+   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│
+   │Sub-agents included · profile filters turns · + partial · ░ un│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯
 
@@ -890,7 +890,7 @@ Ent
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │Primary agents  $7.200+                                       │
    │  claude-opus-5-5  $6.200+                                    │
-   │Sub-agents included · profile filters turns · + partial · base│
+   │Sub-agents included · profile filters turns · + partial · ░ un│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯
 
@@ -921,8 +921,8 @@ Ent
 │  │    16  18  20  22  00  02  04  06  08  10  12  14            │  │
 │  │                                                              │  │
 │  │Primary agents  $7.200+                                       │  │
-│  │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │  │
-╰  │Sub-agents included · profile filters turns · + partial · base│  ╯
+│  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│  │
+╰  │Sub-agents included · profile filters turns · + partial · ░ un│  ╯
 ╭  │  Refresh     Close                                           │  ╮
 │  ╰──────────────────────────────────────────────────────────────╯  │
 ╰                                                                    ╯
@@ -959,8 +959,8 @@ E
 │    │                                                                                                            │    │
 │    │Straightforward subagents  $1.000+                                                                          │    │
 │    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -979,7 +979,7 @@ Ent
    │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │Primary agents  $7.200+                                       │
-   │Sub-agents included · profile filters turns · + partial · base│
+   │Sub-agents included · profile filters turns · + partial · ░ un│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯
 
@@ -1016,8 +1016,8 @@ Ent
 │    │Straightforward subagents  $1.000+                                                                          │    │
 │    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -1054,8 +1054,8 @@ Ent
 │    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
 │    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
 │    │    0 sub-agents · 3/5 turns reported                                                                       │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -1078,8 +1078,8 @@ Ent
    │                                                              │
    │                                                              │
    │Unclassified subagents  ?                                     │
-   │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │
-   │Sub-agents included · profile filters turns · + partial · base│
+   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│
+   │Sub-agents included · profile filters turns · + partial · ░ un│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯
 
@@ -1102,8 +1102,8 @@ Ent
    │                                                              │
    │    custom-model  ?  tokens unknown                           │
    │    2 sub-agents · 4/4 turns reported                         │
-   │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced │
-   │Sub-agents included · profile filters turns · + partial · base│
+   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│
+   │Sub-agents included · profile filters turns · + partial · ░ un│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯
 
@@ -1140,8 +1140,8 @@ Ent
 │    │Straightforward subagents  $1.000+                                                                          │    │
 │    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -1178,8 +1178,8 @@ Ent
 │    │  gpt-6.1-sol  $0.500                                                                                       │    │
 │    │                                                                                                            │    │
 │    │Oracles  $0.500                                                                                             │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -1216,8 +1216,122 @@ Ent
 │    │  gpt-6.1-sol  $0.500                                                                                       │    │
 │    │                                                                                                            │    │
 │    │Oracles  $0.500                                                                                             │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
+│    │  Refresh     Close                                                                                         │  ▄ ╮
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent
+
+=== Usage discontiguous hours selected (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile codex ▾                                                                                             │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total ? · 2 hours selected · estimated API USD                                                              │    │
+│    │OpenAI ? · ~20.0%                                                                                           │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
+│    │$50                                                                             ░░░                         │    │
+│    │                                                                                ░░░ ▄▄▄                     │    │
+│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
+│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
+│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
+│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
+│    │                                                                                                            │    │
+│    │Primary agents  $1.000                                                                                      │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Orchestrators  $1.000                                                                                       │    │
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Subtle subagents  $1.000                                                                                    │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
+│    │  gpt-6.1-sol  $0.500                                                                                       │    │
+│    │                                                                                                            │    │
+│    │Oracles  $0.500                                                                                             │    │
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
+│    │  Refresh     Close                                                                                         │  ▄ ╮
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent
+
+=== Usage range added (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile codex ▾                                                                                             │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total ? · 7 hours selected · estimated API USD                                                              │    │
+│    │OpenAI ? · ~20.0%                                                                                           │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
+│    │$50                                                                             ░░░                         │    │
+│    │                                                                                ░░░ ▄▄▄                     │    │
+│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
+│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
+│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
+│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
+│    │                                                                                                            │    │
+│    │Primary agents  $1.000                                                                                      │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Orchestrators  $1.000                                                                                       │    │
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Subtle subagents  $1.000                                                                                    │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
+│    │  gpt-6.1-sol  $0.500                                                                                       │    │
+│    │                                                                                                            │    │
+│    │Oracles  $0.500                                                                                             │    │
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
+│    │  Refresh     Close                                                                                         │  ▄ ╮
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent
+
+=== Usage no hours selected (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile codex ▾                                                                                             │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total $0.000 · no hours selected · estimated API USD                                                        │    │
+│    │OpenAI $0.000 · ~0.0%                                                                                       │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
+│    │$50                                                                             ░░░                         │    │
+│    │                                                                                ░░░ ▄▄▄                     │    │
+│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
+│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
+│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
+│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  $0.000                                                                        │    │
+│    │    2 sub-agents · 0/0 turns reported                                                                       │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -1241,21 +1355,21 @@ Ent
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │    │
-│    │Primary agents  $1.000                                                                                      │    │
-│    │  gpt-6.1-terra  $1.000                                                                                     │  ──╯
+│    │Other subagents  $0.105                                                                                     │    │
+│    │  gpt-6-luna  $0.105                                                                                        │  ──╯
 │    │                                                                                                            │  ──╮
-│    │Orchestrators  $1.000                                                                                       │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │Unclassified subagents  ?                                                                                   │    │
+│    │  custom-model  ?                                                                                           │    │
 │    │                                                                                                            │  ──╯
-│    │Subtle subagents  $1.000                                                                                    │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
+│    │Investigate recovery [codex]  ? · suspended                                                                 │  ▄ ╮
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │  ▄ ╮
+│    │    custom-model  ?  tokens unknown                                                                         │    │
+│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
 │    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -1272,9 +1386,9 @@ Ent
    │Weekly quota consumed in window · all account use             │
    │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
-   │Primary agents  $1.000                                        │
-   │  gpt-6.1-terra  $1.000                                       │
-   │Sub-agents included · profile filters turns · + partial · base│
+   │                                                              │
+   │Investigate recovery [codex]  ? · suspended                   │
+   │Sub-agents included · profile filters turns · + partial · ░ un│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯
 
@@ -1311,8 +1425,8 @@ Ent
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
-│    │Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models                                        │    │
-│    │Sub-agents included · profile filters turns · + partial · base rates                                        │  ──╯
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │  ──╯
 │    │  Refresh     Close                                                                                         │  ▄ ╮
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯

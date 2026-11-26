@@ -1146,9 +1146,25 @@ impl DurableRelay {
     /// `relay-state.json` goes through here or [`Self::persist_snapshot`], so
     /// `unpersisted_journal_bytes == 0` means the file matches memory.
     pub(crate) fn commit_snapshot(&mut self, next_snapshot: RelaySnapshot) -> Result<()> {
+        // These checkpoint fields can change without a journal event. A
+        // partially read cut must not combine their old and new values.
+        let cut_changed = self.snapshot.checkpoint_ready_through.is_some()
+            && (self
+                .snapshot
+                .pending_prompt_context
+                .as_ref()
+                .map(|c| &c.text)
+                != next_snapshot
+                    .pending_prompt_context
+                    .as_ref()
+                    .map(|c| &c.text)
+                || self.snapshot.native_use_evidence != next_snapshot.native_use_evidence);
         persist_relay_snapshot(&self.root, &next_snapshot)?;
         self.snapshot = next_snapshot;
         self.unpersisted_journal_bytes = 0;
+        if cut_changed {
+            self.spoil_checkpoint_cut()?;
+        }
         Ok(())
     }
 

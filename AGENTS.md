@@ -45,6 +45,26 @@ Store design notes for LLMs or agents in `.agents/docs/`. These notes can includ
 
 Reserve `docs/` for future documentation for human readers. Do not store ExecPlans, agent runbooks, or LLM-only context in `docs/`.
 
+# Agent memory
+
+Do not save a memory entry that only records finished work: a fix, commit,
+merge, review outcome, shipped feature, completed one-off operation, resolved
+incident, experiment result, or status summary. The repository, git history,
+the issue tracker, and `.agents/docs/` already hold these records, and every
+stale entry costs each later session context.
+
+Save a memory only when it changes what a future session does: a standing
+preference or correction from the user, a durable environment fact or pointer
+the user would otherwise have to restate, or a constraint that still governs
+open work. When the work an entry describes is finished, delete the entry
+unless it carries guidance beyond the record.
+
+Keep each memory index under both startup limits: 200 lines and 25 KiB
+(`STARTUP_INDEX_LINES` and `STARTUP_INDEX_BYTES` in
+`mj-core/src/project_memory.rs`). The harness loads the index only up to
+whichever limit it reaches first, so entries past that point are silently
+lost. Keep index lines short and put detail in the topic files.
+
 # Releases
 
 "Cut a new release" and equivalent release requests explicitly authorize

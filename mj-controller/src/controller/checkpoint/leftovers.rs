@@ -303,7 +303,7 @@ fn clear_host_sweep_backoff(host: &str) {
         .remove(&host_sweep_key(host));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn clear_host_sweep_backoff_for_test() {
     host_sweep_backoff()
         .lock()

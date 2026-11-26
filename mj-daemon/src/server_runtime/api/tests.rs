@@ -1800,7 +1800,7 @@ async fn a_dropped_live_export_request_stops_its_worker_command() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    let alive = mj_client::daemon::process_is_alive;
     assert!(alive(pid));
     request.abort();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -9655,6 +9655,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
                 child_session_id: id.into(),
                 parent_session_id: parent.into(),
                 request_key: id.into(),
+                profile_id: "profile".into(),
                 model: Some("spawn-model".into()),
                 effort: Some("low".into()),
                 orchestrator,

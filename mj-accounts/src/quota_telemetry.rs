@@ -568,40 +568,51 @@ pub fn quota_usage_profile(
     })
 }
 
-/// Each profile's unscoped weekly quota consumed over `since_ms..=until_ms`
-/// (the report's inclusive span), read from `quota_history`. Blocking: one bracketing read per profile. A
+/// Each profile's unscoped weekly quota consumed in the inclusive intervals,
+/// read from `quota_history`. Blocking: one bracketing read per profile. A
 /// profile with no identity, no measurable weekly reading or an unreadable
-/// history yields `None`, never zero (a failed read is logged).
+/// history yields `None` (a failed read is logged). An empty selection is zero.
 pub fn weekly_quota_usage(
     profiles: Vec<QuotaUsageProfile>,
-    since_ms: i64,
-    until_ms: i64,
+    intervals: &[(i64, i64)],
 ) -> Vec<mj_core::usage::ProfileQuotaUsage> {
-    let (since, until) = weekly_usage_span(since_ms, until_ms);
+    let spans: Vec<_> = intervals
+        .iter()
+        .map(|&(start, end)| weekly_usage_span(start, end))
+        .collect();
     profiles
         .into_iter()
         .map(|profile| {
-            let consumption = profile.cache_identity.as_deref().and_then(|identity| {
-                let bounds = u64::try_from(since).ok().zip(u64::try_from(until).ok())?;
-                match crate::database::load_quota_history_bracketing(
-                    identity,
-                    &profile.profile_id,
-                    bounds.0,
-                    bounds.1,
-                    WEEKLY_PERIOD_SECONDS as u64,
-                    has_weekly_reading,
-                ) {
-                    Ok(history) => weekly_consumption(&history, since, until),
-                    Err(error) => {
-                        tracing::warn!(
-                            profile_id = %profile.profile_id,
-                            error = %format!("{error:#}"),
-                            "could not read the stored quota probes for the usage report"
-                        );
-                        None
+            let consumption = if spans.is_empty() {
+                Some(WeeklyConsumption {
+                    basis_points: 0,
+                    partial: false,
+                })
+            } else {
+                profile.cache_identity.as_deref().and_then(|identity| {
+                    let since = spans.first()?.0;
+                    let until = spans.last()?.1;
+                    let bounds = u64::try_from(since).ok().zip(u64::try_from(until).ok())?;
+                    match crate::database::load_quota_history_bracketing(
+                        identity,
+                        &profile.profile_id,
+                        bounds.0,
+                        bounds.1,
+                        WEEKLY_PERIOD_SECONDS as u64,
+                        has_weekly_reading,
+                    ) {
+                        Ok(history) => weekly_consumption_in_spans(&history, &spans),
+                        Err(error) => {
+                            tracing::warn!(
+                                profile_id = %profile.profile_id,
+                                error = %format!("{error:#}"),
+                                "could not read the stored quota probes for the usage report"
+                            );
+                            None
+                        }
                     }
-                }
-            });
+                })
+            };
             mj_core::usage::ProfileQuotaUsage {
                 profile: profile.profile_id,
                 consumed_basis_points: consumption.map(|consumption| consumption.basis_points),
@@ -690,13 +701,29 @@ pub fn weekly_consumption(
     since: i64,
     until: i64,
 ) -> Option<WeeklyConsumption> {
-    if until <= since {
+    weekly_consumption_in_spans(history, &[(since, until)])
+}
+
+fn weekly_consumption_in_spans(
+    history: &[ProfileQuota],
+    spans: &[(i64, i64)],
+) -> Option<WeeklyConsumption> {
+    let duration: i64 = spans
+        .iter()
+        .map(|&(since, until)| until.saturating_sub(since).max(0))
+        .sum();
+    if duration == 0 {
         return None;
     }
     let mut readings: Vec<SamplePoint> = history.iter().filter_map(weekly_reading).collect();
     readings.sort_by_key(|reading| reading.ts);
     // Seconds of `from..to` inside the span.
-    let inside = |from: i64, to: i64| (to.min(until) - from.max(since)).max(0);
+    let inside = |from: i64, to: i64| {
+        spans
+            .iter()
+            .map(|&(since, until)| (to.min(until) - from.max(since)).max(0))
+            .sum::<i64>()
+    };
     let mut covered = 0i64;
     let mut consumed_pct = 0.0;
     for pair in readings.windows(2) {
@@ -726,7 +753,7 @@ pub fn weekly_consumption(
     }
     (covered > 0).then(|| WeeklyConsumption {
         basis_points: (consumed_pct * 100.0).round() as u64,
-        partial: covered < until - since,
+        partial: covered < duration,
     })
 }
 
@@ -1348,6 +1375,51 @@ mod tests {
         // A selected hour inside an idle interval measured no growth, not an
         // unknown.
         assert_eq!(measure(&history, 3600, 7200), Some((0, false)));
+        let gaps = vec![
+            week(0, 10, steady),
+            week(3600, 20, steady),
+            week(7200, 30, steady),
+            week(10_800, 40, steady),
+        ];
+        let spans = [(T, T + 3600), (T + 7200, T + 10_800)];
+        assert_eq!(
+            weekly_consumption_in_spans(&gaps, &spans),
+            Some(WeeklyConsumption {
+                basis_points: 2000,
+                partial: false
+            })
+        );
+        assert_eq!(measure(&gaps, 0, 10_800), Some((3000, false)));
+        // A probe interval crossing the artificial boundary between adjacent
+        // selected hours covers both; it must not create a partial marker.
+        let crossing_boundary = vec![week(0, 10, steady), week(7200, 30, steady)];
+        assert_eq!(
+            weekly_consumption_in_spans(&crossing_boundary, &[(T, T + 3600), (T + 3600, T + 7200)]),
+            Some(WeeklyConsumption {
+                basis_points: 2000,
+                partial: false
+            })
+        );
+        assert_eq!(
+            weekly_consumption_in_spans(
+                &crossing_boundary,
+                &[(T, T + 3600), (T + 7200, T + 10_800)]
+            ),
+            Some(WeeklyConsumption {
+                basis_points: 1000,
+                partial: true
+            })
+        );
+        let empty = weekly_quota_usage(
+            vec![QuotaUsageProfile {
+                profile_id: "p1".into(),
+                cache_identity: None,
+                monthly_price_usd: None,
+            }],
+            &[],
+        );
+        assert_eq!(empty[0].consumed_basis_points, Some(0));
+        assert!(!empty[0].partial);
         // Spans no probe pair covers are unknown, whichever side they fall on.
         assert_eq!(measure(&history, -10_000, -5_000), None);
         assert_eq!(measure(&history, 20_000, 30_000), None);

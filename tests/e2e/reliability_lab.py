@@ -1335,6 +1335,7 @@ pull_policy = "never"
             raise ScenarioFailure(f"suspend preflight returned {status}: {preflight!r}")
         if any(preflight.get(key) for key in ("untracked", "nested_repositories", "untracked_stashes", "keep_dir_entries")):
             raise ScenarioFailure(f"expected clean suspend inventory: {preflight!r}")
+        # Hard-won: 356497937: checkpoint capture overflowed the daemon stack during suspend.
         status, value = self.request(
             "POST",
             "/api/v1/actions",

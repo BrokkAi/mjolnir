@@ -3,7 +3,7 @@ use super::*;
 use mj_core::usage::{
     AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileUsageEstimate,
     SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, USAGE_GRAPH_HOURS, UnknownCost,
-    UsageAgentRole, UsageScope, add_cost, descending_cost, graph_start_ms, hour_start_ms,
+    UsageAgentRole, UsageScope, add_cost, descending_cost, graph_start_ms,
 };
 
 use mj_core::usage::model_catalog;
@@ -77,16 +77,14 @@ fn load_with(
 ) -> Result<SessionUsageReport> {
     let mut connection = open_reader(path)?;
     let tx = connection.transaction()?;
-    // The graph always spans the same hours; the rows cover one of them when
-    // the query names it.
     let graph_start = graph_start_ms(now_ms);
-    let (since_ms, until_ms) = match query.hour_start_ms {
-        Some(hour) => {
-            let hour = hour_start_ms(hour);
-            (hour, now_ms.min(hour.saturating_add(HOUR_MS - 1)))
-        }
-        None => (graph_start, now_ms),
-    };
+    let intervals = query.selected_intervals(now_ms);
+    let (since_ms, until_ms) = intervals
+        .first()
+        .zip(intervals.last())
+        .map_or((now_ms, now_ms.saturating_sub(1)), |(first, last)| {
+            (first.0, last.1)
+        });
     let mut hours = (0..USAGE_GRAPH_HOURS)
         .map(|n| HourlyUsage {
             start_ms: graph_start + n * HOUR_MS,
@@ -192,7 +190,9 @@ fn load_with(
         };
         let entry = &mut entries[index];
         let turn = deserialize_turn_outcome(&body)?;
-        let in_rows = (since_ms..=until_ms).contains(&turn.completed_at_ms);
+        let in_rows = intervals
+            .iter()
+            .any(|&(start, end)| (start..=end).contains(&turn.completed_at_ms));
         let bar = usize::try_from((turn.completed_at_ms - graph_start).div_euclid(HOUR_MS))
             .ok()
             .filter(|bar| *bar < hours.len());
@@ -305,7 +305,7 @@ fn load_with(
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (member, turn_profile) in running {
+    for (member, turn_profile) in running.into_iter().filter(|_| !intervals.is_empty()) {
         if let Some(&index) = owners.get(&member) {
             entries[index].estimate.coverage.unfinished_turns += 1;
             profile_groups
@@ -895,6 +895,7 @@ mod tests {
                     profile: Some(profile.into()),
                     hour_start_ms,
                     include_suspended: true,
+                    ..Default::default()
                 },
                 now,
             )
@@ -1024,6 +1025,7 @@ mod tests {
                 profile: Some("claude".into()),
                 hour_start_ms: Some(now - 2 * 86_400_000),
                 include_suspended: true,
+                ..Default::default()
             },
             now,
         )?;
@@ -1098,6 +1100,102 @@ mod tests {
                     .collect()
             ),
             total_by(unattributed.sessions.iter().map(|s| &s.coverage).collect())
+        );
+
+        // A turn and an active turn in a gap cannot affect any selected row,
+        // though the graph still shows the completed turn.
+        let connection = open(&path)?;
+        let gap_time = now - HOUR_MS;
+        let body = serde_json::json!({"command_id":"gap","completed_ordinal":10,"completed_at_ms":gap_time,
+            "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":{"scope":"turn","input_tokens":1000000,"output_tokens":100000,"total_tokens":1100000,"cached_read_tokens":500000,"cached_write_tokens":0}});
+        let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+        connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES ('root','gap',10,?1)", [serialize_turn_outcome(&turn)?])?;
+        let selection =
+            serde_json::from_value(serde_json::json!({"model":"global.openai.gpt-6-luna"}))?;
+        super::super::usage::record_turn_selection(&connection, "root", "gap", &selection)?;
+        let mut second = turn.clone();
+        second.command_id = "selected-second".into();
+        second.completed_ordinal = 11;
+        second.completed_at_ms = now - 2 * HOUR_MS;
+        connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES ('root','selected-second',11,?1)", [serialize_turn_outcome(&second)?])?;
+        super::super::usage::record_turn_selection(
+            &connection,
+            "root",
+            "selected-second",
+            &selection,
+        )?;
+        connection.execute("UPDATE session_turn_selections SET profile='codex-two' WHERE session_id='root' AND command_id IN ('gap','running')", [])?;
+        let active = serde_json::json!({"command_id":"running","turn_start_position":9,"started_at_ms":gap_time});
+        connection.execute(
+            "UPDATE materialized_sessions SET active_turn_json=?1 WHERE session_id='root'",
+            [active.to_string()],
+        )?;
+        drop(connection);
+        let selected = load_from(
+            &path,
+            &SessionUsageQuery {
+                hour_start_ms: Some(now),
+                hour_starts_ms: Some(BTreeSet::from([
+                    now - 23 * HOUR_MS,
+                    now - 23 * HOUR_MS + 5,
+                    now - 2 * HOUR_MS,
+                ])),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(selected.cost_usd_ticks, Ok(2_100_000_000));
+        assert_eq!(selected.sessions[0].cost_usd_ticks, selected.cost_usd_ticks);
+        assert_eq!(selected.sessions[0].coverage.recorded_turns, 2);
+        assert_eq!(selected.sessions[0].coverage.unfinished_turns, 0);
+        assert_eq!(
+            selected.sessions[0].models[0].totals["input_tokens"].tokens,
+            2_000_000
+        );
+        assert_eq!(
+            role_cost(&selected, UsageAgentRole::Primary),
+            selected.cost_usd_ticks
+        );
+        assert_eq!(selected.profile_usage.len(), 1);
+        assert_eq!(selected.profile_usage[0].profile.as_deref(), Some("codex"));
+        assert_eq!(
+            selected.profile_usage[0].cost_usd_ticks,
+            selected.cost_usd_ticks
+        );
+        assert_eq!(
+            (selected.since_ms, selected.until_ms),
+            (now - 23 * HOUR_MS, now - HOUR_MS - 1)
+        );
+        assert!(selected.hours[22].known_cost_usd_ticks > 0);
+        let gap_profile = load_from(
+            &path,
+            &SessionUsageQuery {
+                profile: Some("codex-two".into()),
+                hour_starts_ms: Some(BTreeSet::from([now - 23 * HOUR_MS, now - 2 * HOUR_MS])),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert!(gap_profile.sessions.is_empty());
+        assert!(gap_profile.profile_usage.is_empty());
+        assert!(gap_profile.hours[22].known_cost_usd_ticks > 0);
+        let empty = load_from(
+            &path,
+            &SessionUsageQuery {
+                hour_start_ms: Some(now),
+                hour_starts_ms: Some(BTreeSet::new()),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(empty.hours, selected.hours);
+        assert_eq!(empty.cost_usd_ticks, Ok(0));
+        assert!(empty.profile_usage.is_empty());
+        assert!(
+            empty
+                .sessions
+                .iter()
+                .all(|s| s.coverage.recorded_turns == 0 && s.coverage.unfinished_turns == 0)
         );
         Ok(())
     }

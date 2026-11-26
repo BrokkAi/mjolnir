@@ -337,6 +337,46 @@ impl Controller {
             // Older workers have no operation pins; retain their existing floor gate.
             bail!("move queue admission is incomplete; retry Move before checkpointing this destination");
         }
+        if relay.connection_mut().protocol_version()
+            < mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL
+        {
+            let checkpoint_only = relay.sync_snapshot().await?.operational.checkpoint_only;
+            if checkpoint_only {
+                relay.release();
+                let connection = self.upgrade_checkpoint_only_worker(
+                    session_id, executor, &backend, &worker_root, &reconnect,
+                ).await.context("upgrade the checkpoint-only worker without starting its harness")?;
+                relay = adopt_restarted_checkpoint_relay(admission, session_id, manager, connection).await?;
+                restarted_worker = true;
+            } else if exclusivity != LatchExclusivity::HoldThroughClose {
+                return Err(CheckpointDeferred::pending_context_worker_upgrade().into());
+            } else {
+                let manager = manager.context("the older worker cannot be upgraded for checkpoint without a session manager")?;
+                relay.release();
+                self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
+                    .await
+                    .context("upgrade the worker before capturing pending prompt context")?;
+                (relay, restarted_worker) = self.open_checkpoint_relay(
+                admission,
+                session_id,
+                executor,
+                Some(manager),
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &worker_root,
+                    reconnect: &reconnect,
+                    launch: None,
+                    prepared: false,
+                    discard_queued_prompts: None,
+                    staged_aws_profile: None,
+                    swap_admission: None,
+                    messages: &RESTART_FOR_CHECKPOINT,
+                },
+                true,
+                None,
+                ).await?;
+            }
+        }
         if let Some(captured) = &prestaged_capture {
             record_checkpoint_report_notice(&mut relay, session_id, captured).await;
         }
@@ -670,14 +710,14 @@ impl Controller {
                 ));
             }
         }
-        if relay.connection_mut().protocol_version()
-            >= mj_core::relay::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL
         {
-            canonical_session.native_use_evidence = relay
+            let (native_use_evidence, pending_prompt_context) = relay
                 .connection_mut()
                 .read_checkpoint_native_use(barrier_command_id.clone(), cursor.clone())
                 .await
-                .context("read the worker's native-session-use evidence at the checkpoint cut")?;
+                .context("read the worker's native-session-use evidence and pending prompt context at the checkpoint cut")?;
+            canonical_session.native_use_evidence = native_use_evidence;
+            canonical_session.pending_prompt_context = pending_prompt_context;
         }
         let native_session_id = barrier
             .operational

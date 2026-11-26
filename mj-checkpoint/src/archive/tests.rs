@@ -285,6 +285,7 @@ pub(super) fn input() -> ArchiveInput {
             assessment_state: None,
             notification_stack: None,
             native_use_evidence: None,
+            pending_prompt_context: None,
             event_frontier: 4,
             event_frontier_digest: "a".repeat(64),
             session: CanonicalSessionState {
@@ -1352,6 +1353,11 @@ fn content_matching_rejects_new_transcript_queue_or_title_content() {
         .values
         .insert("reasoning_effort".into(), serde_json::json!("low"));
     assert!(!archived.content_matches(&reconfigured));
+
+    // A context install can change content without advancing the event frontier.
+    let mut with_pending_context = archived.clone();
+    with_pending_context.pending_prompt_context = Some("hidden notes".into());
+    assert!(!archived.content_matches(&with_pending_context));
 }
 
 #[test]
@@ -3824,6 +3830,7 @@ fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
     assert!(format!("{error:#}").contains("message transcript entries require archive schema 9"));
 }
 
+// Hard-won: suspending before the first prompt lost the pending harness handoff.
 #[test]
 fn native_use_evidence_uses_schema_15_with_and_without_origin_delta_and_rejects_downgrade() {
     let directory = tempfile::tempdir().unwrap();
@@ -3857,6 +3864,56 @@ fn native_use_evidence_uses_schema_15_with_and_without_origin_delta_and_rejects_
     let error = read_archive_verified(&downgraded).unwrap_err();
     assert!(
         format!("{error:#}").contains("native-session-use evidence requires archive schema 15"),
+        "unexpected error: {error:#}"
+    );
+
+    // An older schema 15 archive remains readable; adding context selects 16.
+    let text = "hidden context: 支持\n".repeat(5_000);
+    archive_input.canonical_session.pending_prompt_context = Some(text.clone());
+    let with_context = directory.path().join("pending-context.hel.zip");
+    let context_verified = write_archive_atomic(&with_context, &archive_input).unwrap();
+    assert_eq!(
+        context_verified.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+    );
+    assert_eq!(
+        context_verified
+            .canonical_session
+            .pending_prompt_context
+            .as_deref(),
+        Some(text.as_str())
+    );
+    assert_eq!(
+        read_archive_verified(&path)
+            .unwrap()
+            .canonical_session()
+            .unwrap()
+            .pending_prompt_context,
+        None
+    );
+
+    let (mut manifest, payloads) = prepare_archive(&archive_input).unwrap();
+    manifest.schema_version = ARCHIVE_SCHEMA_VERSION_NATIVE_USE;
+    let bad_version = directory.path().join("pending-context-downgraded.hel.zip");
+    let mut file = File::create(&bad_version).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
+    drop(file);
+    let error = read_archive_verified(&bad_version).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("pending prompt context requires archive schema 16"),
+        "unexpected error: {error:#}"
+    );
+
+    archive_input.canonical_session.pending_prompt_context = None;
+    let (mut manifest, payloads) = prepare_archive(&archive_input).unwrap();
+    manifest.schema_version = ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT;
+    let missing_context = directory.path().join("pending-context-missing.hel.zip");
+    let mut file = File::create(&missing_context).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
+    drop(file);
+    let error = read_archive_verified(&missing_context).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("archive schema 16 requires pending prompt context"),
         "unexpected error: {error:#}"
     );
 
@@ -3902,6 +3959,19 @@ fn native_use_evidence_uses_schema_15_with_and_without_origin_delta_and_rejects_
     assert_eq!(
         delta_verified.canonical_session.native_use_evidence,
         Some(evidence)
+    );
+    delta_input.canonical_session.pending_prompt_context = Some(text.clone());
+    let delta_context = write_archive_atomic(&delta_path, &delta_input).unwrap();
+    assert_eq!(
+        delta_context.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+    );
+    assert_eq!(
+        delta_context
+            .canonical_session
+            .pending_prompt_context
+            .as_deref(),
+        Some(text.as_str())
     );
 }
 
