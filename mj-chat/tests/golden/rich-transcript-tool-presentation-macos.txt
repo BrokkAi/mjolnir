@@ -1538,6 +1538,212 @@ ctrl+b then q detach · : / ? palette
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane │ ctrl+b then q detach · : / ? palette
 
+=== review override shows only declined findings (68x24) ===
+╭ Conversation ────────────────────────────────────────────────────╮
+│ ▸ - [P2] Keep the existing mailbox ordering across a live update▐│
+│   - [P3] 支 持  Unicode and <script>literal text</script>         ▐│
+│   …[overrides truncated]…                                       ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                            │
+│                                                                  │
+│                                                                  │
+╰─────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+
+=== clicking the second finding opens the complete override notice (68x48) ===
+╭ Conversation ────────────────────────────────────────────────────╮
+│ ▾ - [P2] Keep the existing mailbox ordering across a live update▐│
+│   - [P3] 支 持  Unicode and <script>literal text</script>         ▐│
+│   …[overrides truncated]…                                       ▐│
+│ │ Before-push review override requested by the agent. The agent ▐│
+│ │ declined to fix these findings:                               ▐│
+│ │ - Finding: [P2] Keep the existing mailbox ordering            ▐│
+│ │     across a live update                                      ▐│
+│ │   Reason: The current order is intentional.                   ▐│
+│ │     This reason continues on another line.                    ▐│
+│ │     - Finding: This quoted reason line is not another finding.▐│
+│ │     Overridden synthesis (review quoted-text):                ▐│
+│ │ - Finding: [P3] 支 持  Unicode and <script>literal text</script>▐│
+│ │   Reason: This is outside the requested scope.                ▐│
+│ │ …[overrides truncated]…                                       ▐│
+│ │ Overridden synthesis (review review-17):                      ▐│
+│ │ Review findings, including details the agent declined to      ▐│
+│ │ change.                                                       ▐│
+│ │ - Finding: This quoted synthesis line is not another declined ▐│
+│ │ finding.                                                      ▐│
+│ │ Repositories:                                                 ▐│
+│ │ /workspace/mjolnir: abc123..def456 (tree 789abc)              ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                            │
+│                                                                  │
+│                                                                  │
+╰─────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+
+=== override stays expanded across update and narrow resize (44x52) ===
+╭ Conversation ────────────────────────────╮
+│ ▾ - [P2] Keep the existing mailbox      ▐│
+│   ordering across a live update         ▐│
+│   - [P3] 支 持  Unicode and               ▐│
+│   <script>literal text</script>         ▐│
+│   …[overrides truncated]…               ▐│
+│ │ Before-push review override requested ▐│
+│ │ by the agent. The agent declined to   ▐│
+│ │ fix these findings:                   ▐│
+│ │ - Finding: [P2] Keep the existing     ▐│
+│ │ mailbox ordering                      ▐│
+│ │     across a live update              ▐│
+│ │   Reason: The current order is        ▐│
+│ │   intentional.                        ▐│
+│ │     This reason continues on another  ▐│
+│ │     line.                             ▐│
+│ │     - Finding: This quoted reason line▐│
+│ │     is not another finding.           ▐│
+│ │     Overridden synthesis (review      ▐│
+│ │     quoted-text):                     ▐│
+│ │ - Finding: [P3] 支 持  Unicode and      ▐│
+│ │ <script>literal text</script>         ▐│
+│ │   Reason: This is outside the         ▐│
+│ │   requested scope.                    ▐│
+│ │ …[overrides truncated]…               ▐│
+│ │ Overridden synthesis (review          ▐│
+│ │ review-17):                           ▐│
+│ │ Review findings, including details the▐│
+│ │ agent declined to change.             ▐│
+│ │ - Finding: This quoted synthesis line ▐│
+│ │ is not another declined finding.      ▐│
+│ │ Repositories:                         ▐│
+│ │ /workspace/mjolnir: abc123..def456    ▐│
+│ │ (tree 789abc)                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== override body click restores the finding list (44x24) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ - [P2] Keep the existing mailbox orde…▐│
+│   - [P3] 支 持  Unicode and <script>liter…▐│
+│   …[overrides truncated]…               ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== raw override text remains complete (68x48) ===
+╭ Conversation · raw source ───────────────────────────────────────╮
+│ ─ Mjolnir                                                       ▐│
+│ │ Before-push review override requested by the agent. The agent ▐│
+│ │ declined to fix these findings:                               ▐│
+│ │ - Finding: [P2] Keep the existing mailbox ordering            ▐│
+│ │     across a live update                                      ▐│
+│ │   Reason: The current order is intentional.                   ▐│
+│ │     This reason continues on another line.                    ▐│
+│ │     - Finding: This quoted reason line is not another finding.▐│
+│ │     Overridden synthesis (review quoted-text):                ▐│
+│ │ - Finding: [P3] 支 持  Unicode and <script>literal text</script>▐│
+│ │   Reason: This is outside the requested scope.                ▐│
+│ │ …[overrides truncated]…                                       ▐│
+│ │ Overridden synthesis (review review-17):                      ▐│
+│ │ Review findings, including details the agent declined to      ▐│
+│ │ change.                                                       ▐│
+│ │ - Finding: This quoted synthesis line is not another declined ▐│
+│ │ finding.                                                      ▐│
+│ │ Repositories:                                                 ▐│
+│ │ /workspace/mjolnir: abc123..def456 (tree 789abc)              ▐│
+│ │                                                               ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+│                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                            │
+│                                                                  │
+│                                                                  │
+╰─────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+
 === incoming messages start collapsed between agent replies (44x36) ===
 ╭ Conversation ────────────────────────────╮
 │ ● Agent · 15:00                         ▐│

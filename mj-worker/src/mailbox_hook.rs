@@ -279,6 +279,7 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
 
+    // Hard-won: eab4bed08: macOS inherited nonblocking mode on the fake Stop socket.
     #[test]
     fn mailbox_hook_antigravity_stop_observes_main_conversation_and_stays_passive() {
         let root = tempfile::tempdir().unwrap();
@@ -300,6 +301,8 @@ mod tests {
                     Err(error) => panic!("accept Stop request: {error}"),
                 }
             };
+            // macOS accepted sockets inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
