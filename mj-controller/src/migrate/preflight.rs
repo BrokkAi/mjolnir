@@ -25,7 +25,8 @@ pub struct ClassifiedEntry {
 pub struct HomeCopy {
     pub source: PathBuf,
     pub destination: PathBuf,
-    /// External credentials are copied with owner-only permissions.
+    /// Single credential files are dereferenced and copied as regular mode-0600
+    /// files so links into uncopied directories or A paths cannot dangle on B.
     pub private: bool,
 }
 
@@ -210,8 +211,8 @@ pub fn inspect_preflight(
         if let Some(path) = path {
             if let Ok(relative) = path.strip_prefix(old_home) {
                 ensure!(
-                    exists(path)?,
-                    "{label} does not exist on source: {}",
+                    credential_file_exists(path)?,
+                    "{label} does not exist or is not a regular file on source: {}",
                     path.display()
                 );
                 let destination = new_home.join(relative);
@@ -296,22 +297,25 @@ pub fn inspect_preflight(
     }
     for (path, configured) in identity_paths {
         let source = mj_core::path_input::expand_home(&path, Some(old_home))?;
-        if source.starts_with(old_config_root) {
+        let config_copied = source
+            .strip_prefix(old_config_root)
+            .is_ok_and(|relative| !relative.starts_with("instances"));
+        if (config_copied || source.starts_with(old_home)) && !credential_file_exists(&source)? {
+            ensure!(
+                !configured,
+                "configured SSH identity does not exist or is not a regular file on source: {}",
+                source.display()
+            );
+            warnings.push(format!(
+                "historical SSH identity does not exist or is not a regular file on source: {}",
+                source.display()
+            ));
+            continue;
+        }
+        if config_copied {
             continue;
         }
         if let Ok(relative) = source.strip_prefix(old_home) {
-            if !exists(&source)? {
-                ensure!(
-                    !configured,
-                    "configured SSH identity does not exist on source: {}",
-                    source.display()
-                );
-                warnings.push(format!(
-                    "historical SSH identity does not exist on source: {}",
-                    source.display()
-                ));
-                continue;
-            }
             let destination = new_home.join(relative);
             check_destination(&destination, &destination_exists, &mut checked_destinations)?;
             home_copies.push(HomeCopy {
@@ -507,6 +511,15 @@ fn exists(path: &Path) -> Result<bool> {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+/// Follow links: private copies require an existing regular-file target.
+fn credential_file_exists(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect credential {}", path.display())),
     }
 }
 
@@ -1203,7 +1216,9 @@ mod tests {
             "-i~/.ssh/tilde".into(),
         ];
         let preflight = inspect(&config, false).unwrap();
-        assert!(preflight.warnings.iter().any(|warning| warning.contains("historical SSH identity does not exist on source")));
+        assert!(preflight.warnings.iter().any(|warning| warning.contains(
+            "historical SSH identity does not exist or is not a regular file on source"
+        )));
         assert!(preflight.warnings.iter().any(|warning| warning.contains("historical SSH identity is absent on destination")));
         for key in ["id", "other", "tilde"] {
             assert!(preflight.home_copies.iter().any(|copy| copy.private
@@ -1233,7 +1248,134 @@ mod tests {
             inspect(&config, false)
                 .unwrap_err()
                 .to_string()
-                .contains("does not exist on source")
+                .contains("does not exist or is not a regular file on source")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_follows_credential_symlinks_and_distinguishes_nested_config() {
+        use mj_core::config::{MachineId, SshConnection};
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let old_home = root.path().join("old-home");
+        let new_home = root.path().join("new-home");
+        let old_config = old_home.join(".config/mjolnir");
+        let data = root.path().join("data");
+        std::fs::create_dir_all(old_home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(old_home.join("secrets")).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let target = old_home.join("secrets/actual");
+        std::fs::write(&target, "credential").unwrap();
+        let token = old_home.join("secrets/token");
+        let identity = old_home.join(".ssh/key");
+        symlink(&target, &token).unwrap();
+        symlink(&target, &identity).unwrap();
+        let db = data.join("mj.sqlite3");
+        mj_store::database::save_session_to(
+            &db,
+            &mj_store::database::test_session("one", "project"),
+        )
+        .unwrap();
+        let connection = Connection::open(db).unwrap();
+        let mut config = Config::default();
+        config.github.session_token_path = Some(token.clone());
+        config.machines.insert(
+            MachineId::new("ssh").unwrap(),
+            Machine::Ssh {
+                ssh: SshConnection {
+                    host: "remote".into(),
+                    user: None,
+                    identity_file: Some(identity.clone()),
+                    extra_args: vec![],
+                },
+                workspace_prefix: ".local/workspaces".into(),
+                build_cache: None,
+            },
+        );
+        let inspect = |config: &Config| {
+            inspect_preflight(
+                &connection,
+                config,
+                &data,
+                &old_config,
+                &old_home,
+                &new_home,
+                &root.path().join("new-data"),
+                &new_home.join("config"),
+                "source",
+                |_| Ok(false),
+            )
+        };
+        let preflight = inspect(&config).unwrap();
+        for source in [&token, &identity] {
+            assert!(
+                preflight
+                    .home_copies
+                    .iter()
+                    .any(|entry| &entry.source == source && entry.private)
+            );
+        }
+        std::fs::remove_file(&token).unwrap();
+        symlink(old_home.join("missing"), &token).unwrap();
+        assert!(
+            inspect(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("GitHub session token")
+        );
+        config.github.session_token_path = None;
+        std::fs::remove_file(&identity).unwrap();
+        symlink(old_home.join("missing"), &identity).unwrap();
+        assert!(
+            inspect(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("configured SSH identity")
+        );
+        let config_key = old_config.join("keys/id");
+        let Machine::Ssh { ssh, .. } = config.machines.get_mut("ssh").unwrap() else {
+            unreachable!()
+        };
+        ssh.identity_file = Some(config_key.clone());
+        assert!(
+            inspect(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("configured SSH identity")
+        );
+        std::fs::create_dir_all(config_key.parent().unwrap()).unwrap();
+        std::fs::write(&config_key, "key").unwrap();
+        assert!(
+            !inspect(&config)
+                .unwrap()
+                .home_copies
+                .iter()
+                .any(|copy| copy.source == config_key)
+        );
+        let nested_key = old_config.join("instances/other/key");
+        std::fs::create_dir_all(nested_key.parent().unwrap()).unwrap();
+        std::fs::write(&nested_key, "nested").unwrap();
+        let Machine::Ssh { ssh, .. } = config.machines.get_mut("ssh").unwrap() else {
+            unreachable!()
+        };
+        ssh.identity_file = Some(nested_key.clone());
+        assert!(
+            inspect(&config)
+                .unwrap()
+                .home_copies
+                .iter()
+                .any(|copy| copy.source == nested_key && copy.private)
+        );
+        let Machine::Ssh { ssh, .. } = config.machines.get_mut("ssh").unwrap() else {
+            unreachable!()
+        };
+        ssh.identity_file = Some(old_home.join(".ssh"));
+        assert!(
+            inspect(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
         );
     }
 

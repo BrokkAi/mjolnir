@@ -15,11 +15,11 @@ pub fn relocate_ssh_identity_path(
     old_home: &Path,
     new_home: &Path,
 ) {
-    if path.starts_with(old_config.join("ec2")) {
-        relocate_ec2_path(path, old_config, new_config);
-    } else if !path.starts_with(old_config)
-        && let Ok(relative) = path.strip_prefix(old_home)
+    if let Ok(relative) = path.strip_prefix(old_config)
+        && !relative.starts_with("instances")
     {
+        *path = new_config.join(relative);
+    } else if let Ok(relative) = path.strip_prefix(old_home) {
         *path = new_home.join(relative);
     }
 }
@@ -34,6 +34,10 @@ fn for_each_ssh_path(args: &mut [String], mut visit: impl FnMut(&mut PathBuf, bo
             continue;
         } else if arg.starts_with("-i") {
             ("-i", true)
+        } else if arg.starts_with("IdentityFile=") {
+            ("IdentityFile=", true)
+        } else if arg.starts_with("-oIdentityFile=") {
+            ("-oIdentityFile=", true)
         } else if arg.starts_with("UserKnownHostsFile=") {
             ("UserKnownHostsFile=", false)
         } else if arg.starts_with("-oUserKnownHostsFile=") {
@@ -94,6 +98,11 @@ mod tests {
             "/old/.ssh/key".into(),
             "-i/old/.ssh/second".into(),
             "-i~/.ssh/tilde".into(),
+            "-o".into(),
+            "IdentityFile=/old/.ssh/opt_key".into(),
+            "-oIdentityFile=/old/.ssh/attached_key".into(),
+            "-i/old/config/keys/id_ed25519".into(),
+            "-i/old/config/instances/other/key".into(),
             "UserKnownHostsFile=/old/.ssh/known_hosts".into(),
             "-oUserKnownHostsFile=/old/config/ec2/host/known_hosts".into(),
         ];
@@ -102,7 +111,11 @@ mod tests {
             [
                 PathBuf::from("/old/.ssh/key"),
                 PathBuf::from("/old/.ssh/second"),
-                PathBuf::from("~/.ssh/tilde")
+                PathBuf::from("~/.ssh/tilde"),
+                PathBuf::from("/old/.ssh/opt_key"),
+                PathBuf::from("/old/.ssh/attached_key"),
+                PathBuf::from("/old/config/keys/id_ed25519"),
+                PathBuf::from("/old/config/instances/other/key")
             ]
         );
         relocate_ssh_args(
@@ -119,6 +132,11 @@ mod tests {
                 "/new/.ssh/key",
                 "-i/new/.ssh/second",
                 "-i~/.ssh/tilde",
+                "-o",
+                "IdentityFile=/new/.ssh/opt_key",
+                "-oIdentityFile=/new/.ssh/attached_key",
+                "-i/new/config/keys/id_ed25519",
+                "-i/new/config/instances/other/key",
                 "UserKnownHostsFile=/old/.ssh/known_hosts",
                 "-oUserKnownHostsFile=/new/config/ec2/host/known_hosts"
             ]
@@ -131,6 +149,6 @@ mod tests {
             Path::new("/old"),
             Path::new("/new"),
         );
-        assert_eq!(config_key, Path::new("/old/config/private/key"));
+        assert_eq!(config_key, Path::new("/new/config/private/key"));
     }
 }
