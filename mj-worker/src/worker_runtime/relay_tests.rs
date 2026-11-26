@@ -7359,8 +7359,8 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
 #[test]
 fn launch_changes_retire_the_accepted_pair_for_later_worker_starts() {
     let temp = tempfile::tempdir().unwrap();
-    let accepted = |model: &str, effort: Option<&str>| mj_core::acp::AcceptedSessionConfig {
-        model: Some(model.into()),
+    let pair = |model: Option<&str>, effort: Option<&str>| mj_core::acp::AcceptedSessionConfig {
+        model: model.map(Into::into),
         effort: effort.map(Into::into),
     };
     let record = |relay: &mut DurableRelay, key: &str, value: &str| {
@@ -7371,58 +7371,60 @@ fn launch_changes_retire_the_accepted_pair_for_later_worker_starts() {
             })
             .unwrap();
     };
-    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    relay.set_turn_verdict_harness(HarnessKind::Antigravity);
-    record(&mut relay, "model", "gemini-4-neon");
-    record(&mut relay, "effort", "high");
+    let open = || DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    // Worker start: adopt the committed launch, then seed the shared view.
+    let start = |relay: &mut DurableRelay, launch: &WorkerLaunchConfig, thread: &str| {
+        relay.adopt_launch(launch).unwrap();
+        let accepted = unix::accepted_config_for_boot(launch, relay, Some(thread));
+        *relay.accepted_config().lock().unwrap() = accepted.clone();
+        accepted
+    };
+
     let mut launch = launch_config("/var/lib/hel/profiles/session");
     launch.harness = HarnessKind::Antigravity;
-    // Seed the shared view as worker startup does.
-    *relay.accepted_config().lock().unwrap() =
-        unix::accepted_config_for_boot(&launch, &relay, Some("gemini-thread"));
+    let mut relay = open();
+    start(&mut relay, &launch, "gemini-thread");
+    record(&mut relay, "model", "gemini-4-neon");
+    record(&mut relay, "effort", "high");
+    *relay.accepted_config().lock().unwrap() = pair(Some("gemini-4-neon"), Some("high"));
+
+    // A reload that names a new initial model supersedes only the model, in
+    // the journal and in the running worker's view.
+    launch.initial_model = Some("gemini-next".into());
+    relay.adopt_launch(&launch).unwrap();
     assert_eq!(
         *relay.accepted_config().lock().unwrap(),
-        accepted("gemini-4-neon", Some("high"))
+        pair(None, Some("high"))
     );
-
-    // A same-harness reload that names its own model supersedes only the model.
-    launch.initial_model = Some("gemini-next".into());
-    relay.retire_accepted_selectors_for_reload(&launch).unwrap();
-    let effort_only = mj_core::acp::AcceptedSessionConfig {
-        model: None,
-        effort: Some("high".into()),
-    };
-    assert_eq!(*relay.accepted_config().lock().unwrap(), effort_only);
     assert_eq!(
         unix::accepted_config_for_boot(&launch, &relay, Some("gemini-thread")),
-        effort_only
+        pair(None, Some("high"))
     );
     record(&mut relay, "model", "gemini-4-neon");
-
-    // The live sequence: an in-place Move to Claude with no model chosen,
-    // then a later worker start (an upgrade) from the same journal.
-    *relay.accepted_config().lock().unwrap() = accepted("gemini-4-neon", Some("high"));
-    launch.harness = HarnessKind::Claude;
+    record(&mut relay, "effort", "high");
+    // A later launch that names no initial model keeps the accepted model.
     launch.initial_model = None;
-    relay.retire_accepted_selectors_for_reload(&launch).unwrap();
-    relay.set_turn_verdict_harness(HarnessKind::Claude);
-    assert_eq!(
-        *relay.accepted_config().lock().unwrap(),
-        mj_core::acp::AcceptedSessionConfig::default()
-    );
-    relay
-        .record_observation(RelayObservation::SessionOpened {
-            native_session_id: "claude-thread".into(),
-            resumed: false,
-            native_continuity_lost: false,
-            replaced_unused_native_session_id: None,
-        })
-        .unwrap();
     drop(relay);
-    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    let mut relay = open();
     assert_eq!(
-        unix::accepted_config_for_boot(&launch, &relay, Some("claude-thread")),
-        mj_core::acp::AcceptedSessionConfig::default()
+        start(&mut relay, &launch, "gemini-thread"),
+        pair(Some("gemini-4-neon"), Some("high"))
+    );
+
+    // The live sequence: an in-place Move to Claude commits its launch, and
+    // the worker exits before adopting it. The next start settles it.
+    launch.harness = HarnessKind::Claude;
+    drop(relay);
+    let mut relay = open();
+    assert_eq!(
+        start(&mut relay, &launch, "gemini-thread"),
+        pair(None, None)
+    );
+    drop(relay);
+    let mut relay = open();
+    assert_eq!(
+        start(&mut relay, &launch, "claude-thread"),
+        pair(None, None)
     );
 
     // A parked Move that discards the native thread boots without the pair;
@@ -7447,11 +7449,10 @@ fn launch_changes_retire_the_accepted_pair_for_later_worker_starts() {
         })
         .unwrap();
     drop(relay);
-    let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    launch.harness = HarnessKind::Codex;
+    let mut relay = open();
     assert_eq!(
-        unix::accepted_config_for_boot(&launch, &relay, Some("destination-thread")),
-        mj_core::acp::AcceptedSessionConfig::default()
+        start(&mut relay, &launch, "destination-thread"),
+        pair(None, None)
     );
 }
 

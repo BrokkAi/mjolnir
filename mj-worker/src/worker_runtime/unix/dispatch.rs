@@ -1118,12 +1118,6 @@ pub(super) async fn apply_harness_reload_transition(
         } else {
             publish_git_setup(&root, git_setup)?;
         }
-        // The launch is committed; the replacement bridge starts from what is
-        // left of the accepted pair. The running harness is still the old one.
-        relay
-            .lock()
-            .expect("relay lock")
-            .retire_accepted_selectors_for_reload(&launch_config)?;
         let before = launch_config.environment.clone();
         let (registered, boundary, mailbox) = apply_profile_configuration(
             &root,
@@ -1146,6 +1140,12 @@ pub(super) async fn apply_harness_reload_transition(
             }
             disk_launch.write(&root.join("launch.json"))?;
         }
+        // Both paths have committed the launch. A crash before this line is
+        // settled when the next worker start adopts the same launch.
+        relay
+            .lock()
+            .expect("relay lock")
+            .adopt_launch(&launch_config)?;
         let supervisor_path = root.join("acp-supervisor.json");
         mj_core::runtime::spawn_blocking(move || {
             let bytes = serde_json::to_vec(&supervisor_spec)?;

@@ -353,7 +353,9 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         events_tx.clone(),
     );
     let accepted_config = {
-        let relay = relay.lock().expect("relay lock poisoned");
+        let mut relay = relay.lock().expect("relay lock poisoned");
+        // Any committed reload has rolled forward into `config` by now.
+        relay.adopt_launch(&config)?;
         accepted_config_for_boot(&config, &relay, resume_session.as_deref())
     };
     let supervisor_path = root.join("acp-supervisor.json");

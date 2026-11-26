@@ -132,23 +132,47 @@ impl DurableRelay {
         self.commit_snapshot(next)
     }
 
-    /// Retire the accepted selectors a reload to `launch` makes stale, from
-    /// the journal and from the runtime's shared view in one step. Another
-    /// harness cannot restore this harness's model or effort, and a launch
-    /// that names its own initial model supersedes the accepted model. Call
-    /// before the reload records its harness as the running one.
-    pub fn retire_accepted_selectors_for_reload(
+    /// Make `launch` the launch the accepted model and effort belong to,
+    /// retiring whatever it makes stale from the journal and from the
+    /// runtime's shared view in one step. Another harness cannot restore this
+    /// harness's model or effort, and a launch that names a new initial model
+    /// supersedes the accepted model.
+    ///
+    /// Call with every committed launch: at worker start, after any committed
+    /// reload has rolled forward, and when a reload commits in this process.
+    /// The journal records the launch it last adopted, so a crash between a
+    /// reload's commit and this call is settled by the next start (#1704).
+    pub fn adopt_launch(
         &mut self,
         launch: &mj_core::worker_launch::WorkerLaunchConfig,
     ) -> Result<()> {
-        let harness_changed = self.verdict_harness != Some(launch.harness);
-        let model = harness_changed || launch.initial_model.is_some();
-        let effort = harness_changed;
+        let previous = self.snapshot.accepted_launch.clone();
+        let (model, effort) = match &previous {
+            // A journal from before the record: which launch accepted its
+            // pair is unknown, so keep it and start recording.
+            None => (false, false),
+            Some(previous) if previous.harness != launch.harness => (true, true),
+            Some(previous) => (
+                launch.initial_model.is_some() && launch.initial_model != previous.initial_model,
+                false,
+            ),
+        };
+        let adopted = mj_core::relay::AcceptedLaunch {
+            harness: launch.harness,
+            initial_model: launch.initial_model.clone().or_else(|| {
+                previous
+                    .filter(|previous| previous.harness == launch.harness)
+                    .and_then(|previous| previous.initial_model)
+            }),
+        };
+        if self.snapshot.accepted_launch.as_ref() == Some(&adopted) {
+            return Ok(());
+        }
         let mut next = self.snapshot.clone();
         let options = next.config_options.clone();
-        if retire_selector_values(&mut next.config, &options, model, effort) {
-            self.commit_snapshot(next)?;
-        }
+        retire_selector_values(&mut next.config, &options, model, effort);
+        next.accepted_launch = Some(adopted);
+        self.commit_snapshot(next)?;
         let mut accepted = self
             .accepted_config
             .lock()

@@ -1854,7 +1854,7 @@ impl DurableRelay {
     }
 
     /// The accepted model and effort shared with the ACP runtime. See
-    /// [`DurableRelay::retire_accepted_selectors_for_reload`].
+    /// [`DurableRelay::adopt_launch`].
     pub fn accepted_config(&self) -> Arc<std::sync::Mutex<crate::acp::AcceptedSessionConfig>> {
         self.accepted_config.clone()
     }

@@ -1826,6 +1826,18 @@ pub enum NativeSessionUse {
     Used,
 }
 
+/// See [`RelaySnapshot::accepted_launch`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedLaunch {
+    pub harness: HarnessKind,
+    /// The last initial model a launch named. A launch that names none keeps
+    /// this value, so a sub-agent whose spawn model was applied does not lose
+    /// its accepted model when later launches omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_model: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
@@ -1975,6 +1987,12 @@ pub struct RelaySnapshot {
     pub modes: Option<SessionModeState>,
     pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
+    /// The launch the accepted model and effort in `config` belong to. A
+    /// launch on another harness, or one naming another initial model,
+    /// retires them before they are restored (#1704). `None` in a journal
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_launch: Option<AcceptedLaunch>,
     pub active_prompt: Option<ActiveRelayPrompt>,
     pub queued_prompts: Vec<QueuedRelayPrompt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2093,6 +2111,7 @@ impl RelaySnapshot {
             trusted_user_inputs: Vec::new(),
             delegated_parent_instructions: Vec::new(),
             delegated_parent_instructions_omitted: false,
+            accepted_launch: None,
             prior_guardian_reviews: Vec::new(),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
