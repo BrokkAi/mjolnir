@@ -96,6 +96,21 @@ impl CacheHost {
         .stage(ProvisionStage::Cloning)
     }
 
+    fn git_shell_command_with_agent_forwarding(
+        &self,
+        script: &str,
+        arguments: impl IntoIterator<Item = String>,
+        purpose: impl Into<String>,
+    ) -> CommandSpec {
+        self.shell_command_with_agent_forwarding(
+            &format!("{CACHE_LOCK_FUNCTIONS}\n{script}"),
+            "hel-git-cache",
+            arguments,
+            purpose,
+        )
+        .stage(ProvisionStage::Cloning)
+    }
+
     /// The sessions `engine` still has containers for on this host. The
     /// engine is a property of the runtime, not of the machine, so the caller
     /// names it.
@@ -638,7 +653,7 @@ fn prepare_repository(
         cutoff.validate()?;
         arguments.extend(cutoff.commits().map(str::to_owned));
     }
-    let mut command = host.git_shell_command(
+    let mut command = host.git_shell_command_with_agent_forwarding(
         PREPARE_REPOSITORY_SCRIPT,
         arguments,
         format!("prepare cached Git objects for {}", display_url(source)),
