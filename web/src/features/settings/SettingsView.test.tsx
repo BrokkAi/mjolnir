@@ -96,6 +96,7 @@ describe('SettingsView live settings', () => {
     fireEvent.blur(input);
     await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(1));
     expect(api.editSettings.mock.calls[0][2]).toEqual({ kind: 'set', path: ['secret'], text: 'secret replacement' });
+    await waitFor(() => expect(input).toHaveValue(''));
   });
 
   it('serializes an edit caused by blur before a save click', async () => {
@@ -126,6 +127,121 @@ describe('SettingsView live settings', () => {
     expect(within(alert.parentElement as HTMLElement).getByRole('textbox', { name: 'Name' })).toHaveValue('bad');
     await changeName('good');
     await waitFor(() => expect(screen.queryByText('Invalid name')).not.toBeInTheDocument());
+  });
+
+  it.each(['escape', 'restore'])('clears a rejected value on %s and permits saving other edits', async method => {
+    render(<SettingsView path={[]} />);
+    const input = await screen.findByRole('textbox', { name: 'Name' });
+    await changeName('accepted');
+    await screen.findByText('Unsaved changes');
+    api.editSettings.mockResolvedValueOnce({ draft: draft('accepted'), page: page([], 'accepted'), error: 'Invalid name' });
+    fireEvent.change(input, { target: { value: 'bad' } });
+    fireEvent.blur(input);
+    await screen.findByText('Invalid name');
+    if (method === 'escape') {
+      fireEvent.keyDown(input, { key: 'Escape' });
+    } else {
+      fireEvent.change(input, { target: { value: 'accepted' } });
+      fireEvent.blur(input);
+    }
+    expect(input).toHaveValue('accepted');
+    await waitFor(() => expect(screen.queryByText('Invalid name')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledTimes(1));
+  });
+
+  it('clears rejected fields for removed entries and shifted array siblings', async () => {
+    const path = ['review', 'reviewers', '0'];
+    const parent = ['review', 'reviewers'];
+    const entryPage = page(path);
+    entryPage.removable = true;
+    entryPage.groups[0].rows.push(
+      { path: [...path, 'model'], label: 'First model', control: 'text', value: 'first', placeholder: '', number: false },
+      { path: [...parent, '1', 'model'], label: 'Second model', control: 'text', value: 'second', placeholder: '', number: false },
+      { path: ['subagents', 'model'], label: 'Other model', control: 'text', value: 'other', placeholder: '', number: false },
+    );
+    const parentPage = page(parent, 'changed');
+    parentPage.groups[0].rows.push(entryPage.groups[0].rows.at(-1)!);
+    api.getSettings.mockResolvedValue({ ...doc(), page: entryPage });
+    api.getSettingsPage.mockImplementation(async (_draft: JsonValue, target: string[]) => response(target.length === 3 ? entryPage : parentPage));
+    api.editSettings.mockImplementation(async (d: JsonValue, _target: string[], edit: SettingsEdit) => {
+      if (edit.kind === 'remove') return { draft: d, page: parentPage };
+      if (edit.kind === 'set' && edit.path[0] === 'review') return { draft: d, page: entryPage, error: `Invalid ${edit.path[2]}` };
+      if (edit.kind === 'set' && edit.path[0] === 'subagents') return { draft: d, page: entryPage, error: 'Invalid other' };
+      return { draft: draft('changed'), page: { ...entryPage, groups: [{ rows: [
+        { path: ['name'], label: 'Name', control: 'text', value: 'changed', placeholder: '', number: false },
+        ...entryPage.groups[0].rows.slice(2),
+      ] }] } };
+    });
+    useUiStore.setState({ route: { name: 'settings', path } });
+    function Harness() {
+      const route = useUiStore(state => state.route);
+      return route.name === 'settings' ? <SettingsView path={route.path} /> : null;
+    }
+    render(<Harness />);
+    await screen.findByRole('textbox', { name: 'Name' });
+    await changeName('changed');
+    await screen.findByText('Unsaved changes');
+    for (const label of ['First model', 'Second model', 'Other model']) {
+      const field = screen.getByRole('textbox', { name: label });
+      fireEvent.change(field, { target: { value: 'bad' } });
+      fireEvent.blur(field);
+    }
+    await screen.findByText('Invalid 0');
+    await screen.findByText('Invalid 1');
+    await screen.findByText('Invalid other');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove this entry' }));
+    await waitFor(() => expect(useUiStore.getState().route).toEqual({ name: 'settings', path: parent }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+    await screen.findByText('Fix the rejected settings before saving.');
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Other model' }), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByText('Invalid other')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledTimes(1));
+  });
+
+  it('retries an unchanged value after a failed request without duplicating Enter and blur', async () => {
+    let fail!: (error: Error) => void;
+    api.editSettings.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    render(<SettingsView path={[]} />);
+    const input = await screen.findByRole('textbox', { name: 'Name' });
+    fireEvent.change(input, { target: { value: 'retry me' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.blur(input);
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(1));
+    await act(async () => fail(new Error('Connection failed')));
+    await screen.findByText('Connection failed');
+    expect(input).toHaveValue('retry me');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.blur(input);
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(2));
+    expect(api.editSettings.mock.calls[1][2]).toEqual({ kind: 'set', path: ['name'], text: 'retry me' });
+    await screen.findByText('Unsaved changes');
+    expect(input).toHaveValue('retry me');
+  });
+
+  it('queues a return to the accepted value while an earlier edit is pending', async () => {
+    let finishFirst!: (value: unknown) => void;
+    let finishSecond!: (value: unknown) => void;
+    api.editSettings.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishSecond = resolve; }));
+    render(<SettingsView path={[]} />);
+    const input = await screen.findByRole('textbox', { name: 'Name' });
+    fireEvent.change(input, { target: { value: 'B' } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(1));
+    fireEvent.change(input, { target: { value: 'old' } });
+    fireEvent.blur(input);
+    expect(api.editSettings).toHaveBeenCalledTimes(1);
+    await act(async () => finishFirst({ draft: draft('B'), page: page([], 'B') }));
+    await waitFor(() => expect(api.editSettings).toHaveBeenCalledTimes(2));
+    expect(api.editSettings.mock.calls[1][0]).toEqual(draft('B'));
+    expect(api.editSettings.mock.calls[1][2]).toEqual({ kind: 'set', path: ['name'], text: 'old' });
+    expect(input).toHaveValue('old');
+    await act(async () => finishSecond({ draft: draft(), page: page() }));
+    expect(input).toHaveValue('old');
+    await waitFor(() => expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument());
   });
 
   it('shows the review action reason and dispatches it once enabled', async () => {

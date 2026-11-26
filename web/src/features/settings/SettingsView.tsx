@@ -113,35 +113,53 @@ function pageAdd(page: SettingsPage): SettingsAddView | null {
   return { label: record.label, named: record.named === true };
 }
 
+type EditOutcome = 'accepted' | 'refused' | 'failed';
+
 function TextControl({
   row,
   disabled,
   onSet,
+  onClearError,
   hidden = false,
 }: {
   row: TextSettingRow;
   disabled: boolean;
-  onSet: (text: string) => void;
+  onSet: (text: string) => Promise<EditOutcome>;
+  onClearError: () => void;
   hidden?: boolean;
 }) {
   const [value, setValue] = useState(row.value);
   const valueRef = useRef(value);
-  const previousServerValue = useRef(row.value);
-  const lastSubmitted = useRef<string | null>(null);
-  // Do not replace text typed after an earlier edit was submitted.
+  const inFlightCountRef = useRef(0);
+  const queuedValueRef = useRef<string | null>(null);
+  const dirtyLocalRef = useRef(false);
+
   useEffect(() => {
-    if (valueRef.current === previousServerValue.current || valueRef.current === lastSubmitted.current) {
+    if (inFlightCountRef.current === 0 && !dirtyLocalRef.current) {
       valueRef.current = row.value;
       setValue(row.value);
     }
-    previousServerValue.current = row.value;
   }, [row.value]);
 
   const apply = () => {
-    if (value !== row.value && (!hidden || value !== '') && lastSubmitted.current !== value) {
-      lastSubmitted.current = value;
-      onSet(value);
+    const baseline = inFlightCountRef.current > 0 ? queuedValueRef.current : row.value;
+    if (value === baseline) {
+      dirtyLocalRef.current = false;
+      if (inFlightCountRef.current === 0) onClearError();
+      return;
     }
+    if (hidden && value === '') return;
+    dirtyLocalRef.current = false;
+    inFlightCountRef.current += 1;
+    queuedValueRef.current = value;
+    void onSet(value).then(outcome => {
+      inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
+      if (inFlightCountRef.current === 0) queuedValueRef.current = null;
+      if (hidden && outcome === 'accepted' && valueRef.current === value) {
+        valueRef.current = '';
+        setValue('');
+      }
+    });
   };
 
   return (
@@ -153,14 +171,14 @@ function TextControl({
       value={value}
       placeholder={row.placeholder}
       disabled={disabled}
-      onChange={event => { lastSubmitted.current = null; valueRef.current = event.target.value; setValue(event.target.value); }}
+      onChange={event => { dirtyLocalRef.current = true; valueRef.current = event.target.value; setValue(event.target.value); }}
       onBlur={apply}
       onKeyDown={event => {
         if (event.key === 'Enter') {
           event.preventDefault();
           apply();
         }
-        if (event.key === 'Escape') { valueRef.current = row.value; setValue(row.value); }
+        if (event.key === 'Escape') { dirtyLocalRef.current = false; valueRef.current = row.value; setValue(row.value); onClearError(); }
       }}
       className="h-10 min-w-0 w-full rounded-lg border border-line bg-bg px-2.5 text-sm text-fg disabled:opacity-60 sm:w-56"
     />
@@ -274,12 +292,14 @@ function SettingRowView({
   disabled,
   onEdit,
   onNavigate,
+  onClearError,
   error,
 }: {
   row: SettingsRow;
   disabled: boolean;
-  onEdit: (edit: SettingsEdit) => void;
+  onEdit: (edit: SettingsEdit) => Promise<EditOutcome>;
   onNavigate: (path: string[]) => void;
+  onClearError: (path: string[]) => void;
   error?: string;
 }) {
 
@@ -344,10 +364,11 @@ function SettingRowView({
             row={row}
             disabled={disabled}
             onSet={text => onEdit({ kind: 'set', path: row.path, text })}
+            onClearError={() => onClearError(row.path)}
           />
         );
       case 'hidden':
-        return <TextControl row={{ ...row, control: 'text', value: '', placeholder: 'Hidden · type to replace', number: false }} hidden disabled={disabled} onSet={text => onEdit({ kind: 'set', path: row.path, text })} />;
+        return <TextControl row={{ ...row, control: 'text', value: '', placeholder: 'Hidden · type to replace', number: false }} hidden disabled={disabled} onSet={text => onEdit({ kind: 'set', path: row.path, text })} onClearError={() => onClearError(row.path)} />;
       case 'read_only':
         return <span className="min-w-0 break-words text-sm text-muted">{row.text}</span>;
       default:
@@ -549,14 +570,24 @@ export default function SettingsView({ path }: SettingsViewProps) {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [page, pathKey, pollGeneration, enqueue, applyPage, navigate, subagentOptions, reviewerOptions]);
 
-  const runEdit = (edit: SettingsEdit) => {
+  const clearFieldError = (path: string[]) => {
+    const key = JSON.stringify(path);
+    if (!(key in fieldErrorsRef.current)) return;
+    const next = { ...fieldErrorsRef.current };
+    delete next[key];
+    fieldErrorsRef.current = next;
+    setFieldErrors(next);
+  };
+
+  const runEdit = async (edit: SettingsEdit): Promise<EditOutcome> => {
     const editPage = pageRef.current?.path;
-    if (!editPage) return;
+    if (!editPage) return 'failed';
     setError(null);
     setNotice(null);
     pollSuppressedRef.current = false;
     setPollGeneration(value => value + 1);
-    void enqueue(async valid => {
+    let outcome: EditOutcome = 'failed';
+    await enqueue(async valid => {
       try {
         const result = await editSettings(draftRef.current, editPage, edit);
         if (!valid()) return;
@@ -571,10 +602,21 @@ export default function SettingsView({ path }: SettingsViewProps) {
           fieldErrorsRef.current = next;
           setFieldErrors(next);
         } else if (result.error) setError(result.error);
+        if (!result.error && edit.kind === 'remove') {
+          const prefix = /^\d+$/.test(edit.path.at(-1) ?? '') ? edit.path.slice(0, -1) : edit.path;
+          const next = Object.fromEntries(Object.entries(fieldErrorsRef.current).filter(([key]) => {
+            const path = JSON.parse(key) as string[];
+            return !prefix.every((segment, index) => path[index] === segment);
+          }));
+          fieldErrorsRef.current = next;
+          setFieldErrors(next);
+        }
         if (!result.error && result.notice) setNotice(result.notice);
         if (JSON.stringify(result.page.path) !== JSON.stringify(editPage)) navigate({ name: 'settings', path: result.page.path });
+        outcome = result.error ? 'refused' : 'accepted';
       } catch (failure) { if (valid()) setError(describe(failure)); }
     });
+    return outcome;
   };
 
   const discard = () => {
@@ -792,8 +834,9 @@ export default function SettingsView({ path }: SettingsViewProps) {
                 row={row}
                 error={fieldErrors[JSON.stringify(row.path)]}
                 disabled={busy}
-                onEdit={edit => void runEdit(edit)}
+                onEdit={runEdit}
                 onNavigate={navigateTo}
+                onClearError={clearFieldError}
               />
             ))}
           </div>
