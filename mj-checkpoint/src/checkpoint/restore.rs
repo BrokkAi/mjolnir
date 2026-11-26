@@ -42,6 +42,30 @@ pub fn relay_seed_for_restore(
     native_continuity: bool,
     queue_policy: QueueRestorePolicy,
 ) -> Result<mj_core::relay::RestoredRelaySeed> {
+    let mut pending_context =
+        canonical
+            .pending_prompt_context
+            .clone()
+            .map(|text| mj_core::relay::PendingPromptContext {
+                text,
+                attached_command_id: None,
+            });
+    if !queue_policy.keeps_queue()
+        && let Some(mailbox) = &canonical.mailbox
+    {
+        for queued in canonical.queued_prompts.iter().rev() {
+            if let Some(context) = mailbox
+                .quota_input
+                .frozen_prompt_contexts
+                .get(&queued.command_id)
+            {
+                mj_core::relay::prepend_pending_prompt_context(
+                    &mut pending_context,
+                    context.clone(),
+                );
+            }
+        }
+    }
     let seed = mj_core::relay::RestoredRelaySeed {
         command_ledger: None,
         assessment_state: native_continuity
@@ -74,6 +98,42 @@ pub fn relay_seed_for_restore(
                     mailbox.pending_events.clone()
                 },
                 delivered_event_keys: mailbox.delivered_event_keys.clone(),
+                quota_input: mj_core::archive::CanonicalQuotaInput {
+                    pending: {
+                        let mut retained = Vec::new();
+                        if !queue_policy.keeps_queue() {
+                            for queued in &canonical.queued_prompts {
+                                if let Some(input) =
+                                    mailbox.quota_input.claimed.get(&queued.command_id)
+                                {
+                                    retained.extend(input.iter().cloned());
+                                }
+                                if let Some(input) =
+                                    mailbox.quota_input.steered.get(&queued.command_id)
+                                {
+                                    retained.extend(input.iter().cloned());
+                                }
+                            }
+                        }
+                        retained.extend(mailbox.quota_input.pending.iter().cloned());
+                        retained
+                    },
+                    steered: if queue_policy.keeps_queue() {
+                        mailbox.quota_input.steered.clone()
+                    } else {
+                        Default::default()
+                    },
+                    frozen_prompt_contexts: if queue_policy.keeps_queue() {
+                        mailbox.quota_input.frozen_prompt_contexts.clone()
+                    } else {
+                        Default::default()
+                    },
+                    claimed: if queue_policy.keeps_queue() {
+                        mailbox.quota_input.claimed.clone()
+                    } else {
+                        Default::default()
+                    },
+                },
                 prompt_contexts: if queue_policy.keeps_queue() {
                     mailbox.prompt_contexts.clone()
                 } else {
@@ -85,7 +145,7 @@ pub fn relay_seed_for_restore(
         native_use_evidence: native_continuity
             .then(|| canonical.native_use_evidence.clone())
             .flatten(),
-        pending_prompt_context: canonical.pending_prompt_context.clone(),
+        pending_prompt_context: pending_context.map(|context| context.text),
     };
     seed.validate()?;
     Ok(seed)

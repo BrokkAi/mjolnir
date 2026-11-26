@@ -1051,10 +1051,7 @@ impl DurableRelay {
         let hold = self.snapshot.in_place_move_hold.as_ref()?;
         matches!(
             hold.reload_phase,
-            Some(
-                mj_core::relay::InPlaceReloadPhase::Committed
-                    | mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { .. }
-            )
+            Some(mj_core::relay::InPlaceReloadPhase::Committed)
         )
         .then(|| {
             (
@@ -1062,6 +1059,16 @@ impl DurableRelay {
                 self.snapshot.store_id.clone().expect("held store"),
             )
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn failed_after_commit_reload_message(&self) -> Option<String> {
+        match &self.snapshot.in_place_move_hold.as_ref()?.reload_phase {
+            Some(mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { message }) => {
+                Some(message.clone())
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn mark_in_place_harness_committed(
@@ -2240,33 +2247,22 @@ impl DurableRelay {
                     if let Some(context) = next_snapshot.mailbox_prompt_contexts.get(&command_id) {
                         contexts.push(context.clone());
                     }
-                    if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
-                        if context.attached_command_id.is_none() {
-                            context.attached_command_id = Some(command_id.clone());
-                        }
-                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                            contexts.push(context.text.clone());
-                        }
-                    }
-                    for context in &mut next_snapshot.pending_user_shell_contexts {
-                        if context.accepted_ordinal >= accepted_ordinal {
-                            continue;
-                        }
-                        if context.attached_command_id.is_none() {
-                            context.attached_command_id = Some(command_id.clone());
-                        }
-                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                            contexts.push(context.text.clone());
-                        }
+                    if let Some(context) = next_snapshot.frozen_prompt_contexts.get(&command_id) {
+                        contexts.push(context.clone());
                     }
                     (!contexts.is_empty()).then(|| contexts.join("\n\n"))
                 })
                 .flatten();
             claimed.push(ClaimedRelayCommand {
-                command_id,
+                command_id: command_id.clone(),
                 accepted_ordinal,
                 command: dispatch.command.clone(),
                 hidden_prompt_context,
+                quota_interrupted_input: next_snapshot
+                    .quota_prompt_contexts
+                    .get(&command_id)
+                    .cloned()
+                    .unwrap_or_default(),
                 steering_prompt,
             });
         }
@@ -2529,6 +2525,7 @@ impl DurableRelay {
                 accepted_ordinal,
                 command: dispatch.command.clone(),
                 hidden_prompt_context: None,
+                quota_interrupted_input: Vec::new(),
                 steering_prompt: None,
             });
         }
@@ -3632,10 +3629,5 @@ impl DurableRelay {
 }
 
 fn mailbox_prompt_eligible(command: &RelayCommand) -> bool {
-    let Some(prompt) = command.prompt_blocks() else {
-        return false;
-    };
-    !mj_core::acp::prompt_requests_compaction(&prompt)
-        && !mj_core::acp::prompt_is_slash_command(&prompt)
-        && mj_core::acp::context_command(&prompt).is_none()
+    command.accepts_prompt_context()
 }

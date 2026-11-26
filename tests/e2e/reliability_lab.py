@@ -499,7 +499,8 @@ class Lab:
         # detects the real profile, offers it for new sessions and reads its
         # quota. Keep only the worker binary, which callers pass on purpose.
         for key in list(env):
-            if key.startswith(("CLAUDE", "CODEX_", "MJ_")) and key != "MJ_WORKER_BINARY":
+            if (key.startswith(("CLAUDE", "CODEX_", "MJ_", "AGY", "ANTIGRAVITY", "GEMINI", "GOOGLE_API_KEY"))
+                and key != "MJ_WORKER_BINARY"):
                 del env[key]
         # The viewer asks for a commit author when the daemon's Git has none.
         # The lab gives its daemon one, apart from the host's own config.
@@ -507,8 +508,13 @@ class Lab:
         if not git_config.exists():
             git_config.parent.mkdir(parents=True, exist_ok=True)
             git_config.write_text("[user]\n\tname = Reliability Lab\n\temail = lab@example.invalid\n")
+        isolated_home = self.runtime_root / "home"
+        isolated_home.mkdir(exist_ok=True)
         env.update(
             {
+                "HOME": str(isolated_home),
+                "XDG_CONFIG_HOME": str(isolated_home / ".config"),
+                "XDG_DATA_HOME": str(isolated_home / ".local" / "share"),
                 "GIT_CONFIG_GLOBAL": str(git_config),
                 "MJ_CONFIG_DIR": str(self.config),
                 "MJ_DATA_DIR": str(self.data),
@@ -625,6 +631,54 @@ def wait_for_prompt_cancel():
         raise RuntimeError("expected session/cancel while prompt was delayed")
     return True
 
+def update(value):
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": value}})
+
+def say(text):
+    update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
+
+def wait_response(request_id=None, timeout=None):
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    while True:
+        remaining = max(0, deadline - time.monotonic()) if deadline is not None else None
+        ready, _, _ = select.select([sys.stdin], [], [], remaining)
+        if not ready:
+            return None
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        incoming = json.loads(line)
+        log(incoming)
+        if incoming.get("method") == "session/cancel":
+            return "cancelled"
+        if request_id is not None and incoming.get("id") == request_id:
+            return incoming.get("result", {})
+        if incoming.get("id") is not None:
+            send({"jsonrpc": "2.0", "id": incoming["id"], "result": {}})
+
+def ask_live(form):
+    if form:
+        method = "elicitation/create"
+        params = {"sessionId": session_id, "mode": "form", "message": "Live form: choose the options.", "requestedSchema": {
+            "type": "object", "required": ["a_label"], "properties": {
+                "a_label": {"type": "string", "title": "Label"},
+                "b_enabled": {"type": "boolean", "title": "Enabled", "default": False},
+                "c_choice": {"type": "string", "title": "Choice", "oneOf": [{"const": "first", "title": "First"}, {"const": "second", "title": "Second"}]},
+                "d_several": {"type": "array", "title": "Several", "items": {"type": "string", "enum": ["Alpha", "Beta", "Gamma"]}},
+            }}}
+    else:
+        method = "session/request_permission"
+        params = {"sessionId": session_id, "toolCall": {"toolCallId": "live-permission", "kind": "execute", "status": "pending", "title": "Run live command?", "rawInput": {"command": "echo approved"}}, "options": [{"optionId": "allow", "name": "Allow once", "kind": "allow_once"}, {"optionId": "reject", "name": "Reject once", "kind": "reject_once"}]}
+    request_id = "live-question"
+    report_execution("waiting")
+    send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    answer = wait_response(request_id)
+    report_execution("running")
+    if answer is None or answer == "cancelled":
+        return {"stopReason": "cancelled"}
+    say(("elicitation response: " if form else "permission response: ") + json.dumps(answer))
+    return {"stopReason": "end_turn"}
+
 for line in sys.stdin:
     message = json.loads(line)
     log(message)
@@ -695,6 +749,23 @@ for line in sys.stdin:
                     })
             report_execution("idle")
             send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
+            continue
+        if text in ("live tool call", "live slow turn", "live elicitation", "live permission"):
+            if text == "live tool call":
+                update({"sessionUpdate": "tool_call", "toolCallId": "live-tool", "title": "Live tool call", "kind": "execute", "status": "in_progress", "rawInput": {"command": "echo live input"}})
+                update({"sessionUpdate": "tool_call_update", "toolCallId": "live-tool", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "live tool output"}}]})
+                say("tool call finished")
+                result = {"stopReason": "end_turn"}
+            elif text == "live slow turn":
+                say("working on slow turn...")
+                cancelled = wait_response(timeout=20.0) == "cancelled"
+                if not cancelled:
+                    say("slow turn finished")
+                result = {"stopReason": "cancelled" if cancelled else "end_turn"}
+            else:
+                result = ask_live(text == "live elicitation")
+            report_execution("idle")
+            send({"jsonrpc": "2.0", "id": ident, "result": result})
             continue
         send({
             "jsonrpc": "2.0",
@@ -826,7 +897,7 @@ tailscale_detect = false
 [profiles.fake]
 kind = "codex"
 home = {json.dumps(str(self.profile))}
-environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, MJ_FAKE_ACP_SWALLOW_PROMPT = {json.dumps(str(fake_acp_swallow_prompt))}, MJ_FAKE_ACP_SWALLOW_BANNER = {json.dumps("1" if fake_acp_swallow_banner else "")}, PATH = {json.dumps(str(fixture_bin))}, XDG_CACHE_HOME = {json.dumps(str(self.runtime_root / "cache"))} }}
+environment = {{ HOME = {json.dumps(str(self.runtime_root / "home"))}, XDG_CONFIG_HOME = {json.dumps(str(self.runtime_root / "home" / ".config"))}, XDG_DATA_HOME = {json.dumps(str(self.runtime_root / "home" / ".local" / "share"))}, MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, MJ_FAKE_ACP_SWALLOW_PROMPT = {json.dumps(str(fake_acp_swallow_prompt))}, MJ_FAKE_ACP_SWALLOW_BANNER = {json.dumps("1" if fake_acp_swallow_banner else "")}, PATH = {json.dumps(str(fixture_bin))}, XDG_CACHE_HOME = {json.dumps(str(self.runtime_root / "cache"))} }}
 
 [bundles.fixture]
 primary_repo = "fixture"

@@ -118,7 +118,7 @@ describe('Session lifecycle dialogs', () => {
   it('runs suspend preflight and sends PascalCase shown consent', async () => {
     const actions: ControllerAction[] = [];
     const fetchMock = mockFetch({
-      '/api/v1/sessions/s1/lifecycle/suspend-preflight': () => jsonResponse(preflight),
+      '/api/v1/sessions/s1/suspend-preflight': () => jsonResponse(preflight),
       '/api/v1/actions': (_url, init) => {
         actions.push(JSON.parse(String(init?.body)) as ControllerAction);
         return new Response('', { status: 202 });
@@ -138,8 +138,9 @@ describe('Session lifecycle dialogs', () => {
 
     // The preflight is asked for with the currently selected options.
     const preflightCall = fetchMock.calls.find(call =>
-      call.url.includes('/lifecycle/suspend-preflight'),
+      call.url.includes('/suspend-preflight'),
     );
+    expect(preflightCall?.init?.method ?? 'GET').toBe('GET');
     expect(preflightCall?.url).toContain('without_checkpoint=false');
     expect(preflightCall?.url).toContain('history_only=false');
 

@@ -2233,6 +2233,25 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         wake.command.prompt_blocks().unwrap().into_owned()
     };
     drop(mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap());
+    // Exercise the paged cut read with input larger than one relay frame.
+    let quota_text = "東京".repeat(mj_core::relay::MAX_FRAME_BYTES / 6 + 1000);
+    if protocol >= mj_core::relay::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL {
+        let path = relay_root.join(mj_core::relay::RELAY_STATE_FILE);
+        let mut snapshot: mj_core::relay::RelaySnapshot =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        snapshot.quota_interrupted_input =
+            vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                quota_text.clone(),
+            )];
+        let queued_id = snapshot.queued_prompts[0].command_id.clone();
+        snapshot.steered_prompt_contexts.insert(
+            queued_id,
+            vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                "saved injected steering",
+            )],
+        );
+        std::fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    }
 
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
@@ -2327,9 +2346,9 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         .unwrap();
         assert!(
             retained
-                .pending_prompt_context
-                .as_ref()
-                .is_some_and(|context| context.text == pending_context),
+                .frozen_prompt_contexts
+                .values()
+                .any(|context| *context == pending_context),
             "failed replacement lost the pending context"
         );
         {
@@ -2373,11 +2392,48 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         .take()
         .expect("the checkpoint never reached its export");
     spec.canonical_session.validate().unwrap();
-    assert!(
-        spec.canonical_session.pending_prompt_context.as_deref() == Some(pending_context.as_str()),
-        "checkpoint did not preserve the {} byte pending context",
-        pending_context.len()
-    );
+    if protocol >= mj_core::relay::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL {
+        let input = &spec.canonical_session.mailbox.as_ref().unwrap().quota_input;
+        assert!(
+            input
+                .frozen_prompt_contexts
+                .values()
+                .any(|context| *context == pending_context),
+            "checkpoint did not preserve the {} byte frozen context",
+            pending_context.len()
+        );
+        let block: agent_client_protocol::v1::schema::ContentBlock =
+            serde_json::from_value(input.pending[0].clone()).unwrap();
+        assert_eq!(
+            block,
+            agent_client_protocol::v1::schema::ContentBlock::from(quota_text)
+        );
+        assert!(
+            serde_json::to_string(&input.steered)
+                .unwrap()
+                .contains("saved injected steering")
+        );
+        let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
+            &spec.canonical_session,
+            true,
+            mj_checkpoint::checkpoint::QueueRestorePolicy::Defer,
+        )
+        .unwrap();
+        assert_eq!(seed.mailbox.unwrap().quota_input, *input);
+        let discarded = mj_checkpoint::checkpoint::relay_seed_for_restore(
+            &spec.canonical_session,
+            true,
+            mj_checkpoint::checkpoint::QueueRestorePolicy::Discard,
+        )
+        .unwrap();
+        let input = discarded.mailbox.unwrap().quota_input;
+        assert!(input.steered.is_empty());
+        assert!(
+            serde_json::to_string(&input.pending[0])
+                .unwrap()
+                .contains("saved injected steering")
+        );
+    }
     let notices = executor.notices.lock().unwrap().clone();
     if protocol < reads_queue {
         assert!(

@@ -4050,7 +4050,7 @@ pub(super) fn resolve_move_keep_dir(
 mod in_place;
 mod repair;
 pub use in_place::InPlaceRestartError;
-pub(super) use repair::RetainedWorker;
+pub(super) use repair::{RetainedWorker, release_settled_in_place_hold};
 
 #[cfg(test)]
 mod tests;

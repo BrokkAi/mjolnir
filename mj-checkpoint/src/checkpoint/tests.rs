@@ -4736,7 +4736,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     for schema_version in [
         1,
         crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT + 1,
     ] {
         let incompatible = temp
             .path()

@@ -351,6 +351,12 @@ pub enum RelayRequest {
         barrier_command_id: String,
         cut: super::snapshot::RelayCursor,
     },
+    /// Page quota-interrupted input serialized as UTF-8 JSON at the checkpoint cut.
+    ReadCheckpointQuotaInput {
+        barrier_command_id: String,
+        cut: super::snapshot::RelayCursor,
+        offset: u64,
+    },
     /// The worker-owned native-session-use evidence at the cut of a ready
     /// checkpoint barrier. Refused unless that barrier is ready at exactly
     /// `cut` and nothing has been journaled since.
@@ -699,6 +705,7 @@ impl RelayRequest {
             Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
             Self::ReadQueuedCommand { .. } => "read_queued_command",
             Self::ReadCheckpointMailbox { .. } => "read_checkpoint_mailbox",
+            Self::ReadCheckpointQuotaInput { .. } => "read_checkpoint_quota_input",
             Self::ReadCheckpointNativeUse { .. } => "read_checkpoint_native_use",
             Self::BeginLiveBaseline => "begin_live_baseline",
             Self::ReadLiveBaselinePage { .. } => "read_live_baseline_page",
@@ -808,6 +815,7 @@ impl RelayRequest {
             | Self::CommandRetentionStatus
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::ReadCheckpointMailbox { .. } => super::RELAY_CHECKPOINT_MAILBOX_PROTOCOL,
+            Self::ReadCheckpointQuotaInput { .. } => super::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL,
             Self::ReadCheckpointNativeUse { .. } => super::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL,
             Self::HoldInPlaceMoveDispatch { .. }
             | Self::DiscardHeldMoveCommands { .. }
@@ -1135,6 +1143,10 @@ pub enum RelayResponsePayload {
     },
     CheckpointMailbox {
         mailbox: crate::archive::CanonicalMailbox,
+    },
+    CheckpointQuotaInput {
+        page: String,
+        next_offset: Option<u64>,
     },
     CheckpointNativeUse {
         native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,

@@ -11,6 +11,7 @@ import pathlib
 import subprocess
 import sys
 import time
+import tomllib
 import traceback
 
 from reliability_lab import Lab, ScenarioFailure, TIMEOUT
@@ -49,7 +50,7 @@ def wait_marker_or_exit(marker: pathlib.Path, browser: subprocess.Popen[bytes]) 
     # the quota and targets pages, the four-step new-session wizard, a real
     # provision, and a conversation. That is minutes of honest work, not the
     # single page load this wait was first sized for.
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         if marker.exists():
             return
@@ -107,12 +108,20 @@ def stop_from_dashboard(client) -> None:
     client.send(b"\x02:")
     client.wait_for("Search commands")
     client.send(b"suspend session\r")
-    # The browser provisions a managed clone whose publication has not been
-    # verified, so the surface asks before suspending: the recovery copy keeps
-    # any unpublished Git work. Require that question, then confirm it.
+    # The preflight opens while the workspace is checked. Safe workspaces
+    # suspend automatically; a warning leaves a consent dialog to confirm.
     client.wait_for("Suspend session?")
-    client.wait_for("Publication status is unverified")
-    client.send(b"s")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        screen = client.text()
+        if "Suspend session?" not in screen:
+            break
+        if "Checking workspace" not in screen and "Fixing safe blockers" not in screen:
+            client.send(b"s")
+            break
+        time.sleep(0.05)
+    else:
+        raise ScenarioFailure("the TUI suspend preflight did not finish")
     # A stop needs the daemon's session manager to have adopted the session,
     # and adoption is asynchronous: a session the browser created moments ago
     # can still be unmanaged when the first stop reaches it. The surface offers
@@ -166,7 +175,16 @@ def run_layout_matrix(lab: Lab, web_root: pathlib.Path, environment: dict[str, s
 
 def run(lab: Lab) -> None:
     port = lab.prepare(phone_tls=True)
+    config_path = lab.config / "config.toml"
+    config_path.write_text(config_path.read_text() + '\n[targets.destination]\nkind = "bare"\n')
     dashboard = start_dashboard(lab)
+    # Startup can discover installed harnesses. Never let a live test offer a
+    # profile whose home points at the operator's credentials.
+    profiles = tomllib.loads(config_path.read_text()).get("profiles", {})
+    for name, profile in profiles.items():
+        home = profile.get("home")
+        if home and not pathlib.Path(home).resolve().is_relative_to(lab.runtime_root.resolve()):
+            raise ScenarioFailure(f"profile {name} escaped the isolated lab home: {home}")
     code, _ = lab.wait_daemon_status(port)
     status, _ = lab.request("POST", "/auth/session", {"code": code})
     if status != 204:
@@ -190,6 +208,7 @@ def run(lab: Lab) -> None:
             "MJ_BROWSER_CODE": code,
             "MJ_BROWSER_QR_URL": login_url,
             "MJ_BROWSER_TITLE": title,
+            "MJ_BROWSER_MOVE_TARGET": "destination",
             "MJ_BROWSER_PROJECT_DIRECTORY": str(lab.project),
             "MJ_BROWSER_READY_MARKER": str(ready_marker),
             "MJ_TUI_CHANGED_MARKER": str(changed_marker),

@@ -136,7 +136,7 @@ describe('ToolCard', () => {
     mockFetch({
       [DETAIL_PATH]: () => jsonResponse(detailPayload({ command: 'cargo test --workspace' })),
     });
-    render(<ToolCard entry={toolEntry()} sessionId="s1" onBeforeExpand={() => {}} />);
+    render(<ToolCard entry={toolEntry({ tool_detail_trimmed: false })} sessionId="s1" onBeforeExpand={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Run tests, expand/ }));
 

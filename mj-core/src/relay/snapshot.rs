@@ -289,6 +289,15 @@ impl RelayCommand {
         }
     }
 
+    /// Whether a prompt may receive hidden mailbox and quota context.
+    pub fn accepts_prompt_context(&self) -> bool {
+        self.prompt_blocks().is_some_and(|prompt| {
+            !crate::acp::prompt_requests_compaction(&prompt)
+                && !crate::acp::prompt_is_slash_command(&prompt)
+                && crate::acp::context_command(&prompt).is_none()
+        })
+    }
+
     pub fn minimum_protocol(&self) -> u32 {
         match self {
             Self::DismissQuestion { .. } => super::RELAY_DISMISS_QUESTION_PROTOCOL,
@@ -1635,6 +1644,8 @@ pub struct ClaimedRelayCommand {
     pub command: RelayCommand,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_prompt_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_interrupted_input: Vec<ContentBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering_prompt: Option<ClaimedSteeringPrompt>,
 }
@@ -1644,6 +1655,19 @@ pub struct PendingPromptContext {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_command_id: Option<String>,
+}
+
+/// Return interrupted prompt context ahead of context that arrived later.
+pub fn prepend_pending_prompt_context(pending: &mut Option<PendingPromptContext>, context: String) {
+    match pending {
+        Some(pending) => pending.text = format!("{context}\n\n{}", pending.text),
+        None => {
+            *pending = Some(PendingPromptContext {
+                text: context,
+                attached_command_id: None,
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1896,6 +1920,9 @@ pub struct RelaySnapshot {
     pub continuation: crate::continuation::ContinuationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering: Option<SteeringOperation>,
+    /// Receiver of each accepted legacy Cancel, retained until that command settles.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cancel_steer_receivers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2013,6 +2040,18 @@ pub struct RelaySnapshot {
     /// a terminal dispatch state. This closes the journal/snapshot crash gap.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mailbox_prompt_contexts: BTreeMap<String, String>,
+    /// Input owned by quota-stopped turns, awaiting the next eligible prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_interrupted_input: Vec<ContentBlock>,
+    /// Retained input claimed by a started prompt, until it completes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub quota_prompt_contexts: BTreeMap<String, Vec<ContentBlock>>,
+    /// Inputs confirmed injected into each still-owned turn, in injection order.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub steered_prompt_contexts: BTreeMap<String, Vec<ContentBlock>>,
+    /// Prompt and shell context frozen at turn start.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frozen_prompt_contexts: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub active_user_shells: BTreeMap<String, ActiveUserShell>,
     /// Ignored. Protocol 26 workers persisted a Move seal here; the field
@@ -2117,6 +2156,7 @@ impl RelaySnapshot {
             turn_completion: None,
             continuation: Default::default(),
             steering: None,
+            cancel_steer_receivers: BTreeMap::new(),
             cancelling_prompt_id: None,
             native_agents: BTreeMap::new(),
             native_agent_replay: None,
@@ -2161,6 +2201,10 @@ impl RelaySnapshot {
             mailbox_hook_lease: None,
             delivered_mailbox_event_keys: BTreeMap::new(),
             mailbox_prompt_contexts: BTreeMap::new(),
+            quota_interrupted_input: Vec::new(),
+            quota_prompt_contexts: BTreeMap::new(),
+            steered_prompt_contexts: BTreeMap::new(),
+            frozen_prompt_contexts: BTreeMap::new(),
             active_user_shells: BTreeMap::new(),
             command_ledger_seal: None,
             checkpoint_barrier: None,

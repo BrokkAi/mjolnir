@@ -2066,6 +2066,18 @@ fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
         )
     );
 
+    // Claude JSON-RPC errors use the same trusted provider diagnostic.
+    let claude = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+        "message": "Your usage limit has been reached", "code": "usage_limit"
+    }));
+    let (stop_reason, _) = prompt_error_outcome(
+        HarnessKind::Claude,
+        &claude,
+        &mj_core::diagnostic::TurnDiagnostic::from_acp(&claude),
+        "",
+    );
+    assert_eq!(stop_reason, mj_core::diagnostic::QUOTA_STOP_REASON);
+
     // Another Codex error names its kind when it has no sentence of its own.
     let bare = agent_client_protocol::Error::internal_error()
         .data(serde_json::json!({"codexErrorInfo": "responseStreamDisconnected"}));

@@ -116,7 +116,7 @@ afterEach(() => {
 });
 
 describe('SettingsView', () => {
-  it('applies server-driven edits, shows hidden rows as omitted, and saves the draft', async () => {
+  it('applies server-driven edits, shows hidden rows, and saves the draft', async () => {
     let draft = structuredClone(initialDraft) as {
       review: { enabled: boolean };
       theme: JsonValue;
@@ -153,7 +153,7 @@ describe('SettingsView', () => {
 
     expect(await screen.findByRole('button', { name: /Machines/ })).toBeInTheDocument();
     expect(screen.getByText('1.2.3')).toBeInTheDocument();
-    expect(screen.queryByText('Hidden secret')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Hidden secret')).toHaveAttribute('type', 'password');
 
     // Checkbox: exactly a toggle edit.
     fireEvent.click(screen.getByRole('switch', { name: 'Reviews' }));
