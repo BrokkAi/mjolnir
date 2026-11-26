@@ -1218,7 +1218,9 @@ impl Controller {
             notifications_ignored,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
-            machine_id: self.config.template_machine_id(target_id),
+            // The machine is recorded with the placement, which does not exist
+            // yet; provisioning fills it in when it creates the target.
+            machine_id: None,
             build_cache: None,
             create_managed_worktree,
             launch_base,
