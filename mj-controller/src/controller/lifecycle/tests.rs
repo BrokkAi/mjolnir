@@ -4528,15 +4528,17 @@ async fn cancelled_container_suspend_probe_records_rollback_for_recovery() {
         mj_core::test_hooks::install_fake_command(
             &bin,
             "podman",
-            r#"set -eu
+            &r#"set -eu
 root=$MJ_CANCELLED_CONTAINER_SUSPEND_FIXTURE
 cd "$root"
 case "$1 $2" in
-    "container exists")
+    # The existence check lists the engine's containers; the container is present.
+    "container ls")
         if [ -f unreachable ]; then
             echo "container storage unreachable" >&2
             exit 125
         fi
+        echo "fakeid CONTAINER_NAME"
         ;;
     "container inspect") cat inspect.json ;;
     "exec -i")
@@ -4564,7 +4566,11 @@ case "$1 $2" in
         ;;
     *) echo "unexpected podman command: $*" >&2; exit 125 ;;
 esac
-"#,
+"#
+            .replace(
+                "CONTAINER_NAME",
+                &mj_core::targets::resource_name(SESSION_ID).unwrap(),
+            ),
         );
         let paths = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&paths)))

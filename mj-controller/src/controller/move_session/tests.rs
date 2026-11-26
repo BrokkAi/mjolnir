@@ -1428,6 +1428,103 @@ mod staged_in_place_tests {
         }
     }
 
+    // Hard-won: in-place Move: repair returned with a settled failed reload's dispatch still held.
+    #[test]
+    fn repair_releases_settled_failed_hold_but_keeps_unsettled_started_hold() {
+        if !isolated("repair_releases_settled_failed_hold_but_keeps_unsettled_started_hold") {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let _writer = crate::database::install_isolated_test_writer();
+        for (settled, legacy_restart) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+            let relay_root = seed_source_relay(&fixture.worker_root);
+            let mut operation =
+                in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+            if settled {
+                mj_worker::stand_in_relay::seed_failed_after_commit_hold(
+                    &relay_root,
+                    &operation.operation_id,
+                );
+                operation.phase = MovePhase::Failed;
+                operation.in_place_expected_store_id = None;
+                crate::database::save_move_operation(&operation).unwrap();
+            } else {
+                mj_worker::stand_in_relay::seed_in_place_hold(
+                    &relay_root,
+                    &operation.operation_id,
+                    true,
+                );
+                // A different, absent owner record cannot settle this hold.
+                operation.operation_id = "unrelated-move".into();
+                operation.phase = MovePhase::Failed;
+                crate::database::save_move_operation(&operation).unwrap();
+            }
+            let session = fixture
+                .controller
+                .state
+                .sessions
+                .get_mut(LATCH_RELAY_SESSION)
+                .unwrap();
+            session.state = SessionState::Error;
+            crate::database::save_session(session).unwrap();
+            let proxy = fixture.worker_root.join("hel");
+            fs::remove_file(&proxy).unwrap();
+            fs::write(
+                &proxy,
+                format!("#!/bin/sh\nif [ \"$2\" = liveness ]; then if [ \"$3\" != --help ]; then printf 'alive\\n'; fi; exit 0; fi\n{}\n", latch_relay_proxy_command(&relay_root)),
+            )
+            .unwrap();
+            fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
+            let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+            let owner =
+                crate::worker_lifecycle::WorkerPermit::acquire(LATCH_RELAY_SESSION, &admission)
+                    .unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(owner.scope(async {
+                    if legacy_restart {
+                        assert!(
+                            fixture
+                                .controller
+                                .reconnect_legacy_restart(LATCH_RELAY_SESSION, &executor())
+                                .await
+                                .unwrap()
+                        );
+                    } else {
+                        fixture
+                            .controller
+                            .repair_existing_environment(
+                                LATCH_RELAY_SESSION,
+                                crate::controller::resume::RetainedWorker::Live,
+                                false,
+                                &executor(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }));
+            let hold =
+                mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                    .unwrap()
+                    .operational_state()
+                    .in_place_move_hold;
+            assert_eq!(hold.is_none(), settled, "{hold:?}");
+        }
+    }
+
+    // Hard-won: in-place Move staged a stale database native session ID over the live worker's ID.
+    #[test]
+    fn in_place_move_uses_live_native_session_id() {
+        if isolated("in_place_move_uses_live_native_session_id") {
+            run_case("live-native");
+        }
+    }
+
     #[test]
     fn subagent_move_live_same_harness_keeps_current_model() {
         if isolated("subagent_move_live_same_harness_keeps_current_model") {
@@ -1851,6 +1948,16 @@ mod staged_in_place_tests {
             HarnessKind::Claude
         };
         let mut fixture = in_place_fixture(destination_kind, HarnessKind::Claude);
+        if mode == "live-native" {
+            let session = fixture
+                .controller
+                .state
+                .sessions
+                .get_mut(LATCH_RELAY_SESSION)
+                .unwrap();
+            session.native_session_id = Some("stale-native".into());
+            crate::database::save_session(session).unwrap();
+        }
         let source_session = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
         let relay_root = seed_source_relay(&fixture.worker_root);
         if mode.starts_with("subagent-") {
@@ -1953,7 +2060,7 @@ mod staged_in_place_tests {
                         .unwrap();
                         assert!(relay.operational_state().in_place_move_hold.is_none());
                     }
-                    "success" | "subagent-same" | "subagent-cross" => {
+                    "success" | "live-native" | "subagent-same" | "subagent-cross" => {
                         result.unwrap();
                         let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
                             .unwrap()
@@ -1969,6 +2076,13 @@ mod staged_in_place_tests {
                             launch.accepted_reload_operation_id.as_deref(),
                             Some(operation.operation_id.as_str())
                         );
+                        if mode == "live-native" {
+                            assert_eq!(launch.native_session_id.as_deref(), Some("native-session"));
+                            assert_eq!(
+                                session.native_session_id.as_deref(),
+                                Some("native-session")
+                            );
+                        }
                         if mode.starts_with("subagent-") {
                             assert_eq!(launch.initial_model, None);
                             assert_eq!(executor.move_stop_calls(), 0);

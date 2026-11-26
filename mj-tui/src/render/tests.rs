@@ -1512,9 +1512,17 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
         dashboard.toggle_quota_pool();
     }
     let lines = drawn(&mut dashboard, 200, 44);
+    // Profiles waiting for their next check are named in the title instead of
+    // holding the refresh age back.
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("(refreshed 2h ago, pending: claude-1, codex-1)")),
+        "{lines:#?}"
+    );
     let claude = lines
         .iter()
-        .position(|line| line.contains("claude-1"))
+        .position(|line| line.contains("claude-1") && !line.contains("Profiles"))
         .unwrap_or_else(|| panic!("the Claude quota reading: {lines:#?}"));
     assert!(lines[claude].contains("63%"), "{lines:#?}");
     assert!(

@@ -374,6 +374,21 @@ impl StandaloneSession {
         Ok(self.snapshot())
     }
 
+    pub async fn release_in_place_move_dispatch_checked(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        expected_harness_restarted: Option<bool>,
+    ) -> Result<()> {
+        self.client
+            .release_in_place_move_dispatch_checked(
+                operation_id,
+                expected_store_id,
+                expected_harness_restarted,
+            )
+            .await
+    }
+
     /// Whether the actor should follow this worker at the fast cadence.
     ///
     /// True while the worker owns work whose events stream in, while it
