@@ -136,7 +136,7 @@ pub fn sweep_local_checkpoint_leftovers(
         }
     };
     let swept = sweep_checkpoint_leftovers_in(
-        &mj_core::config::data_dir().join("workers"),
+        &mj_core::config::DataLayout::current().workers_dir(),
         started,
         &running,
         &retained_move_snapshots,
@@ -269,7 +269,10 @@ fn host_sweep_backoff()
 }
 
 fn host_sweep_key(host: &str) -> (PathBuf, String) {
-    (mj_core::config::data_dir(), host.to_owned())
+    (
+        mj_core::config::DataLayout::current().root().to_path_buf(),
+        host.to_owned(),
+    )
 }
 
 fn host_is_backed_off(host: &str, now: DateTime<Utc>) -> bool {
@@ -303,7 +306,7 @@ fn clear_host_sweep_backoff(host: &str) {
         .remove(&host_sweep_key(host));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn clear_host_sweep_backoff_for_test() {
     host_sweep_backoff()
         .lock()

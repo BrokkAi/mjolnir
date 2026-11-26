@@ -57,6 +57,10 @@ pub const ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA: u32 = 14;
 /// readers reject the canonical field, so an archive that carries it declares
 /// this schema whatever else it carries (including origin-delta and mailbox).
 pub const ARCHIVE_SCHEMA_VERSION_NATIVE_USE: u32 = 15;
+/// Pending hidden prompt context must survive restore; older readers reject it.
+pub const ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT: u32 = 16;
+/// Quota-interrupted and confirmed steered input must survive restore.
+pub const ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT: u32 = 17;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
@@ -471,6 +475,9 @@ pub struct CanonicalSessionSnapshot {
     /// relay protocol 80.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_use_evidence: Option<crate::relay::NativeSessionUseEvidence>,
+    /// Worker-owned context awaiting the next prompt, without dispatch bookkeeping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_prompt_context: Option<String>,
 }
 
 /// Mail a worker accepted, as its relay held it at a checkpoint cut. The
@@ -494,6 +501,31 @@ pub struct CanonicalMailbox {
     /// prompt's claim to its recovery prompt, which carries it from then on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub prompt_contexts: BTreeMap<String, String>,
+    /// ACP content blocks retained after a quota stop.
+    #[serde(default, skip_serializing_if = "CanonicalQuotaInput::is_empty")]
+    pub quota_input: CanonicalQuotaInput,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalQuotaInput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claimed: BTreeMap<String, Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub steered: BTreeMap<String, Vec<serde_json::Value>>,
+    /// Hidden context frozen for queued restart continuations.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frozen_prompt_contexts: BTreeMap<String, String>,
+}
+impl CanonicalQuotaInput {
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+            && self.claimed.is_empty()
+            && self.steered.is_empty()
+            && self.frozen_prompt_contexts.is_empty()
+    }
 }
 
 impl CanonicalMailbox {
@@ -501,11 +533,23 @@ impl CanonicalMailbox {
         self.pending_events.is_empty()
             && self.delivered_event_keys.is_empty()
             && self.prompt_contexts.is_empty()
+            && self.quota_input.is_empty()
     }
 
     /// The shape the worker's own admission guarantees, checked again before
     /// an archive or seed can become relay state.
     pub fn validate(&self) -> Result<()> {
+        for block in self
+            .quota_input
+            .pending
+            .iter()
+            .chain(self.quota_input.claimed.values().flatten())
+            .chain(self.quota_input.steered.values().flatten())
+        {
+            let _: agent_client_protocol::v1::schema::ContentBlock =
+                serde_json::from_value(block.clone())
+                    .context("invalid archived quota input block")?;
+        }
         let mut pending = BTreeSet::new();
         for event in &self.pending_events {
             ensure!(
@@ -567,6 +611,7 @@ impl CanonicalSessionSnapshot {
             && self.queued_prompts == other.queued_prompts
             && self.mailbox == other.mailbox
             && self.native_use_evidence == other.native_use_evidence
+            && self.pending_prompt_context == other.pending_prompt_context
             && self.session.without_activity_watermark()
                 == other.session.without_activity_watermark()
     }
@@ -1131,7 +1176,13 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
     }
     if let Some(mailbox) = &snapshot.mailbox {
         mailbox.validate()?;
-        for command_id in mailbox.prompt_contexts.keys() {
+        for command_id in mailbox
+            .prompt_contexts
+            .keys()
+            .chain(mailbox.quota_input.claimed.keys())
+            .chain(mailbox.quota_input.steered.keys())
+            .chain(mailbox.quota_input.frozen_prompt_contexts.keys())
+        {
             ensure!(
                 snapshot
                     .queued_prompts

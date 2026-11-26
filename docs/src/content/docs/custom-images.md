@@ -3,8 +3,10 @@ title: Custom container images
 description: What a container image must provide to work with any local or SSH container runtime.
 ---
 
-Mjolnir uses `docker.io/library/buildpack-deps:noble` for container sessions
-by default. Use `mj image build` to build a per-bundle image from the
+Mjolnir uses `ghcr.io/brokkai/mjolnir/session-base:latest` for container
+sessions by default. That image is Mjolnir's Ubuntu 24.04-based default
+session image, with pinned Node.js and agent harnesses preinstalled. Use
+`mj image build` to build a per-bundle image from the
 repository's mise recipe or set a target's `image` to a custom image that
 meets the contract below. [Daemon-container mode](/daemon-container/) has
 its own image and configuration.
@@ -59,13 +61,13 @@ An image-baked `opencode` must be OpenCode 2, because each session imports its
 logins with `opencode auth import` before it starts.
 
 `dsh-acp` is the ACP frontend for the pinned official DSH runtime. Without it
-on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.8.0`, using
+on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.8.1`, using
 Node.js 24.9 or newer with npm and npx; the npm package bundles the release
 binaries and the pinned DSH runtime. An older `dsh-acp` on `PATH` is likewise
 skipped, so the image needs the same Node.js tools for the fallback unless its
-binary is 0.8.0 or newer. Mjolnir supplies the pinned Node runtime when the
+binary is 0.8.1 or newer. Mjolnir supplies the pinned Node runtime when the
 image has no compatible one. To bake it in, run
-`npm install -g @brokkai/dsh-acp@0.8.0`
+`npm install -g @brokkai/dsh-acp@0.8.1`
 (Node.js 24.9 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH` together with its
 pinned `@deepseek-ai/dsh@0.2.2-rc.5` runtime. The Linux binaries need glibc
@@ -192,7 +194,7 @@ those before starting a container.
 ```toml
 [targets.podman]
 kind = "podman"
-image = "docker.io/library/buildpack-deps:noble"
+image = "ghcr.io/brokkai/mjolnir/session-base:latest"
 # Selects the image platform and the matching mj worker architecture.
 platform = "linux/amd64"
 cpus = "8"

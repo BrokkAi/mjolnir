@@ -685,11 +685,7 @@ async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
     assert_eq!(candidates.unavailable[0].0, "codex-high");
     let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
     let error = crate::server::api::resolve_reviewer_model_profile_selection(
-        &backend,
-        "luna",
-        None,
-        mj_core::config::ExecutionPolicy::Unconstrained,
-        "reviewer",
+        &backend, "luna", None, "reviewer",
     )
     .await
     .unwrap_err();
@@ -1160,6 +1156,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -1800,7 +1797,7 @@ async fn a_dropped_live_export_request_stops_its_worker_command() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    let alive = mj_client::daemon::process_is_alive;
     assert!(alive(pid));
     request.abort();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -9465,7 +9462,7 @@ async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_bud
         .unwrap(),
     );
     config.machines.insert(
-        "builder".into(),
+        mj_core::config::MachineId::new("builder").unwrap(),
         serde_json::from_value(serde_json::json!({
             "kind":"ssh","host":"ec2-host","user":"ec2-user"
         }))
@@ -9655,6 +9652,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
                 child_session_id: id.into(),
                 parent_session_id: parent.into(),
                 request_key: id.into(),
+                profile_id: "profile".into(),
                 model: Some("spawn-model".into()),
                 effort: Some("low".into()),
                 orchestrator,

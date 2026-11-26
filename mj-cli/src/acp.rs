@@ -1985,7 +1985,7 @@ mod tests {
             [
                 "interrupt session-1",
                 "look session-1",
-                r#"suspend session-1 {"discard_untracked":"None","abort_operations":"None","without_checkpoint":false}"#,
+                r#"suspend session-1 {"discard_untracked":"None","abort_operations":"None","without_checkpoint":false,"history_only":false}"#,
                 "look session-1",
                 "look session-1",
                 "look session-1",

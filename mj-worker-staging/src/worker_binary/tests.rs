@@ -154,7 +154,7 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
         .run();
         return;
     }
-    let cache = data_dir().join("workers").join("pinned");
+    let cache = DataLayout::current().pinned_workers_dir();
     let source = cache.join("source");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::write(&source, stamped_worker(b"matching cached worker")).unwrap();
@@ -774,7 +774,7 @@ fn stale_pins_are_re_resolved() {
         panic!("local source")
     };
     verify_worker_build(&path).unwrap();
-    assert!(path.starts_with(data_dir().join("workers/pinned")));
+    assert!(path.starts_with(DataLayout::current().pinned_workers_dir()));
 }
 
 /// A client replacing the daemon pins the new build's workers during the
@@ -807,7 +807,7 @@ fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
     }
     let source = std::path::PathBuf::from(std::env::var_os("MJ_WORKER_DIR").unwrap())
         .join("mj-worker-x86_64-unknown-linux-musl");
-    let cache_root = data_dir().join("workers").join("pinned");
+    let cache_root = DataLayout::current().pinned_workers_dir();
     assert!(indexed_pinned_worker(&cache_root, &source).is_none());
 
     warm_worker_binary_sources().unwrap();
@@ -940,7 +940,10 @@ fn downloads_reject_stale_builds_even_with_the_expected_checksum() {
     let error = download_worker(&url, &digest, "x86_64-unknown-linux-musl").unwrap_err();
     server.join().unwrap();
     assert!(format!("{error:#}").contains("missing worker build stamp"));
-    let cached = data_dir().join("workers/pinned").join(&digest).join("hel");
+    let cached = DataLayout::current()
+        .pinned_workers_dir()
+        .join(&digest)
+        .join("hel");
     assert!(!cached.exists());
     std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
     std::fs::write(&cached, vec![b'x'; 150_000]).unwrap();
@@ -2319,6 +2322,115 @@ fn bare_locator_on_the_container_host(session: &str) -> targets::TargetLocator {
         workspace: format!(".local/share/hel/workspaces/{session}"),
     }
 }
+#[test]
+fn host_bare_staging_checks_the_profile_link_and_uses_ssh() {
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let session = "0123456789abcdef0123456789abcdef";
+    let locator = targets::TargetLocator::SshHostBare {
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        data_root: "/old".into(),
+    };
+    install::clear_profile_configuration(
+        &executor,
+        &locator,
+        session,
+        &format!("/old/workers/{session}/profile"),
+        HarnessKind::Codex,
+    )
+    .unwrap();
+    assert!(
+        rendered(&executor.commands.take())
+            .iter()
+            .any(|line| line.contains("shared profile home"))
+    );
+    let lines = install_on_ssh_host(&executor, &fixture, &locator, session);
+    let check = lines
+        .iter()
+        .position(|line| line.contains("rm -f --"))
+        .unwrap();
+    let upload = lines
+        .iter()
+        .position(|line| line.contains("mj-upload"))
+        .unwrap();
+    assert!(check < upload);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("ssh ")
+                && line.contains(&format!("/old/workers/{session}")))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn host_bare_restage_unlinks_personal_home_before_install() {
+    struct LocalSsh;
+    impl CommandExecutor for LocalSsh {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "ssh");
+            let local = CommandSpec::new("sh", ["-c", command.args.last().unwrap().as_str()]);
+            targets::ProcessExecutor.execute(&local)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let personal = temp.path().join("personal");
+    std::fs::create_dir(&personal).unwrap();
+    std::fs::write(personal.join("auth.json"), b"personal").unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let root = temp.path().join("data");
+    let home = root.join("workers").join(id).join("profile");
+    std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&personal, &home).unwrap();
+    let locator = targets::TargetLocator::SshHostBare {
+        ssh: SshTarget {
+            destination: "test".into(),
+            ssh_args: vec![],
+        },
+        data_root: root,
+    };
+    let home_text = home.to_str().unwrap();
+    assert!(
+        install::clear_profile_configuration(
+            &LocalSsh,
+            &locator,
+            id,
+            home_text,
+            HarnessKind::Codex
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(personal.join("auth.json")).unwrap(),
+        b"personal"
+    );
+    install::unlink_host_bare_profile_home(&LocalSsh, &locator, id, home_text).unwrap();
+    assert!(!home.exists());
+    assert_eq!(
+        std::fs::read(personal.join("auth.json")).unwrap(),
+        b"personal"
+    );
+}
+
 /// R3-4 (J-16): every SSH-bare session uploaded its own 139 MB worker, so ten
 /// parallel creates on one host each held a daemon action slot for minutes.
 /// The binary now crosses the network once per build and host; each session
@@ -4809,13 +4921,15 @@ fn only_localhost_harnesses_receive_the_owning_daemons_configuration_paths() {
         if target == "localhost" {
             assert_eq!(
                 launch.environment["MJ_CONFIG_DIR"],
-                std::path::absolute(mj_core::config::config_dir())
+                std::path::absolute(mj_core::config::ConfigLayout::current().root())
                     .unwrap()
                     .to_string_lossy()
             );
             assert_eq!(
                 launch.environment["MJ_DATA_DIR"],
-                std::path::absolute(data_dir()).unwrap().to_string_lossy()
+                std::path::absolute(DataLayout::current().root())
+                    .unwrap()
+                    .to_string_lossy()
             );
             assert_eq!(
                 launch.environment.get("MJ_INSTANCE"),
@@ -5052,7 +5166,7 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
         container: mj_core::config::ContainerTemplate {
             memory_hard_limit: None,
             build_cache: None,
-            image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+            image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
             pull_policy: Default::default(),
             platform: None,
             cpus: None,
@@ -5159,10 +5273,6 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         ExecutionPolicy::ConfiguredApprovals
     );
     assert_eq!(launch.environment["INITIAL_AGENT_MODE"], "agent");
-    assert_eq!(
-        profile.kind.guardian(),
-        mj_core::config::GuardianReviewer::Harness
-    );
 }
 
 fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
@@ -7263,6 +7373,38 @@ fn a_container_mbx_that_reports_another_version_never_replaces_the_stable_path()
 
 #[test]
 fn reload_candidate_install_and_cleanup_leave_live_files_intact() {
+    // The target is POSIX even when the controller runs on Windows. Verify
+    // its cleanup boundary without using the controller's host filesystem.
+    let target_root = "/var/lib/hel/workers/test-session";
+    let target = targets::TargetLocator::LocalBare {
+        worker_root: target_root.into(),
+    };
+    let recorder = MbxStagingRecorder::new("unused");
+    for unsafe_id in ["..", "/", "", "../worker", "a/b", "a\\b"] {
+        assert!(remove_reload_candidate(&recorder, &target, target_root, unsafe_id).is_err());
+    }
+    assert!(recorder.commands.lock().unwrap().is_empty());
+    remove_reload_candidate(&recorder, &target, target_root, "candidate").unwrap();
+    let commands = recorder.commands.lock().unwrap();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].program, "rm");
+    assert_eq!(
+        commands[0].args,
+        [
+            "-rf",
+            "--",
+            "/var/lib/hel/workers/test-session/reload-candidates/candidate"
+        ]
+    );
+    drop(commands);
+
+    // A real LocalBare worker runs POSIX commands and is not a Windows target.
+    #[cfg(unix)]
+    check_local_reload_candidate_files();
+}
+
+#[cfg(unix)]
+fn check_local_reload_candidate_files() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("test-session");
     let home = dir.path().join("home");
@@ -7315,9 +7457,6 @@ fn reload_candidate_install_and_cleanup_leave_live_files_intact() {
         std::fs::read(home.join("config.toml")).unwrap(),
         b"live profile"
     );
-    for unsafe_id in ["..", "/", "", "../worker", "a/b", "a\\b"] {
-        assert!(remove_reload_candidate(&ProcessExecutor, &locator, root_text, unsafe_id).is_err());
-    }
     remove_reload_candidate(&ProcessExecutor, &locator, root_text, "candidate").unwrap();
     assert!(!candidate.exists());
     assert_eq!(std::fs::read(root.join("launch.json")).unwrap(), b"live");

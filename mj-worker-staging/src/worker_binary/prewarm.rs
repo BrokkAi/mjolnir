@@ -20,6 +20,7 @@ pub fn shared_content_ssh(locator: &targets::TargetLocator) -> Option<&SshTarget
     match locator {
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. }
+        | targets::TargetLocator::SshHostBare { ssh, .. }
         | targets::TargetLocator::SshPodman { ssh, .. }
         | targets::TargetLocator::SshDocker { ssh, .. }
         | targets::TargetLocator::SshAppleContainer { ssh, .. } => Some(ssh),

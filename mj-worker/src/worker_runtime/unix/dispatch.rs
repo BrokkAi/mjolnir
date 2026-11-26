@@ -1046,6 +1046,9 @@ pub(super) fn reload_failure_resolution(
     message: String,
 ) -> Result<crate::acp::ReloadResolution> {
     let mut state = relay.lock().expect("relay state lock poisoned");
+    if let Some(existing) = state.failed_after_commit_reload_message() {
+        return Ok(crate::acp::ReloadResolution::FailedAfterCommit(existing));
+    }
     let pending_exists = state
         .root()
         .join(mj_core::worker_launch::PENDING_RELOAD_FILE)
@@ -1140,6 +1143,12 @@ pub(super) async fn apply_harness_reload_transition(
             }
             disk_launch.write(&root.join("launch.json"))?;
         }
+        // Both paths have committed the launch. A crash before this line is
+        // settled when the next worker start adopts the same launch.
+        relay
+            .lock()
+            .expect("relay lock")
+            .adopt_launch(&launch_config)?;
         let supervisor_path = root.join("acp-supervisor.json");
         mj_core::runtime::spawn_blocking(move || {
             let bytes = serde_json::to_vec(&supervisor_spec)?;
@@ -2042,6 +2051,14 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
                 .into_owned();
             if let Some(context) = &claimed.hidden_prompt_context {
                 prompt.insert(0, crate::acp::hidden_context_block(context.clone()));
+            }
+            if !claimed.quota_interrupted_input.is_empty() {
+                let mut retained = vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                    mj_core::continuation::QUOTA_REPLAY_NOTE,
+                )];
+                retained.extend(claimed.quota_interrupted_input.iter().cloned());
+                retained.extend(prompt);
+                prompt = retained;
             }
             Some(CommandRequest::Prompt { request_id, prompt })
         }
@@ -3075,6 +3092,69 @@ mod staged_reload_tests {
 #[cfg(test)]
 mod reload_boot_tests {
     use super::*;
+
+    // Hard-won: in-place Move: boot configuration promoted a terminal reload failure.
+    #[test]
+    fn failed_after_commit_survives_boot_and_later_error_response() {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap();
+        let store = relay.operational_state().store_id.unwrap();
+        relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store.clone(),
+            },
+        });
+        relay
+            .mark_in_place_harness_failed_after_commit("move", &store, "original failure".into())
+            .unwrap();
+        drop(relay);
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let mut configuration = SessionConfiguration::Opening;
+        record_runtime_event_with_startup(
+            &relay,
+            &mut BTreeMap::new(),
+            RuntimeEvent::SessionConfigured {
+                config_options: Vec::new(),
+            },
+            &mut configuration,
+            None,
+            Some(&mut HarnessStartup::new()),
+        )
+        .unwrap();
+        let hold = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .in_place_move_hold
+            .unwrap();
+        assert!(!hold.harness_restarted);
+        assert!(
+            matches!(hold.reload_phase, Some(mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { ref message }) if message == "original failure")
+        );
+        let response = super::super::reload_error_response(&relay, "move", "later error".into());
+        let mj_core::relay::RelayResponseBody::Error { error } = response else {
+            panic!("expected error")
+        };
+        assert_eq!(error.message, "original failure");
+        assert!(matches!(
+            error.detail,
+            Some(mj_core::relay::RelayErrorDetail::ReloadFailedAfterCommit { .. })
+        ));
+        let hold = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .in_place_move_hold
+            .unwrap();
+        assert!(
+            matches!(hold.reload_phase, Some(mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { ref message }) if message == "original failure")
+        );
+    }
 
     #[test]
     fn reload_commit_ready_after_boot_settles_the_durable_hold() {

@@ -180,6 +180,18 @@ impl Controller {
             )?
             .to_string_lossy()
             .into_owned()
+        } else if matches!(backend, targets::TargetLocator::SshHostBare { .. }) {
+            let launch = crate::controller::lifecycle::origin_delta::read_wire::<serde_json::Value>(
+                &backend, session_id, &worker_root, "launch.json", executor)?;
+            if let Some(installed) = launch.as_ref().and_then(mj_core::worker_launch::installed_harness_home_from_json) {
+                let installed = mj_core::target_path::text(&installed);
+                let command = targets::command_on_locator(mj_core::targets::SshTrafficClass::Control,
+                    &backend, session_id, vec!["sh".into(), "-c".into(),
+                    r#"case "$2" in /*) home=$2 ;; '~') home=$HOME ;; '~/'*) home="$HOME/${2#\~/}" ;; *) home="$HOME/$2" ;; esac; a=$(cd -P "$1" && pwd -P) && b=$(cd -P "$home" && pwd -P) && [ "$a" = "$b" ] && printf %s "$home""#.into(),
+                    "mj-check-home".into(), harness_home.clone(), installed.clone()], "verify remote checkpoint harness home")?;
+                let output = super::super::execute_checked(executor, command)?;
+                String::from_utf8(output.stdout).context("remote checkpoint harness home is not UTF-8")?
+            } else { harness_home }
         } else {
             harness_home
         };
@@ -336,6 +348,46 @@ impl Controller {
         if pending_legacy_queue && relay.connection_mut().protocol_version() < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL {
             // Older workers have no operation pins; retain their existing floor gate.
             bail!("move queue admission is incomplete; retry Move before checkpointing this destination");
+        }
+        if relay.connection_mut().protocol_version()
+            < mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL
+        {
+            let checkpoint_only = relay.sync_snapshot().await?.operational.checkpoint_only;
+            if checkpoint_only {
+                relay.release();
+                let connection = self.upgrade_checkpoint_only_worker(
+                    session_id, executor, &backend, &worker_root, &reconnect,
+                ).await.context("upgrade the checkpoint-only worker without starting its harness")?;
+                relay = adopt_restarted_checkpoint_relay(admission, session_id, manager, connection).await?;
+                restarted_worker = true;
+            } else if exclusivity != LatchExclusivity::HoldThroughClose {
+                return Err(CheckpointDeferred::pending_context_worker_upgrade().into());
+            } else {
+                let manager = manager.context("the older worker cannot be upgraded for checkpoint without a session manager")?;
+                relay.release();
+                self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
+                    .await
+                    .context("upgrade the worker before capturing pending prompt context")?;
+                (relay, restarted_worker) = self.open_checkpoint_relay(
+                admission,
+                session_id,
+                executor,
+                Some(manager),
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &worker_root,
+                    reconnect: &reconnect,
+                    launch: None,
+                    prepared: false,
+                    discard_queued_prompts: None,
+                    staged_aws_profile: None,
+                    swap_admission: None,
+                    messages: &RESTART_FOR_CHECKPOINT,
+                },
+                true,
+                None,
+                ).await?;
+            }
         }
         if let Some(captured) = &prestaged_capture {
             record_checkpoint_report_notice(&mut relay, session_id, captured).await;
@@ -582,9 +634,12 @@ impl Controller {
         // and will not send it again. It also owns a queued mailbox wake's
         // prompt: the projection shows the wake's messages as rows of their own
         // and keeps no payload for it. Ask the worker for both while the latch
-        // still holds the cut. Reading a queued command is not bound to the
-        // cut, so the wakes come first and the cut-bound mailbox read after
-        // them proves what they read: it refuses once the relay has moved.
+        // still holds the cut. At protocol 97 one paged read, bound to the cut,
+        // returns the mailbox and every wake's prompt, so the wakes it returns
+        // are the ones at the cut by construction. Older workers answer a wake
+        // with `ReadQueuedCommand`, which is not bound to the cut, so the wakes
+        // come first and the cut-bound mailbox read after them proves what they
+        // read: it refuses once the relay has moved.
         let wakes: Vec<usize> = canonical_session
             .queued_prompts
             .iter()
@@ -595,9 +650,28 @@ impl Controller {
             })
             .map(|(index, _)| index)
             .collect();
-        if relay.connection_mut().protocol_version()
-            >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL
-        {
+        let worker_protocol = relay.connection_mut().protocol_version();
+        if worker_protocol >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL {
+            let mut read = relay
+                .connection_mut()
+                .read_checkpoint_mailbox_pages(barrier_command_id.clone(), cursor.clone())
+                .await
+                .context("read the worker's mail and queued wakes at the checkpoint cut")?;
+            for &index in &wakes {
+                let queued = &mut canonical_session.queued_prompts[index];
+                queued.content = read
+                    .wake_prompts
+                    .remove(&queued.command_id)
+                    .filter(|prompt| !prompt.is_empty())
+                    .with_context(|| {
+                        format!(
+                            "the worker's queue holds no prompt for mailbox wake {}",
+                            queued.command_id
+                        )
+                    })?;
+            }
+            canonical_session.mailbox = (!read.mailbox.is_empty()).then_some(read.mailbox);
+        } else if worker_protocol >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL {
             for &index in &wakes {
                 let queued = &mut canonical_session.queued_prompts[index];
                 let command = relay
@@ -605,7 +679,10 @@ impl Controller {
                     .read_queued_command(queued.command_id.clone())
                     .await
                     .with_context(|| {
-                        format!("read queued mailbox wake {} from the worker", queued.command_id)
+                        format!(
+                            "read queued mailbox wake {} from the worker",
+                            queued.command_id
+                        )
                     })?;
                 let prompt = command
                     .as_ref()
@@ -622,11 +699,18 @@ impl Controller {
                     .map(serde_json::to_value)
                     .collect::<serde_json::Result<_>>()?;
             }
-            let mailbox = relay
+            let mut mailbox = relay
                 .connection_mut()
                 .read_checkpoint_mailbox(barrier_command_id.clone(), cursor.clone())
                 .await
                 .context("read the worker's mail at the checkpoint cut")?;
+            if worker_protocol >= mj_core::relay::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL {
+                mailbox.quota_input = relay
+                    .connection_mut()
+                    .read_checkpoint_quota_input(barrier_command_id.clone(), cursor.clone())
+                    .await
+                    .context("read the worker's quota-interrupted input at the checkpoint cut")?;
+            }
             canonical_session.mailbox = (!mailbox.is_empty()).then_some(mailbox);
         } else {
             if !wakes.is_empty() && !barrier.operational.checkpoint_only {
@@ -670,14 +754,14 @@ impl Controller {
                 ));
             }
         }
-        if relay.connection_mut().protocol_version()
-            >= mj_core::relay::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL
         {
-            canonical_session.native_use_evidence = relay
+            let (native_use_evidence, pending_prompt_context) = relay
                 .connection_mut()
                 .read_checkpoint_native_use(barrier_command_id.clone(), cursor.clone())
                 .await
-                .context("read the worker's native-session-use evidence at the checkpoint cut")?;
+                .context("read the worker's native-session-use evidence and pending prompt context at the checkpoint cut")?;
+            canonical_session.native_use_evidence = native_use_evidence;
+            canonical_session.pending_prompt_context = pending_prompt_context;
         }
         let native_session_id = barrier
             .operational
@@ -966,7 +1050,7 @@ impl Controller {
             // so a frontier-only name could overwrite the last known-good
             // archive before the metadata swap commits.
             let archive_id = new_command_id("archive")?;
-            let destination = sessions_dir().join(format!(
+            let destination = mj_core::config::DataLayout::current().sessions_dir().join(format!(
                 "{session_id}-{}-{archive_id}.hel.zip",
                 target_checkpoint.event_frontier
             ));
@@ -1102,6 +1186,7 @@ impl Controller {
                     && matches!(
                         backend,
                         targets::TargetLocator::SshBare { .. }
+                            | targets::TargetLocator::SshHostBare { .. }
                             | targets::TargetLocator::AwsEc2 { .. }
                     );
                 if promotes_bare_archive {

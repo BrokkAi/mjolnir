@@ -2038,6 +2038,33 @@ fn controller_store_lock_excludes_a_second_process_owner() {
     run_controller_lock_probe(directory.path(), false);
 }
 
+// A corrupt or unreadable ownership identity must stop the controller from
+// starting. Replacing it would orphan every worker stamped with the old value.
+#[test]
+fn controller_store_guard_fails_closed_on_a_corrupt_instance_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity =
+        mj_core::config::DataLayout::at(directory.path().to_path_buf()).instance_identity();
+    for corrupt in [&b"../escape"[..], b"", b"two words", &[0xff, 0xfe]] {
+        std::fs::write(&identity, corrupt).unwrap();
+        let error = ControllerStoreGuard::acquire_at(directory.path())
+            .expect_err("a corrupt identity must fail the acquisition");
+        assert!(
+            format!("{error:#}").contains(&identity.display().to_string()),
+            "the error must name the file: {error:#}"
+        );
+        assert_eq!(std::fs::read(&identity).unwrap(), corrupt, "left untouched");
+    }
+    // A directory where the file belongs is unreadable, not absent.
+    std::fs::remove_file(&identity).unwrap();
+    std::fs::create_dir(&identity).unwrap();
+    let error = ControllerStoreGuard::acquire_at(directory.path()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("instance-identity"),
+        "{error:#}"
+    );
+}
+
 // The data store holds every session record; it must not be traversable by
 // other local users (#1409).
 #[cfg(unix)]
@@ -2173,7 +2200,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         straightforward: None,
         subtle: None,
     });
-    let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
+    let parent_root = mj_core::config::DataLayout::current().worker_root(parent_id);
     parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
     }));
@@ -2281,7 +2308,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             .expect("Codex receives project memory")
             .project_key
     };
-    let child_root = mj_core::config::data_dir().join("workers").join(&child_id);
+    let child_root = mj_core::config::DataLayout::current().worker_root(&child_id);
     assert_eq!(
         memory_key(&controller, &child_id, child_root),
         memory_key(&controller, parent_id, parent_root),
@@ -2343,7 +2370,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         straightforward: None,
         subtle: None,
     });
-    let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
+    let parent_root = mj_core::config::DataLayout::current().worker_root(parent_id);
     parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: parent_root,
     }));
@@ -2374,15 +2401,15 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
     let child_id = child.child_session_id.clone();
     let prompt_id = crate::database::startup_step_id(&child.startup_group_id(), "prompt");
     let backend = targets::TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir()
-            .join("workers")
-            .join(&child_id)
+        worker_root: mj_core::config::DataLayout::current()
+            .worker_root(&child_id)
             .to_string_lossy()
             .into_owned(),
     };
     let snapshot = |transcript: Vec<CanonicalTranscriptItem>,
                     queued: Vec<CanonicalQueuedPrompt>| {
         CanonicalSessionSnapshot {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
@@ -2707,7 +2734,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             subtle: None,
         });
         session.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join("workers").join(id),
+            worker_root: mj_core::config::DataLayout::current().worker_root(id),
         }));
         session.no_project_memory = opted_out;
         session.no_github_events = opted_out;
@@ -2759,9 +2786,8 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             .current_worker_launch_config(
                 id,
                 &targets::TargetLocator::LocalBare {
-                    worker_root: mj_core::config::data_dir()
-                        .join("workers")
-                        .join(id)
+                    worker_root: mj_core::config::DataLayout::current()
+                        .worker_root(id)
                         .to_string_lossy()
                         .into_owned(),
                 },
@@ -3206,6 +3232,179 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
         .unwrap();
 }
 
+/// Revision 160 leaves SSH placements without a machine. Loading the daemon
+/// state fills each from the machine its target template names, fills local
+/// placements by kind, and leaves a placement whose template was removed
+/// unknown rather than guessing a host. So does one whose template now names
+/// another host than the placement recorded.
+#[test]
+fn load_fills_placement_machines_from_surviving_templates_only() {
+    const MARKER: &str = "MJ_TEST_PLACEMENT_MACHINE_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "load_fills_placement_machines_from_surviving_templates_only",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut config = registration_config();
+    for (machine, host) in [("builder", "builder.test"), ("other", "other.test")] {
+        let TargetTemplate::SshPodman { ssh, .. } = durable_remote_template(host) else {
+            unreachable!("the fixture is an ssh-podman template")
+        };
+        config.machines.insert(
+            mj_core::config::MachineId::new(machine).unwrap(),
+            mj_core::config::Machine::Ssh {
+                ssh,
+                workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+                build_cache: None,
+            },
+        );
+    }
+    config
+        .targets
+        .insert("podman".into(), durable_remote_template("builder.test"));
+    // Repointed after the placement below was made on builder.test.
+    config
+        .targets
+        .insert("repointed".into(), durable_remote_template("other.test"));
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let placements = [
+        (
+            "0123456789abcdef0123456789abcde1",
+            "local-docker",
+            TargetLocator::LocalDocker {
+                container_id: "local-container".into(),
+                borrowed_from: None,
+            },
+            Some("local"),
+        ),
+        (
+            "0123456789abcdef0123456789abcde2",
+            "podman",
+            TargetLocator::SshPodman {
+                host: "builder.test".into(),
+                container_id: "kept-container".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            Some("builder"),
+        ),
+        (
+            "0123456789abcdef0123456789abcde3",
+            "removed",
+            TargetLocator::SshPodman {
+                host: "removed.test".into(),
+                container_id: "removed-container".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            None,
+        ),
+        (
+            "0123456789abcdef0123456789abcde4",
+            "repointed",
+            TargetLocator::SshPodman {
+                host: "builder.test".into(),
+                container_id: "repointed-container".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            None,
+        ),
+    ];
+    for (id, template, target, _) in &placements {
+        let mut session = super::test_support::checkpoint_test_session(id);
+        session.target_template_id = (*template).into();
+        session.target = Some(Box::new(target.clone()));
+        // The access settings recorded when the placement was made, on the
+        // host its locator names.
+        if let TargetLocator::SshPodman { host, .. } = target {
+            session.target_runtime = Some((&durable_remote_template(host)).into());
+        }
+        // These rows are what revision 160 leaves: placements with no machine.
+        session.machine_id = None;
+        controller
+            .state
+            .sessions
+            .insert(session.id.clone(), session);
+    }
+    save_fixture_state(&mut controller);
+    let machines = |state: &State| {
+        placements
+            .iter()
+            .map(|(id, ..)| {
+                state.sessions[*id]
+                    .machine_id
+                    .as_ref()
+                    .map(|machine| machine.as_str().to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected: Vec<Option<String>> = placements
+        .iter()
+        .map(|(_, _, _, machine)| machine.map(str::to_owned))
+        .collect();
+
+    let mut loaded = Controller::load().unwrap();
+    assert_eq!(machines(&loaded.state), [None, None, None, None]);
+    loaded.prepare_persisted_sessions().unwrap();
+    assert_eq!(machines(&loaded.state), expected);
+    assert_eq!(
+        machines(&crate::database::load_state().unwrap()),
+        expected,
+        "the filled machines are stored, not only held in memory"
+    );
+    // Environment retirement reads the machine back from the lease.
+    for ((id, ..), machine) in placements.iter().zip(&expected) {
+        let environment = crate::database::session_environment(id).unwrap().unwrap();
+        assert_eq!(
+            environment
+                .placement
+                .machine_id
+                .as_ref()
+                .map(|machine| machine.as_str().to_owned()),
+            *machine
+        );
+        let workers = crate::database::environment_workers(&environment.id).unwrap();
+        assert_eq!(
+            workers
+                .iter()
+                .map(|worker| worker
+                    .machine_id
+                    .as_ref()
+                    .map(|machine| machine.as_str().to_owned()))
+                .collect::<Vec<_>>(),
+            std::slice::from_ref(machine)
+        );
+    }
+    // The environment's worker leases follow the same rule as the sessions.
+    let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    let mut statement = connection
+        .prepare("SELECT worker_session_id, machine_id FROM environment_workers ORDER BY worker_session_id")
+        .unwrap();
+    let workers: Vec<(String, Option<String>)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        workers,
+        placements
+            .iter()
+            .zip(&expected)
+            .map(|((id, ..), machine)| ((*id).to_owned(), machine.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn target_backfill_does_not_block_reload_after_a_concurrent_deletion() {
     const MARKER: &str = "MJ_TEST_TARGET_BACKFILL_DELETE_CHILD";
@@ -3447,7 +3646,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     parent.project_directory = Some(project.path().to_path_buf());
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
     parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(parent_id),
     }));
     let mut controller = Controller {
         config,
@@ -3501,9 +3700,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     );
     // Review is on, so the launch files show who may request it.
     controller.config.review = mj_core::config::ReviewConfig::legacy_default();
-    let worker_root = mj_core::config::data_dir()
-        .join("workers")
-        .join(&child.child_session_id);
+    let worker_root = mj_core::config::DataLayout::current().worker_root(&child.child_session_id);
     let worker_launch = controller
         .current_worker_launch_config(
             &child.child_session_id,
@@ -3569,9 +3766,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .current_worker_launch_config(
             &oracle.child_session_id,
             &targets::TargetLocator::LocalBare {
-                worker_root: mj_core::config::data_dir()
-                    .join("workers")
-                    .join(&oracle.child_session_id)
+                worker_root: mj_core::config::DataLayout::current()
+                    .worker_root(&oracle.child_session_id)
                     .to_string_lossy()
                     .into_owned(),
             },
@@ -3592,9 +3788,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     muse_parent.id = muse_parent_id.into();
     muse_parent.harness_kind = HarnessKind::Kimi;
     muse_parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir()
-            .join("workers")
-            .join(muse_parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(muse_parent_id),
     }));
     save_fixture_session(&mut controller, muse_parent);
     let mut muse_profile = controller.config.profiles["resolved-reviewer"].clone();
@@ -3683,9 +3877,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .current_worker_launch_config(
             &worker.child_session_id,
             &targets::TargetLocator::LocalBare {
-                worker_root: mj_core::config::data_dir()
-                    .join("workers")
-                    .join(&worker.child_session_id)
+                worker_root: mj_core::config::DataLayout::current()
+                    .worker_root(&worker.child_session_id)
                     .to_string_lossy()
                     .into_owned(),
             },
@@ -3797,7 +3990,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
         subtle: None,
     });
     parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(parent_id),
     }));
     parent.review = Some(Box::new(mj_core::config::SessionReview::Push {
         reviewers: Some(vec![mj_core::config::SubagentChoice {
@@ -3834,9 +4027,8 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
         .current_worker_launch_config(
             &child.child_session_id,
             &targets::TargetLocator::LocalBare {
-                worker_root: mj_core::config::data_dir()
-                    .join("workers")
-                    .join(&child.child_session_id)
+                worker_root: mj_core::config::DataLayout::current()
+                    .worker_root(&child.child_session_id)
                     .to_string_lossy()
                     .into_owned(),
             },
@@ -3911,8 +4103,8 @@ mod profile_homes {
             let root = removable_profile_root(&local, SESSION, &profile(kind, home));
             assert_eq!(
                 root,
-                mj_core::config::data_dir()
-                    .join("profiles")
+                mj_core::config::DataLayout::current()
+                    .profiles_dir()
                     .join(SESSION)
                     .to_string_lossy()
                     .into_owned(),

@@ -1214,7 +1214,16 @@ fn prepare_archive_view_with_part_size<'a, T: RepositoryPayload>(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if input.canonical_session.native_use_evidence.is_some() {
+        schema_version: if input
+            .canonical_session
+            .mailbox
+            .as_ref()
+            .is_some_and(|mail| !mail.quota_input.is_empty())
+        {
+            ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT
+        } else if input.canonical_session.pending_prompt_context.is_some() {
+            ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+        } else if input.canonical_session.native_use_evidence.is_some() {
             ARCHIVE_SCHEMA_VERSION_NATIVE_USE
         } else if carries_origin_delta(&repositories) {
             ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
@@ -2024,6 +2033,36 @@ fn read_verified_zip_cancellable(
                 ARCHIVE_SCHEMA_VERSION_NATIVE_USE
             );
             ensure!(
+                manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+                    || snapshot.pending_prompt_context.is_none(),
+                "pending prompt context requires archive schema {}",
+                ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+            );
+            ensure!(
+                manifest.schema_version != ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+                    || snapshot.pending_prompt_context.is_some(),
+                "archive schema {} requires pending prompt context",
+                ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+            );
+            ensure!(
+                manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT
+                    || snapshot
+                        .mailbox
+                        .as_ref()
+                        .is_none_or(|mail| mail.quota_input.is_empty()),
+                "quota input requires archive schema {}",
+                ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT
+            );
+            ensure!(
+                manifest.schema_version != ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT
+                    || snapshot
+                        .mailbox
+                        .as_ref()
+                        .is_some_and(|mail| !mail.quota_input.is_empty()),
+                "archive schema {} requires quota input",
+                ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT
+            );
+            ensure!(
                 canonical_session.replace(snapshot).is_none(),
                 "archive contains duplicate canonical session payloads"
             );
@@ -2207,7 +2246,9 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_NATIVE_USE,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -2304,6 +2345,8 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_PROMPT_CONTEXT
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NATIVE_USE
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK

@@ -108,6 +108,37 @@ impl Controller {
             .map(|_| ())
     }
 
+    /// Validate an existing host-bare checkout on its actual SSH host; it may
+    /// be a plain directory, just like the original local-bare checkout.
+    pub(super) fn validate_existing_project_directory(
+        &self,
+        session: &SessionRecord,
+        target_id: &str,
+        directory: &Path,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        if target_id == session.target_template_id
+            && let Some(locator @ mj_core::state::TargetLocator::SshHostBare { .. }) =
+                session.target.as_deref()
+        {
+            let backend = targets::backend_locator(locator, session, &self.config)?;
+            let command = targets::command_on_locator(
+                SshTrafficClass::Control,
+                &backend,
+                &session.id,
+                vec![
+                    "test".into(),
+                    "-d".into(),
+                    mj_core::target_path::text(directory),
+                ],
+                "check retained project directory",
+            )?;
+            execute_checked(executor, command)?;
+            return Ok(());
+        }
+        self.validate_project_directory(target_id, directory, executor)
+    }
+
     /// Verify a bare project, and say whether it is a plain folder. Only a
     /// local target accepts one; a remote bare project must be a repository.
     fn classify_project_directory(
@@ -367,11 +398,34 @@ impl Controller {
             .get(&session.target_template_id)
             .context("raw session target template disappeared during provisioning")?;
         if matches!(template, TargetTemplate::SshBare { .. }) {
-            self.validate_project_directory(&session.target_template_id, &selected, executor)?;
+            self.validate_existing_project_directory(
+                &session,
+                &session.target_template_id,
+                &selected,
+                executor,
+            )?;
         }
         let target = managed_worktree_target(template)?;
-        if matches!(target, ManagedWorktreeTarget::Local)
-            && local_project_repository(&selected, executor)?.is_none()
+        let host_bare_plain = if let Some(
+            locator @ mj_core::state::TargetLocator::SshHostBare { .. },
+        ) = session.target.as_deref()
+        {
+            let backend = targets::backend_locator(locator, &session, &self.config)?;
+            let command = targets::command_on_locator(SshTrafficClass::Control, &backend, &session.id,
+                vec!["sh".into(), "-c".into(), "if command -v git >/dev/null 2>&1 && git -C \"$1\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then exit 0; else exit 1; fi".into(), "mj-project-check".into(), target_path::text(&selected)], "check whether retained project is a Git checkout")?;
+            let output = executor.execute(&command)?;
+            ensure!(
+                output.status == 0 || output.status == 1,
+                "could not inspect retained project: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            output.status == 1
+        } else {
+            false
+        };
+        if host_bare_plain
+            || (matches!(target, ManagedWorktreeTarget::Local)
+                && local_project_repository(&selected, executor)?.is_none())
         {
             // A requested launch base asks for the same worktree an explicit
             // request does, so it must fail here rather than launch without

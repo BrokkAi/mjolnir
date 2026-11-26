@@ -12,7 +12,7 @@ pub fn load_tool_call_detail_with_checkpoint_fallback(
 ) -> Result<Option<ToolCallDetailResult>> {
     load_tool_call_detail_with_checkpoint_fallback_from(
         &database::database_path(),
-        &mj_core::config::sessions_dir(),
+        &mj_core::config::DataLayout::current().sessions_dir(),
         session_id,
         stable_id,
     )

@@ -23,6 +23,7 @@ pub const STATE_VERSION: u32 = 1;
 mod target_runtime;
 pub use target_runtime::{
     ContainerSettings, TargetConnection, TargetRuntimeSettings, ToolCachePlacement,
+    machine_hosts_placement,
 };
 
 mod session_configuration;
@@ -284,6 +285,9 @@ pub enum PromptCompletion {
     Finished,
     Cancelled,
     QuotaLimit,
+    /// The harness reported ACP `Refusal`, for example a provider content
+    /// filter. The turn failed, but not for an unknown reason.
+    Refused,
     Error,
 }
 
@@ -302,6 +306,7 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
         "inferredfinished" => PromptCompletion::Finished,
         "cancelled" | "canceled" => PromptCompletion::Cancelled,
         "quotalimit" => PromptCompletion::QuotaLimit,
+        "refusal" => PromptCompletion::Refused,
         _ => PromptCompletion::Error,
     }
 }
@@ -992,6 +997,10 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         address: Option<String>,
     },
+    SshHostBare {
+        host: String,
+        data_root: PathBuf,
+    },
     SshBare {
         host: String,
         workspace: PathBuf,
@@ -1363,7 +1372,10 @@ impl TargetLocator {
             | Self::SshDocker { borrowed_from, .. }
             | Self::SshAppleContainer { borrowed_from, .. }
             | Self::SshNitro { borrowed_from, .. } => borrowed_from.is_none(),
-            Self::LocalBare { .. } | Self::SshBare { .. } | Self::AwsEc2 { .. } => false,
+            Self::LocalBare { .. }
+            | Self::SshBare { .. }
+            | Self::SshHostBare { .. }
+            | Self::AwsEc2 { .. } => false,
         }
     }
 
@@ -1402,6 +1414,12 @@ impl TargetLocator {
             }
             Self::AwsEc2 { instance_id, .. } if instance_id.trim().is_empty() => {
                 bail!("target locator has an empty AWS instance id")
+            }
+            Self::SshHostBare { host, data_root } => {
+                if host.trim().is_empty() || host.starts_with('-') {
+                    bail!("host-bare SSH target locator has an invalid host");
+                }
+                crate::target_path::validate_host_bare(data_root, session_id)?;
             }
             Self::SshBare {
                 host,
@@ -1772,6 +1790,19 @@ pub struct SessionRecord {
     /// Connection and worker settings captured when this target was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_runtime: Option<Arc<TargetRuntimeSettings>>,
+    /// The configured machine this placement runs on, stored beside the
+    /// placement (`session_targets.machine_id`) and nowhere else. `None`
+    /// means unknown: a row written before machines were recorded whose
+    /// template is gone.
+    ///
+    /// Not serialized: `SessionRecord` is sent to clients, and clients one
+    /// release older reject unknown fields, so a new field would break an
+    /// attached terminal across a daemon upgrade. A record restored from a
+    /// JSON snapshot (a Move's `recovery_session`) therefore saves `None`
+    /// until the next daemon load fills the column again where the placement
+    /// proves its machine.
+    #[serde(skip)]
+    pub machine_id: Option<crate::config::MachineId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2296,6 +2327,7 @@ impl SessionRecord {
         target_runtime_settings_for(
             &self.id,
             &self.target_template_id,
+            self.machine_id.as_ref(),
             self.target.as_deref(),
             self.target_runtime.as_deref(),
             config,
@@ -2470,7 +2502,10 @@ impl SessionRecord {
             }
             Checkout::Attached { path } => {
                 let remote = match self.target.as_deref() {
-                    Some(TargetLocator::SshBare { host, .. }) => Some(host.as_str()),
+                    Some(
+                        TargetLocator::SshBare { host, .. }
+                        | TargetLocator::SshHostBare { host, .. },
+                    ) => Some(host.as_str()),
                     _ => None,
                 };
                 ProjectSourceIdentity::path(path, remote)
@@ -3740,16 +3775,33 @@ pub struct ResumeRepositorySourceReceipt {
 }
 
 /// Access settings for a recorded physical placement, independent of its session.
+///
+/// `machine_id` is the machine the placement records, when it records one.
 pub fn target_runtime_settings_for<'a>(
     session_id: &str,
     target_template_id: &str,
+    machine_id: Option<&crate::config::MachineId>,
     target: Option<&TargetLocator>,
     runtime: Option<&'a TargetRuntimeSettings>,
     config: &Config,
 ) -> Result<Cow<'a, TargetRuntimeSettings>> {
     if let Some(runtime) = runtime {
         // How to reach the target follows the machine's current ssh
-        // options; where it is stays as recorded (launch finding R3-7).
+        // options; where it is stays as recorded (launch finding R3-7). A
+        // recorded machine that reaches this placement answers for it, changed
+        // or not, so a placement whose template was removed or repointed still
+        // follows `[machines.<id>]`. Only a placement with no machine, or one
+        // the machine does not reach, asks its template.
+        if let Some(refreshed) = machine_id
+            .and_then(|id| config.machines.get(id))
+            .and_then(|machine| runtime.following_machine(machine))
+        {
+            return Ok(if refreshed == *runtime {
+                std::borrow::Cow::Borrowed(runtime)
+            } else {
+                std::borrow::Cow::Owned(refreshed)
+            });
+        }
         if let Some(refreshed) = config.targets.get(target_template_id).and_then(|template| {
             runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
         }) {
@@ -3828,6 +3880,18 @@ impl TargetLocator {
                     instance_id: right, ..
                 },
             ) => left == right,
+            (
+                TargetLocator::SshHostBare {
+                    host: left_host,
+                    data_root: left_root,
+                    ..
+                },
+                TargetLocator::SshHostBare {
+                    host: right_host,
+                    data_root: right_root,
+                    ..
+                },
+            ) => left_host == right_host && left_root == right_root,
             (
                 TargetLocator::SshBare {
                     host: left_host,

@@ -58,6 +58,7 @@ fn host_identity(locator: &TargetLocator) -> HostIdentity {
         | TargetLocator::AppleContainer { .. } => HostIdentity::Local,
         TargetLocator::AwsEc2 { ssh, .. }
         | TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
         | TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
         | TargetLocator::SshAppleContainer { ssh, .. }
@@ -1266,7 +1267,7 @@ fn stage_mode_0600_file(
 ) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let script = format!(
-        "set -euo pipefail\nmkdir -p -- {}\numask 077\ncat > {}\nchmod 0600 -- {}\n",
+        "set -euo pipefail\nmkdir -p -- {}\numask 077\ncat > {}\nchmod -- 0600 {}\n",
         shell_quote(&parent.to_string_lossy()),
         shell_quote(&path.to_string_lossy()),
         shell_quote(&path.to_string_lossy()),
@@ -1424,6 +1425,7 @@ pub(crate) fn cleanup_interrupted_move_credentials(
 fn target_ssh_host(locator: &TargetLocator) -> Option<String> {
     let ssh = match locator {
         TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
         | TargetLocator::AwsEc2 { ssh, .. }
         | TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
@@ -1460,7 +1462,8 @@ fn host_shell_locator(locator: &TargetLocator) -> TargetLocator {
             workspace: workspace.clone(),
             worker_id: None,
         },
-        TargetLocator::SshPodman { ssh, .. }
+        TargetLocator::SshHostBare { ssh, .. }
+        | TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
         | TargetLocator::SshAppleContainer { ssh, .. }
         | TargetLocator::SshNitro { ssh, .. } => TargetLocator::SshBare {
@@ -1476,6 +1479,7 @@ fn host_side_read_command(locator: &TargetLocator, path: &Path) -> String {
     match locator {
         TargetLocator::LocalBare { .. }
         | TargetLocator::SshBare { .. }
+        | TargetLocator::SshHostBare { .. }
         | TargetLocator::AwsEc2 { .. } => format!("cat -- {quoted_path}"),
         TargetLocator::LocalPodman { container_id, .. }
         | TargetLocator::SshPodman { container_id, .. } => {
@@ -1527,6 +1531,7 @@ fn host_side_write_verify_command(
     match locator {
         TargetLocator::LocalBare { .. }
         | TargetLocator::SshBare { .. }
+        | TargetLocator::SshHostBare { .. }
         | TargetLocator::AwsEc2 { .. } => format!("bash -c {}", shell_quote(&inner)),
         TargetLocator::LocalPodman { container_id, .. }
         | TargetLocator::SshPodman { container_id, .. } => format!(
@@ -1689,6 +1694,7 @@ fn container_exec_prefix(
     match locator {
         TargetLocator::LocalBare { .. }
         | TargetLocator::SshBare { .. }
+        | TargetLocator::SshHostBare { .. }
         | TargetLocator::AwsEc2 { .. } => None,
         TargetLocator::LocalPodman { container_id, .. }
         | TargetLocator::SshPodman { container_id, .. } => {

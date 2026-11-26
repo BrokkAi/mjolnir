@@ -30,15 +30,6 @@ impl RuntimeState {
             || request.provider.is_some()
         {
             let mut config = self.owner().controller().config.clone();
-            let execution_policy = if config
-                .targets
-                .get(&request.target_template_id)
-                .is_some_and(|target| target.is_yolo())
-            {
-                mj_core::config::ExecutionPolicy::Unconstrained
-            } else {
-                mj_core::config::ExecutionPolicy::ConfiguredApprovals
-            };
             let backend: Arc<dyn crate::server::api::SubagentBackend> = self
                 .quota_report_backend()
                 .ok_or_else(|| anyhow::anyhow!("session selection backend is unavailable"))?;
@@ -71,7 +62,6 @@ impl RuntimeState {
                     &backend,
                     &config,
                     &provider,
-                    execution_policy,
                     request.subagents.as_ref(),
                 )
                 .await
@@ -101,7 +91,6 @@ impl RuntimeState {
                     &backend,
                     None,
                     config.subagents.primary_choices(),
-                    execution_policy,
                 )
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -318,7 +307,6 @@ impl RuntimeState {
                 &parent.last_profile,
                 policy,
                 SubagentTaskType::Orchestrator,
-                template.execution_policy(),
             )
             .await
             .map_err(|failure| anyhow!(failure.message))?;
@@ -1305,7 +1293,7 @@ mod delegation_replay_tests {
     use mj_controller::controller::test_support::{IsolatedTest, test_name};
 
     #[tokio::test]
-    async fn a_resolved_provider_profile_keeps_target_approval_constraints_at_create() {
+    async fn provider_selection_allows_mjolnir_guardian_on_raw_hosts() {
         use crate::server::api::DashboardBackend;
         use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider, TargetTemplate};
         use std::sync::Arc;
@@ -1314,7 +1302,7 @@ mod delegation_replay_tests {
             let root = tempfile::tempdir().unwrap();
             IsolatedTest::new(test_name(
                 module_path!(),
-                "a_resolved_provider_profile_keeps_target_approval_constraints_at_create",
+                "provider_selection_allows_mjolnir_guardian_on_raw_hosts",
             ))
             .env(CHILD, "1")
             .env("MJ_INSTANCE", "resolved-provider-approvals")
@@ -1326,20 +1314,11 @@ mod delegation_replay_tests {
         let mut config = Config::default();
         config.profiles.insert(
             "kimi".into(),
-            HarnessProfile::new(HarnessKind::Kimi, mj_core::config::data_dir().join("kimi")),
+            HarnessProfile::new(
+                HarnessKind::Kimi,
+                mj_core::config::DataLayout::current().root().join("kimi"),
+            ),
         );
-        let compatible_home = mj_core::config::data_dir().join("compatible");
-        std::fs::create_dir_all(&compatible_home).unwrap();
-        std::fs::write(compatible_home.join("config.toml"), "model_provider = 'moonshot'\n[model_providers.moonshot]\nname = 'Moonshot'\nbase_url = 'https://api.moonshot.ai/v1'\nwire_api = 'responses'\nenv_key = 'MOONSHOT_API_KEY'\n").unwrap();
-        let mut compatible = HarnessProfile::new(HarnessKind::Codex, compatible_home);
-        compatible.environment = mj_core::config::Environment::from_sources(
-            [(
-                "MOONSHOT_API_KEY".into(),
-                mj_core::config::EnvironmentValue::Literal("test-only".into()),
-            )]
-            .into(),
-        );
-        config.profiles.insert("compatible".into(), compatible);
         config
             .targets
             .insert("localhost".into(), TargetTemplate::LocalBare);
@@ -1369,35 +1348,19 @@ mod delegation_replay_tests {
             .with_profile_catalog(catalog),
         );
         runtime.install_report_backend(&backend);
-        let request = serde_json::from_value(serde_json::json!({
-            "workspace_id": "default", "profile_id": "kimi", "provider": QuotaProvider::Moonshot,
-            "bundle_id": "", "target_template_id": "localhost", "additional_mounts": [], "title": ""
-        }))
-        .unwrap();
-        let error = runtime.start_create_session(request).await.unwrap_err();
-        assert!(error.to_string().contains("native guardian"), "{error:#}");
-        assert!(
-            mj_controller::database::load_state()
-                .unwrap()
-                .sessions
-                .is_empty()
-        );
-        let check = |target| mj_client::http::ProviderProfileSelectionRequest {
-            provider: QuotaProvider::Moonshot,
-            profile_id: Some("kimi".into()),
-            target_template_id: target,
-        };
-        assert_eq!(
-            runtime.select_provider_profile(check(None)).await.unwrap(),
-            "kimi"
-        );
-        assert_eq!(
-            runtime
-                .select_provider_profile(check(Some("localhost".into())))
-                .await
-                .unwrap(),
-            "compatible"
-        );
+        for target in [None, Some("localhost".to_owned())] {
+            for profile_id in [None, Some("kimi".to_owned())] {
+                let request = mj_client::http::ProviderProfileSelectionRequest {
+                    provider: QuotaProvider::Moonshot,
+                    profile_id,
+                    target_template_id: target.clone(),
+                };
+                assert_eq!(
+                    runtime.select_provider_profile(request).await.unwrap(),
+                    "kimi"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1435,7 +1398,10 @@ mod delegation_replay_tests {
         ] {
             config.profiles.insert(
                 name.into(),
-                HarnessProfile::new(harness, mj_core::config::data_dir().join(name)),
+                HarnessProfile::new(
+                    harness,
+                    mj_core::config::DataLayout::current().root().join(name),
+                ),
             );
         }
         config
@@ -1513,8 +1479,8 @@ mod delegation_replay_tests {
                 "dsh",
                 None,
                 None,
-                SubagentPolicy::None,
-                Some(("none", "[subagents.straightforward]")),
+                SubagentPolicy::Native,
+                Some(("native", "[subagents.straightforward]")),
                 None,
             ),
             (
@@ -1664,7 +1630,9 @@ mod delegation_replay_tests {
                 legacy_subagents: None,
                 ..mj_core::config::HarnessProfile::new(
                     mj_core::config::HarnessKind::Codex,
-                    mj_core::config::data_dir().join("unused-profile-home"),
+                    mj_core::config::DataLayout::current()
+                        .root()
+                        .join("unused-profile-home"),
                 )
             },
         );
@@ -1845,7 +1813,9 @@ mod delegation_replay_tests {
                 legacy_subagents: None,
                 ..mj_core::config::HarnessProfile::new(
                     mj_core::config::HarnessKind::Codex,
-                    mj_core::config::data_dir().join("missing-profile-home"),
+                    mj_core::config::DataLayout::current()
+                        .root()
+                        .join("missing-profile-home"),
                 )
             },
         );

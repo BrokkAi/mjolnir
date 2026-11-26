@@ -13,6 +13,8 @@
 //!   between them and [`TargetTemplate`].
 //! * `targets` -- projects, containers and [`TargetTemplate`].
 //! * `ui` -- terminal appearance settings.
+//! * `layout` -- every path under the data and configuration directories and
+//!   what `mj migrate` does with each.
 //! * `loading` -- instance names, directories, and atomic file writes.
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
@@ -23,6 +25,7 @@ mod dsh_credentials;
 mod github;
 mod harness;
 mod keys;
+mod layout;
 mod loading;
 mod machines;
 mod secrets;
@@ -34,6 +37,7 @@ pub use daemon::*;
 pub use github::*;
 pub use harness::*;
 pub use keys::*;
+pub use layout::*;
 pub use loading::*;
 pub use machines::*;
 pub use secrets::*;
@@ -1220,17 +1224,7 @@ pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/daemon";
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
 pub const RELEASE_CONTAINER_IMAGE: &str = env!("MJ_DAEMON_IMAGE");
 /// The session image used when neither its project nor target selects one.
-pub const DEFAULT_SESSION_IMAGE: &str = "docker.io/library/buildpack-deps:noble";
-/// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
-/// wrote into a container target a user had touched.
-///
-/// Loading such a file replaces this literal with [`DEFAULT_SESSION_IMAGE`],
-/// so an upgraded install follows the current default session image instead
-/// of pinning whatever was current when the file was written.
-pub const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
-/// The last configuration version that wrote the default image into a file.
-const LEGACY_DEFAULT_IMAGE_LAST_VERSION: u32 = 14;
-
+pub const DEFAULT_SESSION_IMAGE: &str = "ghcr.io/brokkai/mjolnir/session-base:latest";
 /// The rule [`RELEASE_CONTAINER_IMAGE`] is resolved from.
 ///
 /// It is a function so one test build can exercise both channels; a single
@@ -1241,19 +1235,6 @@ pub fn container_image_for(version: &str, release: bool) -> String {
         format!("{CONTAINER_IMAGE_REPOSITORY}:{version}")
     } else {
         format!("{CONTAINER_IMAGE_REPOSITORY}:latest")
-    }
-}
-
-/// Move a container target still carrying the historical default image onto
-/// `default_image`.
-///
-/// A target the user customized -- any other image -- is left alone. Split from
-/// [`TryFrom<StoredConfig>`] to exercise legacy config migration directly.
-fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str) {
-    if let Some(container) = target.container_mut()
-        && container.image == LEGACY_DEFAULT_CONTAINER_IMAGE
-    {
-        container.image = default_image.to_owned();
     }
 }
 
@@ -1482,7 +1463,7 @@ pub struct Config {
     pub bundles: BTreeMap<String, ProjectBundle>,
     pub images: ImagesConfig,
     /// The hosts runtimes run on. `local` is implied even when it is absent.
-    pub machines: BTreeMap<String, Machine>,
+    pub machines: BTreeMap<MachineId, Machine>,
     pub targets: BTreeMap<String, TargetTemplate>,
     /// Ids in `targets` that [`Config::with_local_targets`] inserted because
     /// the file names no target of that id. They are candidates, not choices
@@ -1584,7 +1565,7 @@ struct StoredConfig {
     #[serde(default, skip_serializing_if = "ImagesConfig::is_default")]
     images: ImagesConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    machines: BTreeMap<String, Machine>,
+    machines: BTreeMap<MachineId, Machine>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     targets: BTreeMap<String, TargetEntry>,
 }
@@ -1799,7 +1780,7 @@ impl TryFrom<StoredConfig> for Config {
         // Local is implicit even in files that only name remote machines.
         if !build_cache.enabled {
             machines
-                .entry(LOCAL_MACHINE_ID.to_owned())
+                .entry(MachineId::local())
                 .or_insert(Machine::Local { build_cache: None });
             for machine in machines.values_mut() {
                 match machine {
@@ -1813,14 +1794,6 @@ impl TryFrom<StoredConfig> for Config {
         let mut resolved = BTreeMap::new();
         for (id, runtime) in &runtimes {
             resolved.insert(id.clone(), resolve_target(id, runtime, &machines)?);
-        }
-        // Up to version 14, a container target the user had touched carried
-        // the then-current default image in the file. Move that literal back
-        // onto the current session default; a customized image is left alone.
-        if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION {
-            for target in resolved.values_mut() {
-                migrate_legacy_default_image(target, DEFAULT_SESSION_IMAGE);
-            }
         }
         Ok(Self {
             sessions_side,
@@ -2007,19 +1980,28 @@ impl Config {
     /// Suggest additions for setup without replacing existing entries. Both
     /// setup surfaces use the same identities and collision-free names.
     pub fn setup_additions(&self, discovered: &Self) -> Self {
-        fn additions<T: Clone>(
-            existing: &BTreeMap<String, T>,
-            discovered: &BTreeMap<String, T>,
+        fn additions<K, T>(
+            existing: &BTreeMap<K, T>,
+            discovered: &BTreeMap<K, T>,
             same: impl Fn(&T, &T) -> bool,
             base: impl Fn(&str, &T) -> String,
-        ) -> BTreeMap<String, T> {
+        ) -> BTreeMap<K, T>
+        where
+            K: Ord + Clone + std::borrow::Borrow<str> + TryFrom<String>,
+            T: Clone,
+        {
             let mut known = existing.clone();
             let mut added = BTreeMap::new();
             for (id, value) in discovered {
                 if known.values().any(|entry| same(entry, value)) {
                     continue;
                 }
-                let id = unique_config_id(&known, &base(id, value));
+                // Derived ids are valid configuration ids, so this only
+                // skips a value whose id the key type refuses.
+                let Ok(id) = K::try_from(unique_config_id(&known, &base(id.borrow(), value)))
+                else {
+                    continue;
+                };
                 known.insert(id.clone(), value.clone());
                 added.insert(id, value.clone());
             }
@@ -2057,26 +2039,29 @@ impl Config {
     /// The runtimes that run on machine `machine_id`.
     pub fn machine_runtimes<'a>(
         &'a self,
-        machine_id: &'a str,
+        machine_id: &'a MachineId,
     ) -> impl Iterator<Item = (&'a str, &'a TargetTemplate)> + 'a {
         self.targets
             .iter()
             .filter(move |(_, target)| {
-                target_machine_id(target, &self.machines) == Some(machine_id)
+                target_machine_id(target, &self.machines).as_ref() == Some(machine_id)
             })
             .map(|(id, target)| (id.as_str(), target))
     }
 
+    /// The machine a placement made from the target `target_template_id` runs
+    /// on, or `None` when that target is gone or its machine is no longer
+    /// configured. This is the one place a placement's machine is decided.
+    pub fn template_machine_id(&self, target_template_id: &str) -> Option<MachineId> {
+        target_machine_id(self.targets.get(target_template_id)?, &self.machines)
+    }
+
     /// The SSH and EC2 machines no runtime runs on, which no session can
     /// use until one does.
-    pub fn machines_without_runtimes(&self) -> impl Iterator<Item = (&str, &Machine)> {
-        self.machines
-            .iter()
-            .filter(|(id, machine)| {
-                !matches!(machine, Machine::Local { .. })
-                    && self.machine_runtimes(id).next().is_none()
-            })
-            .map(|(id, machine)| (id.as_str(), machine))
+    pub fn machines_without_runtimes(&self) -> impl Iterator<Item = (&MachineId, &Machine)> {
+        self.machines.iter().filter(|(id, machine)| {
+            !matches!(machine, Machine::Local { .. }) && self.machine_runtimes(id).next().is_none()
+        })
     }
 
     /// The runtimes from `found` to add for machine `machine_id`, under
@@ -2088,7 +2073,7 @@ impl Config {
     /// file under its lock to the Settings draft, decides here.
     pub fn machine_runtime_additions(
         &self,
-        machine_id: &str,
+        machine_id: &MachineId,
         probed: &Machine,
         found: impl IntoIterator<Item = (String, TargetTemplate)>,
     ) -> BTreeMap<String, TargetTemplate> {
@@ -2102,7 +2087,7 @@ impl Config {
         let mut known = self.targets.clone();
         let mut added = BTreeMap::new();
         for (base, target) in found {
-            if target_machine_id(&target, &self.machines) != Some(machine_id)
+            if target_machine_id(&target, &self.machines).as_ref() != Some(machine_id)
                 || !kinds.insert(runtime_kind_name(&target))
             {
                 continue;

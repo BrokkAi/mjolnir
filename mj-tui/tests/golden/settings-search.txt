@@ -5,16 +5,10 @@
 ╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
 │ Create   Open   Fi  │                                                                                              │                     │
 │hel ───────────────  │ memory                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Memory limit                    Runtimes › podman               No limit                     │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Memory limit                    Runtimes › podman               No limit                     │  ───────────────────╮
 │  │ No messages yet  │                                                                                              │                     │
 │  │                  │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
@@ -25,7 +19,13 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -38,18 +38,18 @@ matching paths: [["targets", "podman", "memory"]]
 ╭ Sessions ─────────  │ Settings › Runtimes › podman                                                                 │                     │
 │ Create   Open   Fi  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │hel ───────────────  │                                                                                              │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ ☒ Enabled                                                                           Remove   │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ ☒ Enabled                                                                           Remove   │  ───────────────────╮
 │  │ No messages yet  │ Type                              Podman ▾                                                   │                     │
 │  │                  │ Machine                           local ▾                                                    │                     │
-│                     │ Container image                   ubuntu:24.04                                               │                     │
-│                     │ Download image policy             Pull if missing ▾                                          │                     │
-│                     │ CPU platform                      Default                                                    │  ───────────────────╯
-│                     │ CPU limit                         Default                                                    │  ───────────────────╮
-│                     │ Memory limit                      Default                                                    │                     │
+│                     │ Container image                   ubuntu:24.04                                               │  ───────────────────╯
+│                     │ Download image policy             Pull if missing ▾                                          │  ──────────── ▁   ▄ ╮
+│                     │ CPU platform                      Default                                                    │                     │
+│                     │ CPU limit                         Default                                                    │  ───────────────────╯
+│                     │ Memory limit                      Default                                                    │  ──────────── ▁   ▄ ╮
 │                     │   Environment variables           0 settings  ›                                              │                     │
-│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╯
-│                     │ ☐ Enforce host RAM budget                                                                    │  ──────────── ▁   ▄ ╮
+│                     │   Workspace storage               1 setting  ›                                               │                     │
+│                     │ ☐ Enforce host RAM budget                                                                    │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -57,8 +57,8 @@ matching paths: [["targets", "podman", "memory"]]
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -71,16 +71,10 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 ╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
 │ Create   Open   Fi  │                                                                                              │                     │
 │hel ───────────────  │ compaction                                                                                   │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Context budget (bytes)          Agent Profiles › claude-1       262144 (256 KiB)             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Context budget (bytes)          Agent Profiles › claude-1       262144 (256 KiB)             │  ───────────────────╮
 │  │ No messages yet  │ Context budget (bytes)          Agent Profiles › codex-1        262144 (256 KiB)             │                     │
 │  │                  │ Context budget (bytes)          Agent Profiles › codex-2        262144 (256 KiB)             │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
@@ -91,7 +85,13 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -104,16 +104,10 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 ╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
 │ Create   Open   Fi  │                                                                                              │                     │
 │hel ───────────────  │ image                                                                                        │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Container image                 Runtimes › podman               ubuntu:24.04                 │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Container image                 Runtimes › podman               ubuntu:24.04                 │  ───────────────────╮
 │  │ No messages yet  │ Download image policy           Runtimes › podman               Pull if missing ▾            │                     │
 │  │                  │ Container image                 Daemon                          Not set                      │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
@@ -124,7 +118,13 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette

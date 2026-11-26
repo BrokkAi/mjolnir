@@ -18,7 +18,7 @@ use mj_client::daemon::{
     CONTAINER_OWNER_SCHEMA, ContainerDaemonRecord, DaemonMetadata, DaemonPlacement,
     PROTOCOL_VERSION, write_container_owner,
 };
-use mj_core::config::{DaemonConfig, DaemonRuntime, RELEASE_CONTAINER_IMAGE, data_dir};
+use mj_core::config::{DaemonConfig, DaemonRuntime, RELEASE_CONTAINER_IMAGE};
 use sha2::Digest;
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -612,7 +612,7 @@ impl ContainerSpec {
     }
 
     fn for_this_host(engine: DaemonRuntime, config: &DaemonConfig, image: String) -> Result<Self> {
-        let data = data_dir();
+        let data = mj_core::config::DataLayout::current().root().to_path_buf();
         let instance = short_digest(data.as_os_str().as_encoded_bytes());
         let volume = format!("mj-{instance}-data");
         let mut mounts = Vec::new();

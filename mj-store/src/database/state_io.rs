@@ -119,10 +119,10 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     // Sessions and their relationships must come from the same WAL snapshot.
     // Otherwise a concurrent spawn can look orphaned despite intact foreign keys.
     let connection = reader.transaction()?;
-    load_state_with(&connection)
+    load_state_with(&connection, &sessions_root_for(path))
 }
 
-pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
+pub(super) fn load_state_with(connection: &Connection, sessions_root: &Path) -> Result<State> {
     let mut state = State {
         operator_presence: connection.query_row(
             "SELECT away,revision FROM operator_away WHERE singleton=1",
@@ -215,7 +215,7 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
     }
     load_targets(connection, &mut state)?;
     load_mounts(connection, &mut state)?;
-    load_checkpoints(connection, &mut state)?;
+    load_checkpoints(connection, &mut state, sessions_root)?;
     state.mount_history = read_mount_history(connection)?.into_iter().collect();
     let mut statement = connection
         .prepare("SELECT host, cpus, memory_bytes FROM host_container_sizes ORDER BY host")?;
@@ -337,7 +337,7 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
                 session.workspace_id
             );
         }
-        insert_session(&tx, session)?;
+        insert_session(&tx, session, &sessions_root_for(path))?;
     }
     for subagent in state.subagents.values() {
         // State contains metadata only. New launches must be registered with
@@ -690,14 +690,19 @@ pub(super) fn parse_materialized_execution(
 /// Write every field of a session, including the ones other writers own.
 /// Only a flow that authors the whole record — creation, import, resume, or
 /// orphan adoption — may use this.
-pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
-    insert_session_with_parent(tx, session, None)
+pub(super) fn insert_session(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    sessions_root: &Path,
+) -> Result<()> {
+    insert_session_with_parent(tx, session, None, sessions_root)
 }
 
 pub(super) fn insert_session_with_parent(
     tx: &Transaction<'_>,
     session: &SessionRecord,
     parent: Option<&str>,
+    sessions_root: &Path,
 ) -> Result<()> {
     let previous_error = super::events::previous_session_error(tx, &session.id)?;
     let canonical_bundle =
@@ -850,7 +855,7 @@ pub(super) fn insert_session_with_parent(
     )?;
     replace_targets_with_parent(tx, session, parent)?;
     replace_mounts(tx, &session.id, &session.additional_mounts)?;
-    replace_checkpoint(tx, session)?;
+    replace_checkpoint(tx, session, sessions_root)?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
     super::session_create::settle_create_intent(tx, session)?;
     Ok(())
@@ -909,6 +914,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         archived: _,
         // Written by `replace_targets` below rather than by this statement.
         target: _,
+        // Written by `replace_targets` with the placement.
+        machine_id: _,
         native_session_id: _,
         acp_session_title: _,
         session_title_override: _,
@@ -1008,12 +1015,109 @@ fn replace_targets_with_parent(
         [session.id.as_str()],
     )?;
     if let Some(target) = &session.target {
-        insert_target(tx, &session.id, target)?;
+        insert_target(tx, &session.id, target, session.machine_id.as_ref())?;
     }
     Ok(())
 }
 
-pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+/// The managed archive directory for the store at `db_path`: the `sessions/`
+/// directory beside the database file, derived from the path the store was
+/// opened with, as `tool_details.rs` derives its root. SQLite's own
+/// `Connection::path` is absolute and normalized, so it never matches the
+/// lexical `sessions_dir()` that writers store when the data directory is
+/// relative or reached through a symlink.
+pub(super) fn sessions_root_for(db_path: &Path) -> PathBuf {
+    super::tool_details::data_dir_from(db_path).join("sessions")
+}
+
+/// The root for the process's configured store, for callers that run on the
+/// daemon's writer or reader, which are opened at `database_path()`.
+pub(super) fn configured_sessions_root() -> PathBuf {
+    sessions_root_for(&database_path())
+}
+
+/// Store a direct child of `sessions_root` as its bare file name so the store
+/// resolves it under whatever directory it now lives in. Other paths stay
+/// absolute. Writers store the raw `sessions_dir()` join, so stripping the
+/// prefix lexically is exact.
+pub(super) fn encode_checkpoint_archive_path(path: &Path, sessions_root: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if parent == sessions_root => PathBuf::from(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Inverse of `encode_checkpoint_archive_path`. A bare file name joins onto
+/// `sessions_root`. Every other value, absolute or not, is returned as stored
+/// (the pre-revision-160 behavior): a legacy value must never fail the whole
+/// state load, and resume rejects a non-absolute archive for that one session.
+pub(super) fn decode_checkpoint_archive_path(stored: &Path, sessions_root: &Path) -> PathBuf {
+    let mut components = stored.components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => sessions_root.join(name),
+        _ => stored.to_path_buf(),
+    }
+}
+
+/// Encode a path for a `session_checkpoints` row.
+pub(super) fn checkpoint_archive_blob(path: &Path, sessions_root: &Path) -> Vec<u8> {
+    path_to_blob(&encode_checkpoint_archive_path(path, sessions_root))
+}
+
+/// Migration 160: rewrite managed absolute archive paths to bare file names.
+/// The table holds one small row per suspended session. Rows outside
+/// `sessions/` are left alone.
+///
+/// Writers stored the lexical `sessions_dir()` join, but the store may now be
+/// opened through another spelling of the same directory (a symlink, `..`).
+/// A row that misses the lexical match is also compared by canonical parent
+/// directory, so it is not left absolute while the revision advances. A parent
+/// that cannot be canonicalized leaves the row unchanged.
+pub(super) fn relativize_checkpoint_archive_paths(
+    connection: &Connection,
+    sessions_root: &Path,
+) -> Result<()> {
+    let rows = connection
+        .prepare("SELECT session_id, archive_path FROM session_checkpoints")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                blob_to_path(row.get_ref(1)?.as_blob()?),
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let canonical_root = std::fs::canonicalize(sessions_root).ok();
+    // Rows share a parent, so each distinct parent is canonicalized once.
+    let mut managed_parents = std::collections::HashMap::<PathBuf, bool>::new();
+    for (session_id, stored) in rows {
+        let mut encoded = encode_checkpoint_archive_path(&stored, sessions_root);
+        if encoded == stored
+            && stored.is_absolute()
+            && let (Some(root), Some(parent), Some(name)) =
+                (&canonical_root, stored.parent(), stored.file_name())
+        {
+            let managed = *managed_parents
+                .entry(parent.to_path_buf())
+                .or_insert_with(|| std::fs::canonicalize(parent).is_ok_and(|real| real == *root));
+            if managed {
+                encoded = PathBuf::from(name);
+            }
+        }
+        if encoded != stored {
+            connection.execute(
+                "UPDATE session_checkpoints SET archive_path = ?2 WHERE session_id = ?1",
+                params![session_id, path_to_blob(&encoded)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn replace_checkpoint(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    sessions_root: &Path,
+) -> Result<()> {
     tx.execute(
         "DELETE FROM session_checkpoints WHERE session_id = ?1",
         [session.id.as_str()],
@@ -1024,7 +1128,7 @@ pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) 
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 session.id,
-                path_to_blob(&checkpoint.archive_path),
+                checkpoint_archive_blob(&checkpoint.archive_path, sessions_root),
                 checkpoint.sha256,
                 checkpoint.created_at,
                 checkpoint.event_frontier,
@@ -1043,6 +1147,7 @@ pub(super) struct StoredTargetValues<'a> {
     pub worker_id: Option<&'a str>,
     pub workspace_storage: Option<String>,
     pub borrowed_from: Option<&'a str>,
+    pub data_root: Option<Vec<u8>>,
 }
 
 pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTargetValues<'_>> {
@@ -1153,6 +1258,16 @@ pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTarge
                 None,
                 None,
             ),
+            TargetLocator::SshHostBare { host, .. } => (
+                "ssh-host-bare",
+                Some(host.as_str()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             TargetLocator::SshBare {
                 host,
                 workspace,
@@ -1192,14 +1307,46 @@ pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTarge
         worker_id,
         workspace_storage,
         borrowed_from,
+        data_root: match target {
+            TargetLocator::SshHostBare { data_root, .. } => Some(path_to_blob(data_root)),
+            _ => None,
+        },
     })
+}
+
+pub(super) fn validate_target_for_store(target: &TargetLocator, session_id: &str) -> Result<()> {
+    let fields = stored_target_values(target)?;
+    if let Some(host) = fields.host {
+        anyhow::ensure!(
+            !host.trim().is_empty() && !host.starts_with('-'),
+            "empty or invalid target host for session {session_id}"
+        );
+    }
+    if let Some(resource) = fields.resource {
+        anyhow::ensure!(
+            !resource.trim().is_empty(),
+            "empty target resource for session {session_id}"
+        );
+    }
+    if let Some(workspace) = fields.workspace.as_ref() {
+        anyhow::ensure!(
+            !workspace.is_empty(),
+            "empty target workspace for session {session_id}"
+        );
+    }
+    if let TargetLocator::SshHostBare { data_root, .. } = target {
+        mj_core::target_path::validate_host_bare(data_root, session_id)?;
+    }
+    Ok(())
 }
 
 pub(super) fn insert_target(
     tx: &Transaction<'_>,
     session_id: &str,
     target: &TargetLocator,
+    machine_id: Option<&MachineId>,
 ) -> Result<()> {
+    validate_target_for_store(target, session_id)?;
     let StoredTargetValues {
         kind,
         host,
@@ -1209,10 +1356,11 @@ pub(super) fn insert_target(
         worker_id,
         workspace_storage,
         borrowed_from,
+        data_root,
     } = stored_target_values(target)?;
     tx.execute(
-        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, machine_id, data_root)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             session_id,
             kind,
@@ -1222,7 +1370,9 @@ pub(super) fn insert_target(
             workspace,
             worker_id,
             workspace_storage,
-            borrowed_from
+            borrowed_from,
+            machine_id.map(MachineId::as_str),
+            data_root
         ],
     )?;
     Ok(())
@@ -1242,7 +1392,42 @@ fn load_targets_selected(
             session.target = Some(Box::new(target));
         }
     }
+    for (session_id, machine_id) in read_target_machines(connection, id)? {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.machine_id = Some(machine_id);
+        }
+    }
     Ok(())
+}
+
+/// The machine each placement records. Separate from [`read_targets`], which
+/// revision 122's backfill also runs, before the column exists. A placement
+/// with no machine recorded is absent from the result.
+fn read_target_machines(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<BTreeMap<String, MachineId>> {
+    let predicate = if id.is_some() {
+        " AND session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT session_id, machine_id FROM session_targets WHERE machine_id IS NOT NULL{predicate}"
+    ))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
+        let session_id: String = row.get(0)?;
+        let machine_id: String = row.get(1)?;
+        let machine_id = MachineId::new(machine_id).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, error.into())
+        })?;
+        Ok((session_id, machine_id))
+    })?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
 }
 
 pub(super) fn read_targets(
@@ -1254,21 +1439,60 @@ pub(super) fn read_targets(
     } else {
         ""
     };
-    let mut statement = connection.prepare(&format!("SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from
+    let extra =
+        if super::legacy_schema::table_has_column(connection, "session_targets", "data_root")? {
+            "data_root"
+        } else {
+            "NULL"
+        };
+    let mut statement = connection.prepare(&format!("SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, {extra}
          FROM session_targets{predicate}"))?;
     let arguments: Vec<&dyn rusqlite::ToSql> = id
         .as_ref()
         .map(|id| vec![id as &dyn rusqlite::ToSql])
         .unwrap_or_default();
     let rows = statement.query_map(arguments.as_slice(), |row| {
-        Ok((row.get(0)?, decode_target(row, 1)?))
+        let id: String = row.get(0)?;
+        Ok((id.clone(), decode_target(row, 1, &id)?))
     })?;
     rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+/// The optional machine id in column `index`.
+pub(super) fn decode_machine(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<MachineId>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|text| {
+            MachineId::new(text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(index, Type::Text, error.into())
+            })
+        })
+        .transpose()
 }
 
 pub(super) fn decode_target(
     row: &rusqlite::Row<'_>,
     start: usize,
+    session_id: &str,
+) -> rusqlite::Result<TargetLocator> {
+    decode_target_inner(row, start, session_id).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            start,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid target for session {session_id:?}: {error}"),
+            )),
+        )
+    })
+}
+
+fn decode_target_inner(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+    session_id: &str,
 ) -> rusqlite::Result<TargetLocator> {
     let kind: String = row.get(start)?;
     let host: Option<String> = row.get(start + 1)?;
@@ -1276,8 +1500,9 @@ pub(super) fn decode_target(
     let address: Option<String> = row.get(start + 3)?;
     let workspace = row.get_ref(start + 4)?.blob_or_null()?.map(blob_to_path);
     let worker_id: Option<String> = row.get(start + 5)?;
-    let workspace_storage = row
-        .get::<_, Option<String>>(start + 6)?
+    let storage_text = row.get::<_, Option<String>>(start + 6)?;
+    let workspace_storage = storage_text
+        .clone()
         .map(|serialized| {
             serde_json::from_str(&serialized).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(start + 6, Type::Text, Box::new(error))
@@ -1286,54 +1511,149 @@ pub(super) fn decode_target(
         .transpose()?
         .unwrap_or_default();
     let borrowed_from: Option<String> = row.get(start + 7)?;
+    let data_root = row.get_ref(start + 8)?.blob_or_null()?.map(blob_to_path);
+    let invalid = || {
+        rusqlite::Error::FromSqlConversionFailure(
+            start,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid target columns for session {session_id:?}, kind {kind}"),
+            )),
+        )
+    };
+    let host_present = host.is_some();
+    let resource_present = resource.is_some();
+    let workspace_present = workspace.is_some();
+    let base_valid = match kind.as_str() {
+        "local-bare" => {
+            !host_present
+                && !resource_present
+                && address.is_none()
+                && workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "local-podman" => {
+            !host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+        }
+        "local-docker" | "apple-container" => {
+            !host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+        }
+        "aws-ec2" => {
+            !host_present
+                && resource_present
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "ssh-bare" => {
+            host_present
+                && !resource_present
+                && address.is_none()
+                && workspace_present
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "ssh-host-bare" => {
+            host_present
+                && !resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+                && borrowed_from.is_none()
+        }
+        "ssh-podman" => {
+            host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+        }
+        "ssh-docker" | "ssh-apple-container" | "ssh-nitro" => {
+            host_present
+                && resource_present
+                && address.is_none()
+                && !workspace_present
+                && worker_id.is_none()
+                && storage_text.is_none()
+        }
+        _ => false,
+    };
+    let extra_valid = if kind == "ssh-host-bare" {
+        data_root
+            .as_ref()
+            .is_some_and(|root| mj_core::target_path::validate_host_bare(root, session_id).is_ok())
+    } else {
+        data_root.is_none()
+    };
+    if !base_valid || !extra_valid {
+        return Err(invalid());
+    }
     let target = match kind.as_str() {
         "local-bare" => TargetLocator::LocalBare {
-            worker_root: workspace.unwrap(),
+            worker_root: workspace.ok_or_else(invalid)?,
         },
         "local-podman" => TargetLocator::LocalPodman {
             borrowed_from,
-            container_id: resource.unwrap(),
+            container_id: resource.ok_or_else(invalid)?,
             workspace_storage,
         },
         "local-docker" => TargetLocator::LocalDocker {
             borrowed_from,
-            container_id: resource.unwrap(),
+            container_id: resource.ok_or_else(invalid)?,
         },
         "apple-container" => TargetLocator::AppleContainer {
             borrowed_from,
-            container_id: resource.unwrap(),
+            container_id: resource.ok_or_else(invalid)?,
         },
         "aws-ec2" => TargetLocator::AwsEc2 {
-            instance_id: resource.unwrap(),
+            instance_id: resource.ok_or_else(invalid)?,
             address,
         },
+        "ssh-host-bare" => TargetLocator::SshHostBare {
+            host: host.ok_or_else(invalid)?,
+            data_root: data_root.ok_or_else(invalid)?,
+        },
         "ssh-bare" => TargetLocator::SshBare {
-            host: host.unwrap(),
-            workspace: workspace.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            workspace: workspace.ok_or_else(invalid)?,
             worker_id,
         },
         "ssh-docker" => TargetLocator::SshDocker {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
         },
         "ssh-apple-container" => TargetLocator::SshAppleContainer {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
         },
         "ssh-nitro" => TargetLocator::SshNitro {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
         },
         "ssh-podman" => TargetLocator::SshPodman {
             borrowed_from,
-            host: host.unwrap(),
-            container_id: resource.unwrap(),
+            host: host.ok_or_else(invalid)?,
+            container_id: resource.ok_or_else(invalid)?,
             workspace_storage,
         },
-        _ => unreachable!("target kind constrained by schema"),
+        _ => return Err(invalid()),
     };
     Ok(target)
 }
@@ -1437,16 +1757,21 @@ fn load_mounts_selected(
     Ok(())
 }
 
-pub(super) fn load_checkpoints(connection: &Connection, state: &mut State) -> Result<()> {
-    load_checkpoints_selected(connection, state, None)
+pub(super) fn load_checkpoints(
+    connection: &Connection,
+    state: &mut State,
+    sessions_root: &Path,
+) -> Result<()> {
+    load_checkpoints_selected(connection, state, None, sessions_root)
 }
 
 fn load_checkpoints_selected(
     connection: &Connection,
     state: &mut State,
     id: Option<&str>,
+    sessions_root: &Path,
 ) -> Result<()> {
-    let checkpoints = read_checkpoints(connection, id)?;
+    let checkpoints = read_checkpoints(connection, id, sessions_root)?;
     for (session_id, checkpoint) in checkpoints {
         if let Some(session) = state.sessions.get_mut(&session_id) {
             session.checkpoint = Some(Box::new(checkpoint));
@@ -1457,19 +1782,22 @@ fn load_checkpoints_selected(
 
 pub fn load_session_checkpoints() -> Result<Vec<(String, CheckpointMetadata)>> {
     let connection = open_reader(&database_path())?;
-    read_checkpoints(&connection, None)
+    read_checkpoints(&connection, None, &configured_sessions_root())
 }
 
 pub fn load_session_checkpoint(id: &str) -> Result<Option<CheckpointMetadata>> {
     let connection = open_reader(&database_path())?;
-    Ok(read_checkpoints(&connection, Some(id))?
-        .pop()
-        .map(|(_, checkpoint)| checkpoint))
+    Ok(
+        read_checkpoints(&connection, Some(id), &configured_sessions_root())?
+            .pop()
+            .map(|(_, checkpoint)| checkpoint),
+    )
 }
 
 fn read_checkpoints(
     connection: &Connection,
     id: Option<&str>,
+    sessions_root: &Path,
 ) -> Result<Vec<(String, CheckpointMetadata)>> {
     let predicate = if id.is_some() {
         " WHERE session_id=?1"
@@ -1485,7 +1813,10 @@ fn read_checkpoints(
         Ok((
             row.get::<_, String>(0)?,
             CheckpointMetadata {
-                archive_path: blob_to_path(row.get_ref(1)?.as_blob()?),
+                archive_path: decode_checkpoint_archive_path(
+                    &blob_to_path(row.get_ref(1)?.as_blob()?),
+                    sessions_root,
+                ),
                 sha256: row.get(2)?,
                 created_at: row.get(3)?,
                 event_frontier: row.get(4)?,
@@ -1517,6 +1848,118 @@ pub fn backfill_target_runtime(
         let runtime = stored.as_deref().map(serde_json::from_str).transpose()?;
         tx.commit()?;
         Ok(runtime)
+    })
+}
+
+/// Target kinds that run on this computer, so on the machine `local`
+/// whatever the configuration says.
+const LOCAL_TARGET_KINDS: &str = "'local-bare','local-podman','local-docker','apple-container'";
+/// Target kinds on another host, whose machine only the target template names.
+const REMOTE_TARGET_KINDS: &str = "'ssh-bare','ssh-host-bare','ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro','aws-ec2'";
+
+/// Fill the machine on stored placements that have none, and return the
+/// session placements filled so the caller can update its copies.
+///
+/// A local placement is on `local` by its kind. An SSH placement takes the
+/// machine of its target template, from `templates`, only
+/// when that machine is where the placement itself says it runs
+/// ([`machine_hosts_placement`]): a template repointed to another host since
+/// the placement was made would otherwise hand the placement the wrong
+/// machine. A placement whose template is gone, or whose template no longer
+/// names its host, stays `NULL`: nothing else records which machine it ran
+/// on, and a guess could send sessions to the wrong host. Only rows still
+/// `NULL` change, so a concurrent writer's value is kept. Legacy EC2
+/// placements always stay `NULL` (see [`machine_hosts_placement`]).
+pub fn backfill_machine_ids(
+    templates: &BTreeMap<String, (MachineId, Machine)>,
+) -> Result<BTreeMap<String, MachineId>> {
+    let templates = templates.clone();
+    submit_database_write("backfill_machine_ids", move |_| {
+        let mut connection = open(&database_path())?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let candidate =
+            |template_id: &str,
+             host: Option<&str>,
+             runtime_json: Option<&str>|
+             -> Result<Option<MachineId>> {
+                let Some((machine_id, machine)) = templates.get(template_id) else {
+                    return Ok(None);
+                };
+                let runtime: Option<mj_core::state::TargetRuntimeSettings> = runtime_json
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("read placement access settings for its machine")?;
+                Ok(machine_hosts_placement(machine, host, runtime.as_ref())
+                    .then(|| machine_id.clone()))
+            };
+        let mut filled = BTreeMap::new();
+        {
+            let mut local = tx.prepare(&format!(
+                "SELECT session_id FROM session_targets WHERE machine_id IS NULL AND kind IN ({LOCAL_TARGET_KINDS})"
+            ))?;
+            for session_id in local.query_map([], |row| row.get::<_, String>(0))? {
+                filled.insert(session_id?, MachineId::local());
+            }
+            let mut remote = tx.prepare(&format!(
+                "SELECT t.session_id, s.target_template_id, t.host, s.target_runtime_json
+                 FROM session_targets t JOIN sessions s USING(session_id)
+                 WHERE t.machine_id IS NULL AND t.kind IN ({REMOTE_TARGET_KINDS})"
+            ))?;
+            let rows = remote
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (session_id, template_id, host, runtime) in rows {
+                if let Some(machine_id) =
+                    candidate(&template_id, host.as_deref(), runtime.as_deref())?
+                {
+                    filled.insert(session_id, machine_id);
+                }
+            }
+        }
+        for (session_id, machine_id) in &filled {
+            tx.execute(
+                "UPDATE session_targets SET machine_id = ?2 WHERE session_id = ?1 AND machine_id IS NULL",
+                params![session_id, machine_id.as_str()],
+            )?;
+        }
+        tx.execute(
+            &format!("UPDATE environment_workers SET machine_id = 'local' WHERE machine_id IS NULL AND kind IN ({LOCAL_TARGET_KINDS})"),
+            [],
+        )?;
+        let workers = {
+            let mut statement = tx.prepare(&format!(
+                "SELECT lease_id, target_template_id, host, runtime_json FROM environment_workers
+                 WHERE machine_id IS NULL AND kind IN ({REMOTE_TARGET_KINDS})"
+            ))?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (lease_id, template_id, host, runtime) in workers {
+            if let Some(machine_id) = candidate(&template_id, host.as_deref(), runtime.as_deref())?
+            {
+                tx.execute(
+                    "UPDATE environment_workers SET machine_id = ?2 WHERE lease_id = ?1 AND machine_id IS NULL",
+                    params![lease_id, machine_id.as_str()],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(filled)
     })
 }
 
@@ -1558,6 +2001,7 @@ fn decode_session(
         oracle: row.get(34)?,
         project: decode_shared(row, 30, &mut interns.projects)?,
         target_runtime: decode_shared(row, 26, &mut interns.runtimes)?,
+        machine_id: None,
         harness_kind,
         create_managed_worktree: row.get(21)?,
         launch_base: row.get(25)?,
@@ -1690,20 +2134,27 @@ pub fn load_session_record(id: &str) -> Result<Option<SessionRecord>> {
 pub fn read_durable_session_record(id: &str) -> Result<Option<SessionRecord>> {
     let mut connection = open_reader(&database_path())?;
     let snapshot = connection.transaction()?;
-    load_session_with(&snapshot, id)
+    load_session_with(&snapshot, id, &configured_sessions_root())
 }
 
 pub(super) fn load_session_with(
     connection: &Connection,
     id: &str,
+    sessions_root: &Path,
 ) -> Result<Option<SessionRecord>> {
-    load_session_interned_with(connection, id, &mut SessionInterns::default())
+    load_session_interned_with(
+        connection,
+        id,
+        &mut SessionInterns::default(),
+        sessions_root,
+    )
 }
 
 pub(super) fn load_session_interned_with(
     connection: &Connection,
     id: &str,
     interns: &mut SessionInterns,
+    sessions_root: &Path,
 ) -> Result<Option<SessionRecord>> {
     let record = connection
         .query_row(
@@ -1720,7 +2171,7 @@ pub(super) fn load_session_interned_with(
     state.sessions.insert(id.to_owned(), record);
     load_targets_selected(connection, &mut state, Some(id))?;
     load_mounts_selected(connection, &mut state, Some(id))?;
-    load_checkpoints_selected(connection, &mut state, Some(id))?;
+    load_checkpoints_selected(connection, &mut state, Some(id), sessions_root)?;
     state.validate()?;
     Ok(state.sessions.remove(id))
 }
@@ -1810,9 +2261,22 @@ mod targeted_read_tests {
         let mut reader = open_reader(&path).unwrap();
         let snapshot = reader.transaction().unwrap();
         assert_eq!(
-            load_session_with(&snapshot, "selected").unwrap(),
+            load_session_with(
+                &snapshot,
+                "selected",
+                &crate::database::state_io::configured_sessions_root()
+            )
+            .unwrap(),
             Some(expected)
         );
-        assert_eq!(load_session_with(&snapshot, "missing").unwrap(), None);
+        assert_eq!(
+            load_session_with(
+                &snapshot,
+                "missing",
+                &crate::database::state_io::configured_sessions_root()
+            )
+            .unwrap(),
+            None
+        );
     }
 }

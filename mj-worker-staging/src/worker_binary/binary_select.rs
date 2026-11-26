@@ -248,7 +248,7 @@ fn probe_platform(
 pub fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<PathBuf> {
     validate_worker_sha256(expected_sha256)?;
     let digest = expected_sha256.to_ascii_lowercase();
-    let directory = data_dir().join("workers").join("pinned");
+    let directory = DataLayout::current().pinned_workers_dir();
     let destination = directory.join(&digest).join("hel");
     std::fs::create_dir_all(destination.parent().unwrap_or(&directory))?;
     if destination.is_file() {

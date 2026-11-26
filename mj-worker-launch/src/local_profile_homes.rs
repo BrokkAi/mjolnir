@@ -127,6 +127,12 @@ fn link_directory(_target: &Path, _link: &Path) -> std::io::Result<()> {
 /// home is a link to a profile home, or missing because an earlier release
 /// started its worker from a profile home that could not be linked.
 pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRecord) -> bool {
+    if matches!(
+        session.target.as_deref(),
+        Some(TargetLocator::SshHostBare { .. })
+    ) {
+        return session.harness_kind.nested_home();
+    }
     let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
         return true;
     };
@@ -134,6 +140,122 @@ pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRec
         return true;
     }
     std::fs::symlink_metadata(worker_root.join("profile")).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Whether a staged home and its login file are owned by the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedProfileOwnership {
+    Owned,
+    OwnedSharedLogin,
+    SharedHome,
+}
+
+impl StagedProfileOwnership {
+    pub fn owns_home(self) -> bool {
+        matches!(self, Self::Owned | Self::OwnedSharedLogin)
+    }
+}
+
+/// Check ownership on the machine holding the profile, failing closed when it
+/// cannot be reached. Call from supervised background work.
+pub fn session_has_a_staged_home_on_target(
+    session: &mj_core::state::SessionRecord,
+    config: &mj_core::config::Config,
+    executor: &impl CommandExecutor,
+) -> bool {
+    probe_staged_home_on_target(session, config, executor)
+        .is_some_and(StagedProfileOwnership::owns_home)
+}
+
+/// Return an ownership verdict only when the target can prove one.
+pub fn probe_staged_home_on_target(
+    session: &mj_core::state::SessionRecord,
+    config: &mj_core::config::Config,
+    executor: &impl CommandExecutor,
+) -> Option<StagedProfileOwnership> {
+    use StagedProfileOwnership::{Owned, OwnedSharedLogin, SharedHome};
+    let (locator, data_root) = match session.target.as_deref() {
+        Some(locator @ TargetLocator::SshHostBare { data_root, .. })
+            if !session.harness_kind.nested_home() =>
+        {
+            (locator, data_root)
+        }
+        _ => {
+            return Some(if !session_has_a_staged_home_of_its_own(session) {
+                SharedHome
+            } else if session_shares_profile_login(session, session.harness_kind) {
+                OwnedSharedLogin
+            } else {
+                Owned
+            });
+        }
+    };
+    let backend = match crate::targets::backend_locator(locator, session, config) {
+        Ok(backend) => backend,
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, %error, "could not check remote profile ownership");
+            return None;
+        }
+    };
+    let home = mj_core::config::DataLayout::at(data_root)
+        .worker_root(&session.id)
+        .join("profile");
+    let marker = if session.harness_kind.shares_local_login() {
+        mj_core::target_path::text(&mj_core::config::harness_authentication_marker(
+            session.harness_kind,
+            &home,
+        ))
+    } else {
+        String::new()
+    };
+    let command = match crate::targets::command_on_locator(
+        mj_core::targets::SshTrafficClass::Control,
+        &backend,
+        &session.id,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "if [ -L \"$1\" ] || [ ! -d \"$1\" ]; then printf 'shared_home\\n'; elif [ -n \"$2\" ] && [ -L \"$2\" ]; then printf 'shared_login\\n'; else printf 'owned\\n'; fi".into(),
+            "mj-profile-ownership".into(),
+            mj_core::target_path::text(&home),
+            marker,
+        ],
+        "check remote profile ownership",
+    ) {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, %error, "could not check remote profile ownership");
+            return None;
+        }
+    };
+    match executor.execute(&command) {
+        Ok(output)
+            if output.status == 0
+                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("owned") =>
+        {
+            Some(Owned)
+        }
+        Ok(output)
+            if output.status == 0
+                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("shared_login") =>
+        {
+            Some(OwnedSharedLogin)
+        }
+        Ok(output)
+            if output.status == 0
+                && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("shared_home") =>
+        {
+            Some(SharedHome)
+        }
+        Ok(output) => {
+            tracing::warn!(session_id = %session.id, status = output.status, "could not check remote profile ownership");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, %error, "could not check remote profile ownership");
+            None
+        }
+    }
 }
 
 /// Whether a local session's login file is a link to its profile's own, which
@@ -406,5 +528,110 @@ mod tests {
 
         // A second daemon start finds the links in place and changes nothing.
         assert!(link_profile_homes_of_earlier_sessions(&state).is_empty());
+    }
+
+    // An owned remote home may still contain a shared login symlink.
+    #[test]
+    fn host_bare_profile_probe_runs_on_ssh_and_fails_closed() {
+        struct Probe(i32, &'static str);
+        impl CommandExecutor for Probe {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn execute_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &crate::targets::CommandSpec,
+                _input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                self.execute(command)
+            }
+            fn execute(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                assert_eq!(command.program, "ssh");
+                assert!(command.args.last().unwrap().contains("[ -L"));
+                assert!(command.args.last().unwrap().contains("auth.json"));
+                assert!(
+                    command
+                        .args
+                        .last()
+                        .unwrap()
+                        .contains("/source data/workers/")
+                );
+                if self.0 < 0 {
+                    anyhow::bail!("SSH unavailable");
+                }
+                Ok(crate::targets::CommandOutput {
+                    status: self.0,
+                    stdout: self.1.as_bytes().to_vec(),
+                    stderr: vec![],
+                })
+            }
+        }
+        let id = "0123456789abcdef0123456789abcdef";
+        let mut record = session(id, HarnessKind::Codex, Path::new("/unused"));
+        record.target = Some(Box::new(TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/source data".into(),
+        }));
+        let mut runtime = mj_core::state::TargetRuntimeSettings::from(
+            &mj_core::config::TargetTemplate::LocalBare,
+        );
+        runtime.kind = "ssh-host-bare".into();
+        runtime.connection = mj_core::state::TargetConnection::Ssh {
+            ssh: mj_core::config::SshConnection {
+                host: "source".into(),
+                user: None,
+                identity_file: None,
+                extra_args: vec![],
+            },
+        };
+        record.target_runtime = Some(runtime.into());
+        for (status, stdout, expected) in [
+            (0, "owned\n", Some(StagedProfileOwnership::Owned)),
+            (
+                0,
+                "shared_login\n",
+                Some(StagedProfileOwnership::OwnedSharedLogin),
+            ),
+            (0, "shared_home\n", Some(StagedProfileOwnership::SharedHome)),
+            (0, "unexpected\n", None),
+            (1, "shared_home\n", None),
+            (255, "owned\n", None),
+            (-1, "", None),
+        ] {
+            assert_eq!(
+                probe_staged_home_on_target(
+                    &record,
+                    &mj_core::config::Config::default(),
+                    &Probe(status, stdout)
+                ),
+                expected
+            );
+            assert_eq!(
+                session_has_a_staged_home_on_target(
+                    &record,
+                    &mj_core::config::Config::default(),
+                    &Probe(status, stdout)
+                ),
+                expected.is_some_and(StagedProfileOwnership::owns_home)
+            );
+        }
+        record.harness_kind = HarnessKind::OpenCode;
+        assert!(session_has_a_staged_home_on_target(
+            &record,
+            &mj_core::config::Config::default(),
+            &Probe(-1, "")
+        ));
     }
 }

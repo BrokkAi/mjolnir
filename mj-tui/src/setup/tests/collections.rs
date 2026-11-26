@@ -155,7 +155,7 @@ fn removing_a_machine_removes_the_runtimes_that_named_it() {
         extra_args: vec![],
     };
     config.machines.insert(
-        "builder".into(),
+        mj_core::config::MachineId::new("builder").unwrap(),
         Machine::Ssh {
             ssh: ssh.clone(),
             workspace_prefix: DEFAULT_WORKSPACE_PREFIX.into(),

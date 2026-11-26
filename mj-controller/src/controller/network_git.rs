@@ -40,6 +40,7 @@ impl Controller {
             std::path::Path::new(&workspace_root(
                 backend,
                 session.container_workspace.as_deref(),
+                &session.id,
             )),
             &repository.destination,
         );
@@ -111,7 +112,7 @@ impl Controller {
                 "checkout repository is no longer in the configured bundle"
             );
         }
-        let root = workspace_root(backend, session.container_workspace.as_deref());
+        let root = workspace_root(backend, session.container_workspace.as_deref(), &session.id);
         let initialize = |repository: &mj_core::config::ProjectRepository| {
             let directory = mj_core::target_path::join(
                 std::path::Path::new(&root),
@@ -1666,7 +1667,9 @@ mod tests {
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
         ] {
-            let plan = targets::provision_plan(&template, session_id, &bundle, &[], None).unwrap();
+            let plan =
+                targets::provision_plan(&template, session_id, "test-instance", &bundle, &[], None)
+                    .unwrap();
             let clone = plan
                 .commands
                 .iter()

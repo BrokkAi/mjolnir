@@ -270,7 +270,7 @@ pub fn stage_worker_files_for(
         profile_id: session.last_profile.clone(),
         bundle_id: session.bundle_id.clone(),
         target_template_id: session.target_template_id.clone(),
-        instance_id: Some(mj_core::config::instance_identity()),
+        instance_id: Some(crate::database::ownership_identity()?.as_str().to_owned()),
     }
     .write(&ownership_path)?;
     // Every session runs from a staged copy of its profile, on every target,
@@ -467,6 +467,9 @@ pub fn stage_worker_files_for(
         // Stage it, and the mbx the launchers run, before the file names them.
         install_build_cache_shim(session, backend, &launch, executor)
             .context("stage the session's mbx and configuration")?;
+        if preparation == WorkerFilePreparation::RefreshProfileOnly {
+            unlink_host_bare_profile_home(executor, backend, session_id, &target_profile_home)?;
+        }
         clear_profile_configuration(
             executor,
             backend,
@@ -889,8 +892,15 @@ fn session_launch_config_with_source(
         None
     };
     if let Some(reviewer) = &launch.reviewer_launch {
-        launch.bridge_command = reviewer.bridge_command.clone();
-        launch.bridge_args = reviewer.bridge_args.clone();
+        // The record's own bridge command is the script this build's daemon
+        // generated when the review started. Ask the generator again: a
+        // script saved before a harness pin bump names the old pinned
+        // version, and a worker treats an unrecognized one as a custom
+        // command and runs it as given.
+        let (bridge_command, bridge_args) =
+            mj_core::harness_runtime::fallback_launch(reviewer.harness, reviewer.execution_policy);
+        launch.bridge_command = bridge_command.into();
+        launch.bridge_args = bridge_args;
         launch.execution_policy = reviewer.execution_policy;
         if let Some(source) = aws_source {
             apply_aws_launch_environment(&mut launch.environment, &target_profile_home, source);
@@ -1469,6 +1479,114 @@ mod tests {
         }
     }
 
+    /// The reviewer record holds the launch script generated when the review
+    /// started. After a harness pin bump the worker must still start the
+    /// current built-in launcher, not the saved one.
+    #[test]
+    fn reviewer_launch_regenerates_a_saved_built_in_script_after_a_pin_bump() {
+        const TEST: &str = "reviewer_launch_regenerates_a_saved_built_in_script_after_a_pin_bump";
+        const MARKER: &str = "MJ_TEST_REVIEWER_LAUNCH_REGENERATES";
+        // The launcher v2.76.0 generated for dsh-acp 0.8.0, byte for byte.
+        const SHIPPED_0_8_0: &str =
+            include_str!("../tests/fixtures/dsh_acp_0_8_0_launch_v2_76_0.sh");
+        if std::env::var_os(MARKER).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), TEST))
+                .env(MARKER, "1")
+                .isolated_store(dir.path())
+                .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let layout = mj_core::config::DataLayout::current();
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("podman".into(), TargetTemplate::LocalBare);
+        config.profiles.insert(
+            "dsh".into(),
+            HarnessProfile::new(HarnessKind::Dsh, layout.root().join("profile")),
+        );
+        let policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
+        let current = mj_core::harness_runtime::fallback_launch(HarnessKind::Dsh, policy);
+        assert_ne!(
+            current.1,
+            ["-c".to_owned(), SHIPPED_0_8_0.to_owned()],
+            "the fixture must be an earlier release's script"
+        );
+        let parent_id = "11111111111111111111111111111111";
+        let child_id = "22222222222222222222222222222222";
+        let mut parent = crate::database::test_fixtures::checkpoint_test_session(parent_id);
+        parent.last_profile = "dsh".into();
+        parent.harness_kind = HarnessKind::Dsh;
+        crate::database::save_session(&parent).unwrap();
+        let mut child = crate::database::test_fixtures::checkpoint_test_session(child_id);
+        child.last_profile = "dsh".into();
+        child.harness_kind = HarnessKind::Dsh;
+        child.project_directory = Some(layout.root().join("child-workspace"));
+        child.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: layout.worker_root(child_id),
+        }));
+        let relation = SubagentRecord {
+            child_session_id: child_id.into(),
+            parent_session_id: parent_id.into(),
+            task_name: "review".into(),
+            profile_id: "dsh".into(),
+            working_directory: PathBuf::new(),
+            request_key: "saved-reviewer".into(),
+            created_at: child.created_at.clone(),
+            kind: SubagentKind::Worker,
+            reviewer_launch: Some(mj_core::worker_launch::ReviewerLaunchConfig {
+                role: Default::default(),
+                profile_id: "dsh".into(),
+                harness: HarnessKind::Dsh,
+                bridge_command: "sh".into(),
+                bridge_args: vec!["-c".into(), SHIPPED_0_8_0.into()],
+                environment: Default::default(),
+                excluded_environment: Vec::new(),
+                execution_policy: policy,
+                model: None,
+                effort: None,
+                fast_mode: None,
+                generation: Default::default(),
+                mcp_servers: Vec::new(),
+            }),
+            model: None,
+            effort: None,
+            initial_prompt: "review".into(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: true,
+            orchestrator: false,
+            resume_with_parent: false,
+        };
+        crate::database::register_subagent_with_startup(
+            &child,
+            &relation,
+            Vec::new(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        parent.state = SessionState::Stopped;
+        crate::database::save_lifecycle_session(&parent).unwrap();
+        let state = crate::database::load_state().unwrap();
+        let (backend, _) = worker_placement(&config, &state, child_id).unwrap();
+        let (launch, _, _) =
+            session_launch_config(&config, &state, child_id, &backend, LaunchHistory::Stored)
+                .unwrap();
+        assert!(launch.reviewer_launch.is_some());
+        assert_eq!(launch.bridge_command, Path::new(&current.0));
+        assert_eq!(launch.bridge_args, current.1);
+        assert!(mj_core::harness_runtime::is_fallback_launch(
+            HarnessKind::Dsh,
+            policy,
+            &launch.bridge_command,
+            &launch.bridge_args
+        ));
+    }
+
     #[test]
     fn owned_child_launch_uses_its_checkout_and_report_without_parent_placement() {
         const TEST: &str =
@@ -1491,7 +1609,9 @@ mod tests {
             "codex".into(),
             HarnessProfile::new(
                 HarnessKind::Codex,
-                mj_core::config::data_dir().join("profile"),
+                mj_core::config::DataLayout::current()
+                    .root()
+                    .join("profile"),
             ),
         );
         let choice = mj_core::config::SubagentChoice {
@@ -1515,10 +1635,12 @@ mod tests {
             straightforward: None,
             subtle: None,
         });
-        let workspace = mj_core::config::data_dir().join("child-workspace");
+        let workspace = mj_core::config::DataLayout::current()
+            .root()
+            .join("child-workspace");
         child.project_directory = Some(workspace.clone());
         child.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join(child_id),
+            worker_root: mj_core::config::DataLayout::current().worker_root(child_id),
         }));
         let relation = SubagentRecord {
             child_session_id: child_id.into(),
@@ -1659,7 +1781,9 @@ mod tests {
         );
         assert_eq!(same_launch.initial_commands, original_commands);
 
-        let deepseek_home = mj_core::config::data_dir().join("deepseek-profile");
+        let deepseek_home = mj_core::config::DataLayout::current()
+            .root()
+            .join("deepseek-profile");
         std::fs::create_dir_all(&deepseek_home).unwrap();
         std::fs::write(
             deepseek_home.join("config.toml"),
@@ -1718,7 +1842,7 @@ wire_api = "responses"
             "claude".into(),
             HarnessProfile::new(
                 HarnessKind::Claude,
-                mj_core::config::data_dir().join("claude"),
+                mj_core::config::DataLayout::current().root().join("claude"),
             ),
         );
         let mut moved = state.clone();

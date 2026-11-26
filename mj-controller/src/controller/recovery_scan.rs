@@ -56,10 +56,16 @@ impl Controller {
         executor: &impl CommandExecutor,
         all_instances: bool,
     ) -> RecoveryScan {
-        let mut scan = RecoveryScan {
-            instance_id: mj_core::config::instance_identity(),
-            ..RecoveryScan::default()
-        };
+        let mut scan = RecoveryScan::default();
+        match crate::database::ownership_identity() {
+            Ok(identity) => scan.instance_id = identity.as_str().to_owned(),
+            Err(error) => {
+                scan.warnings.push(format!(
+                    "cannot resolve this daemon's ownership identity: {error:#}"
+                ));
+                return scan;
+            }
+        }
         let moves = match crate::database::load_move_operations() {
             Ok(moves) => moves,
             Err(error) => {
@@ -133,7 +139,13 @@ impl Controller {
             .state
             .sessions
             .get(&candidate.session_id)
-            .is_some_and(|record| locator_in_flight(record.state))
+            .is_some_and(|record| {
+                locator_in_flight(record.state)
+                    || matches!(
+                        record.target.as_deref(),
+                        Some(TargetLocator::SshHostBare { .. })
+                    )
+            })
         {
             return true;
         }
@@ -363,6 +375,9 @@ impl Controller {
                             .into_owned()
                             .into(),
                     );
+                    // The adoption template was validated against the locator,
+                    // so its machine is the placement's.
+                    record.machine_id = self.config.template_machine_id(target_id);
                     record.no_github_credentials = no_github_credentials;
                     record.container_workspace = container_workspace;
                     record.project = Some(project.into());
@@ -420,6 +435,7 @@ impl Controller {
                         .downcast_ref::<crate::worker_client::LiveBaselineUnsupported>()
                         .is_some()
                 }) {
+                    let identity = crate::database::ownership_identity()?;
                     let needs_all_instances = mj_core::runtime::off_async_worker(|| {
                         self.config
                             .targets
@@ -434,7 +450,7 @@ impl Controller {
                             })
                             .and_then(|candidate| candidate.instance_id)
                             .as_deref()
-                            != Some(mj_core::config::instance_identity().as_str())
+                            != Some(identity.as_str())
                     });
                     let error =
                         unsupported_orphan_adoption(session_id, target_id, needs_all_instances);
@@ -988,6 +1004,7 @@ fn adopted_session_record(
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,

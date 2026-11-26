@@ -691,7 +691,7 @@ pub enum DashboardAction {
         scope: DetectScope,
         /// The SSH and EC2 machines in the Settings draft, whose runtimes a
         /// runtime detection probes as well as this machine's.
-        machines: Vec<(String, mj_core::config::Machine)>,
+        machines: Vec<(mj_core::config::MachineId, mj_core::config::Machine)>,
     },
     SaveSetup {
         generation: u64,
@@ -968,6 +968,15 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    /// Conversations the user is reading, as the last frame drew them. A card
+    /// entry for one of these is read even before its receipt catches up.
+    conversations_on_screen: BTreeSet<String>,
+    /// The daemon's cards as published. Readers use `notification_cards`.
+    published_cards: Option<
+        mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
+    >,
+    /// `published_cards` read through this client's own read frontier (see
+    /// `refresh_notification_cards`). Every reader of cards uses this map.
     pub(crate) notification_cards: Option<
         mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
     >,
@@ -1390,6 +1399,8 @@ impl DashboardState {
             stopped_records: Default::default(),
             unread_frontiers: Default::default(),
             notification_dismissals: Default::default(),
+            conversations_on_screen: BTreeSet::new(),
+            published_cards: None,
             notification_cards: None,
             form_holders: Default::default(),
             session_verdicts: Default::default(),

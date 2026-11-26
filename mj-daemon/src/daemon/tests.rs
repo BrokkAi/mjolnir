@@ -410,22 +410,33 @@ where
 fn in_held_close_child(test: &str, held: &str) -> bool {
     use mj_controller::controller::checkpoint::stand_in::{
         LATCH_RELAY_HOLD_COMMAND, LATCH_RELAY_HOLD_PATH, LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
-        LATE_HARNESS_NOTIFICATION,
+        LATCH_RELAY_MAX_PROTOCOL, LATE_HARNESS_NOTIFICATION,
     };
     const CHILD: &str = "MJ_TEST_HELD_CLOSE_CHILD";
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
-    mj_controller::controller::test_support::IsolatedTest::new(
+    let mut child = mj_controller::controller::test_support::IsolatedTest::new(
         mj_controller::controller::test_support::test_name(module_path!(), test),
     )
     .env(CHILD, "1")
     .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, LATE_HARNESS_NOTIFICATION)
     .env(LATCH_RELAY_HOLD_COMMAND, held)
     .env(LATCH_RELAY_HOLD_PATH, directory.path().join("relay-hold"))
-    .isolated_store(directory.path())
-    .run();
+    .isolated_store(directory.path());
+    if matches!(
+        test,
+        "a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes"
+            | "a_cancel_before_the_close_commits_leaves_the_session_running"
+            | "suspend_acceptance_survives_client_disconnect_during_checkpoint"
+    ) {
+        child = child.env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        );
+    }
+    child.run();
     false
 }
 
@@ -1646,6 +1657,7 @@ pub(crate) fn runtime_test_session(
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -2899,6 +2911,13 @@ set -eu
 case "$1 ${{2-}}" in
     'container inspect'|'container exists') exit 1 ;;
     'rm --force'|'info ') exit 0 ;;
+    # Absence comes from successful listings: no container, and the volumes
+    # whose state files exist.
+    'container ls') exit 0 ;;
+    'volume ls')
+        [ ! -f "$MJ_DEFERRED_CLEANUP_TEST_ROOT/volume" ] || echo '{container}-workspace'
+        [ ! -f "$MJ_DEFERRED_CLEANUP_TEST_ROOT/replacement-volume" ] || echo '{container}-replacement'
+        ;;
     'volume inspect')
         case "$5" in
             '{container}-workspace') file=volume ;;
@@ -3108,7 +3127,7 @@ async fn deferred_cleanup_serializes_queued_destroy_and_archive_without_holding_
                 content: vec![serde_json::json!({"type": "text", "text": "archive this session"})],
             },
         });
-    let archives = mj_core::config::sessions_dir();
+    let archives = mj_core::config::DataLayout::current().sessions_dir();
     fs::create_dir_all(&archives).unwrap();
     stopped.checkpoint = Some(Box::new(
         mj_controller::controller::test_support::write_checkpoint_archive_input(
@@ -3213,7 +3232,7 @@ async fn deferred_cleanup_inside_archive_yields_handoff_without_destroying_sessi
                 content: vec![serde_json::json!({"type": "text", "text": "archive this session"})],
             },
         });
-    let archives = mj_core::config::sessions_dir();
+    let archives = mj_core::config::DataLayout::current().sessions_dir();
     fs::create_dir_all(&archives).unwrap();
     stopped.checkpoint = Some(Box::new(
         mj_controller::controller::test_support::write_checkpoint_archive_input(
@@ -3346,6 +3365,14 @@ fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
 // Hard-won: #1321: a daemon stop cancelled a child launch and the failure did not say so.
 #[tokio::test]
 async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
+    #[cfg(windows)]
+    const SLEEP_CHILD: &str = "MJ_TEST_SHUTDOWN_CANCEL_SLEEP_CHILD";
+    #[cfg(windows)]
+    if std::env::var_os(SLEEP_CHILD).is_some() {
+        std::thread::sleep(Duration::from_secs(30));
+        return;
+    }
+
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
@@ -3442,11 +3469,24 @@ async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
         assert_eq!(cancelled.cancelled_restart_releases_intent(), restart);
 
         let executor = control.executor();
+        #[cfg(windows)]
+        let command = {
+            let name = mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "only_a_shutdown_cancel_reports_that_the_daemon_stopped",
+            );
+            let mut command = CommandSpec::new(
+                std::env::current_exe().unwrap().to_string_lossy(),
+                ["--exact", name.as_str(), "--nocapture"],
+            );
+            command.env.insert(SLEEP_CHILD.into(), "1".into());
+            command
+        };
+        #[cfg(not(windows))]
+        let command = CommandSpec::new("sh", ["-c", "sleep 30"]);
         let rollback = std::thread::spawn(move || {
             let started = std::time::Instant::now();
-            let result = executor
-                .shutdown_only()
-                .execute(&CommandSpec::new("sh", ["-c", "sleep 30"]));
+            let result = executor.shutdown_only().execute(&command);
             (result, started.elapsed())
         });
         std::thread::sleep(Duration::from_millis(300));
@@ -5046,38 +5086,9 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
         container: serde_json::from_value(serde_json::json!({})).unwrap(),
     };
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
-    let mut applied = mj_core::state::ContainerSettings::requested(&session);
-    applied.default_image = Some(Some("ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into()));
-    runtime.container_settings = Some(applied);
+    runtime.container_settings = Some(mj_core::state::ContainerSettings::requested(&session));
     session.target_runtime = Some(runtime.into());
     mj_controller::database::save_session(&session).unwrap();
-    // A historical default marker survives persistence and follows the
-    // retained agent-dev tag.
-    let recorded = mj_controller::database::load_session_record("session-1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        mj_core::state::ContainerSettings::requested(&recorded).default_image,
-        Some(Some(
-            mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE.to_owned()
-        ))
-    );
-    // Hard-won: review of a13f351: upgrading an agent-dev session onto buildpack-deps lost its hel account, home and control directory.
-    assert_eq!(
-        mj_core::state::ContainerSettings::upgrade_image(
-            &recorded,
-            mj_core::config::DEFAULT_SESSION_IMAGE
-        ),
-        mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE
-    );
-    let mut refreshed = mj_core::state::ContainerSettings::requested(&recorded);
-    refreshed.record_upgrade_image(mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE);
-    assert_eq!(
-        refreshed.default_image,
-        Some(Some(
-            mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE.to_owned()
-        ))
-    );
     let state = test_runtime_state();
     let controller = Controller {
         config: Config::default(),
@@ -5638,10 +5649,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         container: serde_json::from_value(serde_json::json!({})).unwrap(),
     };
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
-    let applied = mj_core::state::ContainerSettings::applied(
-        &session,
-        mj_core::config::DEFAULT_SESSION_IMAGE,
-    );
+    let applied = mj_core::state::ContainerSettings::requested(&session);
     runtime.container_settings = Some(applied.clone());
     session.target_runtime = Some(runtime.into());
     mj_controller::database::save_session(&session).unwrap();
@@ -5947,6 +5955,7 @@ fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
         assessment_state: None,
         notification_stack: None,
         native_use_evidence: None,
+        pending_prompt_context: None,
         event_frontier: 0,
         event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
         session: mj_core::archive::CanonicalSessionState {
@@ -9939,7 +9948,7 @@ fn in_isolated_live_parent_test(name: &str) -> bool {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    mj_controller::controller::test_support::IsolatedTest::new(
+    let mut child = mj_controller::controller::test_support::IsolatedTest::new(
         mj_controller::controller::test_support::test_name(module_path!(), name),
     )
     .env(LIVE_PARENT_CHILD, "1")
@@ -9954,8 +9963,21 @@ fn in_isolated_live_parent_test(name: &str) -> bool {
     )
     .env("HOME", &home)
     .env("XDG_DATA_HOME", home.join(".local/share"))
-    .env("XDG_CONFIG_HOME", home.join(".config"))
-    .run();
+    .env("XDG_CONFIG_HOME", home.join(".config"));
+    if matches!(
+        name,
+        "suspend_recovery_preserves_a_clones_unpushed_work"
+            | "suspend_recovery_preserves_a_published_clones_durable_review_refs"
+            | "a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running"
+            | "a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified"
+            | "accepted_suspend_failure_is_published_without_an_observer"
+    ) {
+        child = child.env(
+            mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        );
+    }
+    child.run();
     false
 }
 
@@ -10022,7 +10044,9 @@ fn relay_sealed(relay_root: &Path) -> bool {
 /// `hel` in the parent's worker root, which fails the way a full disk does.
 #[cfg(unix)]
 async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy) -> LiveParent {
-    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+    use mj_controller::controller::checkpoint::stand_in::{
+        LATCH_RELAY_MAX_PROTOCOL, LATCH_RELAY_SESSION, current_latch_archive_metadata,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -10053,6 +10077,12 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     let workspace = mj_controller::database::create_workspace("Parent suspension").unwrap();
     let mut parent =
         mj_controller::controller::test_support::checkpoint_test_session(LATCH_RELAY_SESSION);
+    let current_relay = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+        .ok()
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL);
+    // The stand-in does not implement the project-memory transfer transport.
+    parent.no_project_memory = current_relay;
     parent.workspace_id = workspace.id.clone();
     parent.target_template_id = "removed-local".into();
     parent.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
@@ -10070,11 +10100,20 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     }));
     parent.project_directory = Some(checkout);
     if recovery_copy == ParentRecoveryCopy::Installed {
+        let mut input = mj_controller::controller::test_support::checkpoint_archive_input(
+            LATCH_RELAY_SESSION,
+            2,
+            Vec::new(),
+            Vec::new(),
+        );
+        if current_relay {
+            current_latch_archive_metadata(&mut input);
+        }
         parent.checkpoint = Some(Box::new(
-            mj_controller::controller::test_support::write_checkpoint_gate_archive(
+            mj_controller::controller::test_support::write_checkpoint_archive_input(
                 &archives,
                 LATCH_RELAY_SESSION,
-                2,
+                &input,
             ),
         ));
     }
@@ -10291,7 +10330,9 @@ impl LiveClone {
 /// is a stand-in, while capture runs the real worker exporter.
 #[cfg(unix)]
 async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
-    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+    use mj_controller::controller::checkpoint::stand_in::{
+        LATCH_RELAY_MAX_PROTOCOL, LATCH_RELAY_SESSION,
+    };
     use mj_controller::controller::test_support::{committed_repository, test_git};
     use mj_core::worker_suspend as wire;
     use std::os::unix::fs::PermissionsExt;
@@ -10305,6 +10346,21 @@ async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
         std::fs::create_dir_all(path).unwrap();
     }
     seed_live_session(directory.path(), &relay_root);
+    let current_relay = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+        .ok()
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL);
+    if current_relay {
+        // The resumed stand-in says its native session was used, so the real
+        // exporter must find that session's rollout.
+        let native_sessions = worker_root.join("profile/sessions/2026/08/14");
+        std::fs::create_dir_all(&native_sessions).unwrap();
+        std::fs::write(
+            native_sessions.join("rollout-native-session.jsonl"),
+            b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-session\"}}\n",
+        )
+        .unwrap();
+    }
     let hel = worker_root.join("hel");
     std::fs::write(
         &hel,
@@ -10361,6 +10417,8 @@ async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
 
     let workspace = mj_controller::database::create_workspace("Clone suspension").unwrap();
     session.workspace_id = workspace.id.clone();
+    // The stand-in does not implement the project-memory transfer transport.
+    session.no_project_memory = current_relay;
     session.state = SessionState::Closing;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
@@ -10698,7 +10756,7 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
         &runtime_test_subagent(closed_id, LATCH_RELAY_SESSION),
     )
     .unwrap();
-    let data = mj_core::config::data_dir();
+    let data = mj_core::config::DataLayout::current().root().to_path_buf();
     mj_controller::database::tool_details::append_tool_detail(&data, closed_id, "detail", "{}")
         .unwrap();
 
@@ -11542,7 +11600,7 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     projection.applied_event_digest = format!("{:064x}", 1);
     projection.transcript.push(item.clone());
     mj_controller::database::save_materialized_session(&projection).unwrap();
-    let data_dir = mj_core::config::data_dir();
+    let data_dir = mj_core::config::DataLayout::current().root().to_path_buf();
     mj_controller::database::tool_details::append_tool_detail(
         &data_dir,
         closed_id,
@@ -11987,7 +12045,7 @@ async fn exercise_child_close_with_a_nested_workspace(
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
     let profile = mj_controller::targets::local_nested_profile_root(LATCH_RELAY_SESSION);
     std::fs::create_dir_all(&profile).unwrap();
-    let detail_data = mj_core::config::data_dir();
+    let detail_data = mj_core::config::DataLayout::current().root().to_path_buf();
     let detail_body = mj_core::transcript::TranscriptBody::System {
         text: "spilled child detail".into(),
     };
@@ -13931,7 +13989,7 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     parent.project_directory = Some(repository.path().to_owned());
     parent.updated_at = "2000-01-01T00:00:00Z".into();
-    let archives = mj_core::config::sessions_dir();
+    let archives = mj_core::config::DataLayout::current().sessions_dir();
     std::fs::create_dir_all(&archives).unwrap();
     let mut input = mj_controller::controller::test_support::checkpoint_archive_input(
         parent_id,
@@ -15255,7 +15313,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         subtle: None,
     });
     parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+        worker_root: mj_core::config::DataLayout::current().worker_root(parent_id),
     }));
     mj_controller::database::save_session(&parent).unwrap();
 
@@ -15576,9 +15634,11 @@ async fn daemon_api_exchange() {
         "DAEMON_TEST_KEY": {"from_secret": "daemon-only-key"}
     }))
     .unwrap();
-    fs::create_dir_all(mj_core::config::config_dir()).unwrap();
+    fs::create_dir_all(mj_core::config::ConfigLayout::current().root()).unwrap();
     fs::write(
-        mj_core::config::config_dir().join("secrets.toml"),
+        mj_core::config::ConfigLayout::current()
+            .root()
+            .join("secrets.toml"),
         r#"daemon-only-key = "daemon-secret-value""#,
     )
     .unwrap();
@@ -15794,7 +15854,8 @@ async fn daemon_api_exchange() {
         .unwrap()
         .replace("\\\\", "/")
         .replace(
-            &mj_core::config::config_dir()
+            &mj_core::config::ConfigLayout::current()
+                .root()
                 .to_string_lossy()
                 .replace('\\', "/"),
             "<daemon-config>",
@@ -15933,7 +15994,7 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
         .run();
         return;
     }
-    let _writer = mj_controller::database::start_database_writer().unwrap();
+    let _writer = mj_controller::database::install_isolated_test_writer();
     let state = test_runtime_state_loading_the_store();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -16008,7 +16069,10 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
         .unwrap();
     partial.write_all(&header).await.unwrap();
     partial.write_all(&archive[..80 * 1024]).await.unwrap();
-    let uploads = mj_core::config::data_dir().join("uploads");
+    let uploads = mj_core::config::DataLayout::current()
+        .root()
+        .to_path_buf()
+        .join("uploads");
     let upload_count = || {
         fs::read_dir(&uploads)
             .map(|files| files.count())
@@ -16047,7 +16111,7 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
     );
     assert!(mj_controller::upgrade::active_labels().is_empty());
     assert_eq!(
-        std::fs::read_dir(mj_core::config::sessions_dir())
+        std::fs::read_dir(mj_core::config::DataLayout::current().sessions_dir())
             .unwrap()
             .count(),
         0
@@ -16089,14 +16153,20 @@ async fn terminal_import_streams_cleans_up_and_refuses_registration_during_drain
             .is_some()
     );
     assert!(
-        mj_core::config::sessions_dir()
+        mj_core::config::DataLayout::current()
+            .sessions_dir()
             .join("import-session.hel.zip")
             .is_file()
     );
     assert_eq!(
-        std::fs::read_dir(mj_core::config::data_dir().join("uploads"))
-            .unwrap()
-            .count(),
+        std::fs::read_dir(
+            mj_core::config::DataLayout::current()
+                .root()
+                .to_path_buf()
+                .join("uploads")
+        )
+        .unwrap()
+        .count(),
         0
     );
     shutdown.cancel();
@@ -16185,7 +16255,10 @@ async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_stagi
         }
         // The client response and shutdown need not wait for the disposable
         // blocking probe. Wait for it to close the download and clean staging.
-        let staging = mj_core::config::data_dir().join("mbx-download");
+        let staging = mj_core::config::DataLayout::current()
+            .root()
+            .to_path_buf()
+            .join("mbx-download");
         tokio::time::timeout(Duration::from_secs(30), async {
             download.read_to_end(&mut Vec::new()).await.unwrap();
             while fs::read_dir(&staging).unwrap().count() != 0 {
@@ -16508,17 +16581,23 @@ async fn queued_resume_rechecks_state_after_suspend_before_reserving_capacity() 
         mj_core::test_hooks::install_fake_command(
             &bin,
             "podman",
-            r#"
+            &r#"
 printf '%s\n' "$*" >> "$MJ_TEST_QUEUED_RESUME_PODMAN_LOG"
 case "$*" in
     *".State.Running"*) printf 'false\n' ;;
+    "container ls "*) [ -f "$MJ_TEST_QUEUED_RESUME_REMOVED" ] || printf 'fakeid CONTAINER_NAME\n' ;;
+    "volume ls "*) ;;
     "container inspect --format "*|"volume inspect --format "*) printf 'true|queued-resume\n' ;;
     "container inspect "*|"container exists "*) [ ! -f "$MJ_TEST_QUEUED_RESUME_REMOVED" ] ;;
     "rm "*) : > "$MJ_TEST_QUEUED_RESUME_REMOVED" ;;
     "stop "*|"volume rm "*|"info"|"exec "*) exit 0 ;;
     *) printf 'unexpected podman arguments: %s\n' "$*" >&2; exit 92 ;;
 esac
-"#,
+"#
+            .replace(
+                "CONTAINER_NAME",
+                &mj_core::targets::resource_name("queued-resume").unwrap(),
+            ),
         );
         let path = std::env::join_paths(
             std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
@@ -17713,10 +17792,7 @@ async fn resolve_suspend_blockers_refuses_non_idle_borrower() {
     );
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent].state, SessionState::Parked);
-    assert_eq!(
-        stored.sessions[borrower].state,
-        SessionState::Provisioning
-    );
+    assert_eq!(stored.sessions[borrower].state, SessionState::Provisioning);
 }
 
 #[cfg(unix)]
@@ -17751,7 +17827,10 @@ async fn parent_suspend_records_only_children_it_stops_and_resume_keeps_failed_c
     }
     let failed_id = "44444444444444444444444444444444";
     let mut failed = runtime_test_session(failed_id, &workspace.id, SessionState::Parked);
-    let unbootable_root = mj_core::config::data_dir().join(failed_id);
+    let unbootable_root = mj_core::config::DataLayout::current()
+        .root()
+        .to_path_buf()
+        .join(failed_id);
     std::fs::create_dir(&unbootable_root).unwrap();
     failed.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: unbootable_root,
@@ -18103,7 +18182,10 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
         "codex".into(),
         mj_core::config::HarnessProfile::new(
             mj_core::config::HarnessKind::Codex,
-            mj_core::config::data_dir().join("profile"),
+            mj_core::config::DataLayout::current()
+                .root()
+                .to_path_buf()
+                .join("profile"),
         ),
     );
     config.save().unwrap();
@@ -18807,7 +18889,7 @@ async fn terminal_setup_and_viewer_round_trip_and_only_writes_refuse_during_drai
     gate.begin_draining();
     assert!(http.first_run_setup_due().await.is_ok());
     assert_eq!(http.config().await.unwrap().spinner, updated.spinner);
-    let paths = vec![mj_core::config::data_dir()];
+    let paths = vec![mj_core::config::DataLayout::current().root().to_path_buf()];
     assert_eq!(
         http.check_project_directories(paths.clone()).await.unwrap(),
         vec![(paths[0].clone(), true)]
@@ -19018,7 +19100,7 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
 
     let writer = mj_controller::database::install_isolated_test_writer();
     let workspace = mj_controller::database::create_workspace("Bootstrap").unwrap();
-    let data = mj_core::config::data_dir();
+    let data = mj_core::config::DataLayout::current().root().to_path_buf();
     let mut config = Config::default();
     config.profiles.insert(
         "codex".into(),
@@ -19037,8 +19119,9 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
     ] {
         let mut record = runtime_test_session(id, &workspace.id, state);
         record.project_directory = Some(data.clone());
+        // This only publishes target records; no worker is started or read.
         record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-            worker_root: data.join(id),
+            worker_root: format!("/mj-test/workers/{id}").into(),
         }));
         mj_controller::database::save_new_session(&record, None, false, false).unwrap();
     }

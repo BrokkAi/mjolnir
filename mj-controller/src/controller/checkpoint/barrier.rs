@@ -338,6 +338,13 @@ impl CheckpointDeferred {
         Self("Kimi background-agent state could not be synchronized; checkpoint requires a synchronized empty task list".into())
     }
 
+    pub(super) fn pending_context_worker_upgrade() -> Self {
+        Self(
+            "checkpoint deferred until the older worker is upgraded to save pending prompt context"
+                .into(),
+        )
+    }
+
     pub(super) fn background_snapshot(
         state: &mj_core::relay::RelayOperationalState,
         harness: HarnessKind,

@@ -29,7 +29,7 @@ pub const MANAGED_LABEL: &str = "dev.mj.managed";
 pub const SESSION_TAG: &str = "dev.mj.session";
 pub const MANAGED_TAG: &str = "dev.mj.managed";
 /// Which Mjolnir instance (named `--instance` or data-directory fingerprint)
-/// created a worker; see `config::instance_identity`.
+/// created a worker; see `config::InstanceIdentity`.
 pub const INSTANCE_LABEL: &str = "dev.mj.instance";
 pub const INSTANCE_TAG: &str = "dev.mj.instance";
 /// The shared in-container workspace every container session used before
@@ -4200,6 +4200,10 @@ pub enum TargetLocator {
         ssh: SshTarget,
         workspace: String,
     },
+    SshHostBare {
+        ssh: SshTarget,
+        data_root: PathBuf,
+    },
     SshBare {
         ssh: SshTarget,
         workspace: String,
@@ -4364,6 +4368,7 @@ impl TargetLocator {
             Self::AppleContainer { .. } => "apple-container",
             Self::AwsEc2 { .. } => "aws-ec2",
             Self::SshBare { .. } => "ssh-bare",
+            Self::SshHostBare { .. } => "ssh-host-bare",
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
             Self::SshAppleContainer { .. } => "ssh-apple-container",
@@ -4571,9 +4576,9 @@ pub fn locator_command(
             container_id,
             args,
         ),
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_owned(class, ssh, args)
-        }
+        TargetLocator::AwsEc2 { ssh, .. }
+        | TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. } => ssh_command_owned(class, ssh, args),
         TargetLocator::SshPodman {
             ssh, container_id, ..
         }
@@ -4601,6 +4606,9 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
     verify_locator(locator, session_id)?;
     Ok(match locator {
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
+        TargetLocator::SshHostBare { data_root, .. } => crate::target_path::text(
+            &crate::config::DataLayout::at(data_root).worker_root(session_id),
+        ),
         TargetLocator::LocalPodman { .. }
         | TargetLocator::LocalDocker { .. }
         | TargetLocator::AppleContainer { .. }

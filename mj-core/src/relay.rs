@@ -228,7 +228,14 @@ pub const RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL: u32 = 93;
 /// 94 adds `read_session` backward paging (`tail`/`before`), `max_message_chars`,
 /// `"self"`, and `role="dialogue"`.
 pub const RELAY_READ_SESSION_V2_PROTOCOL: u32 = 94;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_READ_SESSION_V2_PROTOCOL;
+/// The cut-checked checkpoint native-use reply also carries pending prompt context.
+pub const RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL: u32 = 95;
+/// 96 pages retained quota and steered input at a checkpoint cut.
+pub const RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL: u32 = 96;
+/// 97 pages the whole checkpoint mailbox, queued wake prompts included, from
+/// one serialization of the cut.
+pub const RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL: u32 = 97;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -275,7 +282,10 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 31 is breaking: older readers cannot replay CancelTurnTarget commands.
 // Revision 32 is breaking: older readers cannot preserve delegated authorization
 // or replay a PostToolUse lease that claims the non-parent partition.
-pub const RELAY_STATE_VERSION: u32 = 32;
+// Revision 33 is breaking: older readers reject `accepted_launch`, and older
+// writers would drop it, so a later start could restore another harness's model.
+// Revision 34 is breaking: older workers cannot preserve quota-interrupted or injected steer input.
+pub const RELAY_STATE_VERSION: u32 = 34;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -481,6 +491,9 @@ pub struct RestoredRelaySeed {
     /// Seeds from older releases omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_use_evidence: Option<NativeSessionUseEvidence>,
+    /// Context awaiting the first prompt, whether or not native history continues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_prompt_context: Option<String>,
 }
 
 impl RestoredRelaySeed {

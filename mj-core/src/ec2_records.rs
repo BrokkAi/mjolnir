@@ -13,7 +13,7 @@ use crate::targets::{SshTarget, TargetLocator};
 
 /// Directory holding one `<operation>/resources.json` record per managed host.
 pub fn ec2_records_dir() -> PathBuf {
-    crate::config::config_dir().join("ec2")
+    crate::config::ConfigLayout::current().ec2_dir()
 }
 
 /// The EC2 instance behind a target and where to reach the AWS API for it.
@@ -70,7 +70,8 @@ pub fn lookup_ec2_host_for_locator_in(
         }),
         TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshNitro { ssh, .. }
-        | TargetLocator::SshBare { ssh, .. } => ssh_identity_files(ssh)
+        | TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. } => ssh_identity_files(ssh)
             .into_iter()
             .find_map(|identity| record_for_identity(&identity, records_root)),
         _ => None,
@@ -208,6 +209,10 @@ mod tests {
                 ssh: ssh(&["-i", key]),
                 workspace: "/w".into(),
                 worker_id: None,
+            },
+            TargetLocator::SshHostBare {
+                ssh: ssh(&["-i", key]),
+                data_root: "/old".into(),
             },
         ] {
             assert_eq!(

@@ -100,7 +100,6 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     /// Puts the draft back on the review step. A move re-requests its
     /// preparation, because the draft it was prepared for has changed.
     fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction;
-    fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind>;
     /// The step Back leaves the review for.
     fn review_back_step(&self, dashboard: &DashboardState) -> WizardStep;
     /// Records a draft edit, cancelling whatever background answer it makes
@@ -195,19 +194,6 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
         mj_core::path_completion::CompletionKind,
     )> {
         None
-    }
-}
-
-fn declare_sandbox_offer<W: WizardDraft>(
-    dashboard: &DashboardState,
-    wizard: &W,
-    form: &mut Dialog<WizardControl>,
-) {
-    if dashboard
-        .sandbox_offer(wizard)
-        .is_some_and(|offer| offer.alternative.is_some())
-    {
-        form.declare_with_enabled(WizardControl::UseSandboxedTarget, ControlKind::Button, true);
     }
 }
 
@@ -351,18 +337,6 @@ impl WizardDraft for NewWizard {
             self.step = WizardStep::Launching;
         }
         dashboard.keep(self)
-    }
-
-    fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind> {
-        let id = self.selected_profile_id(dashboard)?;
-        if id.is_empty() {
-            return None;
-        }
-        dashboard
-            .config
-            .profiles
-            .get(&id)
-            .map(|profile| profile.kind)
     }
 
     /// A bare project target reviews a directory; every other target reviews
@@ -860,7 +834,6 @@ impl WizardDraft for NewWizard {
                     .is_some_and(|options| options.available),
             );
         }
-        declare_sandbox_offer(dashboard, self, form);
         self.subagents.declare(form);
         let target = dashboard.config.targets.get(&self.target);
         if target.is_some_and(offers_attached_directories) {
@@ -980,13 +953,6 @@ impl WizardDraft for ResumeWizard {
         }
         let profile_id = self.destination_profile(dashboard);
         dashboard.request_move_preparation_for_review(self, profile_id)
-    }
-
-    fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind> {
-        dashboard
-            .resume_wizard_profiles(self)
-            .get(self.profile)
-            .map(|(_, kind)| *kind)
     }
 
     /// Resume has no bundle or project step, so Back returns to the target
@@ -1126,7 +1092,6 @@ impl WizardDraft for ResumeWizard {
         dashboard: &DashboardState,
         form: &mut Dialog<WizardControl>,
     ) -> bool {
-        declare_sandbox_offer(dashboard, self, form);
         if self.subagent_choice_applies(dashboard) {
             self.subagents.declare(form);
         }

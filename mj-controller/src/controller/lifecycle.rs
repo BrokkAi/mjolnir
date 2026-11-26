@@ -198,6 +198,7 @@ impl Controller {
                         PathBuf::from(crate::controller::network_git::workspace_root(
                             &backend,
                             session.container_workspace.as_deref(),
+                            &session.id,
                         ));
                     bundle
                         .repositories
@@ -258,6 +259,7 @@ impl Controller {
                                 PathBuf::from(crate::controller::network_git::workspace_root(
                                     &backend,
                                     session.container_workspace.as_deref(),
+                                    &session.id,
                                 ));
                             bundle
                                 .repositories
@@ -288,7 +290,9 @@ impl Controller {
                                 .and_then(|locator| {
                                     backend_locator(locator, session, &self.config).ok().map(
                                         |backend| {
-                                            PathBuf::from(targets::workspace_root(&backend, None))
+                                            PathBuf::from(targets::workspace_root(
+                                                &backend, None, session_id,
+                                            ))
                                         },
                                     )
                                 })
@@ -3268,7 +3272,7 @@ impl Controller {
             );
         }
         super::checkpoint::remove_session_checkpoint_archives(
-            &mj_core::config::sessions_dir(),
+            &mj_core::config::DataLayout::current().sessions_dir(),
             session_id,
             session.checkpoint.as_deref(),
         )?;
@@ -3427,8 +3431,8 @@ impl Controller {
             return Ok(());
         }
 
-        let resolve = |target, template, runtime| {
-            super::backend::recorded_backend_locator(target, id, template, runtime, &self.config)
+        let resolve = |target, template, machine, runtime| {
+            super::backend::recorded_backend_locator(target, id, template, machine, runtime, &self.config)
                 .inspect_err(|error| {
                     tracing::debug!(session_id = id, %error, "could not resolve a candidate Move credential host");
                 })
@@ -3441,6 +3445,7 @@ impl Controller {
                 resolve(
                     placement.target.as_ref()?,
                     &placement.target_template_id,
+                    placement.machine_id.as_ref(),
                     placement.runtime.as_ref(),
                 )
             })
@@ -3450,6 +3455,10 @@ impl Controller {
                 candidates.extend(resolve(
                     source,
                     &operation.source_target_template_id,
+                    operation
+                        .recovery_session
+                        .as_ref()
+                        .and_then(|session| session.machine_id.as_ref()),
                     operation
                         .recovery_session
                         .as_ref()
@@ -3469,6 +3478,7 @@ impl Controller {
                         .target_template_id
                         .as_deref()
                         .unwrap_or(&retired.target_template_id),
+                    None,
                     prepared.map(|destination| &destination.runtime),
                 ));
             }
@@ -3665,7 +3675,7 @@ impl Controller {
                 )?;
                 retire_worker_restart_intent(session_id)?;
                 super::checkpoint::remove_session_checkpoint_archives(
-                    &mj_core::config::sessions_dir(),
+                    &mj_core::config::DataLayout::current().sessions_dir(),
                     session_id,
                     session.checkpoint.as_deref(),
                 )?;
@@ -3858,7 +3868,7 @@ pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
 fn finish_retired_session_destroy(session_id: &str) -> Result<()> {
     let checkpoint = crate::database::load_session_checkpoint(session_id)?;
     super::checkpoint::remove_session_checkpoint_archives(
-        &mj_core::config::sessions_dir(),
+        &mj_core::config::DataLayout::current().sessions_dir(),
         session_id,
         checkpoint.as_ref(),
     )?;

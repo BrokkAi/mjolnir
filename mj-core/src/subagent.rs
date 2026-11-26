@@ -1584,7 +1584,7 @@ pub fn failed_turn(
         {
             PromptCompletion::Finished | PromptCompletion::InputRequired => return None,
             PromptCompletion::Cancelled => ("interrupted", "the turn was cancelled".to_owned()),
-            PromptCompletion::QuotaLimit | PromptCompletion::Error => (
+            PromptCompletion::QuotaLimit | PromptCompletion::Refused | PromptCompletion::Error => (
                 "failed",
                 format!("the turn ended with stop reason {stop_reason:?}"),
             ),

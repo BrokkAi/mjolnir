@@ -129,8 +129,16 @@ pub fn target_recovery_plan(
     let container_id = endpoint.container_id;
     let (exists, inspect, start) = match endpoint.engine {
         "podman" => (
-            CommandSpec::new("podman", ["container", "exists", container_id])
-                .purpose("check for Mjolnir session container"),
+            CommandSpec::new(
+                "sh",
+                [
+                    "-c",
+                    &format!("{}\npodman_resource_exists container \"$1\"", super::cleanup::PODMAN_RESOURCE_EXISTS_SCRIPT),
+                    "mj-podman-exists",
+                    container_id,
+                ],
+            )
+            .purpose("check for Mjolnir session container"),
             CommandSpec::new("podman", ["container", "inspect", container_id])
                 .purpose("inspect Mjolnir session container"),
             CommandSpec::new("podman", ["start", container_id])
@@ -188,9 +196,9 @@ pub fn ensure_recovery_target_running(
         .context("check whether container session target exists")?;
     match existence.status {
         0 => {}
-        // `podman container exists` deliberately reserves 1 for absence and
-        // uses 125 for invocation or storage failures. SSH preserves the
-        // remote exit status, so this contract also covers remote Podman.
+        // Podman existence plans report 1 only from a successful engine
+        // listing; `podman exists` itself also returns 1 when its rootless
+        // runtime is broken (#1708). SSH preserves the remote status.
         1 => return Ok(TargetRecoveryOutcome::Missing),
         _ => {
             checked_command_output(&plan.exists, existence)

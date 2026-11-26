@@ -340,6 +340,12 @@ pub struct DurableRelay {
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
+    /// The accepted model and effort the ACP runtime starts each bridge from.
+    /// Shared with the runtime, but only this relay retires values from it,
+    /// in the same step that retires them from the snapshot's durable
+    /// `config`. A reset held only in memory came back at the next worker
+    /// start (#1704).
+    accepted_config: Arc<std::sync::Mutex<crate::acp::AcceptedSessionConfig>>,
     pub(crate) jev_disabled: bool,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
@@ -399,6 +405,9 @@ pub struct DurableRelay {
     /// The barrier whose cut background work started after. See
     /// `checkpoint_hold`.
     cut_spoiled_for: Option<String>,
+    /// The serialized mailbox read of the ready barrier's cut. See
+    /// `checkpoint_hold`.
+    checkpoint_mailbox_text: Option<checkpoint_hold::CheckpointMailboxText>,
     /// The background work the relay last saw, to tell work that starts from
     /// work already running. See `checkpoint_hold`.
     known_background_work: BTreeSet<String>,
@@ -878,6 +887,15 @@ impl DurableRelay {
                 // The accepted model and effort the worker pins on its first
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
+                // The cut has settled or recovered the old dispatch. Its
+                // command attachment is local to that dispatch, not the seed.
+                snapshot.pending_prompt_context =
+                    restored
+                        .pending_prompt_context
+                        .map(|text| PendingPromptContext {
+                            text,
+                            attached_command_id: None,
+                        });
                 snapshot.restored_native_session_unused = restored.native_session_unused;
                 if let Some(evidence) = restored.native_use_evidence {
                     snapshot.native_session_used = evidence.usage == NativeSessionUse::Used;
@@ -951,6 +969,41 @@ impl DurableRelay {
                     snapshot.pending_mailbox_events = mailbox.pending_events;
                     snapshot.delivered_mailbox_event_keys = mailbox.delivered_event_keys;
                     snapshot.mailbox_prompt_contexts = mailbox.prompt_contexts;
+                    snapshot.quota_interrupted_input = mailbox
+                        .quota_input
+                        .pending
+                        .into_iter()
+                        .map(serde_json::from_value)
+                        .collect::<serde_json::Result<_>>()?;
+                    snapshot.frozen_prompt_contexts = mailbox.quota_input.frozen_prompt_contexts;
+                    snapshot.steered_prompt_contexts = mailbox
+                        .quota_input
+                        .steered
+                        .into_iter()
+                        .map(|(id, blocks)| {
+                            Ok((
+                                id,
+                                blocks
+                                    .into_iter()
+                                    .map(serde_json::from_value)
+                                    .collect::<serde_json::Result<_>>()?,
+                            ))
+                        })
+                        .collect::<serde_json::Result<_>>()?;
+                    snapshot.quota_prompt_contexts = mailbox
+                        .quota_input
+                        .claimed
+                        .into_iter()
+                        .map(|(id, blocks)| {
+                            Ok((
+                                id,
+                                blocks
+                                    .into_iter()
+                                    .map(serde_json::from_value)
+                                    .collect::<serde_json::Result<_>>()?,
+                            ))
+                        })
+                        .collect::<serde_json::Result<_>>()?;
                 }
             }
             snapshot
@@ -1089,6 +1142,7 @@ impl DurableRelay {
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
             verdict_harness: None,
+            accepted_config: Default::default(),
             jev_disabled: mj_core::jev::disabled_by_environment(),
             authentication_login_path: None,
             login_identity: Default::default(),
@@ -1111,6 +1165,7 @@ impl DurableRelay {
             held_writes: VecDeque::new(),
             hold_ended_for: None,
             cut_spoiled_for: None,
+            checkpoint_mailbox_text: None,
             known_background_work: BTreeSet::new(),
             #[cfg(test)]
             stage_snapshot_every_append: false,
@@ -1837,6 +1892,12 @@ impl DurableRelay {
         self.turn_context.clone()
     }
 
+    /// The accepted model and effort shared with the ACP runtime. See
+    /// [`DurableRelay::adopt_launch`].
+    pub fn accepted_config(&self) -> Arc<std::sync::Mutex<crate::acp::AcceptedSessionConfig>> {
+        self.accepted_config.clone()
+    }
+
     pub fn acp_activity_clock(&self) -> AcpActivityClock {
         self.acp_activity.clone()
     }
@@ -1975,8 +2036,12 @@ impl DurableRelay {
         {
             return Ok(());
         }
+        let old_evidence = self.snapshot.native_use_evidence.clone();
         self.snapshot.native_session_used = true;
         self.snapshot.record_native_use(NativeSessionUse::Used);
+        if self.snapshot.native_use_evidence != old_evidence {
+            self.spoil_checkpoint_cut()?;
+        }
         self.persist_snapshot()
     }
 

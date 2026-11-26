@@ -57,6 +57,70 @@ fn observation_can_wait(observation: &RelayObservation) -> bool {
     )
 }
 
+/// The serialized `CheckpointMailboxRead` for one barrier and cut.
+pub(super) struct CheckpointMailboxText {
+    barrier_command_id: String,
+    cut: RelayCursor,
+    json: String,
+}
+
+/// One frame's worth of `text` from `offset`, which must be a character
+/// boundary at or before the end. Sized by the escaped length each character
+/// takes in the response and checked against the real frame, so a page never
+/// fits only by an estimate. `Err` carries a refusal for the caller.
+pub(super) fn checkpoint_mailbox_page(
+    text: &str,
+    offset: usize,
+    request_id: &str,
+    protocol_version: u32,
+) -> Result<std::result::Result<RelayResponsePayload, &'static str>> {
+    let response = |page: String, next_offset: Option<u64>| RelayResponseEnvelope {
+        request_id: request_id.to_owned(),
+        protocol_version,
+        body: RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CheckpointMailboxPage { page, next_offset },
+        },
+    };
+    // The widest next offset, and the newline that ends the frame.
+    let fixed = serde_json::to_vec(&response(String::new(), Some(u64::MAX)))?
+        .len()
+        .saturating_add(1);
+    let budget = MAX_FRAME_BYTES.saturating_sub(fixed);
+    let mut used = 0usize;
+    let mut end = offset;
+    for (index, character) in text[offset..].char_indices() {
+        let escaped = match character {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            control if control < ' ' => 6,
+            other => other.len_utf8(),
+        };
+        if used + escaped > budget {
+            break;
+        }
+        used += escaped;
+        end = offset + index + character.len_utf8();
+    }
+    if end == offset && offset != text.len() {
+        return Ok(Err(
+            "checkpoint mailbox page cannot fit in a relay response frame",
+        ));
+    }
+    let next_offset = (end < text.len()).then_some(end as u64);
+    let page = text[offset..end].to_owned();
+    let frame = serde_json::to_vec(&response(page.clone(), next_offset))?
+        .len()
+        .saturating_add(1);
+    if frame > MAX_FRAME_BYTES {
+        return Ok(Err(
+            "checkpoint mailbox page cannot fit in a relay response frame",
+        ));
+    }
+    Ok(Ok(RelayResponsePayload::CheckpointMailboxPage {
+        page,
+        next_offset,
+    }))
+}
+
 impl DurableRelay {
     /// Whether the worker's own writes wait for the checkpoint barrier: a
     /// barrier is ready, and nothing has ended its hold early.
@@ -78,8 +142,9 @@ impl DurableRelay {
         if !self.at_checkpoint_cut(barrier_command_id, expected) {
             return Some("close does not match the current checkpoint cut");
         }
-        (self.cut_spoiled_for.as_deref() == self.snapshot.checkpoint_barrier.as_deref())
-            .then_some("background work started after the checkpoint cut")
+        (self.cut_spoiled_for.as_deref() == self.snapshot.checkpoint_barrier.as_deref()).then_some(
+            "background work started after the checkpoint cut or checkpoint state changed",
+        )
     }
 
     /// Whether relay state is still exactly the cut this barrier made: the
@@ -110,18 +175,7 @@ impl DurableRelay {
         if !self.at_checkpoint_cut(barrier_command_id, cut) {
             return Ok(Err("the relay is no longer at this checkpoint cut"));
         }
-        let mut pending_events = self
-            .snapshot
-            .mailbox_hook_lease
-            .as_ref()
-            .map(|lease| lease.events.clone())
-            .unwrap_or_default();
-        pending_events.extend(self.snapshot.pending_mailbox_events.iter().cloned());
-        let mailbox = mj_core::archive::CanonicalMailbox {
-            pending_events,
-            delivered_event_keys: self.snapshot.delivered_mailbox_event_keys.clone(),
-            prompt_contexts: self.snapshot.mailbox_prompt_contexts.clone(),
-        };
+        let mailbox = self.mailbox_at_cut();
         // The answer travels in one relay frame, which the relay snapshot that
         // holds these fields may exceed. Refuse with an answer rather than a
         // frame the transport would drop.
@@ -133,21 +187,123 @@ impl DurableRelay {
         Ok(Ok(mailbox))
     }
 
-    /// The worker-owned native-session-use evidence at a ready barrier's cut.
+    /// The mail held now, which at a cut is the mail at the cut. Events leased
+    /// to a hook come first.
+    fn mailbox_at_cut(&self) -> mj_core::archive::CanonicalMailbox {
+        let mut pending_events = self
+            .snapshot
+            .mailbox_hook_lease
+            .as_ref()
+            .map(|lease| lease.events.clone())
+            .unwrap_or_default();
+        pending_events.extend(self.snapshot.pending_mailbox_events.iter().cloned());
+        mj_core::archive::CanonicalMailbox {
+            pending_events,
+            delivered_event_keys: self.snapshot.delivered_mailbox_event_keys.clone(),
+            prompt_contexts: self.snapshot.mailbox_prompt_contexts.clone(),
+            quota_input: Default::default(),
+        }
+    }
+
+    /// Everything a checkpoint reads from the worker's mailbox at the cut,
+    /// serialized once per barrier and cut. The pages of a read are slices of
+    /// this text, so reading a large mailbox costs one serialization, not one
+    /// per page. A request for another barrier or cut replaces it; the relay
+    /// drops it as soon as it journals anything, which ends the cut and with
+    /// it every barrier, and refuses a request for a cut it has moved past.
+    /// The outer error is a serialization failure; the inner one is that
+    /// refusal.
+    pub(super) fn checkpoint_mailbox_text(
+        &mut self,
+        barrier_command_id: &str,
+        cut: &RelayCursor,
+    ) -> Result<std::result::Result<&str, &'static str>> {
+        if !self.at_checkpoint_cut(barrier_command_id, cut) {
+            self.checkpoint_mailbox_text = None;
+            return Ok(Err("the relay is no longer at this checkpoint cut"));
+        }
+        if !self.checkpoint_mailbox_text.as_ref().is_some_and(|cached| {
+            cached.barrier_command_id == barrier_command_id && &cached.cut == cut
+        }) {
+            self.checkpoint_mailbox_text = None;
+            // The controller holds the cut's queued wakes as projection rows
+            // without payloads, so the worker supplies the prompt of each one
+            // its queue holds, from the same cut as the mailbox.
+            let mut wake_prompts = std::collections::BTreeMap::new();
+            // Only the current queue: `dispatches` also keeps settled commands.
+            for queued in &self.snapshot.queued_prompts {
+                let command_id = &queued.command_id;
+                if !mj_core::continuation::carries_mailbox_wake(command_id) {
+                    continue;
+                }
+                let Some(prompt) = self
+                    .snapshot
+                    .dispatches
+                    .get(command_id)
+                    .and_then(|dispatch| dispatch.command.prompt_blocks())
+                    .filter(|p| !p.is_empty())
+                else {
+                    continue;
+                };
+                wake_prompts.insert(
+                    command_id.clone(),
+                    prompt
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<serde_json::Result<Vec<_>>>()?,
+                );
+            }
+            let mut mailbox = self.mailbox_at_cut();
+            mailbox.quota_input = serde_json::from_value(serde_json::json!({
+                "pending": self.snapshot.quota_interrupted_input,
+                "claimed": self.snapshot.quota_prompt_contexts,
+                "steered": self.snapshot.steered_prompt_contexts,
+                "frozen_prompt_contexts": self.snapshot.frozen_prompt_contexts,
+            }))?;
+            let json = serde_json::to_string(&mj_core::relay::CheckpointMailboxRead {
+                mailbox,
+                wake_prompts,
+            })?;
+            self.checkpoint_mailbox_text = Some(CheckpointMailboxText {
+                barrier_command_id: barrier_command_id.to_owned(),
+                cut: cut.clone(),
+                json,
+            });
+        }
+        Ok(Ok(self
+            .checkpoint_mailbox_text
+            .as_ref()
+            .map_or("", |cached| cached.json.as_str())))
+    }
+
+    /// The worker-owned native-use evidence and pending context at the same cut.
     pub(super) fn checkpoint_native_use(
         &self,
         barrier_command_id: &str,
         cut: &RelayCursor,
-    ) -> std::result::Result<Option<mj_core::relay::NativeSessionUseEvidence>, &'static str> {
-        if !self.at_checkpoint_cut(barrier_command_id, cut) {
+    ) -> std::result::Result<
+        (
+            Option<mj_core::relay::NativeSessionUseEvidence>,
+            Option<&str>,
+        ),
+        &'static str,
+    > {
+        if !self.at_checkpoint_cut(barrier_command_id, cut)
+            || self.cut_spoiled_for.as_deref() == Some(barrier_command_id)
+        {
             return Err("the relay is no longer at this checkpoint cut");
         }
-        Ok(self.snapshot.native_use_evidence.clone())
+        Ok((
+            self.snapshot.native_use_evidence.clone(),
+            self.snapshot
+                .pending_prompt_context
+                .as_ref()
+                .map(|context| context.text.as_str()),
+        ))
     }
 
-    /// Spoil the ready barrier's cut: end its hold and remember that work
-    /// started after it, which a journal frontier cannot show.
-    fn spoil_checkpoint_cut(&mut self) -> Result<()> {
+    /// Spoil the ready barrier's cut for changes the frontier cannot show.
+    pub(super) fn spoil_checkpoint_cut(&mut self) -> Result<()> {
         if self.snapshot.checkpoint_ready_through.is_none() {
             return Ok(());
         }

@@ -398,6 +398,7 @@ impl RuntimeState {
                         &**target,
                         mj_core::state::TargetLocator::LocalBare { .. }
                             | mj_core::state::TargetLocator::SshBare { .. }
+                            | mj_core::state::TargetLocator::SshHostBare { .. }
                             | mj_core::state::TargetLocator::AwsEc2 { .. }
                     )),
                     "Restart cannot replace a missing or unreachable container; the retained filesystem was not changed. Recover the original container or explicitly resume its checkpoint."

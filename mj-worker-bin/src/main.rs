@@ -740,6 +740,10 @@ fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(WORKER_RUNTIME_THREADS)
+        // Tokio's 2 MiB default overflows in debug reload preparation through
+        // harness installation and run_bounded_observed; 8 MiB matches the
+        // Linux main-thread stack used for initial startup.
+        .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()
         .context("build Tokio runtime")?;

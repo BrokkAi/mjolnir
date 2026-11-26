@@ -348,6 +348,7 @@ mod tests {
             assessment_state: None,
             notification_stack: None,
             native_use_evidence: None,
+            pending_prompt_context: None,
             event_frontier: bodies.len() as u64 + 10,
             event_frontier_digest: "a".repeat(64),
             session: CanonicalSessionState {

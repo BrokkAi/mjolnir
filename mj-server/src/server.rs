@@ -263,8 +263,10 @@ impl ServerOptions {
     pub async fn load_cookie_credentials(&mut self, path: PathBuf) -> AnyResult<()> {
         let (key, revocations) = mj_core::runtime::spawn_blocking(move || {
             let key = load_or_create_cookie_key(&path)?;
-            let revocations =
-                ViewerRevocations::load(path.with_file_name("phone-cookie-revocations.json"))?;
+            let beside_key = path.parent().unwrap_or(std::path::Path::new("."));
+            let revocations = ViewerRevocations::load(
+                mj_core::config::DataLayout::at(beside_key).phone_cookie_revocations(),
+            )?;
             Ok::<_, anyhow::Error>((key, revocations))
         })
         .await

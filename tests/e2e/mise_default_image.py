@@ -164,7 +164,7 @@ destination = "fixture"
                 wait(ready, f"{kind} ACP session ready")
                 cid = container(session)
                 image = run(["podman", "inspect", "--format", "{{.ImageName}}", cid]).strip()
-                assert image == "docker.io/library/buildpack-deps:noble", image
+                assert image == "ghcr.io/brokkai/mjolnir/session-base:latest", image
                 worker_root = f"/var/lib/hel/workers/{session}"
                 startup = run(["podman", "exec", cid, "cat", worker_root + "/worker-startup.json"])
                 assert "Install project tools" in startup, startup

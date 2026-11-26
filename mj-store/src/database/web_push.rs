@@ -1058,7 +1058,7 @@ mod tests {
             "INSERT INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,'legacy','{}',0)",
             [&subscription.endpoint],
         ).unwrap();
-        let error = schema::migrate_schema(&db).unwrap_err();
+        let error = schema::migrate_schema(&db, None).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1073,7 +1073,7 @@ mod tests {
 
         // Test the remaining compatible revisions before the separate fence
         // for checkpoint mail.
-        let error = schema::migrate_schema(&db).unwrap_err();
+        let error = schema::migrate_schema(&db, None).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1085,7 +1085,7 @@ mod tests {
         let before_mail = schema::read_schema_state(&db).unwrap();
         assert_eq!(before_mail.revision, 141);
         before_mail.ensure_supported_by(137).unwrap();
-        schema::migrate_schema(&db).unwrap();
+        schema::migrate_schema(&db, None).unwrap();
 
         let mut runtime = runtime(true);
         runtime.metadata.notification_cards = None;

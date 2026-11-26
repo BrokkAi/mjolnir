@@ -1062,9 +1062,9 @@ fn the_shared_preflight_probe_helper_frames_large_noisy_output_from_a_real_shell
 
 #[test]
 fn managed_resource_identity_args_build_container_labels() {
-    let instance = mj_core::config::instance_identity();
+    let instance = "test-instance";
     assert_eq!(
-        managed_resource_identity_args(ManagedResourceKind::Container, SESSION),
+        managed_resource_identity_args(ManagedResourceKind::Container, SESSION, instance),
         vec![
             "--label".to_owned(),
             "dev.mj.session=018f9dd2-a3b4-7c8d-9000-123456789abc".to_owned(),
@@ -1108,7 +1108,9 @@ fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(local.exists.args, ["container", "exists", name.as_str()]);
+    assert_eq!(local.exists.program, "sh");
+    assert_eq!(local.exists.args.last().unwrap(), &name);
+    assert!(local.exists.args[1].contains("podman_resource_exists container \"$1\""));
     assert_eq!(local.inspect.args, ["container", "inspect", name.as_str()]);
     assert_eq!(local.start.args, ["start", name.as_str()]);
 
@@ -1124,10 +1126,9 @@ fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
     .unwrap()
     .unwrap();
     assert_eq!(remote.exists.program, "ssh");
-    assert_eq!(
-        unwrapped_remote_line(remote.exists.args.last().unwrap()),
-        format!("'podman' 'container' 'exists' '{name}'")
-    );
+    let remote_exists = unwrapped_remote_line(remote.exists.args.last().unwrap());
+    assert!(remote_exists.contains("podman_resource_exists container"));
+    assert!(remote_exists.ends_with(&format!("'mj-podman-exists' '{name}'")));
     assert_eq!(remote.inspect.program, "ssh");
     assert_eq!(
         unwrapped_remote_line(remote.inspect.args.last().unwrap()),
@@ -1312,6 +1313,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
             workspace_storage: Default::default(),
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1325,7 +1327,8 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
             .windows(2)
             .any(|args| args == ["--name", &name])
     );
-    let identity = managed_resource_identity_args(ManagedResourceKind::Container, SESSION);
+    let identity =
+        managed_resource_identity_args(ManagedResourceKind::Container, SESSION, "test-instance");
     assert!(
         plan.commands[0]
             .args
@@ -1368,6 +1371,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
     let local = provision_plan(
         &TargetTemplate::LocalPodman(container.clone()),
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1400,6 +1404,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
             container,
         },
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1461,7 +1466,15 @@ fn container_plans_for(workspace: Option<&Path>) -> Vec<(&'static str, CommandPl
     .map(|(engine, template)| {
         (
             engine,
-            provision_plan(&template, SESSION, &bundle(), &[], workspace).unwrap(),
+            provision_plan(
+                &template,
+                SESSION,
+                "test-instance",
+                &bundle(),
+                &[],
+                workspace,
+            )
+            .unwrap(),
         )
     })
     .collect()
@@ -1540,6 +1553,7 @@ fn podman_host_helper_creates_the_exact_workspace_before_launch() {
             },
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1609,7 +1623,7 @@ fn container_secret_is_streamed_without_entering_remote_ssh_arguments() {
             workspace_storage: Default::default(),
         },
     };
-    let mut plan = provision_plan(&target, SESSION, &bundle(), &[], None).unwrap();
+    let mut plan = provision_plan(&target, SESSION, "test-instance", &bundle(), &[], None).unwrap();
 
     plan.provide_target_environment_secret(&target, "GH_TOKEN", secret)
         .unwrap();
@@ -1644,6 +1658,7 @@ fn podman_plan_only_marks_per_repository_clone_commands_for_parallel_execution()
             workspace_storage: Default::default(),
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1690,6 +1705,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
             workspace_storage: Default::default(),
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1714,6 +1730,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
             },
         },
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1736,6 +1753,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
             workspace_storage: Default::default(),
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -1815,6 +1833,7 @@ fn an_automatic_pull_policy_never_pulls_during_a_launch() {
                 },
                 "container-name",
                 SESSION,
+                "test-instance",
                 &[],
                 None,
                 "/workspace",
@@ -1855,6 +1874,7 @@ fn an_explicit_newer_pull_policy_still_pulls_during_a_launch() {
             },
             "container-name",
             SESSION,
+            "test-instance",
             &[],
             None,
             "/workspace",
@@ -1887,6 +1907,7 @@ fn explicit_podman_pull_policy_overrides_image_tag_defaults() {
             },
             "container-name",
             SESSION,
+            "test-instance",
             &[],
             None,
             "/workspace",
@@ -1922,6 +1943,7 @@ fn docker_pull_policy_uses_supported_digest_aware_run_modes() {
             },
             "container-name",
             SESSION,
+            "test-instance",
             &[],
             None,
             "/workspace",
@@ -1950,6 +1972,7 @@ fn podman_containers_use_root_in_the_default_namespace() {
         &template,
         "container-name",
         SESSION,
+        "test-instance",
         &[],
         None,
         "/workspace",
@@ -1981,6 +2004,7 @@ fn podman_containers_use_root_in_the_default_namespace() {
             &template,
             "container-name",
             SESSION,
+            "test-instance",
             &[],
             None,
             "/workspace",
@@ -2036,6 +2060,7 @@ fn podman_additional_mounts_use_copy_on_write_overlay_volumes() {
             workspace_storage: Default::default(),
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &mounts,
         None,
@@ -2136,6 +2161,7 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
             workspace_storage: Default::default(),
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &mounts,
         None,
@@ -2393,6 +2419,7 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
             workspace_storage: Default::default(),
         }),
         SESSION,
+        "test-instance",
         &bundle(),
         &mounts,
         None,
@@ -2517,8 +2544,8 @@ fn podman_cleanup_confirmation_checks_container_and_workspace_storage() {
     assert!(!cleanup_target_is_confirmed_absent(&locator, SESSION, &live).unwrap());
     let command = &live.seen.borrow()[0];
     assert_eq!(command.program, "sh");
-    assert!(command.args[1].contains("podman container exists"));
-    assert!(command.args[1].contains("podman volume exists"));
+    assert!(command.args[1].contains("podman_resource_exists container"));
+    assert!(command.args[1].contains("podman_resource_exists volume"));
     assert!(command.args.contains(&volume));
 
     let absent = PodmanPreflightExecutor::with_outputs([podman_output("")]);
@@ -3038,7 +3065,8 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
         ),
     ];
     for (template, purpose) in creating {
-        let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
+        let plan =
+            provision_plan(&template, SESSION, "test-instance", &bundle(), &[], None).unwrap();
         assert_eq!(
             plan.description,
             format!("provision Mjolnir session {SESSION}")
@@ -3747,7 +3775,7 @@ fn an_ssh_podman_cleanup_runs_in_one_command_and_stops_at_a_refused_container() 
         let environment = fake_ssh_podman_environment();
         let home = environment.path().join("home");
         let state = home.join("fake-podman");
-        std::fs::write(state.join("container"), "").unwrap();
+        std::fs::write(state.join("container"), &name).unwrap();
         std::fs::write(state.join("volumes"), format!("{workspace}\n{temporary}\n")).unwrap();
         let cache = home.join(format!(".cache/mjolnir/git/sessions/{SESSION}"));
         std::fs::create_dir_all(&cache).unwrap();
@@ -3986,7 +4014,12 @@ mkdir -p "$state"
 printf '%s\n' "$*" >>"$state/invocations"
 case "${1-}" in
 container)
-    case ${2-} in inspect|exists) ;; *) exit 2 ;; esac
+    case ${2-} in inspect|exists) ;; ls)
+        # The engine's listing: ID and name of each container.
+        if [ -f "$state/container-labels" ]; then
+            printf 'fakeid %s\n' "$(cat "$state/container-name" 2>/dev/null || true)"
+        fi
+        exit 0 ;; *) exit 2 ;; esac
     for argument do name=$argument; done
     case $name in *-mount-init) labels=helper-labels ;; *) labels=container-labels ;; esac
     [ -f "$state/$labels" ] || exit 1
@@ -4023,6 +4056,7 @@ run)
         ;;
 
     *)
+        printf '%s' "$name" >"$state/container-name"
         printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" >"$state/container-labels"
         [ "${FAKE_DOCKER_FAIL_RUN:-0}" = 1 ] && exit 125
         ;;
@@ -4144,8 +4178,23 @@ fn temporary_storage_launch(engine: &str, name: &str, mounts: &[AdditionalMount]
         build_cache: None,
     };
     match engine {
-        "podman" => podman_container_run(&template, name, SESSION, mounts, None, "/workspace"),
-        "docker" => docker_container_run(&template, name, SESSION, mounts, "/workspace"),
+        "podman" => podman_container_run(
+            &template,
+            name,
+            SESSION,
+            "test-instance",
+            mounts,
+            None,
+            "/workspace",
+        ),
+        "docker" => docker_container_run(
+            &template,
+            name,
+            SESSION,
+            "test-instance",
+            mounts,
+            "/workspace",
+        ),
         _ => unreachable!(),
     }
     .unwrap()
@@ -4422,7 +4471,7 @@ fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires a cached agent-dev image and a host that permits perf; optionally set MJ_PERF_TEST_HOST for SSH"]
+#[ignore = "requires a cached session-base image and a host that permits perf; optionally set MJ_PERF_TEST_HOST for SSH"]
 fn podman_session_container_can_record_perf_samples() {
     assert!(
         mj_core::config::instance_name().is_some(),
@@ -4437,7 +4486,7 @@ fn podman_session_container_can_record_perf_samples() {
     let session = mj_core::state::new_session_id().unwrap();
     let name = resource_name(&session).unwrap();
     let template = ContainerTemplate {
-        image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".into(),
+        image: "ghcr.io/brokkai/mjolnir/session-base:latest".into(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: PodmanWorkspaceStorage::ContainerLayer,
@@ -4459,7 +4508,15 @@ fn podman_session_container_can_record_perf_samples() {
     let result = (|| -> Result<()> {
         execute_checked(
             &ProcessExecutor,
-            &podman_container_run(&template, &name, &session, &[], ssh.as_ref(), "/workspace")?,
+            &podman_container_run(
+                &template,
+                &name,
+                &session,
+                "test-instance",
+                &[],
+                ssh.as_ref(),
+                "/workspace",
+            )?,
         )?;
         let script = r#"set -eu
 work='i=0; while [ "$i" -lt 500000 ]; do i=$((i+1)); done'
@@ -4486,7 +4543,7 @@ test -s /tmp/mj-perf.txt
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman with runc installed, a cached buildpack-deps:noble image, and MJ_INSTANCE=tmp1212"]
+#[ignore = "requires rootless Podman with runc installed, a cached session-base image, and MJ_INSTANCE=tmp1212"]
 fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace() {
     assert_eq!(mj_core::config::instance_name().as_deref(), Some("tmp1212"));
     let runc_conf = tempfile::NamedTempFile::new().unwrap();
@@ -4524,7 +4581,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
         let session = mj_core::state::new_session_id().unwrap();
         let name = resource_name(&session).unwrap();
         let template = ContainerTemplate {
-            image: "docker.io/library/buildpack-deps:noble".to_owned(),
+            image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
             pull_policy: ImagePullPolicy::Never,
             extra_run_args: vec![],
             workspace_storage: storage,
@@ -4542,6 +4599,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
                     &template,
                     &name,
                     &session,
+                    "test-instance",
                     &[],
                     None,
                     "/workspace",
@@ -4576,12 +4634,12 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
 // Hard-won: #1303: an agent's kill of PID 1 stopped the session container
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman and a cached buildpack-deps:noble image"]
+#[ignore = "requires rootless Podman and a cached session-base image"]
 fn podman_session_container_survives_signals_sent_to_pid_1() {
     let session = mj_core::state::new_session_id().unwrap();
     let name = resource_name(&session).unwrap();
     let template = ContainerTemplate {
-        image: "docker.io/library/buildpack-deps:noble".to_owned(),
+        image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: Default::default(),
@@ -4604,7 +4662,15 @@ fn podman_session_container_survives_signals_sent_to_pid_1() {
     let result = (|| -> Result<()> {
         execute_checked(
             &ProcessExecutor,
-            &podman_container_run(&template, &name, &session, &[], None, "/workspace")?,
+            &podman_container_run(
+                &template,
+                &name,
+                &session,
+                "test-instance",
+                &[],
+                None,
+                "/workspace",
+            )?,
         )?;
         let stop_signal = inspect(&name, "{{.Config.StopSignal}}");
         ensure!(
@@ -4716,6 +4782,7 @@ fn docker_overlay_run_rollback_removes_owned_mj_directory_after_run_failure() {
         },
         &name,
         SESSION,
+        "test-instance",
         &[AdditionalMount {
             source: lower.path().to_path_buf(),
             destination: PathBuf::from("/mnt/cache"),
@@ -5335,7 +5402,15 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
         destination: PathBuf::from("/mnt/source"),
         access: crate::targets::MountAccess::Cow,
     };
-    let mut plan = provision_plan(&template, SESSION, &bundle(), &[mount], None).unwrap();
+    let mut plan = provision_plan(
+        &template,
+        SESSION,
+        "test-instance",
+        &bundle(),
+        &[mount],
+        None,
+    )
+    .unwrap();
     assert!(plan.commands.iter().all(|command| command.program == "ssh"));
     let create = &plan.commands[0];
     assert!(create.creates_target);
@@ -5377,7 +5452,7 @@ fn ssh_apple_container_template() -> TargetTemplate {
 #[test]
 fn ssh_apple_container_provisions_with_container_run_over_ssh_only() {
     let template = ssh_apple_container_template();
-    let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
+    let plan = provision_plan(&template, SESSION, "test-instance", &bundle(), &[], None).unwrap();
     assert!(!plan.commands.is_empty());
     assert!(plan.commands.iter().all(|command| command.program == "ssh"));
     let create = plan
@@ -5562,6 +5637,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
         },
         &name,
         SESSION,
+        "test-instance",
         &[AdditionalMount {
             source: PathBuf::from("/macOS/private temp/source"),
             destination: PathBuf::from("/mnt/cache"),
@@ -5592,7 +5668,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires a running Docker daemon and cached buildpack-deps:noble image"]
+#[ignore = "requires a running Docker daemon and cached session-base image"]
 fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
     let source = docker_overlay_smoke_directory(cfg!(target_os = "macos")).unwrap();
     let session = format!(
@@ -5617,7 +5693,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
     std::os::unix::fs::symlink("payload", source.path().join("link")).unwrap();
     let template = ContainerTemplate {
         build_cache: None,
-        image: "docker.io/library/buildpack-deps:noble".to_owned(),
+        image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: Default::default(),
@@ -5627,6 +5703,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
             &template,
             &name,
             &session,
+            "test-instance",
             &[AdditionalMount {
                 source: source.path().to_owned(),
                 destination: PathBuf::from("/mnt/source"),
@@ -5876,6 +5953,7 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
     let plan = provision_plan_named(
         &TargetTemplate::LocalPodman(container),
         SESSION,
+        "test-instance",
         &bundle(),
         &[],
         None,
@@ -5948,7 +6026,7 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman and cached docker.io/library/buildpack-deps:noble image"]
+#[ignore = "requires rootless Podman and cached session-base image"]
 fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout() {
     struct ContainerGuard(String);
     impl Drop for ContainerGuard {
@@ -5974,7 +6052,7 @@ fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout()
                 "dev.mj.managed=true",
                 "--label",
                 &format!("dev.mj.session={session}"),
-                "docker.io/library/buildpack-deps:noble",
+                "ghcr.io/brokkai/mjolnir/session-base:latest",
                 "sleep",
                 "300",
             ],
@@ -6112,6 +6190,9 @@ volume)
             printf 'true|%s\n' "$FAKE_SESSION"
         fi
         ;;
+    ls)
+        cat "$state/volumes" 2>/dev/null || true
+        ;;
     create)
         printf '%s\n' "$last" >>"$state/volumes"
         echo "$last"
@@ -6124,6 +6205,12 @@ volume)
     ;;
 container)
     case "$*" in
+    'container ls'*)
+        # The engine's listing: ID and name of each container.
+        if [ -f "$state/container" ]; then
+            printf 'fakeid %s\n' "$(cat "$state/container")"
+        fi
+        ;;
     *Mounts*)
         printf '[{"Type":"volume","Name":"%s","Destination":"/tmp","RW":true}]\n' "$FAKE_TMP_VOLUME"
         ;;
@@ -6134,7 +6221,12 @@ container)
     esac
     ;;
 run)
-    : >"$state/container"
+    name=
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = --name ]; then name=$2; fi
+        shift
+    done
+    printf '%s' "$name" >"$state/container"
     echo fake-container-id
     ;;
 rm)
@@ -6173,6 +6265,7 @@ fn run_ssh_podman_creation(
         &template,
         name,
         SESSION,
+        "test-instance",
         &[],
         Some(&ssh()),
         "/workspace",
@@ -6537,4 +6630,190 @@ printf '%s\n' "$FAKE_INFO"
         error.to_string(),
         "SSH connectivity test failed for dev@example.test with status 255: Host key verification failed."
     );
+}
+
+// Hard-won: #1708: Podman returned exit 1 for a broken rootless namespace and live sessions were discarded.
+#[cfg(unix)]
+#[test]
+fn podman_runtime_failure_is_not_resource_absence() {
+    const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // `exists` always answers 1 and `info` always passes: the namespace has
+    // recovered between the calls a health-check-after-the-fact design makes.
+    // Only the single listing, which fails when the engine cannot answer, may
+    // decide presence.
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "podman",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >>"$MJ_PODMAN_TEST_LOG"
+n=$MJ_PODMAN_TEST_NAME
+case "$1 $2" in
+    'container exists'|'volume exists') exit 1 ;;
+    'info ') exit 0 ;;
+    'container ls'|'volume ls')
+        case $MJ_PODMAN_TEST_MODE in
+            broken)
+                echo 'invalid internal status: could not find any running process' >&2
+                exit 1 ;;
+            live)
+                if [ "$2" = ls ] && [ "$1" = container ]; then
+                    printf '%s other,%s\n' "$MJ_PODMAN_TEST_ID" "$n"
+                else
+                    printf '%s\n%s-tmp\n' "$n-workspace" "$n"
+                fi ;;
+            sibling)
+                if [ "$1" = container ]; then
+                    printf '%s %s-move-0123456789abcdef\n' "$MJ_PODMAN_TEST_ID" "$n"
+                else
+                    printf '%s-workspace-old\n' "$n"
+                fi ;;
+        esac
+        exit 0 ;;
+    'container inspect')
+        case "$*" in
+            *State.Running*) echo false ;;
+            *) printf 'true|%s\n' "$MJ_PODMAN_TEST_SESSION" ;;
+        esac
+        exit 0 ;;
+    'volume inspect') printf 'true|%s\n' "$MJ_PODMAN_TEST_SESSION"; exit 0 ;;
+    'stop '*|'rm '*|'volume rm') exit 0 ;;
+    *) echo 'unexpected Podman test invocation' >&2; exit 90 ;;
+esac
+"#,
+    );
+    let name = resource_name(SESSION).unwrap();
+    let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: name.clone(),
+        workspace_storage: PodmanWorkspaceLocator::Volume {
+            name: format!("{name}-workspace"),
+        },
+    };
+    let recovery = target_recovery_plan(&locator, SESSION).unwrap().unwrap();
+    let absence = super::cleanup::podman_absence_command(
+        None,
+        &name,
+        match &locator {
+            TargetLocator::LocalPodman {
+                workspace_storage, ..
+            } => workspace_storage,
+            _ => unreachable!(),
+        },
+        SESSION,
+    );
+    let quiesce = quiesce_plan(&locator, SESSION).unwrap().unwrap();
+    let cleanup = podman_cleanup_plan(&locator, SESSION, false).unwrap();
+    let calls = root.path().join("calls");
+    let run = |command: &CommandSpec, mode: &str| {
+        let mut command = command.clone();
+        command
+            .env
+            .insert("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()));
+        for (key, value) in [
+            ("MJ_PODMAN_TEST_LOG", calls.display().to_string()),
+            ("MJ_PODMAN_TEST_SESSION", SESSION.into()),
+            ("MJ_PODMAN_TEST_NAME", name.clone()),
+            ("MJ_PODMAN_TEST_ID", ID.into()),
+            ("MJ_PODMAN_TEST_MODE", mode.into()),
+        ] {
+            command.env.insert(key.into(), value);
+        }
+        ProcessExecutor.execute(&command).unwrap().status
+    };
+    let log = || std::fs::read_to_string(&calls).unwrap_or_default();
+    let cleanup_statuses =
+        |mode: &str| -> Vec<i32> { cleanup.commands.iter().map(|c| run(c, mode)).collect() };
+
+    // A failed listing is unknown everywhere, including post-stop/remove
+    // verification and the storage steps, and nothing is removed.
+    assert_eq!(run(&recovery.exists, "broken"), 125);
+    assert_eq!(run(&absence, "broken"), 2);
+    assert_ne!(run(&quiesce.commands[0], "broken"), 0);
+    assert!(cleanup_statuses("broken").iter().any(|status| *status != 0));
+    assert!(!log().lines().any(|line| {
+        line.starts_with("volume rm") || line.starts_with("rm ") || line.starts_with("stop ")
+    }));
+
+    // The listing shows live resources while `exists` still says 1 and `info`
+    // is healthy: they are present, whether the locator is the name or an ID.
+    assert_eq!(run(&recovery.exists, "live"), 0);
+    let mut by_id = recovery.exists.clone();
+    *by_id.args.last_mut().unwrap() = ID[..12].to_owned();
+    assert_eq!(run(&by_id, "live"), 0);
+    assert_eq!(run(&absence, "live"), 1);
+    assert_eq!(run(&quiesce.commands[0], "live"), 0);
+    assert_ne!(
+        run(&cleanup.commands[0], "live"),
+        0,
+        "the fake keeps listing the container after rm"
+    );
+    // Storage steps remove only volumes the listing shows, after an owner check.
+    assert!(cleanup.commands.len() > 2);
+    for command in &cleanup.commands[1..] {
+        assert_eq!(run(command, "live"), 0);
+    }
+    assert!(log().lines().any(|line| line.starts_with("volume rm")));
+
+    // A sibling generation (`<name>-move-…`) is not this container.
+    assert_eq!(run(&recovery.exists, "sibling"), 1);
+    assert_eq!(run(&absence, "sibling"), 0);
+
+    // Healthy and truly absent is accepted.
+    assert_eq!(run(&recovery.exists, "empty"), 1);
+    assert_eq!(run(&absence, "empty"), 0);
+    assert_eq!(run(&quiesce.commands[0], "empty"), 0);
+    assert!(cleanup_statuses("empty").iter().all(|status| *status == 0));
+}
+
+#[test]
+fn host_bare_cleanup_only_removes_owned_roots_and_rejects_unsafe_paths() {
+    let worker = format!("/old/data/workers/{SESSION}");
+    let profile = format!("/old/data/profiles/{SESSION}");
+    let locator = TargetLocator::SshHostBare {
+        ssh: ssh(),
+        data_root: "/old/data".into(),
+    };
+    let plan = close_plan(&locator, SESSION).unwrap();
+    let script = plan.scripts()[0].args.last().unwrap();
+    let deletion = script
+        .lines()
+        .find(|line| line.starts_with("rm -rf -- "))
+        .unwrap();
+    assert_eq!(
+        deletion.replace("'\\''", "'"),
+        format!(
+            "rm -rf -- {} {}",
+            posix_quote(&worker),
+            posix_quote(&profile)
+        )
+    );
+    assert!(script.find("worker stop --kill --root").unwrap() < script.find("rm -rf --").unwrap());
+    assert!(!script.contains("/srv/project"));
+    assert!(
+        reconnect_plan(&locator, SESSION).unwrap().commands[0]
+            .args
+            .last()
+            .unwrap()
+            .contains(&format!("{worker}/hel"))
+    );
+    assert_eq!(workspace_root(&locator, None, SESSION), worker);
+    for invalid in ["relative", "/", "/old/../escape"] {
+        let bad = TargetLocator::SshHostBare {
+            ssh: ssh(),
+            data_root: invalid.into(),
+        };
+        assert!(close_plan(&bad, SESSION).is_err());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = TargetLocator::SshHostBare {
+            ssh: ssh(),
+            data_root: std::ffi::OsString::from_vec(b"/old/\xff".to_vec()).into(),
+        };
+        assert!(close_plan(&bad, SESSION).is_err());
+    }
 }

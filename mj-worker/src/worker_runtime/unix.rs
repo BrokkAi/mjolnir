@@ -353,7 +353,9 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         events_tx.clone(),
     );
     let accepted_config = {
-        let relay = relay.lock().expect("relay lock poisoned");
+        let mut relay = relay.lock().expect("relay lock poisoned");
+        // Any committed reload has rolled forward into `config` by now.
+        relay.adopt_launch(&config)?;
         accepted_config_for_boot(&config, &relay, resume_session.as_deref())
     };
     let supervisor_path = root.join("acp-supervisor.json");
@@ -405,7 +407,13 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             relay.step_clock(),
             relay.tools_in_flight(),
             relay.turn_context(),
-            Arc::new(Mutex::new(accepted_config)),
+            {
+                let shared = relay.accepted_config();
+                *shared
+                    .lock()
+                    .expect("accepted session configuration lock poisoned") = accepted_config;
+                shared
+            },
             relay.login_identity.clone(),
             relay.operator_away.clone(),
         )
@@ -3203,7 +3211,39 @@ async fn apply_profile_configuration(
                 false
             }
         }
-        _ => false,
+        HarnessKind::Dsh => {
+            let budget = preparation_step(
+                root,
+                status,
+                "harness-profile",
+                LOCAL_PREPARATION_STEP_TIMEOUT,
+                cancel,
+            )
+            .await?;
+            let home = credentials
+                .as_ref()
+                .map_err(|message| anyhow::anyhow!("{message}"))?
+                .home
+                .clone();
+            let root = root.to_owned();
+            let session_id = config.session_id.clone();
+            let suppress_native = config.subagents.suppresses_native();
+            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                if step_cancel.is_cancelled() {
+                    bail!("preparation cancelled before configuring the DSH profile");
+                }
+                super::subagents::configure_dsh_native_subagents(
+                    &root,
+                    &session_id,
+                    &home,
+                    suppress_native,
+                )
+            })
+            .await
+            .context("prepare DSH profile")?;
+            false // DSH receives its MCP servers through ACP.
+        }
+        HarnessKind::Grok | HarnessKind::Muse => false,
     };
     let mut cache_environment = base_environment.clone();
     cache_environment.extend(config.environment.clone());
@@ -4449,7 +4489,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                 {
                     unavailable_request(envelope, message)
                 } else {
-                    restart_harness_in_place_response(
+                    Box::pin(restart_harness_in_place_response(
                         envelope,
                         request_commands.as_ref(),
                         &relay,
@@ -4457,7 +4497,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                         &relay_root,
                         &shared_subagents,
                         preparation_tx.as_ref(),
-                    )
+                    ))
                     .await
                 };
                 write_logged_response(
@@ -4698,6 +4738,58 @@ mod preparation_tests {
             .unwrap()
             .unwrap();
         serde_json::from_str(&line).unwrap()
+    }
+
+    /// An upgrade or recovery replaces the launch configuration without
+    /// restaging the profile, so the worker's own harness start must write
+    /// the DSH home patch for a session that has none, and must rewrite it
+    /// when the effective policy changes.
+    #[tokio::test]
+    async fn dsh_start_writes_the_home_patch_for_an_unstaged_session_and_follows_the_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        let patch = home.join("dsh-home").join("cordis.patch.yml");
+        let mut config = super::super::relay_tests::launch_config(home.to_str().unwrap());
+        config.harness = HarnessKind::Dsh;
+        config.environment = BTreeMap::from([(
+            HarnessKind::Dsh.home_env().to_owned(),
+            home.to_str().unwrap().to_owned(),
+        )]);
+        let apply = async |config: &mut WorkerLaunchConfig| {
+            apply_profile_configuration(
+                root.path(),
+                config,
+                ProfileCapabilities {
+                    managed_subagent: false,
+                    review_tools: false,
+                    subagent_role: None,
+                },
+                &BTreeMap::new(),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        };
+        assert!(!patch.exists());
+        for policy in [
+            mj_core::subagent::SubagentPolicy::None,
+            mj_core::subagent::SubagentPolicy::Native,
+            mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
+                straightforward: None,
+                subtle: None,
+            },
+        ] {
+            config.subagents = policy.clone();
+            apply(&mut config).await;
+            assert_eq!(
+                std::fs::read_to_string(&patch).unwrap(),
+                mj_core::harness_runtime::dsh_native_subagents_patch(policy.suppresses_native()),
+                "{policy:?}"
+            );
+        }
     }
 
     #[tokio::test]

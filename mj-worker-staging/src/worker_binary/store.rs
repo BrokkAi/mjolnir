@@ -45,7 +45,7 @@ pub fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
     let command = targets::locator_command(SshTrafficClass::Control, locator, vec!["true".into()]);
     format!(
         "{:?}:{}:{:?}:{root}",
-        data_dir(),
+        DataLayout::current().root(),
         command.program,
         command.args
     )
@@ -98,7 +98,9 @@ fn gate_target(locator: &targets::TargetLocator) -> String {
         LocalPodman { container_id, .. }
         | LocalDocker { container_id, .. }
         | AppleContainer { container_id, .. } => format!("local container {container_id}"),
-        SshBare { ssh, .. } | AwsEc2 { ssh, .. } => format!("host {}", ssh.destination),
+        SshBare { ssh, .. } | SshHostBare { ssh, .. } | AwsEc2 { ssh, .. } => {
+            format!("host {}", ssh.destination)
+        }
         LocalBare { .. } => "this host".to_owned(),
     }
 }
@@ -618,7 +620,7 @@ if [ "$mode" != hit ]; then
         fi
     fi
 fi
-chmod 700 -- "$temporary"
+chmod -- 700 "$temporary"
 promote_worker_binary "$temporary" "$destination"
 case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
 collect_worker_store "$store" "$digest" || echo 'worker binary store collection failed' >&2
@@ -889,7 +891,8 @@ fn transfer_binary(
     destination: &str,
 ) -> Result<()> {
     if let targets::TargetLocator::AwsEc2 { ssh, .. }
-    | targets::TargetLocator::SshBare { ssh, .. } = locator
+    | targets::TargetLocator::SshBare { ssh, .. }
+    | targets::TargetLocator::SshHostBare { ssh, .. } = locator
     {
         // This path already belongs to the private store upload. Stream the
         // worker without the deadline reserved for the surrounding commands.
@@ -899,7 +902,7 @@ fn transfer_binary(
             [
                 "sh",
                 "-c",
-                "umask 077; cat > \"$1\" && chmod 700 -- \"$1\"",
+                "umask 077; cat > \"$1\" && chmod -- 700 \"$1\"",
                 "mj-upload",
                 destination,
             ],

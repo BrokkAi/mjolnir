@@ -15,6 +15,7 @@ pub fn backend_locator(
         locator,
         &session.id,
         &session.target_template_id,
+        session.machine_id.as_ref(),
         session.target_runtime.as_deref(),
         config,
     )
@@ -24,6 +25,7 @@ pub fn recorded_backend_locator(
     locator: &mj_core::state::TargetLocator,
     session_id: &str,
     target_template_id: &str,
+    machine_id: Option<&mj_core::config::MachineId>,
     runtime: Option<&mj_core::state::TargetRuntimeSettings>,
     config: &mj_core::config::Config,
 ) -> Result<TargetLocator> {
@@ -31,6 +33,7 @@ pub fn recorded_backend_locator(
         Some(mj_core::state::target_runtime_settings_for(
             session_id,
             target_template_id,
+            machine_id,
             Some(locator),
             runtime,
             config,
@@ -51,6 +54,7 @@ pub fn recorded_backend_locator(
 pub fn workspace_root(
     backend: &TargetLocator,
     container_workspace: Option<&std::path::Path>,
+    session_id: &str,
 ) -> String {
     match backend {
         TargetLocator::LocalPodman { .. }
@@ -64,5 +68,8 @@ pub fn workspace_root(
             workspace.clone()
         }
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
+        TargetLocator::SshHostBare { data_root, .. } => mj_core::target_path::text(
+            &mj_core::config::DataLayout::at(data_root).worker_root(session_id),
+        ),
     }
 }

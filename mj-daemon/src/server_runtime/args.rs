@@ -35,7 +35,7 @@ pub(super) async fn resolve_server_args(
         ));
     }
 
-    let tls_root = mj_core::config::data_dir().join("viewer");
+    let tls_root = mj_core::config::DataLayout::current().viewer_dir();
     let prepared = run_tailscale_blocking(termination.clone(), move |executor| {
         mj_controller::tailscale::prepare_tailscale_tls(&tls_root, executor)
     })

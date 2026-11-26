@@ -1560,17 +1560,31 @@ fn golden_dashboard_dialogs() {
     let lines = drawn(&mut usage, 120, 36);
     let base_row = lines.iter().position(|line| line.contains("$0 ")).unwrap();
     let column = lines[base_row].chars().position(|c| c == '▂').unwrap();
-    let click = |usage: &mut DashboardState| {
+    let next_column = lines[base_row].chars().position(|c| c == '▆').unwrap();
+    let pitch = next_column - column;
+    let click = |usage: &mut DashboardState, position: (u16, u16), modifiers| {
         for kind in [
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
         ] {
-            usage.handle_mouse(mouse_at(kind, (column as u16, base_row as u16)));
+            let mut event = mouse_at(kind, position);
+            event.modifiers = modifiers;
+            usage.handle_mouse(event);
         }
     };
-    click(&mut usage);
+    let at = |index: usize| ((column + (index - 2) * pitch) as u16, base_row as u16);
+    let hour = |index: i64| (490_000 + index) * HOUR_MS;
+    let selected = |indexes: &[i64]| {
+        Some(
+            indexes
+                .iter()
+                .map(|index| hour(*index))
+                .collect::<std::collections::BTreeSet<_>>(),
+        )
+    };
+    click(&mut usage, at(2), KeyModifiers::NONE);
     let (hour_request, query) = usage.session_usage_request().unwrap();
-    assert_eq!(query.hour_start_ms, Some((490_000 + 2) * HOUR_MS));
+    assert_eq!(query.hour_starts_ms, selected(&[2]));
     let mut hour_report = codex_report.clone();
     hour_report.quota_usage.iter_mut().for_each(|q| {
         q.consumed_basis_points = Some(125);
@@ -1584,28 +1598,208 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
-    // Clicking the selected hour again goes back to all hours.
-    click(&mut usage);
-    assert_eq!(usage.session_usage_request().unwrap().1.hour_start_ms, None);
-    let (all_request, _) = usage.session_usage_request().unwrap();
-    usage.apply_session_usage_result(all_request, Ok(codex_report.clone()));
+    // A plain click stays on the hour. Ctrl adds a discontiguous hour.
+    click(&mut usage, at(2), KeyModifiers::NONE);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[2])
+    );
+    click(&mut usage, at(7), KeyModifiers::CONTROL);
+    let (multi_request, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.hour_starts_ms, selected(&[2, 7]));
+    usage.apply_session_usage_result(multi_request, Ok(codex_report.clone()));
+    append_dialog_render(
+        &mut output,
+        "Usage discontiguous hours selected",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    // The text golden cannot show bar colors, so check both selected bars and the gap.
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| render(frame, &mut usage)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let style_at = |index| buffer[(at(index).0, at(index).1)].style();
+    assert_eq!(style_at(2), style_at(7));
+    assert_ne!(style_at(2), style_at(3));
+    // Shift retains the Ctrl-click anchor while replacing the range.
+    click(&mut usage, at(5), KeyModifiers::SHIFT);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[5, 6, 7])
+    );
+    click(&mut usage, at(3), KeyModifiers::SHIFT);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[3, 4, 5, 6, 7])
+    );
+    click(
+        &mut usage,
+        at(9),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    let (range_request, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.hour_starts_ms, selected(&[3, 4, 5, 6, 7, 8, 9]));
+    usage.apply_session_usage_result(range_request, Ok(codex_report.clone()));
+    append_dialog_render(
+        &mut output,
+        "Usage range added",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    // Deselecting the only selected hour is distinct from All.
+    click(&mut usage, at(2), KeyModifiers::NONE);
+    click(&mut usage, at(2), KeyModifiers::CONTROL);
+    let (empty_request, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.hour_starts_ms, selected(&[]));
+    let mut empty_report = codex_report.clone();
+    empty_report.cost_usd_ticks = Ok(0);
+    empty_report.agent_usage.clear();
+    empty_report.profile_usage.clear();
+    for session in &mut empty_report.sessions {
+        session.cost_usd_ticks = Ok(0);
+        session.models.clear();
+        session.coverage = Default::default();
+    }
+    for quota in &mut empty_report.quota_usage {
+        quota.consumed_basis_points = Some(0);
+        quota.partial = false;
+    }
+    usage.apply_session_usage_result(empty_request, Ok(empty_report));
+    append_dialog_render(
+        &mut output,
+        "Usage no hours selected",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        None
+    );
+    // Ctrl from All starts with every displayed graph hour.
+    click(&mut usage, at(2), KeyModifiers::CONTROL);
+    let (_, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        query.hour_starts_ms,
+        selected(&(0..24).filter(|i| *i != 2).collect::<Vec<_>>())
+    );
+    usage.handle_key(key(KeyCode::Enter));
+    // A first Shift-click after reset establishes a new anchor.
+    click(&mut usage, at(7), KeyModifiers::SHIFT);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[7])
+    );
+    click(&mut usage, at(2), KeyModifiers::NONE);
     // The arrow keys move from the clicked bar to its neighbour; Enter goes back to all hours.
     usage.handle_key(key(KeyCode::Left));
     assert_eq!(
-        usage.session_usage_request().unwrap().1.hour_start_ms,
-        Some((490_000 + 1) * HOUR_MS)
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[1])
     );
     // Holding an arrow past the oldest hour stays on it instead of clearing the choice.
     for _ in 0..30 {
         usage.handle_key(key(KeyCode::Left));
     }
     assert_eq!(
-        usage.session_usage_request().unwrap().1.hour_start_ms,
-        Some(490_000 * HOUR_MS)
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[0])
     );
     usage.handle_key(key(KeyCode::Enter));
     let (_, query) = usage.session_usage_request().unwrap();
     assert_eq!(query.hour_start_ms, None);
+    assert_eq!(query.hour_starts_ms, None);
+    // Enter resets the cursor immediately, even before another render.
+    usage.handle_key(key(KeyCode::Left));
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[22])
+    );
+    usage.handle_key(key(KeyCode::Enter));
+
+    // A refreshed graph can expire selected hours and their range anchor.
+    let oldest = ((column - 2 * pitch) as u16, base_row as u16);
+    click(&mut usage, at(2), KeyModifiers::NONE);
+    click(&mut usage, oldest, KeyModifiers::CONTROL);
+    let (old_request, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.hour_starts_ms, selected(&[0, 2]));
+    let mut rolled = codex_report.clone();
+    rolled.hours.remove(0);
+    let mut newest = *rolled.hours.last().unwrap();
+    newest.start_ms = hour(24);
+    rolled.hours.push(newest);
+    usage.apply_session_usage_result(old_request, Ok(rolled.clone()));
+    let (replacement, query) = usage.session_usage_request().unwrap();
+    assert_ne!(replacement, old_request);
+    assert_eq!(query.hour_starts_ms, selected(&[2]));
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.apply_session_usage_result(old_request, Ok(codex_report.clone()));
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.apply_session_usage_result(replacement, Ok(rolled.clone()));
+    assert_eq!(usage.session_usage_request().unwrap().0, replacement);
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_some()));
+    drawn(&mut usage, 120, 36);
+    // The expired anchor is cleared: Shift establishes a new singleton.
+    click(&mut usage, at(2), KeyModifiers::SHIFT);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[3])
+    );
+    click(&mut usage, oldest, KeyModifiers::CONTROL);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[1, 3])
+    );
+    // Expiring the last member preserves an explicit empty selection.
+    click(&mut usage, oldest, KeyModifiers::NONE);
+    let (old_request, _) = usage.session_usage_request().unwrap();
+    rolled.hours.remove(0);
+    let mut newest = *rolled.hours.last().unwrap();
+    newest.start_ms = hour(25);
+    rolled.hours.push(newest);
+    usage.apply_session_usage_result(old_request, Ok(rolled.clone()));
+    let (replacement, query) = usage.session_usage_request().unwrap();
+    assert_ne!(replacement, old_request);
+    assert_eq!(query.hour_starts_ms, selected(&[]));
+    assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.apply_session_usage_result(replacement, Ok(rolled));
+    assert_eq!(usage.session_usage_request().unwrap().0, replacement);
+    drawn(&mut usage, 120, 36);
+    click(&mut usage, oldest, KeyModifiers::CONTROL);
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[2])
+    );
+    usage.handle_key(key(KeyCode::Enter));
+    let (all_request, _) = usage.session_usage_request().unwrap();
+    usage.apply_session_usage_result(all_request, Ok(codex_report.clone()));
+    // The full dashboard requires 60 columns; render the modal by itself to
+    // exercise hidden-hour mapping at a width where bars actually disappear.
+    let mut narrow_terminal = Terminal::new(TestBackend::new(28, 36)).unwrap();
+    narrow_terminal
+        .draw(|frame| crate::render::render_modal(frame, frame.area(), &mut usage))
+        .unwrap();
+    let narrow = buffer_lines(narrow_terminal.backend().buffer());
+    let narrow_row = narrow.iter().position(|line| line.contains("$0 ")).unwrap();
+    let last_bar = narrow[narrow_row]
+        .chars()
+        .enumerate()
+        .filter_map(|(index, c)| "▁▂▃▄▅▆▇█░".contains(c).then_some(index))
+        .last()
+        .unwrap();
+    click(
+        &mut usage,
+        (last_bar as u16, narrow_row as u16),
+        KeyModifiers::NONE,
+    );
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_starts_ms,
+        selected(&[23])
+    );
+    usage.handle_key(key(KeyCode::Enter));
     drawn(&mut usage, 120, 36);
     usage.handle_key(key(KeyCode::BackTab));
     usage.handle_key(key(KeyCode::Char(' ')));
@@ -1908,10 +2102,10 @@ fn golden_tui_container_editor_details() {
         session_id: "session-1".into(),
         source_container_id: "existing-container".into(),
         warning: mj_core::state::CONTAINER_UPGRADE_WARNING.into(),
-        current_image: "ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into(),
+        current_image: "ghcr.io/brokkai/mjolnir/session-base:2.51.0".into(),
         current_image_id: "sha256:previous".into(),
         target_image_id: Some("sha256:selected".into()),
-        target_image: "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0".into(),
+        target_image: "ghcr.io/brokkai/mjolnir/session-base:2.52.0".into(),
         available: true,
         retained_mounts: vec!["/workspace".into(), "/cache".into(), "/tmp".into()],
     };

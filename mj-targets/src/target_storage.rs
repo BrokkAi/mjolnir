@@ -114,7 +114,7 @@ fn board() -> Arc<Board> {
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .entry(mj_core::config::data_dir())
+        .entry(mj_core::config::DataLayout::current().root().to_path_buf())
         .or_default()
         .clone()
 }
@@ -276,6 +276,7 @@ pub fn storage_host(locator: &TargetLocator) -> String {
         | TargetLocator::AppleContainer { .. } => LOCAL_STORAGE_HOST.to_owned(),
         TargetLocator::AwsEc2 { ssh, .. }
         | TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
         | TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
         | TargetLocator::SshAppleContainer { ssh, .. }
@@ -292,7 +293,8 @@ fn host_path(locator: &TargetLocator, path: &str) -> Option<String> {
     match locator {
         TargetLocator::LocalBare { .. }
         | TargetLocator::AwsEc2 { .. }
-        | TargetLocator::SshBare { .. } => Some(path.to_owned()),
+        | TargetLocator::SshBare { .. }
+        | TargetLocator::SshHostBare { .. } => Some(path.to_owned()),
         TargetLocator::LocalPodman { .. } => Some(local_home_path(ContainerStorage::Podman.path())),
         TargetLocator::SshPodman { .. } => Some(ContainerStorage::Podman.path().to_owned()),
         TargetLocator::LocalDocker { .. } | TargetLocator::SshDocker { .. } => {

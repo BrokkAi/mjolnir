@@ -5,6 +5,52 @@
 use anyhow::{Result, ensure};
 use mj_core::relay::RelayCommand;
 
+/// What to do with a durable hold after its Move is no longer executing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OrphanedInPlaceMoveHoldAction {
+    OwnedByActiveMove,
+    Release {
+        operation_id: String,
+        expected_harness_restarted: Option<bool>,
+    },
+    KeepUnsettled {
+        operation_id: String,
+    },
+}
+
+pub fn classify_orphaned_in_place_move_hold(
+    hold: &mj_core::relay::InPlaceMoveHold,
+    current_move: Option<&mj_core::state::MoveOperation>,
+) -> OrphanedInPlaceMoveHoldAction {
+    use OrphanedInPlaceMoveHoldAction::*;
+    use mj_core::{relay::InPlaceReloadPhase, state::MovePhase};
+    let owner = current_move.filter(|op| op.in_place && op.operation_id == hold.operation_id);
+    if owner.is_some_and(|op| op.is_active() && op.phase != MovePhase::DispatchReleased) {
+        return OwnedByActiveMove;
+    }
+    // A settled record names the destination; a missing fence alone does not
+    // prove that a started reload's destination has been recorded.
+    let settled = owner.is_some_and(|op| {
+        matches!(op.phase, MovePhase::Completed | MovePhase::DispatchReleased)
+            || (!op.is_active()
+                && op.in_place_expected_store_id.is_none()
+                && matches!(
+                    hold.reload_phase,
+                    Some(InPlaceReloadPhase::FailedAfterCommit { .. })
+                ))
+    });
+    if settled || (!hold.harness_restarted && hold.reload_phase.is_none()) {
+        Release {
+            operation_id: hold.operation_id.clone(),
+            expected_harness_restarted: (!settled).then_some(false),
+        }
+    } else {
+        KeepUnsettled {
+            operation_id: hold.operation_id.clone(),
+        }
+    }
+}
+
 /// Execution and retained queue admission are phases of one ownership record.
 #[derive(Clone, Copy)]
 enum MoveOwnership {

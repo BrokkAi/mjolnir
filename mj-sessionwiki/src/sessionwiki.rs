@@ -158,7 +158,11 @@ pub fn indexed_project_directory(
                 Some(locator) => {
                     let backend = crate::targets::backend_locator(locator, record, config)
                         .context("resolve the session target for SessionWiki")?;
-                    crate::targets::workspace_root(&backend, record.container_workspace.as_deref())
+                    crate::targets::workspace_root(
+                        &backend,
+                        record.container_workspace.as_deref(),
+                        &record.id,
+                    )
                 }
                 None => mj_core::targets::container_workspace_root(
                     record.container_workspace.as_deref(),
@@ -212,7 +216,7 @@ impl MjolnirAdapter {
     /// hand wants.
     pub fn from_state(state: &State) -> Self {
         Self {
-            sessions_dir: mj_core::config::sessions_dir(),
+            sessions_dir: mj_core::config::DataLayout::current().sessions_dir(),
             sessions: std::sync::Mutex::new(Sessions::of(state, None)),
             reload: false,
         }
@@ -222,7 +226,7 @@ impl MjolnirAdapter {
     /// the configuration snapshot paired with the state.
     pub fn from_state_with_config(state: &State, config: &Config) -> Self {
         Self {
-            sessions_dir: mj_core::config::sessions_dir(),
+            sessions_dir: mj_core::config::DataLayout::current().sessions_dir(),
             sessions: std::sync::Mutex::new(Sessions::of(state, Some(config))),
             reload: false,
         }
@@ -437,7 +441,7 @@ fn checkpoint_archive_session(name: &std::ffi::OsStr) -> Option<(String, u64)> {
 /// Observe uses this after SessionWiki discovers a session whose operational
 /// record has been removed but whose canonical archive has not.
 pub fn newest_checkpoint_archive(session_id: &str) -> Result<Option<PathBuf>> {
-    let directory = mj_core::config::sessions_dir();
+    let directory = mj_core::config::DataLayout::current().sessions_dir();
     let entries = match std::fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1566,7 +1570,7 @@ fn unreadable_reason() -> &'static str {
 /// has another generation, so the marker no longer holds and the next pass is
 /// a full one.
 fn full_pass_marker() -> PathBuf {
-    mj_core::config::data_dir().join("sessionwiki-built")
+    mj_core::config::DataLayout::current().sessionwiki_built()
 }
 
 fn marker_text(stamp: IndexStamp) -> String {
@@ -2841,7 +2845,7 @@ pub fn archive_space_preview(older_than_days: Option<u32>) -> Result<ArchiveSpac
     let (_, state) =
         load_config_and_state().context("load the session records to size their storage")?;
     Ok(archive_space_over_state(
-        &mj_core::config::sessions_dir(),
+        &mj_core::config::DataLayout::current().sessions_dir(),
         &state,
         Utc::now(),
         older_than_days,
@@ -2927,7 +2931,7 @@ pub fn indexed_with_messages(session_ids: &[String]) -> Result<BTreeSet<String>>
         // the archive job deletes data, so it must find nothing here.
         return Ok(BTreeSet::new());
     };
-    let sessions_dir = mj_core::config::sessions_dir();
+    let sessions_dir = mj_core::config::DataLayout::current().sessions_dir();
     let mut indexed = BTreeSet::new();
     for session_id in session_ids {
         let key = format!("{}/{session_id}", sessions_dir.display());
@@ -3111,6 +3115,7 @@ fn snapshot_of(
         assessment_state: None,
         notification_stack: None,
         native_use_evidence: None,
+        pending_prompt_context: None,
         event_frontier,
         // Not a relay frontier, so there is no recorded digest to carry. It has
         // to be a well-formed non-genesis digest, and deriving it from the
@@ -3492,6 +3497,7 @@ mod tests {
                     assessment_state: None,
                     notification_stack: None,
                     native_use_evidence: None,
+                    pending_prompt_context: None,
                     event_frontier: 4,
                     event_frontier_digest: "a".repeat(64),
                     session: CanonicalSessionState {
@@ -3674,6 +3680,7 @@ mod tests {
             notifications_ignored: false,
             project: None,
             target_runtime: None,
+            machine_id: None,
             launch_base: None,
             launch_branch: None,
             checkout: None,
@@ -4718,6 +4725,7 @@ mod tests {
                     assessment_state: None,
                     notification_stack: None,
                     native_use_evidence: None,
+                    pending_prompt_context: None,
                     event_frontier: 0,
                     event_frontier_digest: "0".repeat(64),
                     session: CanonicalSessionState {

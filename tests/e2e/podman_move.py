@@ -2,7 +2,7 @@
 """Create a real Podman session and optionally Move it to another target.
 
 Provide the built mj and its matching portable worker. The Podman engine
-must have the agent-dev:latest image cached. The fixture runs a private Git
+must have the session-base:latest image cached. The fixture runs a private Git
 origin and a deterministic ACP peer. Use a named instance for each case.
 """
 
@@ -15,7 +15,7 @@ import random
 from container_upgrades import Regression
 
 
-IMAGE = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+IMAGE = "ghcr.io/brokkai/mjolnir/session-base:latest"
 
 
 # Hard-won: 6edc4602e: fresh container Create read a nonexistent checkpoint.

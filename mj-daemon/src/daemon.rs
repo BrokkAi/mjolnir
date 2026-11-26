@@ -321,8 +321,7 @@ pub struct RuntimeState {
     /// Per-workspace-owner gate serializing borrower sub-agent registration
     /// against checkout-mutating blocker remediation. Weak references reclaim
     /// entries automatically once no caller holds the gate.
-    borrower_registration_gates:
-        Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::RwLock<()>>>>,
+    borrower_registration_gates: Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::RwLock<()>>>>,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.

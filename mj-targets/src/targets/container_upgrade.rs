@@ -488,12 +488,6 @@ impl RetainedContainer {
         })
     }
 
-    pub fn image_changed(&self) -> bool {
-        self.prepared_image.as_deref().is_some_and(|id| {
-            id.trim_start_matches("sha256:") != self.current_image_id.trim_start_matches("sha256:")
-        })
-    }
-
     pub fn apply_settings(
         &mut self,
         applied: &[AdditionalMount],
@@ -637,7 +631,7 @@ impl RetainedContainer {
         let mut args = vec![
             "sh".into(),
             "-c".into(),
-            "set -eu; mkdir -p -- \"$1\"; chmod 700 -- \"$1\"; shift; exec \"$@\"".into(),
+            "set -eu; mkdir -p -- \"$1\"; chmod -- 700 \"$1\"; shift; exec \"$@\"".into(),
             "mj-container-control-state".into(),
             state.staging_directory.clone(),
             "tar".into(),
@@ -847,7 +841,12 @@ impl RetainedContainer {
 
     /// Idempotent after the durable replacement boundary. The stopped source
     /// remains a rollback resource until the new worker is ready.
-    pub fn replace(&self, session_id: &str, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn replace(
+        &self,
+        session_id: &str,
+        instance: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
         let (host, _) = host_and_name(&self.locator)?;
         let image = self
             .prepared_image
@@ -931,6 +930,7 @@ impl RetainedContainer {
         args.extend(managed_resource_identity_args(
             ManagedResourceKind::Container,
             session_id,
+            instance,
         ));
         args.extend([
             "--label".into(),
@@ -1280,9 +1280,9 @@ pub fn container_upgrade_test_plan(session_id: &str) -> RetainedContainer {
         source_id: "source-container".into(),
         name: name.clone(),
         backup_name: format!("{name}-upgrade-upgrade-test"),
-        current_image: "agent-dev:2.51.0".into(),
+        current_image: "session-base:2.51.0".into(),
         current_image_id: "sha256:source".into(),
-        target_image: "agent-dev:2.52.0".into(),
+        target_image: "session-base:2.52.0".into(),
         prepared_image: Some("sha256:target".into()),
         image_pin_reserved: false,
         selected_image_id: Some("sha256:target".into()),
@@ -1404,10 +1404,14 @@ pub fn retained_workspace_volume_exists(
 /// Recovery only for a shipped recreation that already removed its source.
 /// Existing workspace storage wins over the archive, even if it contains
 /// files the archive never covered. No failure cleanup removes any storage.
+// Each argument is an independent input of one container's creation; the
+// owning instance's identity is one more of them.
+#[allow(clippy::too_many_arguments)]
 pub fn recover_removed_container(
     locator: &TargetLocator,
     template: &ContainerTemplate,
     session_id: &str,
+    instance: &str,
     mounts: &[AdditionalMount],
     workspace: &str,
     require_existing_workspace: bool,
@@ -1507,6 +1511,7 @@ pub fn recover_removed_container(
         template,
         name,
         session_id,
+        instance,
         mounts,
         storage,
         workspace,
@@ -1830,7 +1835,9 @@ mod tests {
                 podman_output(info),
                 failure("fixture stops after capturing the run command"),
             ]);
-            let error = plan.replace(session_id, &executor).unwrap_err();
+            let error = plan
+                .replace(session_id, "test-instance", &executor)
+                .unwrap_err();
             assert!(error.to_string().contains("fixture stops"), "{error:#}");
             let commands = executor.seen.borrow();
             assert_eq!(commands[2].program, engine);
@@ -1859,7 +1866,7 @@ mod tests {
             .map(|index| format!("MJ_UPGRADE_ENV_{index}={}", "e".repeat(4096)))
             .collect::<Vec<_>>();
         let mut template = ContainerTemplate {
-            image: "ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into(),
+            image: "ghcr.io/brokkai/mjolnir/session-base:2.51.0".into(),
             pull_policy: ImagePullPolicy::Never,
             extra_run_args: vec![
                 "--mount".into(),
@@ -1915,6 +1922,7 @@ mod tests {
                     &unsupported,
                     &name,
                     &session,
+                    "test-instance",
                     &[],
                     None,
                     &workspace,
@@ -1941,7 +1949,7 @@ mod tests {
         let error = inspect_retained_container(
             &locator,
             &session,
-            "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0",
+            "ghcr.io/brokkai/mjolnir/session-base:2.52.0",
             "unsupported",
             Path::new(&workspace),
             Path::new(&root),
@@ -1962,9 +1970,16 @@ mod tests {
             &ProcessExecutor,
         )
         .unwrap();
-        let start =
-            container::podman_container_run(&template, &name, &session, &[], None, &workspace)
-                .unwrap();
+        let start = container::podman_container_run(
+            &template,
+            &name,
+            &session,
+            "test-instance",
+            &[],
+            None,
+            &workspace,
+        )
+        .unwrap();
         let started = ProcessExecutor.execute(&start).unwrap();
         assert_eq!(
             started.status,
@@ -2022,7 +2037,7 @@ mod tests {
         let mut plan = inspect_retained_container(
             &locator,
             &session,
-            "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0",
+            "ghcr.io/brokkai/mjolnir/session-base:2.52.0",
             "test-operation",
             Path::new(&workspace),
             Path::new(&root),
@@ -2046,7 +2061,10 @@ mod tests {
         plan.prepared_image = Some(String::from_utf8(image.stdout).unwrap().trim().into());
         let retained = plan.mounts.clone();
         plan.capture_control_state(&ProcessExecutor).unwrap();
-        assert!(plan.replace(&session, &FailReplacementRun).is_err());
+        assert!(
+            plan.replace(&session, "test-instance", &FailReplacementRun)
+                .is_err()
+        );
         let backup = inspect(&host, &plan.backup_name, &ProcessExecutor)
             .unwrap()
             .unwrap();
@@ -2056,9 +2074,13 @@ mod tests {
         // only the serialized plan; no checkpoint exists anywhere in this test.
         let recovered: RetainedContainer =
             serde_json::from_slice(&serde_json::to_vec(&plan).unwrap()).unwrap();
-        recovered.replace(&session, &ProcessExecutor).unwrap();
+        recovered
+            .replace(&session, "test-instance", &ProcessExecutor)
+            .unwrap();
         recovered.restore_control_state(&ProcessExecutor).unwrap();
-        recovered.replace(&session, &ProcessExecutor).unwrap();
+        recovered
+            .replace(&session, "test-instance", &ProcessExecutor)
+            .unwrap();
         let upgraded = inspect(&host, &name, &ProcessExecutor).unwrap().unwrap();
         assert_eq!(upgraded.host_config.cap_add, source.host_config.cap_add);
         let replacement = inspect_retained_container(
@@ -2142,6 +2164,7 @@ mod tests {
                 &legacy,
                 &template,
                 &session,
+                "test-instance",
                 &mounts,
                 &workspace,
                 false,
@@ -2384,10 +2407,13 @@ mod tests {
             assert!(plan.source_is_current(&engine).unwrap());
             *engine.fail.borrow_mut() = failing;
             if failing.is_some() {
-                assert!(plan.replace(session, &engine).is_err(), "{failing:?}");
+                assert!(
+                    plan.replace(session, "test-instance", &engine).is_err(),
+                    "{failing:?}"
+                );
             }
-            plan.replace(session, &engine).unwrap();
-            plan.replace(session, &engine).unwrap();
+            plan.replace(session, "test-instance", &engine).unwrap();
+            plan.replace(session, "test-instance", &engine).unwrap();
             let verbs = engine.log.borrow().clone();
             let applied = verbs
                 .iter()

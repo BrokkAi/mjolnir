@@ -690,11 +690,11 @@ fn read_stats(
         reflinked_bytes: u64,
     }
 
-    let path = directory.join(TALLY_RELATIVE);
+    let path = mj_core::target_path::join(directory, Path::new(TALLY_RELATIVE));
     let command = host.shell_command(
         READ_CONFIG_SCRIPT,
         LABEL,
-        [path.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(&path)],
         "read the container host build cache totals",
     );
     let output = executor.execute(&command).ok()?;
@@ -790,7 +790,7 @@ fn parse_native_probe_output(stdout: &[u8]) -> Result<NativeMbx> {
         .next_back()
         .context("mbx version probe gave an empty version")?;
     ensure!(
-        Path::new(program).is_absolute(),
+        mj_core::target_path::is_absolute(Path::new(program)),
         "mbx version probe returned a non-absolute executable path {program:?}"
     );
     Ok(NativeMbx {
@@ -884,7 +884,7 @@ fn native_cache_directory(
 ) -> Result<PathBuf> {
     let command = host.command(
         vec![
-            native.program.to_string_lossy().into_owned(),
+            mj_core::target_path::text(&native.program),
             "cache".to_owned(),
             "dir".to_owned(),
             "--json".to_owned(),
@@ -917,7 +917,8 @@ cat -- "$1""#;
 /// effective configuration, so the file itself is the only accurate source.
 fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result<Option<String>> {
     let directory = configuration::host_directory(host, executor)?;
-    configuration::read_file(host, &directory.join("config.toml"), executor)
+    let path = mj_core::target_path::join(&directory, Path::new("config.toml"));
+    configuration::read_file(host, &path, executor)
 }
 
 #[derive(Default)]
@@ -1049,10 +1050,11 @@ pub fn effective_target_root(config_file: &str, directory: &Path) -> PathBuf {
         .map_err(|error| tracing::warn!("the host mbx configuration is unreadable: {error:#}"))
         .ok()
         .and_then(|config| config.target_root);
-    mj_core::target_path::normalize(&match configured {
+    let path = mj_core::target_path::normalize(&match configured {
         Some(root) => mj_core::target_path::join(directory, &root),
-        None => directory.join("targets"),
-    })
+        None => mj_core::target_path::join(directory, Path::new("targets")),
+    });
+    PathBuf::from(mj_core::target_path::text(&path))
 }
 
 const NEAREST_ANCESTOR_SCRIPT: &str = r#"d=$1
@@ -1075,13 +1077,13 @@ fn nearest_existing_ancestor(
     let command = host.shell_command(
         NEAREST_ANCESTOR_SCRIPT,
         LABEL,
-        [directory.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(directory)],
         "locate the build cache volume",
     );
     let output = checked(executor.execute(&command)?, &command)?;
     let path = PathBuf::from(String::from_utf8(output.stdout).context("decode cache ancestor")?);
     ensure!(
-        path.is_absolute(),
+        mj_core::target_path::is_absolute(&path),
         "build cache volume {} is not absolute",
         path.display()
     );
@@ -1106,7 +1108,7 @@ fn reflinks_supported(
     let command = host.shell_command(
         REFLINK_SCRIPT,
         LABEL,
-        [volume.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(volume)],
         "probe the build cache volume for reflinks",
     );
     Ok(executor.execute(&command)?.status == 0)
@@ -1134,8 +1136,8 @@ fn cross_reflinks_supported(
         CROSS_REFLINK_SCRIPT,
         LABEL,
         [
-            store.to_string_lossy().into_owned(),
-            target_root.to_string_lossy().into_owned(),
+            mj_core::target_path::text(store),
+            mj_core::target_path::text(target_root),
         ],
         "probe the managed target root for reflinks from the build cache",
     );
@@ -1152,7 +1154,7 @@ fn create_directory(
             "mkdir".to_owned(),
             "-p".to_owned(),
             "--".to_owned(),
-            directory.to_string_lossy().into_owned(),
+            mj_core::target_path::text(directory),
         ],
         "create the build cache directory",
     );
@@ -1614,10 +1616,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
     fn installed_worker_reads_cache_configuration_from_its_recorded_host() {
         let executor = ProbeExecutor::new(&[
             ("XDG_CONFIG_HOME", 0, "/home/builder/.config/mbx"),
@@ -1637,6 +1635,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(config.contains("50GB"));
+        assert!(
+            executor
+                .ran()
+                .iter()
+                .any(|command| command.contains("/home/builder/.config/mbx/config.toml"))
+        );
         assert!(
             executor
                 .seen
@@ -1787,8 +1791,17 @@ mod tests {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
         let mut mounts = Vec::new();
+        // A Windows controller can share a Linux SSH host's cache, but not
+        // its own local host cache with a Linux container.
+        let target = TargetTemplate::SshPodman {
+            ssh: SshTarget {
+                destination: "builder@linux.test".into(),
+                ssh_args: vec![],
+            },
+            container: container(None),
+        };
         let build_cache = prepare(
-            &podman(None),
+            &target,
             &session(Some("/workspace/session-1")),
             &mut mounts,
             &executor,
@@ -2091,23 +2104,37 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
     fn the_preview_reports_what_the_cache_has_already_done() {
         let _isolated = isolated();
         // Ahead of the configuration read, which tests the same `[ -f ]`.
         let mut answers = vec![(
-            "tally.json",
+            "/mnt/fast/mbx-cache/actions/savings/v1/tally.json",
             0,
             r#"{"version":1,"since_secs":1789824719,"builds":155,"cached_compilations":12050,"avoided_compiler_ns":6004997818721,"reflinked_bytes":47612059386}"#,
         )];
+        answers.push(("hel-home", 0, "/home/builder"));
+        answers.push(("hel-mbx-home", 0, "/home/builder"));
+        answers.push((
+            "$resolved\" --version",
+            0,
+            "/home/builder/.local/bin/mbx\nmbx 1.22.0",
+        ));
         answers.extend(native_host());
         let executor = ProbeExecutor::new(&answers);
-        let preview = preview_build_cache(&configured_local_machine(), &executor)
+        let machine = serde_json::from_value(serde_json::json!({
+            "kind": "ssh", "host": "linux.test", "user": "builder"
+        }))
+        .unwrap();
+        let preview = preview_build_cache(&machine, &executor)
             .expect("the host answers")
-            .expect("a local machine can hold a cache");
+            .expect("an SSH machine can hold a cache");
+        assert_eq!(preview.mbx_profile_file.as_deref(), Some("~/.profile"));
+        assert!(
+            executor
+                .ran()
+                .iter()
+                .any(|command| command.contains("/home/builder/.local/bin"))
+        );
         assert_eq!(
             preview.stats,
             Some(mj_core::state::BuildCacheStats {

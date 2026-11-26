@@ -26,26 +26,28 @@ pub fn installed_harness_home(launch_path: &Path) -> anyhow::Result<Option<PathB
         Err(error) => return Err(error.into()),
     };
     let launch: serde_json::Value = serde_json::from_slice(&body)?;
+    Ok(installed_harness_home_from_json(&launch))
+}
+
+/// Decode the home from a launch file read on either host.
+pub fn installed_harness_home_from_json(launch: &serde_json::Value) -> Option<PathBuf> {
     let stated = launch
         .get("harness_home")
         .and_then(serde_json::Value::as_str)
         .filter(|home| !home.is_empty())
         .map(PathBuf::from);
     if stated.is_some() {
-        return Ok(stated);
+        return stated;
     }
-    let Some(harness) = launch
+    let harness = launch
         .get("harness")
         .cloned()
-        .and_then(|harness| serde_json::from_value::<HarnessKind>(harness).ok())
-    else {
-        return Ok(None);
-    };
-    Ok(launch
+        .and_then(|harness| serde_json::from_value::<HarnessKind>(harness).ok())?;
+    launch
         .get("environment")
         .and_then(|environment| environment.get(harness.home_env()))
         .and_then(serde_json::Value::as_str)
-        .map(|home| harness.home_from_environment(home)))
+        .map(|home| harness.home_from_environment(home))
 }
 
 /// Where a worker's ACP adapter and harness executable come from.
@@ -89,7 +91,7 @@ pub struct WorkerOwnership {
     pub profile_id: String,
     pub bundle_id: String,
     pub target_template_id: String,
-    /// Instance that created the worker (`config::instance_identity`).
+    /// Instance that created the worker (`config::InstanceIdentity`).
     /// Markers written before version 3 omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,

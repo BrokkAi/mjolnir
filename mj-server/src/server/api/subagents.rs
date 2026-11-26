@@ -1,9 +1,8 @@
-use mj_accounts::profile_scheduler::{Placement, ScheduledCandidate, guardian_eligible};
+use mj_accounts::profile_scheduler::{Placement, ScheduledCandidate};
 #[cfg(test)]
 use mj_accounts::profile_scheduler::{
     SchedulingContext, order_scheduled_candidates_by_draw, rank_scheduled_candidates,
 };
-use mj_core::config::ExecutionPolicy;
 use mj_core::model_catalog;
 
 use super::*;
@@ -34,21 +33,12 @@ pub(super) async fn spawn_subagent(
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
-    let execution_policy = if backend
-        .session_is_yolo_target(parent_session_id.clone())
-        .await?
-    {
-        ExecutionPolicy::Unconstrained
-    } else {
-        ExecutionPolicy::ConfiguredApprovals
-    };
     let task_type = request.task_type.unwrap_or_default();
     let selection = resolve_subagent_policy_selection(
         &backend,
         &parent.profile_id,
         &parent.subagents,
         task_type,
-        execution_policy,
     )
     .await?;
 
@@ -199,7 +189,6 @@ pub async fn resolve_subagent_policy_selection(
     parent_profile: &str,
     policy: &mj_core::subagent::SubagentPolicy,
     task_type: mj_core::subagent::SubagentTaskType,
-    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     if task_type == mj_core::subagent::SubagentTaskType::Oracle {
         return Err(ApiFailure::bad_request(
@@ -234,7 +223,6 @@ pub async fn resolve_subagent_policy_selection(
         backend,
         choices,
         ModelProfileCandidateSource::Subagents { parent_profile },
-        execution_policy,
         Some(task_type.id()),
     )
     .await
@@ -254,13 +242,11 @@ pub async fn resolve_oracle_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
     choices: &[mj_core::config::SubagentChoice],
-    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     resolve_choices_selection(
         backend,
         choices,
         ModelProfileCandidateSource::Subagents { parent_profile },
-        execution_policy,
         Some("oracle"),
     )
     .await
@@ -272,13 +258,11 @@ pub async fn resolve_primary_session_selection(
     backend: &Arc<dyn SubagentBackend>,
     ranking_anchor: Option<&str>,
     choices: &[mj_core::config::SubagentChoice],
-    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     resolve_choices_selection(
         backend,
         choices,
         ModelProfileCandidateSource::Session { ranking_anchor },
-        execution_policy,
         Some("primary"),
     )
     .await
@@ -290,7 +274,6 @@ pub async fn resolve_provider_session_selection(
     backend: &Arc<dyn SubagentBackend>,
     config: &mj_core::config::Config,
     provider: &mj_core::config::QuotaProvider,
-    execution_policy: ExecutionPolicy,
     subagents: Option<&mj_core::subagent::SubagentPolicy>,
 ) -> Result<ProviderSessionSelection, ApiFailure> {
     let matching_ids: std::collections::BTreeSet<String> = {
@@ -328,14 +311,6 @@ pub async fn resolve_provider_session_selection(
             continue;
         }
         matched_any = true;
-        if !guardian_eligible(candidate.harness, execution_policy) {
-            excluded.push(format!(
-                "profile {} ({}) does not support native guardian approvals on this target",
-                candidate.profile_id,
-                candidate.harness.display_name()
-            ));
-            continue;
-        }
         if let Some(mj_core::subagent::SubagentPolicy::Mjolnir { .. }) = subagents
             && !candidate.harness.supports_delegation_tools()
         {
@@ -426,7 +401,6 @@ pub async fn resolve_provider_session_selection(
         .collect();
     let reservation = ReservationSlot::new(telemetry_store.draw_and_reserve(
         &mut draw_pool,
-        execution_policy,
         Placement::TopLevel,
         None,
         None,
@@ -450,7 +424,6 @@ async fn resolve_choices_selection(
     backend: &Arc<dyn SubagentBackend>,
     choices: &[mj_core::config::SubagentChoice],
     source: ModelProfileCandidateSource<'_>,
-    execution_policy: ExecutionPolicy,
     category: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
     for choice in choices {
@@ -472,7 +445,6 @@ async fn resolve_choices_selection(
                 .unwrap_or(EffortRequirement::Default),
             None,
             source,
-            execution_policy,
             category,
         )
         .await;
@@ -516,14 +488,6 @@ async fn resolve_choices_selection(
                 continue;
             };
             matched_any = true;
-            if !guardian_eligible(candidate.harness, execution_policy) {
-                excluded.push(format!(
-                    "profile {} ({}) does not support native guardian approvals on this target",
-                    candidate.profile_id,
-                    candidate.harness.display_name()
-                ));
-                continue;
-            }
             if let Some(reason) =
                 mj_accounts::profile_scheduler::ineligibility(candidate, &identity, now)
             {
@@ -610,7 +574,6 @@ async fn resolve_choices_selection(
         let mut draw_pool = eligible.clone();
         let reservation = ReservationSlot::new(telemetry_store.draw_and_reserve(
             &mut draw_pool,
-            execution_policy,
             placement,
             category,
             anchor,
@@ -675,7 +638,6 @@ pub(crate) async fn resolve_session_model_profile_selection(
     ranking_anchor: Option<&str>,
     model: &str,
     effort: Option<&str>,
-    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     if effort == Some("adaptive") {
         return Err(ApiFailure::bad_request(
@@ -692,7 +654,6 @@ pub(crate) async fn resolve_session_model_profile_selection(
         requirement,
         None,
         ModelProfileCandidateSource::Session { ranking_anchor },
-        execution_policy,
         Some("primary"),
     )
     .await
@@ -728,7 +689,6 @@ pub async fn resolve_reviewer_model_profile_selection(
     backend: &Arc<dyn SubagentBackend>,
     model: &str,
     effort: Option<&str>,
-    execution_policy: ExecutionPolicy,
     category: &str,
 ) -> Result<SubagentSelection, ApiFailure> {
     let requirement = effort
@@ -742,7 +702,6 @@ pub async fn resolve_reviewer_model_profile_selection(
             requirement,
             None,
             ModelProfileCandidateSource::ReviewersReady,
-            execution_policy,
             Some(category),
         )
         .await
@@ -818,7 +777,6 @@ pub async fn resolve_reviewer_model_profile_selection(
                 requirement,
                 None,
                 ModelProfileCandidateSource::Reviewers,
-                execution_policy,
                 Some(category),
             )
             .await
@@ -916,7 +874,6 @@ async fn resolve_model_profile_selection_matching(
     requirement: EffortRequirement<'_>,
     inherited_effort: Option<&str>,
     source: ModelProfileCandidateSource<'_>,
-    execution_policy: ExecutionPolicy,
     category: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
     let candidates = match source {
@@ -943,7 +900,6 @@ async fn resolve_model_profile_selection_matching(
         requirement,
         inherited_effort,
         source,
-        execution_policy,
         category,
     )
     .await
@@ -958,7 +914,6 @@ async fn resolve_model_profile_selection_from(
     requirement: EffortRequirement<'_>,
     inherited_effort: Option<&str>,
     source: ModelProfileCandidateSource<'_>,
-    execution_policy: ExecutionPolicy,
     category: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
     let SubagentCandidates {
@@ -1027,30 +982,17 @@ async fn resolve_model_profile_selection_from(
     let mut draw_context = None;
     if profile_id.is_none() {
         // Load balancing offers only profiles that may still run the model
-        // from their own allowance (or credits they may spend) and satisfy the
-        // target's guardian policy. A named profile is not load balancing and
-        // keeps its pin.
+        // from their own allowance (or credits they may spend). A named
+        // profile is not load balancing and keeps its pin.
         let now = now_epoch_seconds();
         let mut excluded = Vec::new();
-        let mut guardian_excluded = false;
-        let mut quota_excluded = false;
         offered.retain(|candidate| {
-            if !guardian_eligible(candidate.harness, execution_policy) {
-                guardian_excluded = true;
-                excluded.push(format!(
-                    "profile {} ({}) does not support native guardian approvals on this target",
-                    candidate.profile_id,
-                    candidate.harness.display_name()
-                ));
-                return false;
-            }
             match mj_accounts::profile_scheduler::ineligibility(
                 &candidate.candidate,
                 &identity,
                 now,
             ) {
                 Some(reason) => {
-                    quota_excluded = true;
                     excluded.push(reason.describe(&candidate.profile_id, &identity));
                     false
                 }
@@ -1058,21 +1000,12 @@ async fn resolve_model_profile_selection_from(
             }
         });
         if offered.is_empty() {
-            let headline = if quota_excluded && !guardian_excluded {
-                format!(
-                    "every {} profile that can run model {model:?} is out of subscription quota: {}. \
-                     Try again after the quota resets.",
-                    source.profile_description(),
-                    excluded.join("; ")
-                )
-            } else {
-                format!(
-                    "every {} profile that can run model {model:?} is ineligible: {}.",
-                    source.profile_description(),
-                    excluded.join("; ")
-                )
-            };
-            return Err(ApiFailure::conflict(headline));
+            return Err(ApiFailure::conflict(format!(
+                "every {} profile that can run model {model:?} is out of subscription quota: {}. \
+                 Try again after the quota resets.",
+                source.profile_description(),
+                excluded.join("; ")
+            )));
         }
         offered.retain(|candidate| {
             if let Some(note) = unhealthy_note(&candidate.candidate, &candidate.model.value) {
@@ -1120,7 +1053,6 @@ async fn resolve_model_profile_selection_from(
             if let Some((store, prefer, ranking, anchor, placement)) = &draw_context {
                 ReservationSlot::new(store.draw_and_reserve(
                     &mut offered,
-                    execution_policy,
                     *placement,
                     category,
                     *anchor,
@@ -1357,7 +1289,6 @@ pub(crate) fn merge_same_models(
     let telemetry = mj_accounts::quota_telemetry::QuotaTelemetrySnapshot::default();
     let power_ranking = mj_accounts::power_ranking::PowerRankingSnapshot::baseline();
     let ctx = SchedulingContext {
-        execution_policy: ExecutionPolicy::Unconstrained,
         placement: Placement::Child,
         category: Some("straightforward"),
         ranking_anchor: Some(parent_profile),
@@ -1619,7 +1550,6 @@ mod tests {
         let telemetry = mj_accounts::quota_telemetry::QuotaTelemetrySnapshot::default();
         let power_ranking = mj_accounts::power_ranking::PowerRankingSnapshot::baseline();
         let ctx = SchedulingContext {
-            execution_policy: ExecutionPolicy::Unconstrained,
             placement,
             category: Some("straightforward"),
             ranking_anchor,
@@ -1663,7 +1593,6 @@ mod tests {
         let telemetry = mj_accounts::quota_telemetry::QuotaTelemetrySnapshot::default();
         let power_ranking = mj_accounts::power_ranking::PowerRankingSnapshot::baseline();
         let ctx = SchedulingContext {
-            execution_policy: ExecutionPolicy::Unconstrained,
             placement,
             category: Some("straightforward"),
             ranking_anchor,
@@ -2064,7 +1993,6 @@ mod tests {
                     ModelProfileCandidateSource::Subagents {
                         parent_profile: "codex",
                     },
-                    ExecutionPolicy::Unconstrained,
                     None,
                 )
                 .await
@@ -2448,7 +2376,6 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Straightforward,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .unwrap_err();
@@ -2512,7 +2439,6 @@ mod tests {
             ModelProfileCandidateSource::Subagents {
                 parent_profile: "probe-fails-zero",
             },
-            ExecutionPolicy::Unconstrained,
             Some("subtle"),
         )
         .await
@@ -2545,13 +2471,7 @@ mod tests {
         });
         let selected = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            resolve_reviewer_model_profile_selection(
-                &backend,
-                "fixed",
-                Some("high"),
-                ExecutionPolicy::Unconstrained,
-                "reviewer",
-            ),
+            resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"), "reviewer"),
         )
         .await
         .unwrap()
@@ -2597,15 +2517,9 @@ mod tests {
             config: Default::default(),
             candidates: SubagentCandidates::default(),
         });
-        let error = resolve_reviewer_model_profile_selection(
-            &backend,
-            "fixed",
-            None,
-            ExecutionPolicy::Unconstrained,
-            "reviewer",
-        )
-        .await
-        .unwrap_err();
+        let error = resolve_reviewer_model_profile_selection(&backend, "fixed", None, "reviewer")
+            .await
+            .unwrap_err();
         assert!(
             error
                 .message
@@ -2652,15 +2566,9 @@ mod tests {
             config: Default::default(),
             candidates: SubagentCandidates::default(),
         });
-        let error = resolve_reviewer_model_profile_selection(
-            &backend,
-            "fixed",
-            None,
-            ExecutionPolicy::Unconstrained,
-            "reviewer",
-        )
-        .await
-        .unwrap_err();
+        let error = resolve_reviewer_model_profile_selection(&backend, "fixed", None, "reviewer")
+            .await
+            .unwrap_err();
         assert!(
             error.message.contains("team-terra (probe failed)")
                 && error.message.contains("terra (login expired)"),
@@ -2724,7 +2632,6 @@ mod tests {
             EffortRequirement::Exact("high"),
             None,
             ModelProfileCandidateSource::ReviewersReady,
-            ExecutionPolicy::Unconstrained,
             None,
         )
         .await
@@ -2759,7 +2666,6 @@ mod tests {
                 requirement,
                 None,
                 ModelProfileCandidateSource::ReviewersReady,
-                ExecutionPolicy::Unconstrained,
                 None,
             )
             .await
@@ -2808,7 +2714,6 @@ mod tests {
                 EffortRequirement::Exact("high"),
                 None,
                 ModelProfileCandidateSource::ReviewersReady,
-                ExecutionPolicy::Unconstrained,
                 None,
             )
             .await
@@ -2835,25 +2740,14 @@ mod tests {
                 unavailable: Vec::new(),
             },
         });
-        let selected = resolve_reviewer_model_profile_selection(
-            &backend,
-            "fixed",
-            Some("high"),
-            ExecutionPolicy::Unconstrained,
-            "reviewer",
-        )
-        .await
-        .unwrap();
+        let selected =
+            resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"), "reviewer")
+                .await
+                .unwrap();
         assert_eq!(selected.effort.as_deref(), Some("high"));
-        let error = resolve_reviewer_model_profile_selection(
-            &backend,
-            "missing",
-            None,
-            ExecutionPolicy::Unconstrained,
-            "reviewer",
-        )
-        .await
-        .unwrap_err();
+        let error = resolve_reviewer_model_profile_selection(&backend, "missing", None, "reviewer")
+            .await
+            .unwrap_err();
         assert!(
             error.message.contains("no enabled profile"),
             "{}",
@@ -2861,24 +2755,14 @@ mod tests {
         );
         let mut saw_different_profiles = false;
         for _ in 0..48 {
-            let first = resolve_reviewer_model_profile_selection(
-                &backend,
-                "no-effort",
-                None,
-                ExecutionPolicy::Unconstrained,
-                "reviewer",
-            )
-            .await
-            .unwrap();
-            let second = resolve_reviewer_model_profile_selection(
-                &backend,
-                "no-effort",
-                None,
-                ExecutionPolicy::Unconstrained,
-                "reviewer",
-            )
-            .await
-            .unwrap();
+            let first =
+                resolve_reviewer_model_profile_selection(&backend, "no-effort", None, "reviewer")
+                    .await
+                    .unwrap();
+            let second =
+                resolve_reviewer_model_profile_selection(&backend, "no-effort", None, "reviewer")
+                    .await
+                    .unwrap();
             assert_eq!(first.effort, None);
             assert_eq!(second.effort, None);
             saw_different_profiles |= first.profile_id != second.profile_id;
@@ -2954,7 +2838,6 @@ mod tests {
                         model: request.into(),
                         effort: Some("high".into()),
                     }),
-                    ExecutionPolicy::Unconstrained,
                 )
                 .await
                 .unwrap();
@@ -2970,7 +2853,6 @@ mod tests {
                     &backend,
                     request,
                     Some("high"),
-                    ExecutionPolicy::Unconstrained,
                     "reviewer",
                 )
                 .await
@@ -2986,7 +2868,6 @@ mod tests {
                     subtle: None,
                 },
                 SubagentTaskType::Straightforward,
-                ExecutionPolicy::Unconstrained,
             )
             .await
             .unwrap();
@@ -3034,7 +2915,6 @@ mod tests {
             "claude-exhausted",
             &policy,
             SubagentTaskType::Straightforward,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .unwrap();
@@ -3088,7 +2968,6 @@ mod tests {
                     subtle: None,
                 },
                 task_type,
-                ExecutionPolicy::Unconstrained,
             )
             .await
             .unwrap();
@@ -3140,7 +3019,6 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .unwrap();
@@ -3150,7 +3028,6 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .unwrap_err();
@@ -3182,15 +3059,10 @@ mod tests {
             (SubagentTaskType::Straightforward, "no-effort", None),
             (SubagentTaskType::Subtle, "fixed", Some("high")),
         ] {
-            let selected = resolve_subagent_policy_selection(
-                &backend,
-                "parent",
-                &mixed_policy,
-                task_type,
-                ExecutionPolicy::Unconstrained,
-            )
-            .await
-            .unwrap();
+            let selected =
+                resolve_subagent_policy_selection(&backend, "parent", &mixed_policy, task_type)
+                    .await
+                    .unwrap();
             assert_eq!(
                 (
                     selected.profile_id.as_str(),
@@ -3209,7 +3081,6 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Subtle,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .unwrap_err();
@@ -3246,7 +3117,6 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Subtle,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .unwrap_err();
@@ -3260,7 +3130,6 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Straightforward,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .unwrap();
@@ -3313,7 +3182,6 @@ mod tests {
                 subtle: None,
             },
             mj_core::subagent::SubagentTaskType::Straightforward,
-            ExecutionPolicy::Unconstrained,
         )
         .await
         .expect("healthy sibling model on the same pool must still be selected");
@@ -3372,7 +3240,6 @@ mod tests {
             &backend,
             &config,
             &mj_core::config::QuotaProvider::Anthropic,
-            ExecutionPolicy::Unconstrained,
             None,
         )
         .await
@@ -3383,7 +3250,6 @@ mod tests {
             &backend,
             &config,
             &mj_core::config::QuotaProvider::Google,
-            ExecutionPolicy::Unconstrained,
             None,
         )
         .await

@@ -340,7 +340,7 @@ exit 0"#,
                     .context("host home directory is empty")?,
             ));
         ensure!(
-            home.is_absolute(),
+            mj_core::target_path::is_absolute(&home),
             "container host home is not an absolute path"
         );
         (
@@ -377,7 +377,11 @@ exit 0"#,
         ),
     };
     ensure!(
-        program.is_absolute(),
+        if host.ssh().is_some() {
+            mj_core::target_path::is_absolute(&program)
+        } else {
+            program.is_absolute()
+        },
         "the selected mbx destination is not absolute"
     );
 
@@ -415,20 +419,23 @@ impl PreparedMbx {
                 .context("the selected mbx path has no parent directory")?;
             let script = format!(
                 r#"{}
-probe publish sh -c 'chmod 755 -- "$1" && mv -f -- "$1" "$2"' hel-mbx-publish {} {} || exit 0
+probe publish sh -c 'chmod -- 755 "$1" && mv -f -- "$1" "$2"' hel-mbx-publish {} {} || exit 0
 probe setup {} setup --yes || exit 0
 probe profile sh -c {} hel-mbx-profile update {} {} {} {} || exit 0
 probe native sh -c {}
 exit 0"#,
                 mj_targets::targets::PROBE_HELPER_SH,
-                shell_quote(&staged.to_string_lossy()),
-                shell_quote(&program.to_string_lossy()),
-                shell_quote(&program.to_string_lossy()),
+                shell_quote(&mj_core::target_path::text(staged)),
+                shell_quote(&mj_core::target_path::text(&program)),
+                shell_quote(&mj_core::target_path::text(&program)),
                 shell_quote(PROFILE_SCRIPT),
-                shell_quote(&binary_dir.to_string_lossy()),
+                shell_quote(&mj_core::target_path::text(binary_dir)),
                 shell_quote(&posix_profile_block(binary_dir, &shim_dir)),
                 shell_quote(&fish_profile_block(binary_dir, &shim_dir)),
-                shell_quote(&self.home.join(".mbx.lock").to_string_lossy()),
+                shell_quote(&mj_core::target_path::text(&mj_core::target_path::join(
+                    &self.home,
+                    Path::new(".mbx.lock"),
+                ))),
                 shell_quote(super::NATIVE_VERSION_SCRIPT)
             );
             let command = host.shell_command(
@@ -501,11 +508,11 @@ exit 0"#,
             });
         }
         let command = host.shell_command(
-            r#"chmod 755 -- "$1" && mv -f -- "$1" "$2""#,
+            r#"chmod -- 755 "$1" && mv -f -- "$1" "$2""#,
             "hel-mbx-install-publish",
             [
-                staged.to_string_lossy().into_owned(),
-                program.to_string_lossy().into_owned(),
+                mj_core::target_path::text(staged),
+                mj_core::target_path::text(&program),
             ],
             "publish the mbx binary atomically on the SSH host",
         );
@@ -551,14 +558,18 @@ fn canonical_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<P
     let command = host.shell_command(
         r#"cd -- "$1" && pwd -P"#,
         "hel-mbx-home",
-        [home.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(&home)],
         "resolve the container host's physical home directory",
     );
     let output = checked(executor.execute(&command)?, &command)?;
     let text = String::from_utf8(output.stdout).context("host home directory is not UTF-8")?;
     let home = PathBuf::from(text.trim());
     ensure!(
-        home.is_absolute(),
+        if host.ssh().is_some() {
+            mj_core::target_path::is_absolute(&home)
+        } else {
+            home.is_absolute()
+        },
         "container host home is not an absolute path"
     );
     Ok(home)
@@ -583,15 +594,18 @@ fn host_architecture(host: &CacheHost, executor: &impl CommandExecutor) -> Resul
 fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<InstallDestination> {
     let Some(existing) = existing else {
         return Ok(InstallDestination::Supported {
-            program: home.join(".local/bin/mbx"),
+            program: mj_core::target_path::join(home, Path::new(".local/bin/mbx")),
             kind: MbxInstallKind::Install,
         });
     };
     ensure!(
-        existing.program.is_absolute(),
+        mj_core::target_path::is_absolute(&existing.program),
         "native mbx probe returned a non-absolute path"
     );
-    let allowed = [home.join(".local/bin"), home.join(".cargo/bin")];
+    let allowed = [
+        mj_core::target_path::join(home, Path::new(".local/bin")),
+        mj_core::target_path::join(home, Path::new(".cargo/bin")),
+    ];
     if allowed
         .iter()
         .any(|directory| existing.program.strip_prefix(directory).is_ok())
@@ -636,10 +650,13 @@ fn stage_binary(
     }
 
     let sequence = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".mbx.mjolnir-{}-{sequence}.tmp",
-        std::process::id()
-    ));
+    let temporary = mj_core::target_path::join(
+        parent,
+        Path::new(&format!(
+            ".mbx.mjolnir-{}-{sequence}.tmp",
+            std::process::id()
+        )),
+    );
     temporary
         .strip_prefix(home)
         .context("mbx install directory is outside the SSH host home")?;
@@ -652,8 +669,8 @@ fn stage_binary(
             "-c".into(),
             "mkdir -p -- \"$1\" && cat > \"$2\"".into(),
             "hel-mbx-stage".into(),
-            parent.to_string_lossy().into_owned(),
-            temporary.to_string_lossy().into_owned(),
+            mj_core::target_path::text(parent),
+            mj_core::target_path::text(&temporary),
         ],
     )
     .purpose("upload the pinned mbx binary to the SSH host")
@@ -687,7 +704,7 @@ fn remove_remote_temporary(host: &CacheHost, path: &Path, executor: &impl Comman
             "rm".into(),
             "-f".into(),
             "--".into(),
-            path.to_string_lossy().into_owned(),
+            mj_core::target_path::text(path),
         ],
         "remove partial mbx install upload",
     );
@@ -724,7 +741,7 @@ fn run_setup(host: &CacheHost, program: &Path, executor: &impl CommandExecutor) 
     // belongs in mbx: set the temporary file's mode before persist, then bump our pin.
     let command = host.command(
         vec![
-            program.to_string_lossy().into_owned(),
+            mj_core::target_path::text(program),
             "setup".into(),
             "--yes".into(),
         ],
@@ -758,7 +775,7 @@ fn inspect_profile_selection(
     let command = host.shell_command(
         PROFILE_SCRIPT,
         "hel-mbx-profile",
-        ["preview".into(), binary_dir.to_string_lossy().into_owned()],
+        ["preview".into(), mj_core::target_path::text(binary_dir)],
         "resolve the host login profile for the mbx PATH block",
     );
     let output = checked(executor.execute(&command)?, &command)?;
@@ -810,13 +827,16 @@ fn update_profile(
         "hel-mbx-profile",
         [
             "update".into(),
-            binary_dir.to_string_lossy().into_owned(),
+            mj_core::target_path::text(binary_dir),
             posix_block,
             fish_block,
             if _lock.is_some() {
                 String::new()
             } else {
-                home.join(".mbx.lock").to_string_lossy().into_owned()
+                mj_core::target_path::text(&mj_core::target_path::join(
+                    home,
+                    Path::new(".mbx.lock"),
+                ))
             },
         ],
         "add the mbx PATH block to the container host login profile",
@@ -859,7 +879,7 @@ fn selection_from_lines(lines: &mut impl Iterator<Item = String>) -> Result<Prof
         .next()
         .context("profile selection returned no mbx shim directory")?;
     ensure!(
-        Path::new(&shim_dir).is_absolute(),
+        mj_core::target_path::is_absolute(Path::new(&shim_dir)),
         "host selected a non-absolute mbx shim directory: {shim_dir:?}"
     );
     ensure!(
@@ -875,7 +895,7 @@ fn selection_from_lines(lines: &mut impl Iterator<Item = String>) -> Result<Prof
 
 fn validate_profile_file(file: &str) -> Result<()> {
     ensure!(
-        file.starts_with("~/") || Path::new(file).is_absolute(),
+        file.starts_with("~/") || mj_core::target_path::is_absolute(Path::new(file)),
         "host selected a non-absolute login profile path: {file:?}"
     );
     Ok(())
@@ -883,7 +903,11 @@ fn validate_profile_file(file: &str) -> Result<()> {
 
 fn profile_details(selection: &ProfileSelection, binary_dir: &Path) -> MbxProfileDetails {
     let manual_path_line = (selection.shell_kind == "unknown").then(|| {
-        let directories = format!("{}:{}", selection.shim_dir.display(), binary_dir.display());
+        let directories = format!(
+            "{}:{}",
+            mj_core::target_path::text(&selection.shim_dir),
+            mj_core::target_path::text(binary_dir)
+        );
         format!(
             "export PATH={}{}",
             shell_quote(&directories),
@@ -902,8 +926,8 @@ fn profile_details(selection: &ProfileSelection, binary_dir: &Path) -> MbxProfil
 }
 
 fn posix_profile_block(binary_dir: &Path, shim_dir: &Path) -> String {
-    let binary_dir = shell_quote(&binary_dir.to_string_lossy());
-    let shim_dir = shell_quote(&shim_dir.to_string_lossy());
+    let binary_dir = shell_quote(&mj_core::target_path::text(binary_dir));
+    let shim_dir = shell_quote(&mj_core::target_path::text(shim_dir));
     format!(
         r#"# >>> mbx (added by Mjolnir) >>>
 _mjolnir_mbx_prepend_path() {{
@@ -949,8 +973,8 @@ export PATH
 }
 
 fn fish_profile_block(binary_dir: &Path, shim_dir: &Path) -> String {
-    let binary_dir = fish_quote(&binary_dir.to_string_lossy());
-    let shim_dir = fish_quote(&shim_dir.to_string_lossy());
+    let binary_dir = fish_quote(&mj_core::target_path::text(binary_dir));
+    let shim_dir = fish_quote(&mj_core::target_path::text(shim_dir));
     format!(
         "# >>> mbx (added by Mjolnir) >>>\nfish_add_path --path --prepend --move -- {binary_dir}\nfish_add_path --path --prepend --move -- {shim_dir}\n# <<< mbx <<<"
     )
@@ -1006,15 +1030,15 @@ fn expected_digest(triple: &str) -> Result<&'static str> {
 pub fn pinned_linux_binary(triple: &str, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let expected = expected_digest(triple)?;
     // Keep the original verified cache layout for offline retries and other hosts.
-    let destination = mj_core::config::data_dir()
-        .join("mbx")
+    let destination = mj_core::config::DataLayout::current()
+        .mbx_dir()
         .join(MBX_VERSION)
         .join(triple)
         .join("mbx");
     if destination.is_file() {
         return Ok(destination);
     }
-    let root = mj_core::config::data_dir().join("mbx-download");
+    let root = mj_core::config::DataLayout::current().mbx_download_dir();
     std::fs::create_dir_all(&root).context("create mbx download staging root")?;
     let directory = tempfile::tempdir_in(root).context("create mbx download staging directory")?;
     let url = release_url(triple);
@@ -1118,6 +1142,8 @@ mod tests {
         commands: Mutex<Vec<CommandSpec>>,
         probe_answers: Mutex<VecDeque<CommandOutput>>,
         setup_error: Option<String>,
+        ssh_install: bool,
+        uploaded: Mutex<Vec<u8>>,
     }
 
     impl FakeExecutor {
@@ -1126,6 +1152,7 @@ mod tests {
                 commands: Mutex::new(Vec::new()),
                 probe_answers: Mutex::new(probes.into_iter().collect()),
                 setup_error: None,
+                ..Self::default()
             }
         }
 
@@ -1168,6 +1195,39 @@ mod tests {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             let output = match command.purpose.as_str() {
+                "discover the mbx installation host" if self.ssh_install => CommandOutput {
+                    status: 0,
+                    stdout: targets::ssh_podman_probe_fixture(&[
+                        ("platform", 0, "Linux x86_64\n", ""),
+                        ("arch", 0, "x86_64\n", ""),
+                        (
+                            "home",
+                            0,
+                            "/home/build\n/home/build/.local/share/mbx/bin\n",
+                            "",
+                        ),
+                        ("native", 1, "", ""),
+                    ]),
+                    stderr: Vec::new(),
+                },
+                "publish and configure the pinned mbx binary" if self.ssh_install => {
+                    let version = format!("/home/build/.local/bin/mbx\nmbx {MBX_VERSION}\n");
+                    CommandOutput {
+                        status: 0,
+                        stdout: targets::ssh_podman_probe_fixture(&[
+                            ("publish", 0, "", ""),
+                            ("setup", 0, "", ""),
+                            (
+                                "profile",
+                                0,
+                                "changed\n~/.profile\nposix\n/home/build/.local/share/mbx/bin\n",
+                                "",
+                            ),
+                            ("native", 0, &version, ""),
+                        ]),
+                        stderr: Vec::new(),
+                    }
+                }
                 "detect build cache host platform" => output(0, "Linux x86_64\n", ""),
                 "detect mbx host architecture" => output(0, "x86_64\n", ""),
                 "read the container host mbx version" => self
@@ -1193,6 +1253,16 @@ mod tests {
                 _ => output(0, "", ""),
             };
             Ok(output)
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(command.clone());
+            input.read_to_end(&mut self.uploaded.lock().unwrap())?;
+            Ok(output(0, "", ""))
         }
     }
 
@@ -1374,6 +1444,37 @@ mod tests {
     }
 
     #[test]
+    fn ssh_install_preserves_posix_paths_in_discovery_upload_and_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("mbx");
+        let bytes = vec![b'x'; 128 * 1024];
+        std::fs::write(&binary, &bytes).unwrap();
+        let executor = FakeExecutor {
+            ssh_install: true,
+            ..Default::default()
+        };
+
+        let result = install_mbx_with(&ssh_machine(), &executor, None, |_| Ok(binary)).unwrap();
+
+        assert_eq!(
+            result.program.to_string_lossy(),
+            "/home/build/.local/bin/mbx"
+        );
+        assert_eq!(result.kind, MbxInstallKind::Install);
+        assert_eq!(result.profile_file, "~/.profile");
+        assert_eq!(*executor.uploaded.lock().unwrap(), bytes);
+        let commands = executor.commands();
+        assert_eq!(commands.len(), 3);
+        assert!(commands[1].ssh_gzip_stdin);
+        let upload = commands[1].args.last().unwrap();
+        assert!(upload.contains("/home/build/.local/bin/.mbx.mjolnir-"));
+        let publish = commands[2].args.last().unwrap();
+        assert!(publish.contains("/home/build/.local/bin/mbx"));
+        assert!(publish.contains("/home/build/.mbx.lock"));
+        assert!(publish.contains("/home/build/.local/share/mbx/bin"));
+    }
+
+    #[test]
     #[cfg_attr(
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
@@ -1416,7 +1517,11 @@ mod tests {
                 local
                     .env
                     .insert("HOME".into(), self.home.to_string_lossy().into_owned());
-                local.env.insert("PATH".into(), "/usr/bin:/bin".into());
+                local.env.insert("SHELL".into(), "/bin/sh".into());
+                local.env.insert(
+                    "PATH".into(),
+                    format!("{}:/usr/bin:/bin", self.home.join("bin").display()),
+                );
                 local.env.insert(
                     "XDG_DATA_HOME".into(),
                     self.home.join("data").to_string_lossy().into_owned(),
@@ -1440,6 +1545,25 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("remote home with quotes '");
         std::fs::create_dir_all(&home).unwrap();
+        #[cfg(unix)]
+        {
+            let tools = home.join("bin");
+            std::fs::create_dir(&tools).unwrap();
+            mj_core::test_hooks::install_fake_command(
+                &tools,
+                "uname",
+                "#!/bin/sh\ncase $1 in -sm) echo 'Linux x86_64';; -m) echo x86_64;; *) exit 1;; esac\n",
+            );
+            if cfg!(target_os = "macos") {
+                // The simulated Linux host has flock; retain the real fd lock
+                // when running its shell script on a Mac without that utility.
+                mj_core::test_hooks::install_fake_command(
+                    &tools,
+                    "flock",
+                    "#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = -x ] && [ \"$2\" = 9 ] || exit 1\nexec /usr/bin/python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'\n",
+                );
+            }
+        }
         let binary = temp.path().join("downloaded-mbx");
         let mut bytes = format!("#!/bin/sh\ncase $1 in --version) echo 'mbx {MBX_VERSION}';; setup) touch \"$HOME/setup-ran\";; esac\n").into_bytes();
         bytes.extend_from_slice(format!("#{}\n", "padding".repeat(20000)).as_bytes());
@@ -1534,8 +1658,8 @@ mod tests {
             .run();
             return;
         }
-        let destination = mj_core::config::data_dir()
-            .join("mbx")
+        let destination = mj_core::config::DataLayout::current()
+            .mbx_dir()
             .join(MBX_VERSION)
             .join("x86_64")
             .join("mbx");

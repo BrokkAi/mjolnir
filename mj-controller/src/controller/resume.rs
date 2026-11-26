@@ -901,28 +901,31 @@ impl Controller {
             prompt_contexts.extend(stopped_subagents_context);
             let (backend, worker_root) = self.worker_placement(session_id)?;
             let harness_home = target_profile_home(&backend, session_id, profile);
-            let workspace_root = if let Some(worktree) =
-                self.state.sessions[session_id].managed_worktree.as_ref()
-            {
-                // Use the managed clone's parent rather than `project_directory.parent()`:
-                // a remotely seeded `--no-checkout` clone has not checked out any
-                // subdirectory yet when `ensure_room_for` and `restore_checkpoint`
-                // validate `workspace_root`.
-                worktree
-                    .worktree_root
-                    .parent()
-                    .context("managed worktree has no parent")?
-                    .to_string_lossy()
-                    .into_owned()
-            } else if let Some(project_directory) = &resumed_project_directory {
-                project_directory
-                    .parent()
-                    .context("bare project directory has no parent")?
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                super::network_git::workspace_root(&backend, resumed_container_workspace.as_deref())
-            };
+            let workspace_root =
+                if let Some(worktree) = self.state.sessions[session_id].managed_worktree.as_ref() {
+                    // Use the managed clone's parent rather than `project_directory.parent()`:
+                    // a remotely seeded `--no-checkout` clone has not checked out any
+                    // subdirectory yet when `ensure_room_for` and `restore_checkpoint`
+                    // validate `workspace_root`.
+                    worktree
+                        .worktree_root
+                        .parent()
+                        .context("managed worktree has no parent")?
+                        .to_string_lossy()
+                        .into_owned()
+                } else if let Some(project_directory) = &resumed_project_directory {
+                    project_directory
+                        .parent()
+                        .context("bare project directory has no parent")?
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    super::network_git::workspace_root(
+                        &backend,
+                        resumed_container_workspace.as_deref(),
+                        session_id,
+                    )
+                };
             let target_path = |path: &str| match &backend {
                 targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. }
                     if !path.starts_with('/') =>
@@ -1391,13 +1394,10 @@ impl Controller {
                     bail!("ACP loaded native session {native_session_id}, expected {archived}");
                 }
             } else {
-                relay
-                    .install_prompt_context(
-                        utility_handoff
-                            .clone()
-                            .context("a resume into a fresh native session has no handoff")?,
-                    )
-                    .await?;
+                let handoff = utility_handoff
+                    .clone()
+                    .context("a resume into a fresh native session has no handoff")?;
+                relay.install_prompt_context(handoff).await?;
                 if replay_queue {
                     for prompt in &canonical_session.queued_prompts {
                         // A queued configuration change is replayed as itself;
@@ -2281,7 +2281,7 @@ impl Controller {
             && matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. })
             && let Some(project_directory) = checkout.project_directory()
         {
-            self.validate_project_directory(target_id, &project_directory, executor)
+            self.validate_existing_project_directory(&previous, target_id, &project_directory, executor)
                 .context("raw project is unavailable for resume")?;
         }
         let conversion = match plan {
@@ -2503,6 +2503,7 @@ impl Controller {
                 .context("resume target disappeared")?
                 .into(),
         );
+        record.machine_id = self.config.template_machine_id(target_id);
         record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.target = None;
@@ -2686,7 +2687,7 @@ impl Controller {
                         // straight into the local destination worker root first so
                         // `restore_managed_clone_origin_delta` reads it locally.
                         let local_worker_root =
-                            mj_core::config::data_dir().join("workers").join(session_id);
+                            mj_core::config::DataLayout::current().worker_root(session_id);
                         self.reserve_provisioning_target(
                             session_id,
                             mj_core::state::TargetLocator::LocalBare {
@@ -4002,6 +4003,7 @@ impl Controller {
             let workspace = PathBuf::from(super::network_git::workspace_root(
                 backend,
                 source.container_workspace.as_deref(),
+                &source.id,
             ));
             source
                 .project_bundle(&self.config)
@@ -4048,7 +4050,7 @@ pub(super) fn resolve_move_keep_dir(
 mod in_place;
 mod repair;
 pub use in_place::InPlaceRestartError;
-pub(super) use repair::RetainedWorker;
+pub(super) use repair::{RetainedWorker, release_settled_in_place_hold};
 
 #[cfg(test)]
 mod tests;

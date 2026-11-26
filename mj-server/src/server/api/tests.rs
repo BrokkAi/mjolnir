@@ -272,6 +272,8 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
     for path in [
         "/api/v1/usage/report",
         "/api/v1/usage/report?profile=account%2Bapi&hour_start_ms=7200000&include_suspended=true",
+        "/api/v1/usage/report?hour_start_ms=1&hour_starts_ms=7200001%2C0%2C7200001",
+        "/api/v1/usage/report?hour_start_ms=7200000&hour_starts_ms=",
         // A client from before the hour graph still sends a period.
         "/api/v1/usage/report?period=daily",
     ] {
@@ -304,7 +306,18 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
             mj_core::usage::SessionUsageQuery {
                 profile: Some("account+api".into()),
                 hour_start_ms: Some(7_200_000),
-                include_suspended: true
+                include_suspended: true,
+                ..Default::default()
+            },
+            mj_core::usage::SessionUsageQuery {
+                hour_start_ms: Some(1),
+                hour_starts_ms: Some([0, 7_200_001].into_iter().collect()),
+                ..Default::default()
+            },
+            mj_core::usage::SessionUsageQuery {
+                hour_start_ms: Some(7_200_000),
+                hour_starts_ms: Some(Default::default()),
+                ..Default::default()
             },
             mj_core::usage::SessionUsageQuery::default(),
         ]
@@ -3852,7 +3865,6 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
             subtle: None,
         },
         mj_core::subagent::SubagentTaskType::Straightforward,
-        mj_core::config::ExecutionPolicy::Unconstrained,
     )
     .await
     .unwrap();
@@ -3868,7 +3880,12 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
     let backend = Arc::new(FakeBackend {
         session_model_candidates: Some(SubagentCandidates {
             offered: vec![
-                model_candidate("claude4", 80, "luna"),
+                model_candidate_for_harness(
+                    "kimi-1",
+                    80,
+                    "luna",
+                    mj_core::config::HarnessKind::Kimi,
+                ),
                 model_candidate("codex-1", 80, "luna"),
             ],
             unavailable: Vec::new(),
@@ -3880,8 +3897,8 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
         |snapshot| {
             snapshot.profiles.push(crate::server::ViewerProfile {
                 availability: Default::default(),
-                id: "claude4".into(),
-                harness_kind: "codex".into(),
+                id: "kimi-1".into(),
+                harness_kind: "kimi".into(),
                 capabilities_key: String::new(),
                 quota_pools: Vec::new(),
                 quota: None,
@@ -3890,40 +3907,53 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
         preferences,
     );
 
-    for effort in ["", ",\"effort\":\"high\""] {
-        let mut selected = std::collections::BTreeSet::new();
-        // Exercise both session-selection paths through the public API. With
-        // equal weights, missing either account in 64 draws has probability 2^-63.
-        for _ in 0..64 {
-            let mut response = mj_core::runtime::spawn(app.clone().oneshot(start_request(
-                format!("{{\"bundle_id\":\"hel\",\"model\":\"luna\"{effort}}}"),
-            )));
-            let request = tokio::select! {
-                request = actions.recv() => request.unwrap(),
-                early = &mut response => panic!("start returned before its action: {:?}", early.unwrap().unwrap().status()),
-            };
-            let ControllerAction::New { profile_id, .. } = &request.action else {
-                panic!("expected a New action, got {:?}", request.action);
-            };
-            assert!(["codex-1", "claude4"].contains(&profile_id.as_str()));
-            selected.insert(profile_id.clone());
-            request
-                .reply
-                .send(ActionOutcome::Accepted {
-                    session_id: Some("session-2".into()),
-                    notice: None,
-                })
-                .unwrap();
+    for target in ["podman", "raw"] {
+        for effort in [None, Some("high")] {
+            let mut selected = std::collections::BTreeSet::new();
+            // Exercise both session-selection paths through the public API. With
+            // equal weights, missing either account in 64 draws has probability 2^-63.
+            for _ in 0..64 {
+                let mut body = serde_json::json!({
+                    "bundle_id": "hel", "target_id": target, "model": "luna"
+                });
+                if target == "raw" {
+                    body["project_directory"] = "/work/project".into();
+                }
+                if let Some(effort) = effort {
+                    body["effort"] = effort.into();
+                }
+                let mut response =
+                    mj_core::runtime::spawn(app.clone().oneshot(start_request(body.to_string())));
+                let request = tokio::select! {
+                    request = actions.recv() => request.unwrap(),
+                    early = &mut response => {
+                        let response = early.unwrap().unwrap();
+                        panic!("start returned before its action: {} {}", response.status(), json_body(response).await);
+                    },
+                };
+                let ControllerAction::New { profile_id, .. } = &request.action else {
+                    panic!("expected a New action, got {:?}", request.action);
+                };
+                assert!(["codex-1", "kimi-1"].contains(&profile_id.as_str()));
+                selected.insert(profile_id.clone());
+                request
+                    .reply
+                    .send(ActionOutcome::Accepted {
+                        session_id: Some("session-2".into()),
+                        notice: None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    response.await.unwrap().unwrap().status(),
+                    StatusCode::CREATED
+                );
+            }
             assert_eq!(
-                response.await.unwrap().unwrap().status(),
-                StatusCode::CREATED
+                selected.len(),
+                2,
+                "model-first launches must spread across accounts, even with a saved default"
             );
         }
-        assert_eq!(
-            selected.len(),
-            2,
-            "model-first launches must spread across accounts, even with a saved default"
-        );
     }
 }
 

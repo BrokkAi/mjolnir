@@ -1987,7 +1987,7 @@ fn raw_ssh_permissions_are_required_and_podman_rejects_them() {
     // Saving names the host the three runtimes share, so the file that comes
     // back has the machine the in-memory config never spelled out.
     config.machines.insert(
-        "builder".into(),
+        MachineId::new("builder").unwrap(),
         Machine::Ssh {
             ssh: SshConnection {
                 host: "builder".into(),
@@ -2291,7 +2291,7 @@ fn cache_opt_out_migration_covers_implicit_local_and_all_older_config_versions()
         assert_eq!(Config::load_from(&path).unwrap(), config);
         // A newly added machine uses the normal default, not a hidden veto.
         config.machines.insert(
-            "new".into(),
+            MachineId::new("new").unwrap(),
             serde_json::from_value(serde_json::json!({"kind":"ssh", "host":"new.example.com"}))
                 .unwrap(),
         );
@@ -2379,9 +2379,10 @@ fn saving_can_reenable_one_machine_during_global_cache_migration() {
     let path = directory.path().join("config.toml");
     fs::write(&path, "version = 13\n[build_cache]\nenabled = false\n").unwrap();
     let mut config = Config::load_from(&path).unwrap();
-    config
-        .machines
-        .insert("local".into(), Machine::Local { build_cache: None });
+    config.machines.insert(
+        MachineId::new("local").unwrap(),
+        Machine::Local { build_cache: None },
+    );
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     assert!(!saved.contains("build_cache"), "{saved}");
@@ -2954,24 +2955,75 @@ fn an_override_naming_the_default_data_directory_shares_the_user_index() {
     }
 }
 
+// A copied data directory must keep its ownership identity, and an existing
+// store that upgrades in place must keep the identity its workers carry.
+#[test]
+fn instance_identity_is_seeded_once_and_follows_a_copied_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let fresh = root.path().join("fresh");
+    let first = ensure_instance_identity_at(None, &fresh).unwrap();
+    assert_eq!(first.as_str().len(), 16);
+    assert_ne!(
+        first.as_str(),
+        legacy_instance_identity_for(None, &fresh),
+        "a new store gets a random identity, not the path hash"
+    );
+    assert_eq!(ensure_instance_identity_at(None, &fresh).unwrap(), first);
+    assert_eq!(
+        ensure_instance_identity_at(Some("other-name"), &fresh).unwrap(),
+        first,
+        "an existing identity is never replaced"
+    );
+    let copy = root.path().join("copy");
+    fs::create_dir(&copy).unwrap();
+    fs::copy(
+        DataLayout::at(fresh.clone()).instance_identity(),
+        DataLayout::at(copy.clone()).instance_identity(),
+    )
+    .unwrap();
+    assert_eq!(ensure_instance_identity_at(None, &copy).unwrap(), first);
+
+    for existing in ["mj.sqlite3", "workers"] {
+        let store = root.path().join(format!("store-{existing}"));
+        fs::create_dir(&store).unwrap();
+        let marker = store.join(existing);
+        if existing == "workers" {
+            fs::create_dir(&marker).unwrap();
+        } else {
+            fs::write(&marker, b"").unwrap();
+        }
+        assert_eq!(
+            ensure_instance_identity_at(None, &store).unwrap().as_str(),
+            legacy_instance_identity_for(None, &store),
+            "an existing store keeps the identity its workers were stamped with"
+        );
+    }
+
+    let named = root.path().join("named");
+    assert_eq!(
+        ensure_instance_identity_at(Some("qa0916"), &named).unwrap(),
+        "qa0916"
+    );
+}
+
 // Hard-won: 18de1bb4: recovery could act on workers belonging to another instance
 #[test]
-fn instance_identity_prefers_a_valid_instance_name() {
+fn legacy_instance_identity_prefers_a_valid_instance_name() {
     let dir = Path::new("/home/user/.local/share/mjolnir");
-    assert_eq!(instance_identity_for(Some("qa0916"), dir), "qa0916");
+    assert_eq!(legacy_instance_identity_for(Some("qa0916"), dir), "qa0916");
     assert_eq!(
-        instance_identity_for(Some("../escape"), dir),
-        instance_identity_for(None, dir),
+        legacy_instance_identity_for(Some("../escape"), dir),
+        legacy_instance_identity_for(None, dir),
         "an invalid name falls back to the data-dir fingerprint"
     );
 }
 
 // Hard-won: 18de1bb4: recovery could act on workers belonging to another instance
 #[test]
-fn instance_identity_fingerprints_the_data_dir_stably() {
-    let first = instance_identity_for(None, Path::new("/srv/mj/one"));
-    let same = instance_identity_for(None, Path::new("/srv/mj/one"));
-    let other = instance_identity_for(None, Path::new("/srv/mj/two"));
+fn legacy_instance_identity_fingerprints_the_data_dir_stably() {
+    let first = legacy_instance_identity_for(None, Path::new("/srv/mj/one"));
+    let same = legacy_instance_identity_for(None, Path::new("/srv/mj/one"));
+    let other = legacy_instance_identity_for(None, Path::new("/srv/mj/two"));
     assert_eq!(first, same);
     assert_ne!(first, other);
     assert_eq!(first.len(), 16);
@@ -3332,69 +3384,6 @@ fn a_release_pins_its_version_and_a_development_build_uses_latest() {
         container_image_for(version, false),
         "ghcr.io/brokkai/mjolnir/daemon:latest"
     );
-}
-
-fn container_target(image: &str) -> TargetTemplate {
-    TargetTemplate::LocalDocker {
-        container: ContainerTemplate {
-            memory_hard_limit: None,
-            image: image.to_owned(),
-            pull_policy: Default::default(),
-            platform: None,
-            cpus: None,
-            memory: None,
-            environment: Default::default(),
-            workspace_storage: Default::default(),
-            build_cache: None,
-        },
-    }
-}
-
-#[test]
-fn migrating_the_legacy_default_image_rewrites_only_the_default() {
-    let session_default = DEFAULT_SESSION_IMAGE;
-    let mut default = container_target(LEGACY_DEFAULT_CONTAINER_IMAGE);
-    migrate_legacy_default_image(&mut default, session_default);
-    assert_eq!(default.container().unwrap().image, session_default);
-
-    let mut custom = container_target("example.invalid/agent:1");
-    migrate_legacy_default_image(&mut custom, session_default);
-    assert_eq!(custom.container().unwrap().image, "example.invalid/agent:1");
-}
-
-/// A file written before the running build's default image existed must follow
-/// that build instead of pinning the image that was current when it was written.
-#[test]
-fn a_version_14_file_follows_the_running_builds_default_image() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        format!(
-            "version = 14\n\
-             [targets.podman]\nkind = \"podman\"\nimage = \"{LEGACY_DEFAULT_CONTAINER_IMAGE}\"\n\
-             [targets.custom]\nkind = \"docker\"\nimage = \"example.invalid/agent:1\"\n"
-        ),
-    )
-    .unwrap();
-    let config = Config::load_from(&path).unwrap();
-    assert_eq!(config.version, CONFIG_VERSION);
-    assert_eq!(
-        config.targets["podman"].container().unwrap().image,
-        DEFAULT_SESSION_IMAGE
-    );
-    config.save_to(&path).unwrap();
-    let saved = fs::read_to_string(&path).unwrap();
-    assert!(
-        saved.contains(&format!("version = {CONFIG_VERSION}")),
-        "{saved}"
-    );
-    // The default is implicit now; only the customized image stays pinned.
-    assert!(
-        !saved.contains(&format!("image = \"{LEGACY_DEFAULT_CONTAINER_IMAGE}\"")),
-        "{saved}"
-    );
-    assert!(saved.contains("example.invalid/agent:1"), "{saved}");
 }
 
 #[test]

@@ -16,10 +16,9 @@ pub fn install_rustls_crypto_provider() {
 }
 
 pub const COOKIE_KEY_BYTES: usize = 32;
-const COOKIE_KEY_FILE: &str = "phone-cookie-key";
 
 pub fn cookie_key_path() -> PathBuf {
-    mj_core::config::data_dir().join(COOKIE_KEY_FILE)
+    mj_core::config::DataLayout::current().phone_cookie_key()
 }
 
 /// Load the phone cookie signing key, creating it on first use.

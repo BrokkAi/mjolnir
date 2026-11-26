@@ -329,7 +329,8 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 128c9a3de: revision-126 fixtures omitted historical harness constraints.
     connection
         .execute_batch(
-            "DROP INDEX materialized_transcript_update_ordinal;
+            "ALTER TABLE session_targets DROP COLUMN data_root;
+         DROP INDEX materialized_transcript_update_ordinal;
          DROP INDEX materialized_transcript_unsettled;
          ALTER TABLE materialized_transcript_items DROP COLUMN detail_offset;
          ALTER TABLE materialized_transcript_items DROP COLUMN detail_len;
@@ -2629,4 +2630,219 @@ fn force_stop_clears_only_the_unreachable_legacy_container_record() {
     assert!(!path.exists());
     assert!(!api_path.exists());
     assert!(!data.join("daemon-container.json").exists());
+}
+
+/// An `mj` for the store at `data`/`config` with no `--instance`, so the store
+/// seeds its own random ownership identity the way a default install does.
+#[cfg(unix)]
+fn fence_command(
+    storage: &common::DaemonStorage,
+    data: &std::path::Path,
+    config: &std::path::Path,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    common::own_test_daemons(&mut command)
+        .env("MJ_DATA_DIR", data)
+        .env("MJ_CONFIG_DIR", config)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .env("XDG_RUNTIME_DIR", storage.path());
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
+    // `AgentIsolation` points the XDG directories at the shared fixture root;
+    // this test's stores are the explicit directories above.
+    command
+}
+
+#[cfg(unix)]
+fn run_fence_command(
+    storage: &common::DaemonStorage,
+    data: &std::path::Path,
+    config: &std::path::Path,
+    args: &[&str],
+) -> (bool, String) {
+    let log = storage.path().join(format!(
+        "fence-{}-{}.log",
+        args.join("-").replace(['/', ':'], "_"),
+        data.file_name().unwrap().to_string_lossy()
+    ));
+    let (status, output) =
+        run_client_with_deadline(fence_command(storage, data, config).args(args), &log);
+    (status.success(), output)
+}
+
+#[cfg(unix)]
+fn copy_directory(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else if kind.is_file() {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn stored_daemon_pid(data: &std::path::Path) -> u32 {
+    let metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(data.join("daemon.json")).unwrap()).unwrap();
+    metadata.pid
+}
+
+/// `mj daemon fence` stops a running daemon and leaves the store refusing
+/// every daemon, whether started by a client or by `daemon-run`; the refusal
+/// travels with a copy of the data directory, worded for a copy; `unfence`
+/// restores startup; and the copy keeps the ownership identity.
+#[cfg(unix)]
+#[test]
+fn daemon_fence_stops_the_daemon_refuses_clients_and_follows_a_copy() {
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let config = storage.path().join("config");
+
+    let (ok, output) =
+        run_fence_command(&storage, &data, &config, &["daemon", "endpoint", "--json"]);
+    assert!(ok, "{output}");
+    let pid = stored_daemon_pid(&data);
+    assert!(common::process_exists(pid));
+    let identity = fs::read(data.join("instance-identity")).unwrap();
+    assert_eq!(identity.len(), 16, "a new store gets a random identity");
+
+    let (ok, output) = run_fence_command(
+        &storage,
+        &data,
+        &config,
+        &["daemon", "fence", "--to", "ssh://b", "--note", "test"],
+    );
+    assert!(ok, "{output}");
+    assert!(output.contains("Fenced the store"), "{output}");
+    assert!(
+        !common::process_exists(pid),
+        "fence left the daemon running"
+    );
+
+    // A client is refused before it spawns a daemon.
+    let (ok, output) =
+        run_fence_command(&storage, &data, &config, &["daemon", "endpoint", "--json"]);
+    assert!(!ok, "{output}");
+    assert!(output.contains("was moved to ssh://b"), "{output}");
+    assert!(output.contains("Note: test"), "{output}");
+    assert!(
+        output.contains("Do not run `mj daemon unfence`"),
+        "{output}"
+    );
+    assert!(!data.join("daemon.json").exists(), "a daemon was started");
+
+    let (ok, output) = run_fence_command(&storage, &data, &config, &["daemon", "status"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("daemon is stopped"), "{output}");
+    assert!(output.contains("The store is fenced"), "{output}");
+
+    // A copy refuses too, in the words for a copy, and keeps the identity.
+    let copy_data = storage.path().join("copy-data");
+    let copy_config = storage.path().join("copy-config");
+    copy_directory(&data, &copy_data);
+    copy_directory(&config, &copy_config);
+    let (ok, output) = run_fence_command(
+        &storage,
+        &copy_data,
+        &copy_config,
+        &["daemon", "endpoint", "--json"],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("is a copy fenced on"), "{output}");
+    assert!(output.contains("mj daemon unfence"), "{output}");
+    assert!(!copy_data.join("daemon.json").exists());
+
+    let (ok, output) =
+        run_fence_command(&storage, &copy_data, &copy_config, &["daemon", "unfence"]);
+    assert!(ok, "{output}");
+    let (ok, output) = run_fence_command(
+        &storage,
+        &copy_data,
+        &copy_config,
+        &["daemon", "endpoint", "--json"],
+    );
+    assert!(ok, "{output}");
+    assert_eq!(
+        fs::read(copy_data.join("instance-identity")).unwrap(),
+        identity,
+        "the copy runs under the original's ownership identity"
+    );
+    let (ok, output) = run_fence_command(&storage, &copy_data, &copy_config, &["daemon", "stop"]);
+    assert!(ok, "{output}");
+
+    // The original is still fenced until it is unfenced there.
+    let (ok, output) = run_fence_command(&storage, &data, &config, &["daemon", "unfence"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("Removed the fence"), "{output}");
+    let (ok, output) =
+        run_fence_command(&storage, &data, &config, &["daemon", "endpoint", "--json"]);
+    assert!(ok, "{output}");
+    let (ok, output) = run_fence_command(&storage, &data, &config, &["daemon", "stop"]);
+    assert!(ok, "{output}");
+}
+
+/// A client that waits on `daemon-start.lock` while a fence is being written
+/// reads the fence after it gets the lock and refuses, instead of spawning a
+/// daemon on the store the fence just closed.
+#[cfg(unix)]
+#[test]
+fn a_client_waiting_on_the_start_lock_sees_the_fence_instead_of_spawning() {
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let config = storage.path().join("config");
+
+    // Create the store and its fence table, then leave it unfenced.
+    for args in [
+        &["daemon", "fence", "--to", "ssh://b"][..],
+        &["daemon", "unfence"][..],
+    ] {
+        let (ok, output) = run_fence_command(&storage, &data, &config, args);
+        assert!(ok, "{output}");
+    }
+
+    let lock_path = data.join("daemon-start.lock");
+    let lock = fs::OpenOptions::new().write(true).open(&lock_path).unwrap();
+    lock.lock().unwrap();
+
+    let log = storage.path().join("waiting-client.log");
+    let output = fs::File::create(&log).unwrap();
+    let mut waiting = fence_command(&storage, &data, &config)
+        .args(["daemon", "endpoint", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(output.try_clone().unwrap())
+        .stderr(output)
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(
+        waiting.try_wait().unwrap().is_none(),
+        "the client did not wait for the start lock: {}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
+
+    // The fence lands while the client is waiting.
+    let store = rusqlite::Connection::open(data.join("mj.sqlite3")).unwrap();
+    store
+        .execute(
+            "INSERT INTO store_fence
+                 (singleton, destination, fenced_at, fenced_host, fenced_data_dir, note)
+             VALUES (1, 'ssh://b', '2026-11-25T00:00:00Z', ?1, ?2, NULL)",
+            rusqlite::params![
+                mj_core::storage::local_host_name(),
+                std::os::unix::ffi::OsStrExt::as_bytes(data.as_os_str()),
+            ],
+        )
+        .unwrap();
+    drop(store);
+    lock.unlock().unwrap();
+
+    let status = waiting.wait().unwrap();
+    let output = fs::read_to_string(&log).unwrap_or_default();
+    assert!(!status.success(), "{output}");
+    assert!(output.contains("was moved to ssh://b"), "{output}");
+    assert!(!data.join("daemon.json").exists(), "a daemon was started");
 }

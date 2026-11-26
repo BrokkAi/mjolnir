@@ -934,7 +934,6 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
         "model",
         candidates,
         1,
-        mj_core::config::ExecutionPolicy::Unconstrained,
         mj_controller::profile_scheduler::Placement::TopLevel,
         Some("primary"),
         &telemetry,
@@ -968,7 +967,7 @@ fn quota_move_request() -> mj_core::state::MoveSessionRequest {
 fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
     use mj_controller::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
     use mj_controller::quota::QuotaWindow;
-    use mj_core::config::{ExecutionPolicy, HarnessKind};
+    use mj_core::config::HarnessKind;
 
     let store = mj_controller::quota_telemetry::QuotaTelemetryStore::new();
     let now = 1_700_000_000;
@@ -1003,7 +1002,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
         let reservation = first_store
             .draw_and_reserve(
                 &mut candidates,
-                ExecutionPolicy::Unconstrained,
                 Placement::TopLevel,
                 Some("primary"),
                 None,
@@ -1023,7 +1021,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
         let reservation = second_store
             .draw_and_reserve(
                 &mut candidates,
-                ExecutionPolicy::Unconstrained,
                 Placement::TopLevel,
                 Some("primary"),
                 None,
@@ -1107,7 +1104,7 @@ async fn automatic_move_settles_before_any_wait_and_releases_failed_placement() 
     use futures::FutureExt;
     use mj_controller::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
     use mj_controller::quota::QuotaWindow;
-    use mj_core::config::{ExecutionPolicy, HarnessKind};
+    use mj_core::config::HarnessKind;
 
     for outcome in [
         "completed",
@@ -1152,7 +1149,6 @@ async fn automatic_move_settles_before_any_wait_and_releases_failed_placement() 
                         },
                         cache_identity: Some("destination".into()),
                     }],
-                    ExecutionPolicy::Unconstrained,
                     Placement::TopLevel,
                     Some("primary"),
                     None,
@@ -2679,7 +2675,7 @@ async fn unanswered_wait_reconciles_even_when_the_snapshot_already_shows_it_is_d
 }
 
 #[tokio::test]
-async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
+async fn quota_prepare_ignores_stale_profile_for_all_session_kinds() {
     use mj_controller::controller::test_support::{IsolatedTest, test_name};
     use mj_controller::quota::{
         ProfileQuota, QuotaRefreshRequest, QuotaReportMap, QuotaReportPublication, QuotaWindow,
@@ -2687,7 +2683,7 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
     use mj_core::config::{HarnessKind, HarnessProfile};
 
     const CHILD: &str = "MJ_QUOTA_PROVENANCE_TEST_CHILD";
-    const NAME: &str = "quota_prepare_ignores_stale_profile_for_top_level_only";
+    const NAME: &str = "quota_prepare_ignores_stale_profile_for_all_session_kinds";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
         IsolatedTest::new(test_name(module_path!(), NAME))
@@ -2845,46 +2841,51 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
         "top-level turn from profile-a must be obsolete on profile-b: {stale:?}"
     );
 
-    // Managed Worker subagents keep replanning so an interrupted switch cannot
-    // strand a waiting parent.
-    let mut child_controller = Controller {
-        config,
-        state: Default::default(),
-    };
-    child_controller
-        .state
-        .sessions
-        .insert("one".into(), session);
-    child_controller.state.subagents.insert(
-        "one".into(),
-        mj_core::subagent::SubagentRecord {
-            resume_with_parent: false,
-            kind: mj_core::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
-            child_session_id: "one".into(),
-            parent_session_id: "parent".into(),
-            task_name: "worker".into(),
-            profile_id: "profile-b".into(),
-            model: None,
-            effort: None,
-            working_directory: Default::default(),
-            initial_prompt: "work".into(),
-            request_key: "req".into(),
-            created_at: "2026-11-22T00:00:00Z".into(),
-            noticed_turn: None,
-            reported_finish: None,
-            handback_tool: true,
-            orchestrator: false,
-        }
-        .into(),
-    );
-    let child_state = super::super::tests::test_runtime_state_with(child_controller);
-    child_state.install_report_backend(&backend);
-    let child_plan = quota::prepare(&child_state, "one", &blocked).await.unwrap();
-    assert!(
-        !matches!(child_plan, quota::Plan::Obsolete),
-        "managed Worker child must keep replanning after profile change: {child_plan:?}"
-    );
+    // A stale result belongs to profile-a for every child kind as well.
+    for kind in [
+        mj_core::subagent::SubagentKind::Worker,
+        mj_core::subagent::SubagentKind::Reviewer,
+        mj_core::subagent::SubagentKind::Oracle,
+    ] {
+        let mut child_controller = Controller {
+            config: config.clone(),
+            state: Default::default(),
+        };
+        child_controller
+            .state
+            .sessions
+            .insert("one".into(), session.clone());
+        child_controller.state.subagents.insert(
+            "one".into(),
+            mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
+                kind,
+                reviewer_launch: None,
+                child_session_id: "one".into(),
+                parent_session_id: "parent".into(),
+                task_name: "worker".into(),
+                profile_id: "profile-b".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: "work".into(),
+                request_key: "req".into(),
+                created_at: "2026-11-22T00:00:00Z".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: true,
+                orchestrator: false,
+            }
+            .into(),
+        );
+        let child_state = super::super::tests::test_runtime_state_with(child_controller);
+        child_state.install_report_backend(&backend);
+        let child_plan = quota::prepare(&child_state, "one", &blocked).await.unwrap();
+        assert!(
+            matches!(child_plan, quota::Plan::Obsolete),
+            "{kind:?} child result from profile-a must be obsolete on profile-b: {child_plan:?}"
+        );
+    }
 }
 
 #[tokio::test]

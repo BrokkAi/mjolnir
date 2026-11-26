@@ -1640,9 +1640,9 @@ fn turn_stall_transcript_message(harness: HarnessKind, reason: &str) -> String {
 /// failed with a JSON-RPC error.
 ///
 /// An exhausted usage limit ends the turn as `QuotaLimit`, the stop reason
-/// that puts the session in the quota-blocked state with its notice, for Kimi
-/// and for Codex, whose bridge reports it as an internal error naming
-/// `usageLimitExceeded` (launch finding J-25).
+/// that puts the session in the quota-blocked state with its notice, for
+/// Claude, Kimi and Codex. Codex's bridge reports it as an internal error
+/// naming `usageLimitExceeded` (launch finding J-25).
 ///
 /// There is no warning when it would only repeat the turn's last agent
 /// message: codex-acp streams Codex's own account of a failed turn as agent
@@ -1664,13 +1664,17 @@ pub(super) fn prompt_error_outcome(
     (stop_reason, (!repeated).then_some(warning))
 }
 
-/// The stop reason of a turn the bridge failed: a usage limit puts Kimi and
-/// Codex sessions in the quota-blocked state, anything else is an error.
+/// The stop reason of a turn the bridge failed: a usage limit puts Claude,
+/// Kimi and Codex sessions in the quota-blocked state, anything else is an error.
 fn failed_turn_stop_reason(
     harness: HarnessKind,
     diagnostic: &mj_core::diagnostic::TurnDiagnostic,
 ) -> String {
-    if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex) && diagnostic.is_usage_limit() {
+    if matches!(
+        harness,
+        HarnessKind::Kimi | HarnessKind::Codex | HarnessKind::Claude
+    ) && diagnostic.is_usage_limit()
+    {
         mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
     } else {
         PROMPT_ERROR_STOP_REASON.to_owned()

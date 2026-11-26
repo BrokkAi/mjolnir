@@ -156,10 +156,13 @@ pub fn worker_workspace_for_recovery(
 ) -> Option<WorkerWorkspace> {
     let target = match backend {
         targets::TargetLocator::LocalBare { .. } => mj_core::state::ManagedWorktreeTarget::Local,
-        targets::TargetLocator::SshBare { ssh, .. } => mj_core::state::ManagedWorktreeTarget::Ssh {
-            destination: ssh.destination.clone(),
-            ssh_args: ssh.ssh_args.clone(),
-        },
+        targets::TargetLocator::SshBare { ssh, .. }
+        | targets::TargetLocator::SshHostBare { ssh, .. } => {
+            mj_core::state::ManagedWorktreeTarget::Ssh {
+                destination: ssh.destination.clone(),
+                ssh_args: ssh.ssh_args.clone(),
+            }
+        }
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
@@ -432,14 +435,14 @@ pub fn worker_launch_config_with_checkout(
         // address the daemon that created this session, including named instances.
         environment.insert(
             "MJ_CONFIG_DIR".into(),
-            std::path::absolute(mj_core::config::config_dir())
+            std::path::absolute(ConfigLayout::current().root())
                 .context("resolve host Mjolnir configuration directory")?
                 .to_string_lossy()
                 .into_owned(),
         );
         environment.insert(
             "MJ_DATA_DIR".into(),
-            std::path::absolute(data_dir())
+            std::path::absolute(DataLayout::current().root())
                 .context("resolve host Mjolnir data directory")?
                 .to_string_lossy()
                 .into_owned(),
@@ -521,7 +524,7 @@ pub fn worker_launch_config_with_checkout(
         // told the process is already running in an isolated sandbox. Every
         // container engine can run the session as root. Podman and Nitro
         // always do. Docker and Apple container do when the image user is
-        // root, as on the default buildpack-deps image.
+        // root, as on the default session-base image.
         environment.insert("IS_SANDBOX".into(), "1".into());
     }
     // Placement owns this directive; profile/target environment cannot enable
@@ -635,9 +638,9 @@ pub fn exclude_harness_environment(
 pub fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePolicy {
     match backend {
         targets::TargetLocator::LocalBare { .. } => mj_core::placement::local_harness_runtime(),
-        targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
-            HarnessRuntimePolicy::Managed
-        }
+        targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. }
+        | targets::TargetLocator::SshHostBare { .. } => HarnessRuntimePolicy::Managed,
         _ => HarnessRuntimePolicy::Ambient,
     }
 }

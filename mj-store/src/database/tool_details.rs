@@ -20,8 +20,8 @@ pub(super) fn data_dir_from(db_path: &Path) -> &Path {
 
 fn detail_path(data_dir: &Path, session_id: &str) -> Result<PathBuf> {
     mj_core::config::validate_id("session", session_id)?;
-    Ok(data_dir
-        .join("tool-details")
+    Ok(mj_core::config::DataLayout::at(data_dir)
+        .tool_details_dir()
         .join(format!("{session_id}.mjtd")))
 }
 
@@ -224,7 +224,9 @@ pub(super) fn sweep_orphaned_tool_details(
     connection: &rusqlite::Connection,
     db_path: &Path,
 ) -> Result<()> {
-    let entries = match fs::read_dir(data_dir_from(db_path).join("tool-details")) {
+    let entries = match fs::read_dir(
+        mj_core::config::DataLayout::at(data_dir_from(db_path)).tool_details_dir(),
+    ) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error).context("scan tool details for orphaned files"),

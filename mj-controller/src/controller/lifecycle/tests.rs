@@ -2467,8 +2467,8 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
     assert_eq!(&arguments[..3], ["shared", "/srv/mbx-cache", ""]);
     assert_eq!(
         arguments[3],
-        mj_core::config::data_dir()
-            .join("mbx")
+        mj_core::config::DataLayout::current()
+            .mbx_dir()
             .to_string_lossy()
             .as_ref()
     );
@@ -2603,7 +2603,7 @@ fn destroy_removes_every_archive_of_the_session_and_only_those() {
     let _writer = crate::database::install_isolated_test_writer();
     let session_id = "0123456789abcdef0123456789abcdef";
     let other_id = "fedcba9876543210fedcba9876543210";
-    let sessions = mj_core::config::sessions_dir();
+    let sessions = mj_core::config::DataLayout::current().sessions_dir();
     // The record points at the newest archive; the Move's handoff archive is
     // an older file no record refers to.
     std::fs::create_dir_all(&sessions).unwrap();
@@ -3309,7 +3309,7 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
     let mut relation = failed_subagent_relation(child_id);
     relation.parent_session_id = session_id.into();
     crate::database::save_subagent_session(&child, &relation).unwrap();
-    let data = mj_core::config::data_dir();
+    let data = mj_core::config::DataLayout::current().root().to_path_buf();
     crate::database::tool_details::append_tool_detail(&data, child_id, "detail", "{}").unwrap();
     let err = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint(session_id, true, &CancellingFailingExecutor)
@@ -4191,10 +4191,12 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
-    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    // Git reports canonical worktree paths, including macOS /private/var.
+    let fixture_root = directory.path().canonicalize().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(&fixture_root, name);
     let worktrees = [
-        directory.path().join("outside/first"),
-        directory.path().join("outside/second"),
+        fixture_root.join("outside/first"),
+        fixture_root.join("outside/second"),
     ];
     for worktree in &worktrees {
         std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
@@ -4214,7 +4216,7 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
     let mut session = checkpoint_test_session(name);
     session.state = SessionState::Running;
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(name),
+        worker_root: fixture_root.join(name),
     }));
     attach_local_managed_clone(&mut session, repo, origin);
     let mut controller = Controller {
@@ -4526,15 +4528,17 @@ async fn cancelled_container_suspend_probe_records_rollback_for_recovery() {
         mj_core::test_hooks::install_fake_command(
             &bin,
             "podman",
-            r#"set -eu
+            &r#"set -eu
 root=$MJ_CANCELLED_CONTAINER_SUSPEND_FIXTURE
 cd "$root"
 case "$1 $2" in
-    "container exists")
+    # The existence check lists the engine's containers; the container is present.
+    "container ls")
         if [ -f unreachable ]; then
             echo "container storage unreachable" >&2
             exit 125
         fi
+        echo "fakeid CONTAINER_NAME"
         ;;
     "container inspect") cat inspect.json ;;
     "exec -i")
@@ -4562,7 +4566,11 @@ case "$1 $2" in
         ;;
     *) echo "unexpected podman command: $*" >&2; exit 125 ;;
 esac
-"#,
+"#
+            .replace(
+                "CONTAINER_NAME",
+                &mj_core::targets::resource_name(SESSION_ID).unwrap(),
+            ),
         );
         let paths = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&paths)))
@@ -5080,18 +5088,24 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
 
     const NAME: &str = "origin_delta_move_reuses_the_source_lease_until_quiescence";
     const CHILD: &str = "MJ_TEST_ORIGIN_DELTA_MOVE_LEASE";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(crate::controller::test_support::test_name(
-            module_path!(),
-            NAME,
-        ))
-        .env(CHILD, "1")
-        .env("MJ_INSTANCE", "origin-delta-move-lease")
-        .isolated_store(directory.path())
-        .run();
+    let Some(case) = std::env::var_os(CHILD) else {
+        for case in ["automatic", "explicit"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(crate::controller::test_support::test_name(
+                module_path!(),
+                NAME,
+            ))
+            .env(CHILD, case)
+            .env(
+                mj_core::test_hooks::latch_relay::LATCH_RELAY_MAX_PROTOCOL,
+                "94",
+            )
+            .env("MJ_INSTANCE", "origin-delta-move-lease")
+            .isolated_store(directory.path())
+            .run();
+        }
         return;
-    }
+    };
     let _writer = crate::database::install_isolated_test_writer();
     let data = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
     let (origin, clone) = init_managed_clone_with_origin(&data, LATCH_RELAY_SESSION);
@@ -5162,7 +5176,15 @@ exit 2
         MoveSourceRelay::lease(&admission, &channels.control, LATCH_RELAY_SESSION)
             .await
             .unwrap();
-    let held_relay = source_relay.take().expect("Move holds the live relay");
+    let mut held_relay = source_relay.take().expect("Move holds the live relay");
+    assert_eq!(held_relay.connection_mut().protocol_version(), 94);
+    let pending = "hidden context before origin-delta stop";
+    held_relay
+        .connection_mut()
+        .install_prompt_context(pending.into())
+        .await
+        .unwrap();
+    let automatic = case == "automatic";
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         controller.suspend_session_controlled_with_manager(
@@ -5176,9 +5198,17 @@ exit 2
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
             Some(held_relay),
-            LatchExclusivity::HoldThroughClose,
+            if automatic {
+                LatchExclusivity::HoldThroughQuotaClose
+            } else {
+                LatchExclusivity::HoldThroughClose
+            },
             None,
-            SuspendSettlement::Suspend,
+            if automatic {
+                SuspendSettlement::TemporaryStop
+            } else {
+                SuspendSettlement::Suspend
+            },
         ),
     )
     .await
@@ -5192,6 +5222,11 @@ exit 2
         controller.state.sessions[LATCH_RELAY_SESSION].state,
         SessionState::Running
     );
+    let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &std::fs::read(data.join("relay").join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.pending_prompt_context.unwrap().text, pending);
     handle.lease_connection(&admission).await.unwrap().release();
     channels.shutdown.shutdown().await.unwrap();
 }
@@ -6693,7 +6728,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
             container: ConfigContainer {
                 memory_hard_limit: None,
                 build_cache: None,
-                image: "agent-dev:latest".into(),
+                image: "session-base:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
                 cpus: None,
@@ -6848,7 +6883,7 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
             container: ConfigContainer {
                 memory_hard_limit: None,
                 build_cache: None,
-                image: "agent-dev:latest".into(),
+                image: "session-base:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
                 cpus: None,

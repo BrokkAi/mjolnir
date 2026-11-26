@@ -504,7 +504,6 @@ pub(super) async fn action(
     if let ControllerAction::New {
         remember_launch_choices,
         profile_id,
-        target_id,
         ..
     } = &mut action
     {
@@ -522,24 +521,10 @@ pub(super) async fn action(
                     "primary auto-selection is not configured; set [subagents] primary in config.toml or choose an explicit profile",
                 ));
             }
-            let execution_policy = {
-                let snapshot = state.snapshot_rx.borrow();
-                let yolo = snapshot
-                    .targets
-                    .iter()
-                    .find(|target| target.id == *target_id)
-                    .is_some_and(|target| target.yolo);
-                if yolo {
-                    mj_core::config::ExecutionPolicy::Unconstrained
-                } else {
-                    mj_core::config::ExecutionPolicy::ConfiguredApprovals
-                }
-            };
             let selection = crate::server::api::resolve_primary_session_selection(
                 backend,
                 None,
                 subagents.primary_choices(),
-                execution_policy,
             )
             .await
             .map_err(|failure| ApiError::new(failure.status, failure.message))?;
@@ -1188,16 +1173,37 @@ pub(super) async fn events(
         mj_core::runtime::spawn(async move {
             let publish = async {
                 let mut revisions = source.revisions;
+                // Transcripts publish on their own channel and can advance
+                // without a runtime revision.
+                let mut conversations = state.conversation_rx.clone();
+                let mut conversations_open = true;
                 let mut feed = viewer_feed::ViewerFeed::default();
                 let mut reconnect = requested_cursor;
                 loop {
                     // Observe the wake before reading, so a runtime change
                     // that races the capture remains pending.
                     revisions.borrow_and_update();
+                    let conversation_versions: std::collections::BTreeMap<
+                        String,
+                        viewer_feed::ConversationVersion,
+                    > = conversations
+                        .borrow_and_update()
+                        .iter()
+                        .map(|(id, transcript)| {
+                            (
+                                id.clone(),
+                                viewer_feed::ConversationVersion {
+                                    latest_seq: transcript.latest_seq,
+                                    presentation_key: transcript.presentation_key.clone(),
+                                },
+                            )
+                        })
+                        .collect();
                     let read = source.views.clone();
                     let encoded = mj_core::runtime::spawn_blocking(move || {
-                        let result = read(reconnect.as_ref())
-                            .and_then(|views| feed.encode(views, reconnect.take()));
+                        let result = read(reconnect.as_ref()).and_then(|views| {
+                            feed.encode(views, reconnect.take(), conversation_versions)
+                        });
                         (feed, result)
                     })
                     .await;
@@ -1228,8 +1234,15 @@ pub(super) async fn events(
                             return;
                         }
                     }
-                    if revisions.changed().await.is_err() {
-                        return;
+                    tokio::select! {
+                        changed = revisions.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                        changed = conversations.changed(), if conversations_open => {
+                            conversations_open = changed.is_ok();
+                        }
                     }
                 }
             };

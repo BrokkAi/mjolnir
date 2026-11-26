@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{SessionRecord, SessionResourceAllocation, TargetLocator};
 use crate::config::{
-    Environment, EnvironmentValue, ExecutionPolicy, SshConnection, TargetTemplate,
+    Environment, EnvironmentValue, ExecutionPolicy, Machine, SshConnection, TargetTemplate,
 };
 use crate::targets::AdditionalMount;
 
@@ -65,28 +65,6 @@ impl TargetRuntimeSettings {
 pub struct ContainerSettings {
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
-    /// Which image the container was created from, as far as upgrades care:
-    /// `Some(Some(image))` for the default image of the Mjolnir that created
-    /// it, `Some(None)` for a configured image, and `None` for a container
-    /// recorded before Mjolnir tracked this. Old release-image strings remain
-    /// readable. An explicit upgrade can use the retained agent-dev tag for
-    /// sessions created on that default. This snapshot never authorizes
-    /// container replacement.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "recorded_default_image"
-    )]
-    pub default_image: Option<Option<String>>,
-}
-
-/// A present `default_image`, `null` included, is a recorded answer; only a
-/// missing one is unknown.
-fn recorded_default_image<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 impl ContainerSettings {
@@ -106,70 +84,7 @@ impl ContainerSettings {
         Self {
             additional_mounts: session.additional_mounts.clone(),
             resource_allocation: session.resource_allocation.clone(),
-            // Normalize the recorded default within its image family.
-            default_image: Self::applied_to(session)
-                .and_then(|applied| applied.default_image.as_ref())
-                .map(|image| {
-                    image
-                        .as_deref()
-                        .map(default_family_image)
-                        .map(str::to_owned)
-                }),
         }
-    }
-
-    /// The snapshot to record for a container just created from `image`.
-    pub fn applied(session: &SessionRecord, image: &str) -> Self {
-        Self {
-            default_image: Some(Self::default_marker(image)),
-            ..Self::requested(session)
-        }
-    }
-
-    /// The `default_image` marker for a container running `image`: the image
-    /// when it is the session default, `None` for a configured image.
-    pub fn default_marker(image: &str) -> Option<String> {
-        (image == crate::config::DEFAULT_SESSION_IMAGE).then(|| image.to_owned())
-    }
-
-    /// Record the replacement image, retaining the legacy default marker when
-    /// an upgrade refreshes an existing session on that image family.
-    pub fn record_upgrade_image(&mut self, image: &str) {
-        let legacy_default = self
-            .default_image
-            .as_ref()
-            .and_then(Option::as_deref)
-            .is_some_and(|recorded| {
-                default_family_image(recorded) == image
-                    && image == crate::config::LEGACY_DEFAULT_CONTAINER_IMAGE
-            });
-        self.default_image = Some(if legacy_default {
-            Some(image.to_owned())
-        } else {
-            Self::default_marker(image)
-        });
-    }
-
-    /// The replacement image for an explicit upgrade. Sessions created on the
-    /// old default follow the retained agent-dev tag when the target resolves
-    /// to the session default, preserving their user, home and tools.
-    pub fn upgrade_image<'a>(session: &SessionRecord, resolved: &'a str) -> &'a str {
-        let recorded = Self::applied_to(session)
-            .and_then(|applied| applied.default_image.as_ref())
-            .and_then(Option::as_deref);
-        match recorded {
-            Some(recorded) if resolved == crate::config::DEFAULT_SESSION_IMAGE => {
-                default_family_image(recorded)
-            }
-            _ => resolved,
-        }
-    }
-
-    fn applied_to(session: &SessionRecord) -> Option<&Self> {
-        session
-            .target_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.container_settings.as_ref())
     }
 
     fn owns_container(session: &SessionRecord) -> bool {
@@ -245,14 +160,7 @@ impl TargetRuntimeSettings {
         if self.kind != current.kind || recorded == now {
             return None;
         }
-        let location = |ssh: &SshConnection| super::ManagedWorktreeTarget::Ssh {
-            destination: match &ssh.user {
-                Some(user) => format!("{user}@{}", ssh.host),
-                None => ssh.host.clone(),
-            },
-            ssh_args: ssh.extra_args.clone(),
-        };
-        if !location(recorded).same_location(&location(now)) {
+        if !same_ssh_place(recorded, now) {
             return None;
         }
         let mut refreshed = self.clone();
@@ -264,6 +172,77 @@ impl TargetRuntimeSettings {
             },
         };
         Some(refreshed)
+    }
+}
+
+/// Whether two SSH connections reach the same place: the same host, login
+/// user and port. The other options say how to connect, not where.
+fn same_ssh_place(recorded: &SshConnection, now: &SshConnection) -> bool {
+    let location = |ssh: &SshConnection| super::ManagedWorktreeTarget::Ssh {
+        destination: match &ssh.user {
+            Some(user) => format!("{user}@{}", ssh.host),
+            None => ssh.host.clone(),
+        },
+        ssh_args: ssh.extra_args.clone(),
+    };
+    location(recorded).same_location(&location(now))
+}
+
+impl TargetRuntimeSettings {
+    /// These recorded settings as `machine` now configures them, or `None`
+    /// when `machine` is not where these settings reach: not an SSH machine,
+    /// or another host, user or port. `Some` means the machine answers for
+    /// this placement, whether or not its SSH options changed, so a caller
+    /// stops there instead of asking the target template.
+    pub fn following_machine(&self, machine: &Machine) -> Option<Self> {
+        let Machine::Ssh { ssh, .. } = machine else {
+            return None;
+        };
+        let TargetConnection::Ssh { ssh: recorded } = &self.connection else {
+            return None;
+        };
+        if !same_ssh_place(recorded, ssh) {
+            return None;
+        }
+        let mut refreshed = self.clone();
+        refreshed.connection = TargetConnection::Ssh {
+            ssh: SshConnection {
+                identity_file: ssh.identity_file.clone(),
+                extra_args: ssh.extra_args.clone(),
+                ..recorded.clone()
+            },
+        };
+        Some(refreshed)
+    }
+}
+
+/// Whether `machine` is where a stored placement runs, judged from what the
+/// placement itself recorded: the locator's SSH `host` and the frozen access
+/// settings. A template that was repointed since the placement was made names
+/// a machine that fails this test, and the placement stays unassigned rather
+/// than taking the wrong machine. A legacy EC2 placement is never assigned:
+/// its frozen settings hold the AWS profile, region and user but not the
+/// launch template, so they cannot tell two machines in one account apart.
+#[must_use]
+pub fn machine_hosts_placement(
+    machine: &Machine,
+    locator_host: Option<&str>,
+    runtime: Option<&TargetRuntimeSettings>,
+) -> bool {
+    match machine {
+        Machine::Local { .. } => false,
+        Machine::Ssh { ssh, .. } => {
+            if locator_host != Some(ssh.host.as_str()) {
+                return false;
+            }
+            match runtime.map(|runtime| &runtime.connection) {
+                Some(TargetConnection::Ssh { ssh: recorded }) => same_ssh_place(recorded, ssh),
+                // Without recorded access settings only the host name is known,
+                // which cannot tell users or ports on one host apart.
+                Some(_) | None => false,
+            }
+        }
+        Machine::AwsEc2 { .. } => false,
     }
 }
 
@@ -330,15 +309,5 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
 impl From<&TargetTemplate> for std::sync::Arc<TargetRuntimeSettings> {
     fn from(template: &TargetTemplate) -> Self {
         Self::new(TargetRuntimeSettings::from(template))
-    }
-}
-
-/// Normalize recorded defaults to the current session default or the retained
-/// agent-dev tag.
-fn default_family_image(recorded: &str) -> &'static str {
-    if recorded == crate::config::DEFAULT_SESSION_IMAGE {
-        crate::config::DEFAULT_SESSION_IMAGE
-    } else {
-        crate::config::LEGACY_DEFAULT_CONTAINER_IMAGE
     }
 }

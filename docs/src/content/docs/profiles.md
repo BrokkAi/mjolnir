@@ -46,11 +46,12 @@ use the shared choices.
 **Create** and **Move…** offer **Native** (the harness's own sub-agents),
 **Mjolnir** (children Mjolnir starts and tracks), and **None**. Mjolnir
 requires a Claude, Codex, DSH, OpenCode, or Antigravity profile and a configured
-Straightforward choice. DSH and Antigravity offer **Mjolnir** and **None**.
+Straightforward choice. Antigravity offers **Mjolnir** and **None**; the other
+harnesses offer all three.
 
 On a profile without a remembered choice, **Create** defaults to Mjolnir
 when available. If Mjolnir is unavailable, it uses Native on harnesses with
-their own sub-agents and None on DSH and Antigravity. **Move…** carries forward
+their own sub-agents and None on Antigravity. **Move…** carries forward
 the session's delegation choice by default.
 OpenCode has no steering, so a child's report reaches an OpenCode parent when
 its current turn ends, not between its tool calls. An OpenCode older than 2.2.6
@@ -83,11 +84,13 @@ those sub-agents' turns. Parents on the chosen profile appear even when they
 have no usage in the period. Earlier versions did not record each turn's
 profile, so their turns count under the session's profile at the time of the
 upgrade, and usage from sub-agents destroyed before the upgrade appears only
-under **All**. **Hourly** is the default period;
-**Daily** covers the trailing 24 hours; **Weekly** and **Monthly** cover the
-trailing seven and thirty days. Check
-**Include suspended sessions** to include inactive parents. The report refreshes
-every thirty seconds, and **Refresh** reloads it immediately.
+under **All**. The graph shows the last 24 clock hours. Click a bar to select
+one hour, Ctrl-click to toggle an hour, Shift-click to select a range from the
+last clicked or Ctrl-clicked hour, or Ctrl+Shift-click to add a range.
+Ctrl-clicking from the full graph removes that hour from the selection. The
+arrow keys select one hour; Enter restores all 24. Check **Include suspended
+sessions** to include inactive parents. The report refreshes every thirty
+seconds, and **Refresh** reloads it immediately.
 
 Costs assume standard base API token rates, including cache reads and default
 cache writes, even for subscription profiles. They exclude tools and speed,
@@ -779,7 +782,7 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.8.0, which serves the pinned
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.8.1, which serves the pinned
 official DSH runtime over ACP. DSH owns model calls, the agent loop, tools,
 permissions, MCP clients, session persistence, and plugins; dsh-acp owns the
 ACP protocol and replay projection. It is not the DeepSeek harness earlier
@@ -1219,7 +1222,7 @@ and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
-it is 0.8.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.8.0` package
+it is 0.8.1 or newer, or fetches the pinned `@brokkai/dsh-acp@0.8.1` package
 through `npx`, using the compatible system runtime or the managed Node
 described above; the npm package bundles the native bridge and pinned DSH
 runtime. An older
@@ -1331,9 +1334,10 @@ handoffs; see
   SessionWiki search do not support DSH yet. A DSH session can use Mjolnir's
   sub-agents, and a DSH profile can run them: it reads the delegation policy
   from its staged `AGENTS.md` and receives the `mj-agents` tools over ACP.
-  dsh-acp has no sub-agents of its own, so DSH offers Mjolnir and None but
-  not Native. A DSH session stored with Native keeps working and behaves as
-  None. It serves DeepSeek-family
+  DSH also has sub-agents of its own, so Native is offered. Mjolnir stages a
+  DSH home patch that omits DSH's native delegation plugins unless the session
+  keeps Native, so a Mjolnir child cannot mistake itself for DSH's root agent.
+  It serves DeepSeek-family
   utility inference with its flash model only when its base URL is DeepSeek's
   own `api.deepseek.com` and its key is set.
 - A custom bridge must speak the ACP version and features Mjolnir expects.

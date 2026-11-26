@@ -49,7 +49,7 @@ and container targets, where an unoptimized binary costs transfer size and
 session speed. A profile flag applies to every binary a script builds, so pass
 `--profile dev` to both, or to neither, when trading that for link speed.
 
-Container sessions use `docker.io/library/buildpack-deps:noble` by default.
+Container sessions use `ghcr.io/brokkai/mjolnir/session-base:latest` by default. That image is Mjolnir's Ubuntu 24.04-based default session image, with pinned Node.js and agent harnesses preinstalled.
 Use `mj image build` to build a per-bundle image from the project's mise recipe.
 Development builds prefer the portable worker built from your checkout. Its
 build identity covers committed inputs only, so a published worker that reports

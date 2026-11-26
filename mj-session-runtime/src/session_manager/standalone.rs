@@ -374,6 +374,21 @@ impl StandaloneSession {
         Ok(self.snapshot())
     }
 
+    pub async fn release_in_place_move_dispatch_checked(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        expected_harness_restarted: Option<bool>,
+    ) -> Result<()> {
+        self.client
+            .release_in_place_move_dispatch_checked(
+                operation_id,
+                expected_store_id,
+                expected_harness_restarted,
+            )
+            .await
+    }
+
     /// Whether the actor should follow this worker at the fast cadence.
     ///
     /// True while the worker owns work whose events stream in, while it
@@ -954,6 +969,28 @@ impl StandaloneSession {
             .await
     }
 
+    /// The whole mailbox and the queued mailbox wakes' prompts at a ready
+    /// checkpoint barrier's cut (protocol 97).
+    pub async fn read_checkpoint_mailbox_pages(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+    ) -> Result<mj_core::relay::CheckpointMailboxRead> {
+        self.client
+            .read_checkpoint_mailbox_pages(barrier_command_id, cut)
+            .await
+    }
+
+    pub async fn read_checkpoint_quota_input(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+    ) -> Result<mj_core::archive::CanonicalQuotaInput> {
+        self.client
+            .read_checkpoint_quota_input(barrier_command_id, cut)
+            .await
+    }
+
     /// The command the worker's relay holds for a queued entry. Not tied to a
     /// checkpoint cut; a caller that needs one proves it with a cut-bound read.
     pub async fn read_queued_command(
@@ -968,7 +1005,10 @@ impl StandaloneSession {
         &mut self,
         barrier_command_id: String,
         cut: RelayCursor,
-    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
+    ) -> Result<(
+        Option<mj_core::relay::NativeSessionUseEvidence>,
+        Option<String>,
+    )> {
         self.client
             .read_checkpoint_native_use(barrier_command_id, cut)
             .await

@@ -263,6 +263,16 @@ impl Controller {
             profile_id: String,
         }
 
+        if matches!(
+            session.target.as_deref(),
+            Some(mj_core::state::TargetLocator::SshHostBare { .. })
+        ) && !super::local_profile_homes::session_has_a_staged_home_on_target(
+            session,
+            &self.config,
+            executor,
+        ) {
+            return Ok(false);
+        }
         let kind = session.harness_kind;
         let Some(relative_login) = mj_core::credentials::copied_login_relative_path(kind) else {
             return Ok(false);
@@ -1378,12 +1388,12 @@ pub(in crate::controller) mod tests {
             controller.config.profiles["codex"].clone(),
         );
         if cross_harness {
-            controller
-                .config
-                .profiles
-                .get_mut("destination")
-                .unwrap()
-                .kind = mj_core::config::HarnessKind::Claude;
+            let destination = controller.config.profiles.get_mut("destination").unwrap();
+            destination.kind = mj_core::config::HarnessKind::Claude;
+            // The fake destination must never consult a host's Claude Keychain.
+            destination
+                .environment
+                .insert("ANTHROPIC_API_KEY".into(), "test-only-key".into());
         }
         let mut operation =
             super::super::move_session::test_fixtures::source_recovery_operation(&previous);
@@ -1549,6 +1559,15 @@ pub(in crate::controller) mod tests {
             &root.path().join(LATCH_RELAY_SESSION).join("launch.json"),
         )
         .unwrap();
+        if cross_harness {
+            assert_eq!(
+                launch
+                    .environment
+                    .get("ANTHROPIC_API_KEY")
+                    .map(String::as_str),
+                Some("test-only-key")
+            );
+        }
         let parked = launch
             .parked_move
             .as_ref()

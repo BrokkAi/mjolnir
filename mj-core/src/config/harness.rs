@@ -272,16 +272,6 @@ impl PermissionMode {
     }
 }
 
-/// Who answers a harness's tool approvals on a target that keeps configured
-/// approvals. See [`HarnessKind::guardian`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardianReviewer {
-    /// The harness's own reviewer (Codex's guardian, Claude's Auto mode, …).
-    Harness,
-    /// The Mjolnir worker reviews each permission request the harness sends.
-    Mjolnir,
-}
-
 /// The Claude Code permission mode a Claude profile's sessions run in on
 /// targets that keep configured approvals (localhost, guardian SSH).
 /// Unconstrained targets always run Claude in bypassPermissions.
@@ -634,14 +624,14 @@ impl HarnessKind {
     /// below the configuration directory identifies Mjolnir, rather than the
     /// harness's own installation, as the owner of the login and native data.
     pub fn managed_profile_home(self, profile_id: &str) -> PathBuf {
-        self.managed_profile_home_in(&super::config_dir(), profile_id)
+        self.managed_profile_home_in(super::ConfigLayout::current().root(), profile_id)
     }
 
     /// [`Self::managed_profile_home`] with an explicit configuration root for
     /// tests and callers that are already operating on another instance.
     pub fn managed_profile_home_in(self, config_root: &Path, profile_id: &str) -> PathBuf {
-        config_root
-            .join("profiles")
+        super::ConfigLayout::at(config_root)
+            .profiles_dir()
             .join(profile_id)
             .join(self.id())
     }
@@ -1344,17 +1334,6 @@ impl HarnessKind {
         Ok(())
     }
 
-    /// Whether the harness ships a native reviewer under configured
-    /// approvals. Kimi Code, OpenCode and DSH rely on Mjolnir's reviewer.
-    pub const fn guardian(self) -> GuardianReviewer {
-        match self {
-            Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Antigravity => {
-                GuardianReviewer::Harness
-            }
-            Self::Kimi | Self::OpenCode | Self::Dsh => GuardianReviewer::Mjolnir,
-        }
-    }
-
     /// Whether requests that reach Mjolnir are eligible for its guardian.
     pub fn mjolnir_guardian_reviews(
         self,
@@ -1414,10 +1393,11 @@ impl HarnessKind {
     }
 
     /// Whether the harness has sub-agents of its own, which the Native
-    /// delegation choice keeps. dsh-acp has none, so Native would do nothing
-    /// for DSH and is not offered there.
+    /// delegation choice keeps. Antigravity has none that Mjolnir offers, so
+    /// Native would do nothing for it. DSH's runtime has its own sub-agents;
+    /// Mjolnir removes their plugins unless the session keeps Native.
     pub const fn has_native_subagents(self) -> bool {
-        !matches!(self, Self::Dsh | Self::Antigravity)
+        !matches!(self, Self::Antigravity)
     }
 
     /// The harness-home-relative directories that hold its native session

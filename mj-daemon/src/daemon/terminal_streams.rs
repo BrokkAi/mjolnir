@@ -82,8 +82,11 @@ impl TerminalStreams for RuntimeState {
             command.env(name, value);
         }
         command.env("MJ_LOGIN_TERMINAL", "1");
-        command.env("MJ_CONFIG_DIR", mj_core::config::config_dir());
-        command.env("MJ_DATA_DIR", mj_core::config::data_dir());
+        command.env(
+            "MJ_CONFIG_DIR",
+            mj_core::config::ConfigLayout::current().root(),
+        );
+        command.env("MJ_DATA_DIR", mj_core::config::DataLayout::current().root());
         self.open_login_stream(command, cols, rows, shutdown)
             .map_err(Into::into)
     }

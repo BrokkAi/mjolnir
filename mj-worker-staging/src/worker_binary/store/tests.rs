@@ -1317,13 +1317,35 @@ fn ssh_container_script_reuses_verified_pins_heals_corruption_and_cleans_failed_
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     std::fs::create_dir(root.join("bin")).unwrap();
+    // These commands run inside the simulated Linux container even when the
+    // controller running this fixture is macOS.
+    let sha256 = if cfg!(target_os = "macos") {
+        "/usr/bin/shasum -a 256"
+    } else {
+        "/usr/bin/sha256sum"
+    };
     for (name, body) in [
         ("podman", "#!/bin/sh\ncase $1 in exec) shift; if [ \"$1\" = --user ]; then shift 2; fi; shift; exec \"$@\";; cp) cp -- \"$2\" \"${3#*:}\" || exit $?; [ ! -e \"$HOME/fail-cp\" ];; *) exit 1;; esac\n".to_owned()),
-        ("sha256sum", format!("#!/bin/sh\necho hash >> '{}'\nexec /usr/bin/sha256sum \"$@\"\n", root.join("hashes").display())),
+        ("uname", "#!/bin/sh\n[ \"$1\" = -s ] || exit 1\nprintf 'Linux\\n'\n".to_owned()),
+        ("sha256sum", format!("#!/bin/sh\necho hash >> '{}'\nexec {sha256} \"$@\"\n", root.join("hashes").display())),
     ] {
         let path = root.join("bin").join(name);
         std::fs::write(&path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    if cfg!(target_os = "macos") {
+        let stat = root.join("bin/stat");
+        std::fs::write(
+            &stat,
+            "#!/bin/sh\nif [ \"$1\" = -c ] && [ \"$2\" = '%u:%g' ] && [ \"$3\" = -- ]; then shift 3; exec /usr/bin/stat -f '%u:%g' \"$@\"; fi\nexec /usr/bin/stat \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(stat, std::fs::Permissions::from_mode(0o755)).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &root.join("bin"),
+            "chown",
+            "#!/bin/sh\nif [ \"$1\" = -R ] && [ \"$3\" = -- ]; then owner=$2; shift 3; exec /usr/sbin/chown -R -- \"$owner\" \"$@\"; fi\nexec /usr/sbin/chown \"$@\"\n",
+        );
     }
     let id = "cccccccccccccccccccccccccccccccc";
     let locator = targets::TargetLocator::SshPodman {

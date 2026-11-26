@@ -67,34 +67,34 @@
 === AFK waiting requests cleared (100x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
 │hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
 │  ○ Exp  │                                                                              │         │
 │  Idle   │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │         │
-│  │ I n  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
-│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│  │ I n  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │  ───────╯
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │  ───────╮
 │         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
-│  ○ Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
-│  Idle   │                                                                              │         │
-│  │ I n  │   While you are away, an agent that asks a question or needs permission is   │         │
-│  │      │  told that you are away and asked to do other useful work first. If it asks  │  ───────╯
-│         │               the same thing again, the request waits for you.               │  ───────╮
-│  ○ Ord  │                                                                              │         │
-│  Idle   │                       No sessions are waiting for you.                       │  en.    │
+│  ○ Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │  en.    │
 ╰───────  │                                                                              │  ───────╯
-╭ Target  │                        Close this window to come back.                       │   ▁   ▄ ╮
-│  Host   │                                                                              │         │
-╰───────  │                                                                              │  ───────╯
+╭ Target  │   While you are away, an agent that asks a question or needs permission is   │   ▁   ▄ ╮
+│  Host   │  told that you are away and asked to do other useful work first. If it asks  │         │
+╰───────  │               the same thing again, the request waits for you.               │  ───────╯
 ╭ Profil  │                                                                              │   ▁   ▄ ╮
-│ANTHROP  │                                                                              │         │
+│ANTHROP  │                       No sessions are waiting for you.                       │         │
 │ + refr  │                                                                              │         │
-│OPENAI   ╰──────────────────────────────────────────────────────────────────────────────╯         │
-│ + 2 re                                                                                           │
-╰───────                                                                                    ───────╯
-╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Nothing needs you                                                                                 │
+│OPENAI   │                        Close this window to come back.                       │         │
+│ + 2 re  │                                                                              │         │
+╰───────  │                                                                              │  ───────╯
+╭ Notifi  │                                                                              │   ▁   ▄ ╮
+│Nothing  │                                                                              │         │
+│         │                                                                              │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK ASCII (100x32) ===

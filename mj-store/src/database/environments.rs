@@ -27,6 +27,10 @@ impl EnvironmentPhase {
 pub struct EnvironmentPlacement {
     #[serde(skip)]
     pub target: Option<TargetLocator>,
+    /// The machine recorded on the lease row of `target`. Stored in the
+    /// column, never in the placement JSON.
+    #[serde(skip)]
+    pub machine_id: Option<MachineId>,
     pub target_template_id: String,
     pub runtime: Option<TargetRuntimeSettings>,
     pub managed_worktree: Option<ManagedWorktree>,
@@ -52,6 +56,7 @@ impl EnvironmentPlacement {
     pub fn from_session(session: &SessionRecord) -> Self {
         Self {
             target: session.target.clone().map(|v| *v),
+            machine_id: session.machine_id.clone(),
             target_template_id: session.target_template_id.clone(),
             runtime: session.target_runtime.as_deref().cloned(),
             managed_worktree: session.managed_worktree.clone().map(|v| *v),
@@ -93,16 +98,48 @@ pub struct EnvironmentWorker {
     pub target: TargetLocator,
     pub target_template_id: String,
     pub runtime: Option<TargetRuntimeSettings>,
+    /// The machine recorded on this lease; `None` when unknown.
+    pub machine_id: Option<MachineId>,
 }
 
 pub(super) fn read_environment(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<EnvironmentRecord>> {
+    read_environment_with(connection, id, "machine_id")
+}
+
+/// `read_environment` for the migrations before revision 161, whose
+/// `environment_workers` has no `machine_id` column.
+pub(super) fn read_environment_before_machine_id(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<EnvironmentRecord>> {
+    read_environment_with(connection, id, "NULL")
+}
+
+fn read_environment_with(
+    connection: &Connection,
+    id: &str,
+    machine_column: &str,
+) -> Result<Option<EnvironmentRecord>> {
+    let extra = if super::legacy_schema::table_has_column(
+        connection,
+        "environment_workers",
+        "data_root",
+    )? {
+        "data_root"
+    } else {
+        "NULL"
+    };
     let row = connection.query_row("SELECT owner_session_id,phase,placement_json,target_lease_id FROM environments WHERE environment_id=?1",[id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?))).optional()?;
     row.map(|(owner_session_id,phase,json,lease)| {
         let mut placement: EnvironmentPlacement = serde_json::from_str(&json).context("read environment placement")?;
-        placement.target = lease.map(|lease| connection.query_row("SELECT kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from FROM environment_workers WHERE lease_id=?1",[lease],|row|super::state_io::decode_target(row,0))).transpose()?;
+        let lease = lease.map(|lease| connection.query_row(&format!("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,{extra},{machine_column} FROM environment_workers WHERE lease_id=?1"),[lease],|row|Ok((super::state_io::decode_target(row,1,&row.get::<_, String>(0)?)?,super::state_io::decode_machine(row,10)?)))).transpose()?;
+        (placement.target, placement.machine_id) = match lease {
+            Some((target, machine_id)) => (Some(target), machine_id),
+            None => (None, None),
+        };
         Ok(EnvironmentRecord {id:id.to_owned(),owner_session_id,phase:EnvironmentPhase::from_stored(&phase)?,placement})
     }).transpose()
 }
@@ -190,18 +227,36 @@ fn read_environment_workers(
     connection: &Connection,
     environment_id: &str,
 ) -> Result<Vec<EnvironmentWorker>> {
-    let mut query = connection.prepare("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,target_template_id,runtime_json,lease_id FROM environment_workers WHERE environment_id=?1 ORDER BY worker_session_id,lease_id")?;
+    read_environment_workers_with(connection, environment_id, "machine_id")
+}
+
+fn read_environment_workers_with(
+    connection: &Connection,
+    environment_id: &str,
+    machine_column: &str,
+) -> Result<Vec<EnvironmentWorker>> {
+    let extra = if super::legacy_schema::table_has_column(
+        connection,
+        "environment_workers",
+        "data_root",
+    )? {
+        "data_root"
+    } else {
+        "NULL"
+    };
+    let mut query = connection.prepare(&format!("SELECT worker_session_id,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,{extra},target_template_id,runtime_json,lease_id,{machine_column} FROM environment_workers WHERE environment_id=?1 ORDER BY worker_session_id,lease_id"))?;
     let rows = query.query_map([environment_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            super::state_io::decode_target(row, 1)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, Option<String>>(10)?,
-            row.get::<_, String>(11)?,
+            super::state_io::decode_target(row, 1, &row.get::<_, String>(0)?)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, String>(12)?,
+            super::state_io::decode_machine(row, 13)?,
         ))
     })?;
     rows.map(|row| {
-        let (session_id, target, target_template_id, runtime, lease_id) = row?;
+        let (session_id, target, target_template_id, runtime, lease_id, machine_id) = row?;
         Ok(EnvironmentWorker {
             lease_id,
             session_id,
@@ -211,11 +266,56 @@ fn read_environment_workers(
                 .map(|json| serde_json::from_str(&json))
                 .transpose()
                 .context("read environment worker access")?,
+            machine_id,
         })
     })
     .collect()
 }
 
+/// The lease an existing worker row already holds for `target`, or a new id.
+fn worker_lease(
+    transaction: &Transaction<'_>,
+    environment_id: &str,
+    session_id: &str,
+    target: &TargetLocator,
+) -> Result<String> {
+    // Also run by the revision-122 backfill, before `machine_id` exists.
+    let existing = read_environment_workers_with(transaction, environment_id, "NULL")?
+        .into_iter()
+        .find(|worker| worker.session_id == session_id && worker.target.same_resource(target));
+    Ok(match existing {
+        Some(worker) => worker.lease_id,
+        None => mj_core::state::new_session_id()?,
+    })
+}
+
+/// Publish the environment's lease for `target`, when this transaction owns it.
+fn point_environment_at_lease(
+    transaction: &Transaction<'_>,
+    environment_id: &str,
+    session_id: &str,
+    lease: &str,
+) -> Result<()> {
+    let owner: Option<String> = transaction
+        .query_row(
+            "SELECT owner_session_id FROM environments WHERE environment_id=?1",
+            [environment_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if owner.as_deref() == Some(session_id) {
+        transaction.execute(
+            "UPDATE environments SET target_lease_id=?2 WHERE environment_id=?1",
+            params![environment_id, lease],
+        )?;
+    }
+    Ok(())
+}
+
+/// Write a worker row. `machine_id` is the configured machine the placement
+/// runs on; `None` records "unknown", which the daemon fills at load from the
+/// template when it still exists. A row that already has a machine keeps it
+/// (the lease names one physical resource, which stays on one machine).
 fn store_worker(
     transaction: &Transaction<'_>,
     environment_id: &str,
@@ -223,23 +323,31 @@ fn store_worker(
     target_template_id: &str,
     runtime: Option<&TargetRuntimeSettings>,
     target: &TargetLocator,
+    machine_id: Option<&MachineId>,
 ) -> Result<String> {
-    let existing = read_environment_workers(transaction, environment_id)?
-        .into_iter()
-        .find(|worker| worker.session_id == session_id && worker.target.same_resource(target));
-    let lease = existing
-        .map(|worker| worker.lease_id)
-        .unwrap_or(mj_core::state::new_session_id()?);
+    super::state_io::validate_target_for_store(target, session_id)?;
+    let lease = worker_lease(transaction, environment_id, session_id, target)?;
+    let fields = super::state_io::stored_target_values(target)?;
+    transaction.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,runtime_json,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from,machine_id,data_root) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(lease_id) DO UPDATE SET address=excluded.address,workspace_storage=excluded.workspace_storage,runtime_json=coalesce(environment_workers.runtime_json,excluded.runtime_json),machine_id=coalesce(environment_workers.machine_id,excluded.machine_id)",params![lease,environment_id,session_id,target_template_id,runtime.map(serde_json::to_string).transpose()?,fields.kind,fields.host,fields.resource,fields.address,fields.workspace,fields.worker_id,fields.workspace_storage,fields.borrowed_from,machine_id.map(MachineId::as_str),fields.data_root])?;
+    point_environment_at_lease(transaction, environment_id, session_id, &lease)?;
+    Ok(lease)
+}
+
+/// `store_worker` as it was before revision 160 added `machine_id`. The
+/// environment backfills of revision 122 run against that schema, so they
+/// cannot name the column.
+fn store_worker_before_machine_id(
+    transaction: &Transaction<'_>,
+    environment_id: &str,
+    session_id: &str,
+    target_template_id: &str,
+    runtime: Option<&TargetRuntimeSettings>,
+    target: &TargetLocator,
+) -> Result<String> {
+    let lease = worker_lease(transaction, environment_id, session_id, target)?;
     let fields = super::state_io::stored_target_values(target)?;
     transaction.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,target_template_id,runtime_json,kind,host,resource_id,address,workspace,worker_id,workspace_storage,borrowed_from) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(lease_id) DO UPDATE SET address=excluded.address,workspace_storage=excluded.workspace_storage,runtime_json=coalesce(environment_workers.runtime_json,excluded.runtime_json)",params![lease,environment_id,session_id,target_template_id,runtime.map(serde_json::to_string).transpose()?,fields.kind,fields.host,fields.resource,fields.address,fields.workspace,fields.worker_id,fields.workspace_storage,fields.borrowed_from])?;
-    if read_environment(transaction, environment_id)?
-        .is_some_and(|environment| environment.owner_session_id == session_id)
-    {
-        transaction.execute(
-            "UPDATE environments SET target_lease_id=?2 WHERE environment_id=?1",
-            params![environment_id, lease],
-        )?;
-    }
+    point_environment_at_lease(transaction, environment_id, session_id, &lease)?;
     Ok(lease)
 }
 
@@ -381,6 +489,7 @@ pub(super) fn capture_session_environment(
             &session.target_template_id,
             session.target_runtime.as_deref(),
             target,
+            session.machine_id.as_ref(),
         )?;
     }
 
@@ -567,6 +676,7 @@ pub(super) fn backfill_environments(transaction: &Transaction<'_>) -> Result<()>
             id.clone(),
             EnvironmentPlacement {
                 target: targets.get(&id).cloned(),
+                machine_id: None,
                 target_template_id,
                 runtime: runtime
                     .map(|json| serde_json::from_str(&json))
@@ -617,7 +727,7 @@ pub(super) fn backfill_environments(transaction: &Transaction<'_>) -> Result<()>
             params![worker, id],
         )?;
         if let Some(target) = placement.target {
-            store_worker(
+            store_worker_before_machine_id(
                 transaction,
                 id,
                 &worker,
@@ -787,8 +897,8 @@ fn register_historical_environment(
         .query_map([owner], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
-        let candidate =
-            read_environment(transaction, &id)?.context("historical environment disappeared")?;
+        let candidate = read_environment_before_machine_id(transaction, &id)?
+            .context("historical environment disappeared")?;
         let same_target = match (&candidate.placement.target, &placement.target) {
             (Some(left), Some(right)) => left.same_resource(right),
             (None, None) => true,
@@ -812,7 +922,7 @@ fn register_historical_environment(
     let id = mj_core::state::new_session_id()?;
     transaction.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES (?1,?2,'active',?3)",params![id,owner,serde_json::to_string(&placement)?])?;
     if let Some(target) = &placement.target {
-        store_worker(
+        store_worker_before_machine_id(
             transaction,
             &id,
             owner,
@@ -1066,6 +1176,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_bare_worker_lease_round_trips_through_live_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection =
+            super::super::schema::open_writer(&directory.path().join("store.sqlite3")).unwrap();
+        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('env','worker','active','{}')", []).unwrap();
+        let target = TargetLocator::SshHostBare {
+            host: "source".into(),
+            data_root: "/remote data".into(),
+        };
+        let tx = connection.transaction().unwrap();
+        assert!(
+            store_worker(
+                &tx,
+                "env",
+                "worker",
+                "target",
+                None,
+                &TargetLocator::SshHostBare {
+                    host: "source".into(),
+                    data_root: "/".into()
+                },
+                None
+            )
+            .is_err()
+        );
+        let lease = store_worker(&tx, "env", "worker", "target", None, &target, None).unwrap();
+        tx.commit().unwrap();
+        let workers = read_environment_workers(&connection, "env").unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].lease_id, lease);
+        assert_eq!(workers[0].target, target);
+        let workspace: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT workspace FROM environment_workers WHERE lease_id=?1",
+                [&lease],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(workspace.is_none());
+    }
+
+    #[test]
     fn registration_and_placement_keep_owned_environments_separate() {
         const CHILD: &str = "MJ_ISOLATED_OWNED_ENVIRONMENT_REGISTRATION";
         if std::env::var_os(CHILD).is_none() {
@@ -1182,9 +1334,19 @@ mod tests {
             worker_root: directory.path().join(&child.id),
         }));
         let transaction = connection.transaction().unwrap();
-        super::super::state_io::insert_session(&transaction, &parent).unwrap();
-        super::super::state_io::insert_session_with_parent(&transaction, &child, Some(&parent.id))
-            .unwrap();
+        super::super::state_io::insert_session(
+            &transaction,
+            &parent,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap();
+        super::super::state_io::insert_session_with_parent(
+            &transaction,
+            &child,
+            Some(&parent.id),
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap();
         transaction.execute("INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,'fixture','{}')",params![child.id,parent.id]).unwrap();
         transaction.commit().unwrap();
         let mut source = child.clone();
@@ -1222,7 +1384,7 @@ mod tests {
             UPDATE schema_compatibility SET minimum_compatible_version=121;
             PRAGMA user_version=121;
             CREATE TRIGGER interrupt_ownership_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=122 BEGIN SELECT RAISE(ABORT,'fixture interruption'); END;").unwrap();
-        assert!(super::super::schema::migrate_schema(&connection).is_err());
+        assert!(super::super::schema::migrate_schema(&connection, None).is_err());
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -1252,7 +1414,7 @@ mod tests {
         connection
             .execute_batch("DROP TRIGGER interrupt_ownership_migration")
             .unwrap();
-        super::super::schema::migrate_schema(&connection).unwrap();
+        super::super::schema::migrate_schema(&connection, None).unwrap();
         let environment_id: String = connection
             .query_row(
                 "SELECT environment_id FROM environment_bindings WHERE session_id=?1",

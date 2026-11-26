@@ -51,7 +51,9 @@ pub fn session_create_end(session_id: &str) -> Result<CreateEnd> {
     if has_create_intent_with(&snapshot, session_id)? {
         return Ok(CreateEnd::Unfinished);
     }
-    let Some(record) = state_io::load_session_with(&snapshot, session_id)? else {
+    let Some(record) =
+        state_io::load_session_with(&snapshot, session_id, &state_io::configured_sessions_root())?
+    else {
         return Ok(CreateEnd::Failed(format!(
             "session {session_id} no longer exists"
         )));
@@ -188,8 +190,12 @@ pub fn failed_first_launch(
         })
 }
 
-fn failed_launch_record_with(connection: &Connection, id: &str) -> Result<Option<SessionRecord>> {
-    let Some(record) = state_io::load_session_with(connection, id)? else {
+fn failed_launch_record_with(
+    connection: &Connection,
+    id: &str,
+    sessions_root: &Path,
+) -> Result<Option<SessionRecord>> {
+    let Some(record) = state_io::load_session_with(connection, id, sessions_root)? else {
         return Ok(None);
     };
     let is_subagent: bool = connection.query_row(
@@ -204,14 +210,16 @@ fn failed_launch_record_with(connection: &Connection, id: &str) -> Result<Option
 pub fn read_failed_launch_record(id: &str) -> Result<Option<SessionRecord>> {
     let mut connection = open_reader(&database_path())?;
     let snapshot = connection.transaction()?;
-    failed_launch_record_with(&snapshot, id)
+    failed_launch_record_with(&snapshot, id, &state_io::configured_sessions_root())
 }
 
 /// Accept the retry and publish a recoverable create in the same transaction.
 pub fn begin_failed_launch_retry(expected: SessionRecord) -> Result<Option<String>> {
     submit_database_write("begin failed launch retry", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let Some(mut record) = failed_launch_record_with(&tx, &expected.id)? else {
+        let Some(mut record) =
+            failed_launch_record_with(&tx, &expected.id, &state_io::configured_sessions_root())?
+        else {
             return Ok(None);
         };
         if record.workspace_id != expected.workspace_id
@@ -241,8 +249,9 @@ pub fn reset_session_for_create_retry(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("reset_session_for_create_retry", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let current = state_io::load_session_with(&tx, &session.id)?
-            .context("cannot reset Create for a missing session")?;
+        let current =
+            state_io::load_session_with(&tx, &session.id, &state_io::configured_sessions_root())?
+                .context("cannot reset Create for a missing session")?;
         anyhow::ensure!(
             !create_intent_is_stale(&current) && has_create_intent_with(&tx, &session.id)?,
             "session {} no longer has an unfinished Create",

@@ -298,4 +298,41 @@ impl CacheHost {
         remote.extend(arguments);
         self.command(remote, purpose)
     }
+
+    /// Run a command on an SSH container host with the controller's agent
+    /// forwarded. The agent is needed only by host-side Git operations; the
+    /// socket itself stays on the controller and OpenSSH exposes a temporary
+    /// forwarding socket to the remote command.
+    pub fn shell_command_with_agent_forwarding(
+        &self,
+        script: &str,
+        label: &str,
+        arguments: impl IntoIterator<Item = String>,
+        purpose: impl Into<String>,
+    ) -> CommandSpec {
+        let Some(ssh) = self.ssh() else {
+            return self.shell_command(script, label, arguments, purpose);
+        };
+        if std::env::var_os("SSH_AUTH_SOCK").is_none() || ssh_agent_forwarding_is_configured(ssh) {
+            return self.shell_command(script, label, arguments, purpose);
+        }
+
+        let mut forwarded = ssh.clone();
+        forwarded
+            .ssh_args
+            .extend(["-o".into(), "ForwardAgent=yes".into()]);
+        let host = Self::Ssh(forwarded);
+        host.shell_command(script, label, arguments, purpose)
+    }
+}
+
+fn ssh_agent_forwarding_is_configured(ssh: &SshTarget) -> bool {
+    ssh.ssh_args.iter().any(|argument| {
+        matches!(argument.as_str(), "-A" | "-a")
+            || argument
+                .strip_prefix("-o")
+                .unwrap_or(argument)
+                .split_once('=')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("ForwardAgent"))
+    })
 }

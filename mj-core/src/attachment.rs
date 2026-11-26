@@ -324,9 +324,7 @@ impl AttachmentStore {
     pub fn controller(session_id: &str) -> Result<Self> {
         crate::config::validate_id("session", session_id)?;
         Ok(Self::new(
-            crate::config::sessions_dir()
-                .join(session_id)
-                .join(ATTACHMENT_DIR),
+            crate::config::DataLayout::current().session_attachments_dir(session_id),
         ))
     }
     pub fn worker(root: &Path) -> Self {

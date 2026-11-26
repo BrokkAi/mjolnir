@@ -2066,6 +2066,18 @@ fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
         )
     );
 
+    // Claude JSON-RPC errors use the same trusted provider diagnostic.
+    let claude = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+        "message": "Your usage limit has been reached", "code": "usage_limit"
+    }));
+    let (stop_reason, _) = prompt_error_outcome(
+        HarnessKind::Claude,
+        &claude,
+        &mj_core::diagnostic::TurnDiagnostic::from_acp(&claude),
+        "",
+    );
+    assert_eq!(stop_reason, mj_core::diagnostic::QUOTA_STOP_REASON);
+
     // Another Codex error names its kind when it has no sentence of its own.
     let bare = agent_client_protocol::Error::internal_error()
         .data(serde_json::json!({"codexErrorInfo": "responseStreamDisconnected"}));
@@ -10260,48 +10272,6 @@ for line in sys.stdin:
     }
     shutdown.cancel();
     runtime.await.unwrap().unwrap();
-}
-
-#[cfg(unix)]
-#[test]
-fn reload_launch_config_clears_stale_accepted_config_selectors() {
-    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
-        silence: None,
-        tool_call: None,
-    });
-    spec.harness = HarnessKind::Codex;
-    spec.initial_model = Some("old-codex-model".into());
-    *spec.accepted_config.lock().unwrap() = AcceptedSessionConfig {
-        model: Some("accepted-codex-model".into()),
-        effort: Some("high".into()),
-    };
-
-    // Same harness with a new initial_model clears stale accepted model so startup_model()
-    // selects the new Move model, while preserving effort.
-    let mut same_harness = crate::worker_runtime::relay_tests::launch_config("/profile");
-    same_harness.harness = HarnessKind::Codex;
-    same_harness.initial_model = Some("new-codex-model".into());
-    spec.apply_reload_accepted_config(&same_harness);
-    spec.initial_model = same_harness.initial_model.clone();
-    assert_eq!(spec.startup_model().as_deref(), Some("new-codex-model"));
-    assert_eq!(
-        spec.accepted_config.lock().unwrap().effort.as_deref(),
-        Some("high")
-    );
-
-    // Harness switch clears accepted_config completely (both model and effort).
-    *spec.accepted_config.lock().unwrap() = AcceptedSessionConfig {
-        model: Some("accepted-codex-model".into()),
-        effort: Some("xhigh".into()),
-    };
-    let mut cross_harness = crate::worker_runtime::relay_tests::launch_config("/profile");
-    cross_harness.harness = HarnessKind::Claude;
-    cross_harness.initial_model = Some("claude-sonnet".into());
-    spec.apply_reload_accepted_config(&cross_harness);
-    spec.harness = cross_harness.harness;
-    spec.initial_model = cross_harness.initial_model.clone();
-    assert_eq!(spec.startup_model().as_deref(), Some("claude-sonnet"));
-    assert!(spec.accepted_config.lock().unwrap().effort.is_none());
 }
 
 #[cfg(unix)]

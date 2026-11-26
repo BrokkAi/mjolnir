@@ -17,7 +17,7 @@ pub fn save_imported_session(
             !session_exists(&tx, &session.id)?,
             "imported session already exists"
         );
-        insert_session(&tx, &session)?;
+        insert_session(&tx, &session, &super::state_io::configured_sessions_root())?;
         write_materialized_session(&tx, &materialized)?;
         tx.commit()?;
         Ok(())
@@ -108,7 +108,7 @@ fn save_new_session_with_preferences_to(
         !session.last_profile.is_empty(),
         "a session profile id cannot use the reserved legacy preference key"
     );
-    insert_session(&tx, session)?;
+    insert_session(&tx, session, &super::state_io::sessions_root_for(path))?;
     super::session_create::insert_create_intent(&tx, session, remember_launch_choices)?;
     if let Some((host, size)) = container_size.filter(|_| remember_container_size) {
         write_host_container_size(&tx, &host, size)?;
@@ -264,6 +264,7 @@ pub fn register_subagent_with_startup_admitted(
             &tx,
             &session,
             (!own_environment).then_some(subagent.parent_session_id.as_str()),
+            &super::state_io::configured_sessions_root(),
         )?;
         super::session_create::insert_create_intent(&tx, &session, false)?;
         super::usage::record_child_accounting(&tx, &subagent, category.as_deref())?;
@@ -996,7 +997,7 @@ fn save_resumed_session_in_environment_to(
                 .transpose()?,
         ],
     )?;
-    replace_checkpoint(&tx, session)?;
+    replace_checkpoint(&tx, session, &super::state_io::sessions_root_for(path))?;
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
     }
@@ -1039,7 +1040,13 @@ pub async fn enqueue_adopted_session<G: Send + 'static>(
     guard: G,
 ) -> Result<AcceptedDatabaseWrite<SessionRecord, G>> {
     enqueue_database_write("install adopted session", guard, move |connection| {
-        install_adopted_session_with(connection, expected, cut, updated_at)
+        install_adopted_session_with(
+            connection,
+            expected,
+            cut,
+            updated_at,
+            &super::state_io::configured_sessions_root(),
+        )
     })
     .await
 }
@@ -1049,6 +1056,7 @@ fn install_adopted_session_with(
     mut expected: SessionRecord,
     cut: Option<(MaterializedSession, mj_core::relay::LiveSessionBaseline)>,
     updated_at: String,
+    sessions_root: &Path,
 ) -> Result<SessionRecord> {
     mj_core::test_hooks::reach_test_hook("adoption_install_write_accepted")?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1070,7 +1078,7 @@ fn install_adopted_session_with(
             "worker is already named by session {id}"
         );
     }
-    if let Some(current) = super::state_io::load_session_with(&tx, &expected.id)? {
+    if let Some(current) = super::state_io::load_session_with(&tx, &expected.id, sessions_root)? {
         ensure!(
             current.state == SessionState::Disconnected
                 && current.native_session_id.is_none()
@@ -1080,7 +1088,7 @@ fn install_adopted_session_with(
         );
     } else {
         validate_session_record(&expected)?;
-        insert_session(&tx, &expected)?;
+        insert_session(&tx, &expected, sessions_root)?;
     }
     if let Some((projection, baseline)) = &cut {
         ensure!(
@@ -1090,7 +1098,7 @@ fn install_adopted_session_with(
         super::materialized::install_live_session_baseline_with(&tx, projection, baseline)?;
     }
     tx.execute("UPDATE sessions SET state='disconnected', native_session_id=NULL, updated_at=?2, last_error=NULL WHERE session_id=?1", params![expected.id, updated_at])?;
-    let current = super::state_io::load_session_with(&tx, &expected.id)?
+    let current = super::state_io::load_session_with(&tx, &expected.id, sessions_root)?
         .context("adopted session disappeared")?;
     tx.commit()?;
     if cut
@@ -1116,6 +1124,7 @@ pub async fn enqueue_adoption_connected<G: Send + 'static>(
             &expected,
             native_session_id.as_deref(),
             &updated_at,
+            &super::state_io::configured_sessions_root(),
         )
     })
     .await
@@ -1126,9 +1135,10 @@ fn publish_adoption_connected_with(
     expected: &SessionRecord,
     native_session_id: Option<&str>,
     updated_at: &str,
+    sessions_root: &Path,
 ) -> Result<SessionRecord> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let current = super::state_io::load_session_with(&tx, &expected.id)?
+    let current = super::state_io::load_session_with(&tx, &expected.id, sessions_root)?
         .context("adopted session disappeared before attachment publication")?;
     ensure!(
         current.target == expected.target
@@ -1145,7 +1155,7 @@ fn publish_adoption_connected_with(
         );
         mark_session_worker_connected_with(&tx, &expected.id, native_session_id, updated_at)?;
     }
-    let current = super::state_io::load_session_with(&tx, &expected.id)?
+    let current = super::state_io::load_session_with(&tx, &expected.id, sessions_root)?
         .context("adopted session disappeared")?;
     tx.commit()?;
     Ok(current)
@@ -1161,7 +1171,13 @@ pub fn refuse_adoption_if_current(
     let detail = detail.to_owned();
     let updated_at = updated_at.to_owned();
     submit_database_write("refuse legacy adoption", move |connection| {
-        refuse_adoption_with(connection, &expected, &detail, &updated_at)
+        refuse_adoption_with(
+            connection,
+            &expected,
+            &detail,
+            &updated_at,
+            &super::state_io::configured_sessions_root(),
+        )
     })
 }
 
@@ -1170,9 +1186,10 @@ fn refuse_adoption_with(
     expected: &SessionRecord,
     detail: &str,
     updated_at: &str,
+    sessions_root: &Path,
 ) -> Result<SessionRecord> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let mut current = super::state_io::load_session_with(&tx, &expected.id)?
+    let mut current = super::state_io::load_session_with(&tx, &expected.id, sessions_root)?
         .context("provisional adoption record disappeared")?;
     ensure!(
         current.state == SessionState::Disconnected
@@ -1202,7 +1219,7 @@ fn refuse_adoption_with(
     super::events::record_session_fault_transition(&tx, &current, previous_error)?;
     super::session_create::settle_create_intent(&tx, &current)?;
     super::state_io::replace_targets(&tx, &current)?;
-    let current = super::state_io::load_session_with(&tx, &expected.id)?
+    let current = super::state_io::load_session_with(&tx, &expected.id, sessions_root)?
         .context("refused adoption record disappeared")?;
     tx.commit()?;
     Ok(current)
@@ -1231,7 +1248,12 @@ pub(super) fn record_adoption_failure_if_current_to(
 ) -> Result<Option<SessionRecord>> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let Some(mut current) = super::state_io::load_session_with(&tx, &expected.id)? else {
+    let Some(mut current) = super::state_io::load_session_with(
+        &tx,
+        &expected.id,
+        &super::state_io::sessions_root_for(path),
+    )?
+    else {
         return Ok(None);
     };
     if current.state == SessionState::Disconnected
@@ -1262,7 +1284,12 @@ pub fn fail_unready_session(
     let observed_updated_at = observed_updated_at.to_owned();
     submit_database_write("fail_unready_session", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let Some(mut record) = load_session_with(&tx, &session_id)? else {
+        let Some(mut record) = load_session_with(
+            &tx,
+            &session_id,
+            &super::state_io::configured_sessions_root(),
+        )?
+        else {
             return Ok(None);
         };
         if !matches!(
@@ -1538,27 +1565,49 @@ pub fn replace_checkpoint_archive_if_current(
     replacement: &CheckpointMetadata,
 ) -> Result<bool> {
     let session_id = session_id.to_owned();
-    let expected_archive_path = path_to_blob(expected_archive_path);
+    let expected_archive_path = expected_archive_path.to_path_buf();
     let expected_sha256 = expected_sha256.to_owned();
-    let archive_path = path_to_blob(&replacement.archive_path);
-    let sha256 = replacement.sha256.clone();
+    let replacement = replacement.clone();
     submit_database_write("replace_checkpoint_archive_if_current", move |connection| {
-        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let changed = tx.execute(
-            "UPDATE session_checkpoints
-                 SET archive_path = ?3, sha256 = ?4
-                 WHERE session_id = ?1 AND archive_path = ?2 AND sha256 = ?5",
-            params![
-                session_id,
-                expected_archive_path,
-                archive_path,
-                sha256,
-                expected_sha256,
-            ],
-        )?;
-        tx.commit()?;
-        Ok(changed == 1)
+        replace_checkpoint_archive_if_current_on(
+            connection,
+            &session_id,
+            &expected_archive_path,
+            &expected_sha256,
+            &replacement,
+            &super::state_io::configured_sessions_root(),
+        )
     })
+}
+
+pub(super) fn replace_checkpoint_archive_if_current_on(
+    connection: &mut Connection,
+    session_id: &str,
+    expected_archive_path: &Path,
+    expected_sha256: &str,
+    replacement: &CheckpointMetadata,
+    sessions_root: &Path,
+) -> Result<bool> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Every managed row is stored relative, and callers hold decoded paths.
+    let expected_archive_path =
+        super::state_io::checkpoint_archive_blob(expected_archive_path, sessions_root);
+    let archive_path =
+        super::state_io::checkpoint_archive_blob(&replacement.archive_path, sessions_root);
+    let changed = tx.execute(
+        "UPDATE session_checkpoints
+             SET archive_path = ?3, sha256 = ?4
+             WHERE session_id = ?1 AND archive_path = ?2 AND sha256 = ?5",
+        params![
+            session_id,
+            expected_archive_path,
+            archive_path,
+            replacement.sha256,
+            expected_sha256,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(changed == 1)
 }
 
 pub fn save_checkpointed_session(session: &SessionRecord) -> Result<()> {
@@ -2271,7 +2320,7 @@ pub(super) fn save_session_with_container_size_to(
         session.viewed_through_event_ordinal = viewed;
         session.archived = archived;
     }
-    insert_session(&tx, &session)?;
+    insert_session(&tx, &session, &super::state_io::sessions_root_for(path))?;
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
     }
@@ -2324,7 +2373,7 @@ pub(super) fn save_checkpointed_session_to(path: &Path, session: &SessionRecord)
         "UPDATE sessions SET native_session_id = ?2 WHERE session_id = ?1",
         params![session.id, session.native_session_id],
     )?;
-    replace_checkpoint(&tx, session)?;
+    replace_checkpoint(&tx, session, &super::state_io::sessions_root_for(path))?;
     tx.commit()?;
     Ok(())
 }
@@ -2525,24 +2574,32 @@ mod ownership_tests {
         stopped.state = SessionState::Stopped;
         stopped.target = None;
         save_session_to(&path, &stopped).unwrap();
-        let stopped =
-            super::super::state_io::load_session_with(&open(&path).unwrap(), &expected.id)
-                .unwrap()
-                .unwrap();
+        let stopped = super::super::state_io::load_session_with(
+            &open(&path).unwrap(),
+            &expected.id,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         let mut connection = open(&path).unwrap();
         assert!(
             publish_adoption_connected_with(
                 &mut connection,
                 &expected,
                 Some("late-native"),
-                "2030-01-01T00:00:00Z"
+                "2030-01-01T00:00:00Z",
+                &crate::database::state_io::configured_sessions_root()
             )
             .is_err()
         );
         assert_eq!(
-            super::super::state_io::load_session_with(&connection, &expected.id)
-                .unwrap()
-                .unwrap(),
+            super::super::state_io::load_session_with(
+                &connection,
+                &expected.id,
+                &crate::database::state_io::configured_sessions_root()
+            )
+            .unwrap()
+            .unwrap(),
             stopped
         );
     }
@@ -2567,6 +2624,7 @@ mod ownership_tests {
             &expected,
             "legacy refusal",
             "2030-01-01T00:00:00Z",
+            &crate::database::state_io::configured_sessions_root(),
         )
         .unwrap();
         assert_eq!(refused.title, "concurrent edit");
@@ -2581,22 +2639,31 @@ mod ownership_tests {
         let mut stopped = refused;
         stopped.state = SessionState::Stopped;
         save_session_to(&path, &stopped).unwrap();
-        let stopped = super::super::state_io::load_session_with(&connection, &expected.id)
-            .unwrap()
-            .unwrap();
+        let stopped = super::super::state_io::load_session_with(
+            &connection,
+            &expected.id,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert!(
             refuse_adoption_with(
                 &mut connection,
                 &expected,
                 "late refusal",
-                "2030-01-01T00:00:01Z"
+                "2030-01-01T00:00:01Z",
+                &crate::database::state_io::configured_sessions_root()
             )
             .is_err()
         );
         assert_eq!(
-            super::super::state_io::load_session_with(&connection, &expected.id)
-                .unwrap()
-                .unwrap(),
+            super::super::state_io::load_session_with(
+                &connection,
+                &expected.id,
+                &crate::database::state_io::configured_sessions_root()
+            )
+            .unwrap()
+            .unwrap(),
             stopped
         );
     }
@@ -2679,9 +2746,13 @@ mod ownership_tests {
         provisioning.native_session_id = Some("resumed-native".into());
         provisioning.additional_mounts.clear();
         save_resumed_session_to(&path, &provisioning, None).unwrap();
-        let current = load_session_with(&connection, &original.id)
-            .unwrap()
-            .unwrap();
+        let current = load_session_with(
+            &connection,
+            &original.id,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(current.state, SessionState::Provisioning);
         assert_eq!(current.native_session_id, provisioning.native_session_id);
         assert_eq!(current.additional_mounts, original.additional_mounts);
@@ -2722,17 +2793,25 @@ mod ownership_tests {
             event_frontier: 1,
         }));
         save_resumed_session_to(&path, &provisioning, None).unwrap();
-        let converted = load_session_with(&connection, &original.id)
-            .unwrap()
-            .unwrap();
+        let converted = load_session_with(
+            &connection,
+            &original.id,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(converted.resource_allocation, Some(allocation.clone()));
         assert_eq!(converted.additional_mounts, mounts);
 
         // Failure restores a snapshot captured before those independent edits.
         save_resumed_session_to(&path, &original, None).unwrap();
-        let rolled_back = load_session_with(&connection, &original.id)
-            .unwrap()
-            .unwrap();
+        let rolled_back = load_session_with(
+            &connection,
+            &original.id,
+            &crate::database::state_io::configured_sessions_root(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(rolled_back.state, original.state);
         assert_eq!(rolled_back.additional_mounts, mounts);
         assert_eq!(rolled_back.resource_allocation, Some(allocation));

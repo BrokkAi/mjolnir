@@ -355,10 +355,12 @@ pub fn clear_relay_state_plan(
             CommandSpec::new("sh", ["-c", script.as_str()])
                 .purpose("stop a leaked local Mjolnir worker and clear its relay state")
         })),
-        TargetLocator::SshBare { ssh, .. } => Some(script.into_command(|script| {
-            ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()])
-                .purpose("stop a leaked remote Mjolnir worker and clear its relay state")
-        })),
+        TargetLocator::SshBare { ssh, .. } | TargetLocator::SshHostBare { ssh, .. } => {
+            Some(script.into_command(|script| {
+                ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()])
+                    .purpose("stop a leaked remote Mjolnir worker and clear its relay state")
+            }))
+        }
         TargetLocator::LocalPodman { .. }
         | TargetLocator::LocalDocker { .. }
         | TargetLocator::AppleContainer { .. }

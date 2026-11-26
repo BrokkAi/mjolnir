@@ -475,6 +475,7 @@ pub(crate) mod tests {
             assessment_state: None,
             notification_stack: None,
             native_use_evidence: None,
+            pending_prompt_context: None,
             event_frontier: 0,
             event_frontier_digest: "0".repeat(64),
             session: CanonicalSessionState {

@@ -1325,22 +1325,127 @@ impl RelayClient {
         }
     }
 
+    /// The whole mailbox at the cut and the prompts of its queued mailbox
+    /// wakes, in one cut-bound read. The worker serializes the cut once and
+    /// serves its pages; the read fails if the relay moves past the cut.
+    pub async fn read_checkpoint_mailbox_pages(
+        &mut self,
+        barrier_command_id: String,
+        cut: mj_core::relay::RelayCursor,
+    ) -> Result<mj_core::relay::CheckpointMailboxRead> {
+        let mut offset = 0u64;
+        let mut json = String::new();
+        loop {
+            let RelayResponsePayload::CheckpointMailboxPage { page, next_offset } = self
+                .call(RelayRequest::ReadCheckpointMailboxPage {
+                    barrier_command_id: barrier_command_id.clone(),
+                    cut: cut.clone(),
+                    offset,
+                })
+                .await?
+            else {
+                bail!("relay returned an unexpected checkpoint mailbox page response")
+            };
+            json.push_str(&page);
+            match next_offset {
+                None => return Ok(serde_json::from_str(&json)?),
+                Some(next) => {
+                    anyhow::ensure!(
+                        next > offset && usize::try_from(next).ok() == Some(json.len()),
+                        "checkpoint mailbox page returned an invalid next offset"
+                    );
+                    offset = next;
+                }
+            }
+        }
+    }
+
+    pub async fn read_checkpoint_quota_input(
+        &mut self,
+        barrier_command_id: String,
+        cut: mj_core::relay::RelayCursor,
+    ) -> Result<mj_core::archive::CanonicalQuotaInput> {
+        let mut offset = 0u64;
+        let mut json = String::new();
+        loop {
+            let RelayResponsePayload::CheckpointQuotaInput { page, next_offset } = self
+                .call(RelayRequest::ReadCheckpointQuotaInput {
+                    barrier_command_id: barrier_command_id.clone(),
+                    cut: cut.clone(),
+                    offset,
+                })
+                .await?
+            else {
+                bail!("relay returned an unexpected checkpoint quota input response")
+            };
+            json.push_str(&page);
+            match next_offset {
+                None => return Ok(serde_json::from_str(&json)?),
+                Some(next) => {
+                    anyhow::ensure!(
+                        next > offset && usize::try_from(next).ok() == Some(json.len()),
+                        "checkpoint quota input page returned an invalid next offset"
+                    );
+                    offset = next;
+                }
+            }
+        }
+    }
+
     pub async fn read_checkpoint_native_use(
         &mut self,
         barrier_command_id: String,
         cut: mj_core::relay::RelayCursor,
-    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
-        match self
-            .call(RelayRequest::ReadCheckpointNativeUse {
-                barrier_command_id,
-                cut,
-            })
-            .await?
-        {
-            RelayResponsePayload::CheckpointNativeUse {
+    ) -> Result<(
+        Option<mj_core::relay::NativeSessionUseEvidence>,
+        Option<String>,
+    )> {
+        anyhow::ensure!(
+            self.protocol_version >= mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL,
+            "worker cannot report pending prompt context at a checkpoint cut"
+        );
+        let mut offset = None;
+        let mut evidence = None;
+        let mut context: Option<String> = None;
+        loop {
+            let RelayResponsePayload::CheckpointNativeUse {
                 native_use_evidence,
-            } => Ok(native_use_evidence),
-            _ => bail!("relay returned an unexpected checkpoint native-use response"),
+                pending_prompt_context,
+                next_context_offset,
+            } = self
+                .call(RelayRequest::ReadCheckpointNativeUse {
+                    barrier_command_id: barrier_command_id.clone(),
+                    cut: cut.clone(),
+                    pending_context_offset: offset,
+                })
+                .await?
+            else {
+                bail!("relay returned an unexpected checkpoint native-use response");
+            };
+            if let Some(first) = &evidence {
+                anyhow::ensure!(
+                    *first == native_use_evidence,
+                    "checkpoint native-use evidence changed between context pages"
+                );
+            } else {
+                evidence = Some(native_use_evidence);
+            }
+            match pending_prompt_context {
+                Some(page) => context.get_or_insert_with(String::new).push_str(&page),
+                None => anyhow::ensure!(
+                    offset.is_none() && next_context_offset.is_none(),
+                    "checkpoint context disappeared between pages"
+                ),
+            }
+            let Some(next) = next_context_offset else {
+                return Ok((evidence.flatten(), context));
+            };
+            let length = context.as_ref().map_or(0, String::len);
+            anyhow::ensure!(
+                next > offset.unwrap_or(0) && usize::try_from(next).ok() == Some(length),
+                "checkpoint context page returned an invalid next offset"
+            );
+            offset = Some(next);
         }
     }
 

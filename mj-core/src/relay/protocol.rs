@@ -351,6 +351,25 @@ pub enum RelayRequest {
         barrier_command_id: String,
         cut: super::snapshot::RelayCursor,
     },
+    /// Page quota-interrupted input serialized as UTF-8 JSON at the checkpoint
+    /// cut. Protocol 96; a controller at protocol 97 reads it, with the rest of
+    /// the mailbox, through `ReadCheckpointMailboxPage`.
+    ReadCheckpointQuotaInput {
+        barrier_command_id: String,
+        cut: super::snapshot::RelayCursor,
+        offset: u64,
+    },
+    /// One page of a `CheckpointMailboxRead` serialized as UTF-8 JSON: the
+    /// whole mailbox at the cut of a ready checkpoint barrier and the prompts
+    /// of the mailbox wakes queued there. The relay serializes the cut once and
+    /// serves every page from that text. Refused unless that barrier is ready
+    /// at exactly `cut` and nothing has been journaled since.
+    /// Protocol 97.
+    ReadCheckpointMailboxPage {
+        barrier_command_id: String,
+        cut: super::snapshot::RelayCursor,
+        offset: u64,
+    },
     /// The worker-owned native-session-use evidence at the cut of a ready
     /// checkpoint barrier. Refused unless that barrier is ready at exactly
     /// `cut` and nothing has been journaled since.
@@ -358,6 +377,10 @@ pub enum RelayRequest {
     ReadCheckpointNativeUse {
         barrier_command_id: String,
         cut: super::snapshot::RelayCursor,
+        /// UTF-8 byte offset into pending context; absent starts at zero. Each
+        /// page uses the same barrier and cut.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_context_offset: Option<u64>,
     },
     ReadPendingElicitation {
         elicitation_id: String,
@@ -695,6 +718,8 @@ impl RelayRequest {
             Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
             Self::ReadQueuedCommand { .. } => "read_queued_command",
             Self::ReadCheckpointMailbox { .. } => "read_checkpoint_mailbox",
+            Self::ReadCheckpointMailboxPage { .. } => "read_checkpoint_mailbox_page",
+            Self::ReadCheckpointQuotaInput { .. } => "read_checkpoint_quota_input",
             Self::ReadCheckpointNativeUse { .. } => "read_checkpoint_native_use",
             Self::BeginLiveBaseline => "begin_live_baseline",
             Self::ReadLiveBaselinePage { .. } => "read_live_baseline_page",
@@ -804,6 +829,10 @@ impl RelayRequest {
             | Self::CommandRetentionStatus
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::ReadCheckpointMailbox { .. } => super::RELAY_CHECKPOINT_MAILBOX_PROTOCOL,
+            Self::ReadCheckpointQuotaInput { .. } => super::RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL,
+            Self::ReadCheckpointMailboxPage { .. } => {
+                super::RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL
+            }
             Self::ReadCheckpointNativeUse { .. } => super::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL,
             Self::HoldInPlaceMoveDispatch { .. }
             | Self::DiscardHeldMoveCommands { .. }
@@ -1049,6 +1078,17 @@ pub enum RelayResponseBody {
     Error { error: RelayProtocolError },
 }
 
+/// Everything a checkpoint reads from a worker's mailbox at one cut: the
+/// mailbox and the prompts of the queued mailbox wakes. Pages of its JSON text
+/// travel in `CheckpointMailboxPage` responses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointMailboxRead {
+    pub mailbox: crate::archive::CanonicalMailbox,
+    /// The prompt blocks of each queued mailbox wake, by command ID.
+    pub wake_prompts: std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayResponsePayload {
@@ -1132,8 +1172,27 @@ pub enum RelayResponsePayload {
     CheckpointMailbox {
         mailbox: crate::archive::CanonicalMailbox,
     },
+    CheckpointQuotaInput {
+        page: String,
+        next_offset: Option<u64>,
+    },
+    CheckpointMailboxPage {
+        page: String,
+        /// Absolute UTF-8 byte offset of the next page, at a character
+        /// boundary and strictly greater than the requested offset; absent
+        /// when complete.
+        next_offset: Option<u64>,
+    },
     CheckpointNativeUse {
         native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
+        /// A UTF-8 page, present at protocol 95 when context is pending at the cut.
+        /// An empty string remains distinct from absent context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_prompt_context: Option<String>,
+        /// Absolute UTF-8 byte offset of the next page, at a character boundary
+        /// and strictly greater than the requested offset; absent when complete.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_context_offset: Option<u64>,
     },
     PendingElicitation {
         request: Option<crate::elicitation::ElicitationRequest>,

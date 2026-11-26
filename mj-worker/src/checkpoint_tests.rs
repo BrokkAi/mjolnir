@@ -166,6 +166,7 @@ pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 origin_override: None,
             }],
             canonical_session: CanonicalSessionSnapshot {
+                pending_prompt_context: None,
                 command_ledger: None,
                 assessment_state: None,
                 notification_stack: None,
@@ -406,6 +407,31 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     let pending = vec![parent_mail("first", false), parent_mail("second", false)];
     assert_eq!(mailbox.pending_events, pending);
     assert!(mailbox.delivered_event_keys.contains_key("delivered"));
+    // The paged read serves the same mail from one serialization of the cut.
+    let read_page_at_cut = |relay: &mut DurableRelay| {
+        relay
+            .handle(relay_request(
+                "read-mail-page",
+                RelayRequest::ReadCheckpointMailboxPage {
+                    barrier_command_id: "suspend-barrier".into(),
+                    cut: cut.clone(),
+                    offset: 0,
+                },
+            ))
+            .body
+    };
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::CheckpointMailboxPage {
+                page,
+                next_offset: None,
+            },
+    } = read_page_at_cut(&mut source)
+    else {
+        panic!("the relay refused to page its mail at the ready cut");
+    };
+    let paged: mj_core::relay::CheckpointMailboxRead = serde_json::from_str(&page).unwrap();
+    assert_eq!(paged.mailbox, mailbox);
     // Mail accepted after the cut moves the relay past it, as it would refuse
     // a Close there; the cut's mail can no longer be read.
     submit_relay(
@@ -417,12 +443,38 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
         panic!("the relay reported mail for a cut it has moved past");
     };
     assert_eq!(error.code, RelayErrorCode::InvalidState);
+    // The serialization the relay cached for the cut is not served past it.
+    let RelayResponseBody::Error { error } = read_page_at_cut(&mut source) else {
+        panic!("the relay paged mail for a cut it has moved past");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
 
     // The fixture's queued prompt carries claimed mail, as a recovery prompt
     // does after a worker restart.
     let (mut spec, _) = fixture(temp.path());
     let claimed = "claimed mail for the queued prompt";
+    spec.canonical_session.pending_prompt_context = Some("later pending context".into());
     spec.canonical_session.mailbox = Some(CanonicalMailbox {
+        quota_input: mj_core::archive::CanonicalQuotaInput {
+            steered: Default::default(),
+            frozen_prompt_contexts: [("queued-1".into(), "frozen handoff".into())].into(),
+            pending: vec![
+                serde_json::to_value(agent_client_protocol::v1::schema::ContentBlock::from(
+                    "newer quota input",
+                ))
+                .unwrap(),
+            ],
+            claimed: [(
+                "queued-1".into(),
+                vec![
+                    serde_json::to_value(agent_client_protocol::v1::schema::ContentBlock::from(
+                        "older quota input",
+                    ))
+                    .unwrap(),
+                ],
+            )]
+            .into(),
+        },
         prompt_contexts: [("queued-1".to_owned(), claimed.to_owned())].into(),
         ..mailbox
     });
@@ -432,7 +484,7 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
             .unwrap()
             .manifest
             .schema_version,
-        ARCHIVE_SCHEMA_VERSION_MAILBOX
+        mj_core::archive::ARCHIVE_SCHEMA_VERSION_QUOTA_INPUT
     );
     let restore = |name: &str, queue_policy| {
         let workspace = temp.path().join(format!("{name}-workspace"));
@@ -480,12 +532,26 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     assert_eq!(pending_keys(&restored), ["first", "second"]);
     let started = restored.claim_pending_commands(true).unwrap();
     assert_eq!(started[0].command_id, "queued-1");
+    assert_eq!(
+        started[0].quota_interrupted_input,
+        vec![
+            agent_client_protocol::v1::schema::ContentBlock::from("older quota input"),
+            agent_client_protocol::v1::schema::ContentBlock::from("newer quota input"),
+        ]
+    );
     assert!(
         started[0]
             .hidden_prompt_context
             .as_deref()
             .unwrap()
             .contains(claimed)
+    );
+    assert!(
+        started[0]
+            .hidden_prompt_context
+            .as_deref()
+            .unwrap()
+            .contains("frozen handoff")
     );
     submit_relay(
         &mut restored,
@@ -512,6 +578,13 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
             .as_deref()
             .unwrap()
             .contains(claimed)
+    );
+    assert!(
+        started[0]
+            .hidden_prompt_context
+            .as_deref()
+            .unwrap()
+            .contains("frozen handoff")
     );
     for event in &pending {
         submit_relay(
@@ -540,7 +613,11 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     submit_relay(&mut discarded, "queued-1", next_prompt());
     let started = discarded.claim_pending_commands(true).unwrap();
     assert_eq!(started[0].command_id, "queued-1");
-    assert!(started[0].hidden_prompt_context.is_none());
+    // Hard-won: 74e095a3a: queue discard lost the restart's frozen context.
+    assert_eq!(
+        started[0].hidden_prompt_context.as_deref(),
+        Some("frozen handoff\n\nlater pending context")
+    );
 }
 
 #[test]

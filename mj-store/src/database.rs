@@ -15,13 +15,13 @@ use chrono::Utc;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use mj_core::config::data_dir;
+use mj_core::config::{Machine, MachineId};
 use mj_core::state::{
     CheckpointMetadata, HostContainerSize, ManagedWorktree, MaterializedExecutionState,
     MaterializedQueuedPrompt, MaterializedSession, MaterializedSessionSummary, MaterializedTurn,
     MaterializedTurnOutcome, OperatorPresence, ProjectionWindow, SessionRecord,
     SessionResourceAllocation, SessionState, State, TargetLocator, TranscriptBody, TranscriptItem,
-    validate_relay_event_digest, validate_relay_event_frontier,
+    machine_hosts_placement, validate_relay_event_digest, validate_relay_event_frontier,
 };
 use mj_core::subagent::SubagentRecord;
 
@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 159;
+const SCHEMA_VERSION: i64 = 163;
 
 pub mod web_push;
 pub use web_push::*;
@@ -58,6 +58,8 @@ pub use mailbox::*;
 
 mod legacy_schema;
 mod schema;
+mod store_fence;
+pub use store_fence::*;
 mod turn_outcome;
 use turn_outcome::{deserialize_turn_outcome, serialize_turn_outcome};
 mod usage;
@@ -128,6 +130,7 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -178,7 +181,10 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
         failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
         checkpoint: Some(Box::new(CheckpointMetadata {
-            archive_path: PathBuf::from("sessions/test.hel.zip"),
+            archive_path: std::env::temp_dir()
+                .join("fixture")
+                .join("sessions")
+                .join("test.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-12T01:00:00Z".into(),
             event_frontier: 6,

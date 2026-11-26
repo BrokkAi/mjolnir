@@ -79,6 +79,7 @@ fn claude_prior_snapshot() -> Arc<CanonicalSessionSnapshot> {
     })
     .collect();
     Arc::new(CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -1725,6 +1726,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         notifications_ignored: false,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -2400,7 +2402,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
     let archive_directory = data_directory.join("archives");
     std::fs::create_dir_all(&archive_directory).unwrap();
-    std::fs::create_dir_all(mj_core::config::config_dir()).unwrap();
+    std::fs::create_dir_all(mj_core::config::ConfigLayout::current().root()).unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
 
@@ -2535,7 +2537,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     );
     // Legacy raw-to-workspace conversion no longer writes a persistent
     // conversion archive into sessions_dir().
-    let sessions = mj_core::config::sessions_dir();
+    let sessions = mj_core::config::DataLayout::current().sessions_dir();
     let leftover: Vec<_> = std::fs::read_dir(&sessions)
         .map(|entries| {
             entries
@@ -2553,6 +2555,8 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
 
 #[cfg(unix)]
 const FRESH_NATIVE_RESUME_CHILD: &str = "MJ_TEST_FRESH_NATIVE_RESUME_CHILD";
+#[cfg(unix)]
+const FRESH_NATIVE_RESTORE_SPEC: &str = "MJ_TEST_FRESH_NATIVE_RESTORE_SPEC";
 
 /// How the stand-in worker of [`fresh_native_resume`] opens its session.
 #[cfg(unix)]
@@ -2569,6 +2573,8 @@ enum FreshNativeOpening {
     /// The archive holds the native session's files, and the worker opens a
     /// new session with no reason given for the change.
     Unexplained,
+    /// A second harness switch must carry the prior hidden handoff too.
+    CrossHarness,
 }
 
 /// Whether the suspend before a [`fresh_native_resume`] stopped a sub-agent.
@@ -2588,6 +2594,12 @@ fn fresh_native_resume_for_each_harness(
     stopped_subagents: StoppedSubagents,
 ) {
     if let Some(harness) = std::env::var_os(FRESH_NATIVE_RESUME_CHILD) {
+        if harness == "restore" {
+            let path = std::env::var_os(FRESH_NATIVE_RESTORE_SPEC).unwrap();
+            let spec = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            mj_checkpoint::checkpoint::restore_checkpoint(&spec, &SystemGit).unwrap();
+            return;
+        }
         let harness = match harness.to_str() {
             Some("claude") => mj_core::config::HarnessKind::Claude,
             Some("codex") => mj_core::config::HarnessKind::Codex,
@@ -2657,14 +2669,35 @@ fn fresh_native_resume(
 
     // Never prompted: the archived transcript is empty, and the archive names
     // the native session the harness was given at launch.
-    let checkpoint = write_checkpoint_gate_archive_for_harness(
-        &archives,
-        session_id,
-        2,
-        harness,
-        profile_id,
-        opening != FreshNativeOpening::NothingToLoad,
-    );
+    let saved_context = if opening == FreshNativeOpening::CrossHarness {
+        "x".repeat(mj_core::relay::MAX_FRAME_BYTES - 4_096)
+    } else {
+        String::new()
+    };
+    let new_handoff = "new generated handoff ".repeat(300);
+    let checkpoint = if opening == FreshNativeOpening::CrossHarness {
+        let mut input = crate::controller::test_support::checkpoint_archive_input(
+            session_id,
+            2,
+            Vec::new(),
+            Vec::new(),
+        );
+        input.session.harness_kind = harness;
+        input.session.profile_id = profile_id.to_owned();
+        input.canonical_session.pending_prompt_context = Some(saved_context.clone());
+        crate::controller::test_support::write_checkpoint_archive_input(
+            &archives, session_id, &input,
+        )
+    } else {
+        write_checkpoint_gate_archive_for_harness(
+            &archives,
+            session_id,
+            2,
+            harness,
+            profile_id,
+            opening != FreshNativeOpening::NothingToLoad,
+        )
+    };
     let verified = verify_resume_checkpoint(session_id, &checkpoint).unwrap();
     assert_eq!(
         verified.manifest.session.native_session_id,
@@ -2678,7 +2711,29 @@ fn fresh_native_resume(
         FreshNativeOpening::ReplacesUnused => format!(
             "{LATCH_RELAY_REPLACED_UNUSED}=native-session\n    export {LATCH_RELAY_REPLACED_UNUSED}\n    "
         ),
-        FreshNativeOpening::NothingToLoad | FreshNativeOpening::Unexplained => String::new(),
+        FreshNativeOpening::NothingToLoad
+        | FreshNativeOpening::Unexplained
+        | FreshNativeOpening::CrossHarness => String::new(),
+    };
+    let restore_command = if opening == FreshNativeOpening::CrossHarness {
+        let test = format!(
+            "{}::a_cross_harness_resume_preserves_saved_context_and_stopped_subagent_notes",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        format!(
+            "{FRESH_NATIVE_RESUME_CHILD}=restore {FRESH_NATIVE_RESTORE_SPEC}={} {} --exact {} --nocapture || exit $?",
+            quote(&restore_spec),
+            quote(&std::env::current_exe().unwrap()),
+            quote(Path::new(&test))
+        )
+    } else {
+        format!(
+            "cat >{} <<'SEED'\n{{\"event_frontier\":2,\"event_frontier_digest\":\"{}\",\"queued_prompts\":[],\"native_session_unused\":true}}\nSEED",
+            quote(&mj_core::relay::restored_relay_seed_path(&worker_root)),
+            verified.canonical_session.event_frontier_digest
+        )
     };
     let script = format!(
         r#"case "${{2:-}}" in
@@ -2693,9 +2748,7 @@ restore-checkpoint)
     # The spec arrives on standard input (`--spec -`), never as an uploaded file.
     [ "$4" = - ] || exit 64
     cat >{restore_spec}
-    cat >{seed} <<'SEED'
-{{"event_frontier":2,"event_frontier_digest":"{digest}","queued_prompts":[],"native_session_unused":true}}
-SEED
+    {restore_command}
     ;;
 esac
 exit 0
@@ -2703,9 +2756,7 @@ exit 0
         root = quote(&worker_root),
         binary = quote(&std::env::current_exe().unwrap()),
         child = mj_core::test_hooks::latch_relay::CHILD_TEST,
-        seed = quote(&mj_core::relay::restored_relay_seed_path(&worker_root)),
         restore_spec = quote(&restore_spec),
-        digest = verified.canonical_session.event_frontier_digest,
     );
     // Only the behaviour goes in: the resume installs `MJ_WORKER_BINARY`, the
     // checked-in dispatcher, as `hel`, and that reads `hel.script` beside it.
@@ -2792,12 +2843,13 @@ exit 0
                 resumed_project_directory: Some(checkout.clone()),
                 resumed_container_workspace: None,
                 restore_repositories: false,
-                native_continuity: true,
-                discard_queued_prompts: false,
-                replay_queue: true,
+                native_continuity: opening != FreshNativeOpening::CrossHarness,
+                discard_queued_prompts: opening == FreshNativeOpening::CrossHarness,
+                replay_queue: opening != FreshNativeOpening::CrossHarness,
                 queue_policy_override: QueuePolicy::Import,
                 move_transfer: None,
-                utility_handoff: None,
+                utility_handoff: (opening == FreshNativeOpening::CrossHarness)
+                    .then(|| new_handoff.clone()),
                 projection_build: None,
                 resume_notices: Vec::new(),
                 include_in_place_subagents: false,
@@ -2826,7 +2878,11 @@ exit 0
     // worker try to load it; Codex cannot load a thread it never wrote.
     assert_eq!(
         launch.native_session_id.as_deref(),
-        (opening != FreshNativeOpening::NothingToLoad).then_some("native-session")
+        (!matches!(
+            opening,
+            FreshNativeOpening::NothingToLoad | FreshNativeOpening::CrossHarness
+        ))
+        .then_some("native-session")
     );
     assert_eq!(
         restored_spec
@@ -2844,7 +2900,9 @@ exit 0
     };
 
     match opening {
-        FreshNativeOpening::NothingToLoad | FreshNativeOpening::ReplacesUnused => {
+        FreshNativeOpening::NothingToLoad
+        | FreshNativeOpening::ReplacesUnused
+        | FreshNativeOpening::CrossHarness => {
             restored.unwrap_or_else(|error| panic!("{harness:?} resume failed: {error:#}"));
             // The new identity is the session's now, in memory and on disk, so
             // the next suspend archives it and the next resume expects it.
@@ -2881,6 +2939,17 @@ exit 0
                         .unwrap()
                         .is_empty()
                 );
+            }
+            if opening == FreshNativeOpening::CrossHarness {
+                let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+                    &std::fs::read(worker_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+                )
+                .unwrap();
+                let context = snapshot.pending_prompt_context.unwrap().text;
+                assert!(context.contains(&saved_context));
+                assert_eq!(context.matches(&saved_context).count(), 1);
+                assert!(context.contains(&new_handoff));
+                assert!(context.contains("<mj-stopped-subagents>"));
             }
 
             // The resumed session takes a prompt and answers it.
@@ -2972,6 +3041,17 @@ exit 0
             );
         }
     }
+}
+
+// Hard-won: a second harness switch after suspend lost the pending handoff.
+#[cfg(unix)]
+#[test]
+fn a_cross_harness_resume_preserves_saved_context_and_stopped_subagent_notes() {
+    fresh_native_resume_for_each_harness(
+        "a_cross_harness_resume_preserves_saved_context_and_stopped_subagent_notes",
+        FreshNativeOpening::CrossHarness,
+        StoppedSubagents::One,
+    );
 }
 
 /// R7-5: a session suspended before its native session was ever prompted.
@@ -3525,6 +3605,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
             },
         ));
         let canonical = mj_core::archive::CanonicalSessionSnapshot {
+            pending_prompt_context: None,
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
@@ -3609,7 +3690,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
             "podman".into(),
             serde_json::from_value(serde_json::json!({
                 "kind": "local-podman",
-                "image": "agent-dev:latest"
+                "image": "session-base:latest"
             }))
             .unwrap(),
         );
@@ -3842,6 +3923,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
     }));
     let archive_path = temp.path().join("cutoff.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -3949,7 +4031,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
         "podman".into(),
         serde_json::from_value(serde_json::json!({
             "kind": "local-podman",
-            "image": "agent-dev:latest"
+            "image": "session-base:latest"
         }))
         .unwrap(),
     );
@@ -4040,6 +4122,7 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
     let session_id = "legacy-clone-on-disk".to_owned();
     let archive_path = temp.path().join("legacy-clone.hel.zip");
     let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        pending_prompt_context: None,
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
@@ -4114,7 +4197,7 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
         "podman".into(),
         serde_json::from_value(serde_json::json!({
             "kind": "local-podman",
-            "image": "agent-dev:latest"
+            "image": "session-base:latest"
         }))
         .unwrap(),
     );

@@ -297,6 +297,10 @@ impl TryFrom<RecordedTarget<'_>> for targets::TargetLocator {
                 container_id: container_id.clone(),
                 borrowed_from: borrowed_from.clone(),
             },
+            TargetLocator::SshHostBare { host, data_root } => Self::SshHostBare {
+                ssh: ssh(host)?,
+                data_root: data_root.clone(),
+            },
             TargetLocator::SshBare {
                 host,
                 workspace,
@@ -386,6 +390,7 @@ pub const fn locator_kind_name(locator: &TargetLocator) -> &'static str {
         TargetLocator::AppleContainer { .. } => "apple-container",
         TargetLocator::AwsEc2 { .. } => "aws-ec2",
         TargetLocator::SshBare { .. } => "ssh-bare",
+        TargetLocator::SshHostBare { .. } => "ssh-host-bare",
         TargetLocator::SshPodman { .. } => "ssh-podman",
         TargetLocator::SshDocker { .. } => "ssh-docker",
         TargetLocator::SshAppleContainer { .. } => "ssh-apple-container",
@@ -398,6 +403,7 @@ pub fn locator_needs_connection(locator: &TargetLocator) -> bool {
     matches!(
         locator,
         TargetLocator::SshBare { .. }
+            | TargetLocator::SshHostBare { .. }
             | TargetLocator::SshPodman { .. }
             | TargetLocator::SshDocker { .. }
             | TargetLocator::SshAppleContainer { .. }
@@ -419,6 +425,10 @@ mod tests {
             extra_args: vec!["-p".into(), "2222".into()],
         };
         let locators = [
+            TargetLocator::SshHostBare {
+                host: connection.host.clone(),
+                data_root: "/old".into(),
+            },
             TargetLocator::SshBare {
                 host: connection.host.clone(),
                 workspace: "workspace".into(),
@@ -460,6 +470,7 @@ mod tests {
             .unwrap();
             let ssh = match backend {
                 targets::TargetLocator::SshBare { ssh, .. }
+                | targets::TargetLocator::SshHostBare { ssh, .. }
                 | targets::TargetLocator::SshPodman { ssh, .. }
                 | targets::TargetLocator::SshDocker { ssh, .. }
                 | targets::TargetLocator::SshAppleContainer { ssh, .. }

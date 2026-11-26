@@ -387,6 +387,7 @@ impl<'a> OriginPlan<'a> {
                 let workspace_root = PathBuf::from(crate::controller::network_git::workspace_root(
                     backend,
                     session.container_workspace.as_deref(),
+                    &session.id,
                 ));
                 Ok(Self::Workspace {
                     repositories: bundle
@@ -569,6 +570,7 @@ impl OriginDeltaSuspend {
                 PathBuf::from(crate::controller::network_git::workspace_root(
                     &backend,
                     session.container_workspace.as_deref(),
+                    &session.id,
                 ))
             }
             mj_core::state::Checkout::Attached { path } => path.to_path_buf(),

@@ -449,6 +449,9 @@ impl Controller {
                     .into_owned()
                     .into(),
             }),
+            // A child starts in its parent's placement until a placement of
+            // its own replaces it.
+            machine_id: parent.machine_id.clone(),
             launch_base: None,
             launch_branch: None,
             checkout: None,
@@ -536,6 +539,7 @@ impl Controller {
             session.bundle_id = placement.bundle_id;
             session.target_template_id = placement.target_id;
             session.target_runtime = Some(template.into());
+            session.machine_id = self.config.template_machine_id(&session.target_template_id);
             session.project_directory = placement.directory;
             session.resource_allocation = placement.allocation;
             session.create_managed_worktree = session.project_directory.as_ref().map(|_| true);
@@ -806,6 +810,10 @@ fn borrowed_locator(
         TargetLocator::LocalBare { worker_root } => TargetLocator::LocalBare {
             worker_root: sibling_path(worker_root, parent_id, child_id)?,
         },
+        TargetLocator::SshHostBare { host, data_root } => TargetLocator::SshHostBare {
+            host: host.clone(),
+            data_root: data_root.clone(),
+        },
         TargetLocator::SshBare {
             host,
             workspace,
@@ -911,8 +919,11 @@ pub(super) fn subagent_report_root(
             )
         }
         None => {
-            let workspace =
-                super::network_git::workspace_root(backend, parent.container_workspace.as_deref());
+            let workspace = super::network_git::workspace_root(
+                backend,
+                parent.container_workspace.as_deref(),
+                &parent.id,
+            );
             (
                 format!(
                     "{}/{}",

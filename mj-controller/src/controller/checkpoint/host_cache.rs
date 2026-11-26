@@ -89,6 +89,7 @@ pub fn host_cache_key(locator: &TargetLocator) -> String {
         | TargetLocator::AppleContainer { .. } => "local".to_owned(),
         TargetLocator::AwsEc2 { ssh, .. }
         | TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
         | TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
         | TargetLocator::SshAppleContainer { ssh, .. }
@@ -115,10 +116,10 @@ pub(crate) fn parse_host_cache_key(host: &str) -> Result<HostCacheTarget> {
 
 /// Local host-owned directory for cached snapshot archives.
 ///
-/// Lives under `mj_core::config::data_dir()` so isolated `--instance` daemons
+/// Lives under the data directory so isolated `--instance` daemons
 /// and unit tests never share or clobber each other's snapshot cache.
 pub fn local_snapshot_cache_dir() -> PathBuf {
-    mj_core::config::data_dir().join("snapshot-cache")
+    mj_core::config::DataLayout::current().snapshot_cache_dir()
 }
 
 fn cache_filename(sha256: &str) -> String {
@@ -676,7 +677,9 @@ fn stage_verified_host_cache_to_target(
             Path::new(cached_path),
             remote_archive,
         ),
-        TargetLocator::SshBare { ssh, .. } | TargetLocator::AwsEc2 { ssh, .. } => {
+        TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::SshHostBare { ssh, .. }
+        | TargetLocator::AwsEc2 { ssh, .. } => {
             let script = "set -eu; src=$1; dst=$2; mkdir -p -- \"$(dirname -- \"$dst\")\"; cp -f -- \"$src\" \"$dst\"";
             let command = mj_core::targets::ssh_command_owned(
                 SshTrafficClass::Control,
