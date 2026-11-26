@@ -168,7 +168,7 @@ pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.26.0";
 pub const MUSE_VERSION: &str = "1.4.25-R9361.1";
 pub const OPENCODE_VERSION: &str = "2.2.7";
-pub const DSH_ACP_VERSION: &str = "0.8.0";
+pub const DSH_ACP_VERSION: &str = "0.8.1";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 pub const ANTIGRAVITY_VERSION: &str = "1.5.15";
 
@@ -354,49 +354,46 @@ pub fn dsh_acp_script() -> String {
     )
 }
 
-fn dsh_acp_required_major_minor() -> (u64, u64) {
-    DSH_ACP_VERSION
-        .split_once('.')
-        .and_then(|(major, minor)| {
-            Some((
-                major.parse::<u64>().ok()?,
-                minor.split('.').next()?.parse::<u64>().ok()?,
-            ))
-        })
-        .expect("DSH_ACP_VERSION starts with numeric major and minor versions")
+/// Split `major.minor.patch` into numbers. Any further components are
+/// ignored; a missing or non-numeric component (a prerelease such as
+/// `0.9.0-rc.1` included) makes the version unparsable.
+fn parse_dsh_acp_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ))
 }
 
-/// Whether `dsh-acp --version` output names a release that loads staged
-/// instructions from its data directory.
-pub fn dsh_acp_version_supports_native_instructions(version_output: &str) -> bool {
-    let Some(version) = version_output.strip_prefix("dsh-acp ") else {
-        return false;
-    };
-    let mut version = version.trim().split('.');
-    let Some(Ok(major)) = version.next().map(str::parse::<u64>) else {
-        return false;
-    };
-    let Some(Ok(minor)) = version.next().map(str::parse::<u64>) else {
-        return false;
-    };
-    let (required_major, required_minor) = dsh_acp_required_major_minor();
-    major > required_major || (major == required_major && minor >= required_minor)
+/// The pinned release, the oldest a target's own `dsh-acp` may be: earlier
+/// patch releases of the same minor carry defects the pin fixes (0.8.0 fails
+/// every turn longer than 180 s).
+fn dsh_acp_required_version() -> (u64, u64, u64) {
+    parse_dsh_acp_version(DSH_ACP_VERSION).expect("DSH_ACP_VERSION is numeric major.minor.patch")
 }
 
-/// A POSIX shell command that succeeds when the `dsh-acp` on `PATH` can load
-/// staged instructions from its data directory. The caller checks that the
-/// command exists first.
+/// Whether `dsh-acp --version` output names a release at least as new as
+/// [`DSH_ACP_VERSION`]. Unparsable output is unsupported.
+pub fn dsh_acp_version_supported(version_output: &str) -> bool {
+    version_output
+        .strip_prefix("dsh-acp ")
+        .and_then(|version| parse_dsh_acp_version(version.trim()))
+        .is_some_and(|version| version >= dsh_acp_required_version())
+}
+
+/// A POSIX shell command that succeeds when the `dsh-acp` on `PATH` is at
+/// least [`DSH_ACP_VERSION`]; it mirrors [`dsh_acp_version_supported`]. The
+/// caller checks that the command exists first.
 pub fn dsh_acp_version_supported_script() -> String {
-    let (required_major, required_minor) = dsh_acp_required_major_minor();
+    let (major, minor, patch) = dsh_acp_required_version();
     format!(
-        "{{ reported=\"$(dsh-acp --version 2>/dev/null)\" || reported=; case \"$reported\" in 'dsh-acp '*) reported=\"${{reported#dsh-acp }}\" ;; *) reported= ;; esac; major=\"${{reported%%.*}}\"; rest=\"${{reported#*.}}\"; minor=\"${{rest%%.*}}\"; case \"$major\" in ''|*[!0-9]*) major= ;; esac; case \"$minor\" in ''|*[!0-9]*) minor= ;; esac; [ -n \"$major\" ] && [ -n \"$minor\" ] && {{ [ \"$major\" -gt {required_major} ] || {{ [ \"$major\" -eq {required_major} ] && [ \"$minor\" -ge {required_minor} ]; }}; }}; }}",
-        required_major = required_major,
-        required_minor = required_minor,
+        "{{ reported=\"$(dsh-acp --version 2>/dev/null)\" || reported=; case \"$reported\" in 'dsh-acp '*.*.*) reported=\"${{reported#dsh-acp }}\" ;; *) reported= ;; esac; found_major=\"${{reported%%.*}}\"; rest=\"${{reported#*.}}\"; found_minor=\"${{rest%%.*}}\"; rest=\"${{rest#*.}}\"; found_patch=\"${{rest%%.*}}\"; case \"$found_major\" in ''|*[!0-9]*) found_major= ;; esac; case \"$found_minor\" in ''|*[!0-9]*) found_minor= ;; esac; case \"$found_patch\" in ''|*[!0-9]*) found_patch= ;; esac; [ -n \"$found_major\" ] && [ -n \"$found_minor\" ] && [ -n \"$found_patch\" ] && {{ [ \"$found_major\" -gt {major} ] || {{ [ \"$found_major\" -eq {major} ] && {{ [ \"$found_minor\" -gt {minor} ] || {{ [ \"$found_minor\" -eq {minor} ] && [ \"$found_patch\" -ge {patch} ]; }}; }}; }}; }}; }}",
     )
 }
 
 /// The shell commands that start dsh-acp on any target: the target's own
-/// `dsh-acp` when its version supports native instruction loading, otherwise
+/// `dsh-acp` when it is at least [`DSH_ACP_VERSION`], otherwise
 /// the pinned npm package through `npx`, running [`dsh_acp_script`] with the
 /// resolved command as its positional arguments. DSH has no managed
 /// installation — the npm package bundles the native bridge and pinned DSH
@@ -667,8 +664,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "opencode",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.8.0",
-            display_version: "dsh-acp 0.8.0",
+            install_id: "dsh-acp-0.8.1",
+            display_version: "dsh-acp 0.8.1",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },
@@ -742,6 +739,54 @@ mod tests {
                 Path::new("sh"),
                 &["-c".into(), "exec custom-dsh".into()]
             ));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dsh_acp_host_version_gate_compares_patch_in_rust_and_shell() {
+        // The pin is 0.8.1; 0.8.0 fails every turn longer than 180 s.
+        assert_eq!(DSH_ACP_VERSION, "0.8.1", "update the cases with the pin");
+        let cases = [
+            ("dsh-acp 0.8.0", false),
+            ("dsh-acp 0.8.1", true),
+            ("dsh-acp 0.8.2", true),
+            ("dsh-acp 0.9.0", true),
+            ("dsh-acp 1.0.0", true),
+            ("dsh-acp 0.7.9", false),
+            ("dsh-acp 0.8", false),
+            ("dsh-acp 0.8.x", false),
+            ("dsh-acp 0.9.0-rc.1", false),
+            ("dsh-acp ", false),
+            ("dsh-acp", false),
+            ("0.8.1", false),
+            ("other 0.9.0", false),
+            ("", false),
+            ("garbage", false),
+        ];
+        let script = dsh_acp_version_supported_script();
+        let root = tempfile::tempdir().unwrap();
+        for (output, expected) in cases {
+            assert_eq!(
+                dsh_acp_version_supported(output),
+                expected,
+                "rust: {output:?}"
+            );
+            let bin = root.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            crate::test_hooks::install_fake_command(
+                &bin,
+                "dsh-acp",
+                &format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n"),
+            );
+            let status = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .env_clear()
+                .env("PATH", &bin)
+                .status()
+                .unwrap();
+            assert_eq!(status.success(), expected, "shell: {output:?}");
         }
     }
 
