@@ -175,12 +175,17 @@ impl Drop for QueuedJob {
 #[derive(Debug)]
 pub struct CredentialWakes {
     events: watch::Sender<BTreeSet<String>>,
+    profile_updates: watch::Sender<u64>,
     profiles: std::sync::Mutex<BTreeMap<String, ProfileOwnership>>,
 }
 
 #[derive(Debug, Default)]
 struct ProfileOwnership {
     epoch: u64,
+    backend: Option<mj_core::targets::TargetLocator>,
+    probe_attempts: u32,
+    next_probe_after: Option<Instant>,
+    in_flight: Option<(mj_core::targets::TargetLocator, u64)>,
     observed: Option<(
         mj_core::targets::TargetLocator,
         mj_worker_launch::local_profile_homes::StagedProfileOwnership,
@@ -191,6 +196,7 @@ impl Default for CredentialWakes {
     fn default() -> Self {
         Self {
             events: watch::channel(BTreeSet::new()).0,
+            profile_updates: watch::channel(0).0,
             profiles: Default::default(),
         }
     }
@@ -207,6 +213,13 @@ impl CredentialWakes {
         let entry = profiles.entry(session_id.to_owned()).or_default();
         entry.epoch = entry.epoch.wrapping_add(1);
         entry.observed = None;
+        entry.in_flight = None;
+        entry.probe_attempts = 0;
+        entry.next_probe_after = None;
+    }
+
+    pub fn subscribe_profile_updates(&self) -> watch::Receiver<u64> {
+        self.profile_updates.subscribe()
     }
 
     pub fn wake(&self, session_id: &str) {
@@ -243,11 +256,13 @@ impl CredentialWakes {
         crate::targets::backend_locator(locator, session, config).ok()
     }
 
-    /// Observe once per attachment, publishing only if no reconnect raced it.
-    pub fn observe_profile(
-        &self,
+    /// Return a cached verdict immediately and independently start any needed probe.
+    pub fn cached_or_spawn_profile_probe(
+        self: &Arc<Self>,
         session: &mj_core::state::SessionRecord,
         config: &mj_core::config::Config,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+        reprobe_non_owned: bool,
     ) -> Option<mj_worker_launch::local_profile_homes::StagedProfileOwnership> {
         if !matches!(
             session.target.as_deref(),
@@ -261,45 +276,121 @@ impl CredentialWakes {
             );
         }
         let backend = Self::profile_backend(session, config)?;
-        self.observe_profile_with(&session.id, backend, || {
-            mj_worker_launch::local_profile_homes::probe_staged_home_on_target(
-                session,
-                config,
-                &mj_core::targets::ProcessExecutor,
-            )
-        })
+        if cancellation.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return None;
+        }
+        let session = session.clone();
+        let id = session.id.clone();
+        let config = config.clone();
+        let cancellation = cancellation.cloned();
+        self.cached_or_spawn_profile_probe_with(
+            &id,
+            backend,
+            reprobe_non_owned,
+            Instant::now(),
+            move || match cancellation {
+                Some(token) => {
+                    let executor =
+                        mj_core::targets::CancellableProcessExecutor::new(Default::default())
+                            .with_cancellation(token);
+                    mj_worker_launch::local_profile_homes::probe_staged_home_on_target(
+                        &session, &config, &executor,
+                    )
+                }
+                None => mj_worker_launch::local_profile_homes::probe_staged_home_on_target(
+                    &session,
+                    &config,
+                    &mj_core::targets::ProcessExecutor,
+                ),
+            },
+        )
     }
 
-    fn observe_profile_with(
-        &self,
+    fn cached_or_spawn_profile_probe_with(
+        self: &Arc<Self>,
         id: &str,
         backend: mj_core::targets::TargetLocator,
-        probe: impl FnOnce() -> Option<mj_worker_launch::local_profile_homes::StagedProfileOwnership>,
+        reprobe_non_owned: bool,
+        now: Instant,
+        probe: impl FnOnce() -> Option<mj_worker_launch::local_profile_homes::StagedProfileOwnership>
+        + Send
+        + 'static,
     ) -> Option<mj_worker_launch::local_profile_homes::StagedProfileOwnership> {
-        let epoch = {
+        use mj_worker_launch::local_profile_homes::StagedProfileOwnership::Owned;
+        let (epoch, cached) = {
             let mut profiles = self
                 .profiles
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let entry = profiles.entry(id.to_owned()).or_default();
-            if let Some((previous, allowed)) = &entry.observed
-                && previous == &backend
-            {
-                return Some(*allowed);
+            if entry.backend.as_ref() != Some(&backend) {
+                entry.epoch = entry.epoch.wrapping_add(1);
+                entry.backend = Some(backend.clone());
+                entry.observed = None;
+                entry.in_flight = None;
+                entry.probe_attempts = 0;
+                entry.next_probe_after = None;
             }
-            entry.epoch
+            let cached = entry
+                .observed
+                .as_ref()
+                .filter(|(previous, _)| previous == &backend)
+                .map(|(_, ownership)| *ownership);
+            if cached == Some(Owned) || (cached.is_some() && !reprobe_non_owned) {
+                return cached;
+            }
+            if entry.next_probe_after.is_some_and(|until| now < until) {
+                return cached;
+            }
+            let epoch = entry.epoch;
+            if entry.in_flight.as_ref() == Some(&(backend.clone(), epoch)) {
+                return cached;
+            }
+            entry.in_flight = Some((backend.clone(), epoch));
+            (epoch, cached)
         };
-        let allowed = probe()?;
-        let mut profiles = self
-            .profiles
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = profiles.entry(id.to_owned()).or_default();
-        if entry.epoch != epoch {
-            return None;
-        }
-        entry.observed = Some((backend, allowed));
-        Some(allowed)
+        let wakes = Arc::clone(self);
+        let id = id.to_owned();
+        mj_core::runtime::spawn(async move {
+            let result = mj_core::runtime::spawn_blocking(probe).await;
+            let ownership = match result {
+                Ok(ownership) => ownership,
+                Err(error) => {
+                    tracing::error!(session_id = %id, %error, "remote profile ownership probe stopped");
+                    None
+                }
+            };
+            let mut profiles = wakes
+                .profiles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = profiles.entry(id).or_default();
+            if entry.epoch != epoch || entry.in_flight.as_ref() != Some(&(backend.clone(), epoch)) {
+                return;
+            }
+            entry.in_flight = None;
+            if ownership == Some(Owned) {
+                entry.probe_attempts = 0;
+                entry.next_probe_after = None;
+            } else {
+                let backoff = Duration::from_secs(
+                    2u64.saturating_mul(1u64 << entry.probe_attempts.min(5))
+                        .min(60),
+                );
+                entry.probe_attempts = entry.probe_attempts.saturating_add(1);
+                entry.next_probe_after = Some(Instant::now() + backoff);
+            }
+            if let Some(ownership) = ownership {
+                let changed = entry.observed.as_ref() != Some(&(backend.clone(), ownership));
+                entry.observed = Some((backend, ownership));
+                if changed {
+                    wakes
+                        .profile_updates
+                        .send_modify(|n| *n = n.wrapping_add(1));
+                }
+            }
+        });
+        cached
     }
 
     /// No I/O under the daemon owner lock; an absent or stale observation fails closed.
@@ -4543,72 +4634,16 @@ for line in sys.stdin:
 #[cfg(test)]
 mod host_bare_ownership_tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
-    #[test]
-    fn ownership_probe_is_cached_and_reconnect_discards_inflight_result() {
-        use mj_worker_launch::local_profile_homes::StagedProfileOwnership::{
-            Owned, OwnedSharedLogin, SharedHome,
-        };
-        let wakes = Arc::new(CredentialWakes::default());
-        let backend = mj_core::targets::TargetLocator::SshHostBare {
-            ssh: mj_core::targets::SshTarget {
-                destination: "source".into(),
-                ssh_args: vec![],
-            },
-            data_root: "/source".into(),
-        };
-        assert_eq!(
-            wakes.observe_profile_with("s", backend.clone(), || None),
-            None
-        );
-        assert_eq!(
-            wakes.observe_profile_with("s", backend.clone(), || Some(OwnedSharedLogin)),
-            Some(OwnedSharedLogin)
-        );
-        assert_eq!(
-            wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated")),
-            Some(OwnedSharedLogin)
-        );
-        wakes.invalidate_profile("s");
-        assert_eq!(
-            wakes.observe_profile_with("s", backend.clone(), || Some(SharedHome)),
-            Some(SharedHome)
-        );
-        assert_eq!(
-            wakes.observe_profile_with("s", backend.clone(), || panic!("cached probe repeated")),
-            Some(SharedHome)
-        );
-        wakes.invalidate_profile("s");
-        let barrier = Arc::new(Barrier::new(2));
-        std::thread::scope(|scope| {
-            let other_wakes = wakes.clone();
-            let other_barrier = barrier.clone();
-            let other_backend = backend.clone();
-            let task = scope.spawn(move || {
-                other_wakes.observe_profile_with("s", other_backend, || {
-                    other_barrier.wait();
-                    other_barrier.wait();
-                    Some(Owned)
-                })
-            });
-            barrier.wait();
-            wakes.invalidate_profile("s");
-            barrier.wait();
-            assert_eq!(task.join().unwrap(), None);
-        });
-        assert_eq!(
-            wakes.observe_profile_with("s", backend, || Some(Owned)),
-            Some(Owned)
-        );
-    }
+    use mj_core::state::{TargetConnection, TargetLocator, TargetRuntimeSettings};
+    use mj_worker_launch::local_profile_homes::StagedProfileOwnership::{
+        Owned, OwnedSharedLogin, SharedHome,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // A reattached shared login invalidates queued targets that would write login files.
-    #[test]
-    fn shared_login_invalidates_a_prepared_target_that_would_write_login() {
-        use mj_core::state::{TargetConnection, TargetLocator, TargetRuntimeSettings};
-        use mj_worker_launch::local_profile_homes::StagedProfileOwnership::OwnedSharedLogin;
-        let id = "0123456789abcdef0123456789abcdef";
-        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+    const REMOTE: &str = "0123456789abcdef0123456789abcdef";
+
+    fn remote_session() -> mj_core::state::SessionRecord {
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(REMOTE);
         session.target = Some(Box::new(TargetLocator::SshHostBare {
             host: "source".into(),
             data_root: "/remote".into(),
@@ -4624,14 +4659,380 @@ mod host_bare_ownership_tests {
             },
         };
         session.target_runtime = Some(runtime.into());
+        session
+    }
+
+    async fn wait_idle(wakes: &CredentialWakes, id: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if wakes
+                    .profiles
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .is_none_or(|entry| entry.in_flight.is_none())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("probe completed");
+    }
+
+    fn deadline(wakes: &CredentialWakes) -> Instant {
+        wakes.profiles.lock().unwrap()[REMOTE]
+            .next_probe_after
+            .unwrap()
+    }
+
+    // A stalled probe must not block other worker targets.
+    #[tokio::test]
+    async fn ownership_probe_is_cached_and_reconnect_discards_inflight_result() {
+        let wakes = Arc::new(CredentialWakes::default());
+        let mut updates = wakes.subscribe_profile_updates();
         let config = mj_core::config::Config::default();
-        let backend = CredentialWakes::profile_backend(&session, &config).unwrap();
-        let wakes = CredentialWakes::default();
+        let remote = remote_session();
+        let backend = CredentialWakes::profile_backend(&remote, &config).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("profile")).unwrap();
+        let mut healthy = crate::database::test_fixtures::checkpoint_test_session("healthy");
+        healthy.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: root.path().into(),
+        }));
+        let mut state = mj_core::state::State::default();
+        state.sessions.insert(remote.id.clone(), remote.clone());
+        state.sessions.insert(healthy.id.clone(), healthy);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_probe = count.clone();
         assert_eq!(
-            wakes.observe_profile_with(id, backend, || Some(OwnedSharedLogin)),
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                false,
+                Instant::now(),
+                move || {
+                    count_probe.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Some(OwnedSharedLogin)
+                }
+            ),
+            None
+        );
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            let staged = super::super::staged_credential_sessions_with_cache(
+                &config,
+                &state,
+                Some(&wakes),
+                None,
+                false,
+            );
+            assert_eq!(staged.get("healthy"), Some(&Owned));
+            assert!(!staged.contains_key(REMOTE));
+        }
+        let probe_holders = Arc::strong_count(&wakes);
+        let (duplicate_release, duplicate_wait) = std::sync::mpsc::channel::<()>();
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                false,
+                Instant::now(),
+                move || {
+                    let _ = duplicate_wait.recv();
+                    Some(Owned)
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            Arc::strong_count(&wakes),
+            probe_holders,
+            "duplicate probe spawned"
+        );
+        drop(duplicate_release);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), updates.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let staged = super::super::staged_credential_sessions_with_cache(
+            &config,
+            &state,
+            Some(&wakes),
+            None,
+            false,
+        );
+        assert_eq!(staged.get(REMOTE), Some(&OwnedSharedLogin));
+        assert!(!wakes.profile_is_current(&remote, &config, false));
+        assert!(wakes.profile_is_current(&remote, &config, true));
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let due = deadline(&wakes);
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                true,
+                due - Duration::from_nanos(1),
+                || panic!("reprobed before backoff")
+            ),
             Some(OwnedSharedLogin)
         );
-        assert!(!wakes.profile_is_current(&session, &config, false));
-        assert!(wakes.profile_is_current(&session, &config, true));
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                true,
+                due,
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Some(Owned)
+                }
+            ),
+            Some(OwnedSharedLogin)
+        );
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                true,
+                due,
+                || panic!("duplicate probe")
+            ),
+            Some(OwnedSharedLogin)
+        );
+        assert!(!wakes.profile_is_current(&remote, &config, false));
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), updates.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                true,
+                Instant::now(),
+                || panic!("owned home was reprobed")
+            ),
+            Some(Owned)
+        );
+        assert!(wakes.profile_is_current(&remote, &config, false));
+
+        wakes.invalidate_profile(REMOTE);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        wakes.cached_or_spawn_profile_probe_with(
+            REMOTE,
+            backend.clone(),
+            false,
+            Instant::now(),
+            move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Some(Owned)
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        wakes.invalidate_profile(REMOTE);
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&wakes) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("obsolete probe finished");
+        assert!(!wakes.profile_is_current(&remote, &config, false));
+    }
+
+    // Failed observations retry without discarding a conservative shared verdict.
+    #[tokio::test]
+    async fn ownership_probe_retries_unknown_and_keeps_shared_verdict_on_failure() {
+        let wakes = Arc::new(CredentialWakes::default());
+        let mut updates = wakes.subscribe_profile_updates();
+        let remote = remote_session();
+        let config = mj_core::config::Config::default();
+        let backend = CredentialWakes::profile_backend(&remote, &config).unwrap();
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                false,
+                Instant::now(),
+                || None
+            ),
+            None
+        );
+        wait_idle(&wakes, REMOTE).await;
+        let due = deadline(&wakes);
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                false,
+                due - Duration::from_nanos(1),
+                || panic!("retried before backoff")
+            ),
+            None
+        );
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(REMOTE, backend.clone(), false, due, || Some(
+                SharedHome
+            )),
+            None
+        );
+        tokio::time::timeout(Duration::from_secs(5), updates.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let due = deadline(&wakes);
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                true,
+                due - Duration::from_nanos(1),
+                || panic!("reprobed before backoff")
+            ),
+            Some(SharedHome)
+        );
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(REMOTE, backend.clone(), true, due, || None),
+            Some(SharedHome)
+        );
+        wait_idle(&wakes, REMOTE).await;
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend,
+                false,
+                Instant::now(),
+                || panic!("shared verdict disappeared")
+            ),
+            Some(SharedHome)
+        );
+        assert!(!wakes.profile_is_current(&remote, &config, true));
+    }
+
+    // Repeated failures back off without delaying a new attachment or backend.
+    #[tokio::test]
+    async fn ownership_probe_backoff_caps_and_resets_on_invalidation_and_backend_change() {
+        let wakes = Arc::new(CredentialWakes::default());
+        let remote = remote_session();
+        let config = mj_core::config::Config::default();
+        let backend = CredentialWakes::profile_backend(&remote, &config).unwrap();
+        let mut now = Instant::now();
+        for (attempt, seconds) in [2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
+            let before = Instant::now();
+            assert_eq!(
+                wakes.cached_or_spawn_profile_probe_with(
+                    REMOTE,
+                    backend.clone(),
+                    false,
+                    now,
+                    || None
+                ),
+                None
+            );
+            wait_idle(&wakes, REMOTE).await;
+            let after = Instant::now();
+            let profiles = wakes.profiles.lock().unwrap();
+            let entry = &profiles[REMOTE];
+            let next = entry.next_probe_after.unwrap();
+            assert!(next >= before + Duration::from_secs(seconds));
+            assert!(next <= after + Duration::from_secs(seconds));
+            assert_eq!(entry.probe_attempts, (attempt + 1) as u32);
+            drop(profiles);
+            let held = Arc::strong_count(&wakes);
+            assert_eq!(
+                wakes.cached_or_spawn_profile_probe_with(
+                    REMOTE,
+                    backend.clone(),
+                    false,
+                    next - Duration::from_nanos(1),
+                    || panic!("retried early")
+                ),
+                None
+            );
+            assert_eq!(Arc::strong_count(&wakes), held);
+            now = next;
+        }
+        wakes.invalidate_profile(REMOTE);
+        {
+            let profiles = wakes.profiles.lock().unwrap();
+            assert_eq!(profiles[REMOTE].probe_attempts, 0);
+            assert_eq!(profiles[REMOTE].next_probe_after, None);
+        }
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                backend.clone(),
+                false,
+                Instant::now(),
+                || None
+            ),
+            None
+        );
+        wait_idle(&wakes, REMOTE).await;
+        let mut changed = backend;
+        if let mj_core::targets::TargetLocator::SshHostBare { data_root, .. } = &mut changed {
+            *data_root = "/other".into();
+        }
+        let mut updates = wakes.subscribe_profile_updates();
+        assert_eq!(
+            wakes.cached_or_spawn_profile_probe_with(
+                REMOTE,
+                changed,
+                false,
+                Instant::now(),
+                || Some(Owned)
+            ),
+            None
+        );
+        tokio::time::timeout(Duration::from_secs(5), updates.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let profiles = wakes.profiles.lock().unwrap();
+        assert_eq!(profiles[REMOTE].probe_attempts, 0);
+        assert_eq!(profiles[REMOTE].next_probe_after, None);
+    }
+
+    // A reattached shared login invalidates queued targets that would write login files.
+    #[test]
+    fn shared_login_invalidates_a_prepared_target_that_would_write_login() {
+        let wakes = CredentialWakes::default();
+        let remote = remote_session();
+        let config = mj_core::config::Config::default();
+        let backend = CredentialWakes::profile_backend(&remote, &config).unwrap();
+        wakes
+            .profiles
+            .lock()
+            .unwrap()
+            .entry(REMOTE.into())
+            .or_default()
+            .observed = Some((backend, OwnedSharedLogin));
+        assert!(!wakes.profile_is_current(&remote, &config, false));
+        assert!(wakes.profile_is_current(&remote, &config, true));
     }
 }

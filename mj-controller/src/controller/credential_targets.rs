@@ -30,12 +30,16 @@ pub fn staged_credential_sessions(
 
 pub fn staged_credential_sessions_with_cache(
     controller: &Controller,
-    wakes: &worker_client::CredentialWakes,
+    wakes: &std::sync::Arc<worker_client::CredentialWakes>,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+    reprobe_non_owned: bool,
 ) -> worker_client::StagedCredentialSessions {
     worker_client::staged_credential_sessions_with_cache(
         &controller.config,
         &controller.state,
         Some(wakes),
+        cancellation,
+        reprobe_non_owned,
     )
 }
 

@@ -101,17 +101,22 @@ impl PollableWorkerInputs {
     pub(super) fn staged_credentials(
         &self,
     ) -> mj_controller::worker_client::StagedCredentialSessions {
-        self.staged_credentials_with_cache(None)
+        self.staged_credentials_with_cache(None, None, false)
     }
 
     pub(super) fn staged_credentials_with_cache(
         &self,
-        wakes: Option<&mj_controller::worker_client::CredentialWakes>,
+        wakes: Option<&Arc<mj_controller::worker_client::CredentialWakes>>,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+        reprobe_non_owned: bool,
     ) -> mj_controller::worker_client::StagedCredentialSessions {
         let mut staged = match wakes {
-            Some(wakes) => {
-                crate::pollers::staged_credential_sessions_with_cache(&self.controller(), wakes)
-            }
+            Some(wakes) => crate::pollers::staged_credential_sessions_with_cache(
+                &self.controller(),
+                wakes,
+                cancellation,
+                reprobe_non_owned,
+            ),
             None => crate::pollers::staged_credential_sessions(&self.controller()),
         };
         // Ancestors describe command routing, while the owner authorizes IDs.

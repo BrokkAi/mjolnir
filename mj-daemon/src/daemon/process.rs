@@ -1575,6 +1575,10 @@ pub(super) fn spawn_manager_target_refresher(
             .expect("daemon owns the writer")
             .clone();
         let mut revisions = state.revisions();
+        let mut profile_updates = state
+            .session_manager
+            .credential_wakes
+            .subscribe_profile_updates();
         let mut refresh = tokio::time::interval(Duration::from_millis(500));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut installed = None;
@@ -1677,7 +1681,8 @@ pub(super) fn spawn_manager_target_refresher(
             {
                 let staging = inputs.clone();
                 let wakes = state.session_manager.credential_wakes.clone();
-                match mj_core::runtime::spawn_blocking(move || staging.staged_credentials_with_cache(Some(&wakes))).await {
+                let probe_cancellation = cancellation.clone();
+                match mj_core::runtime::spawn_blocking(move || staging.staged_credentials_with_cache(Some(&wakes), Some(&probe_cancellation), false)).await {
                     Ok(staged) => staged_sources = Some((inputs.clone(), staged)),
                     Err(error) => {
                         tracing::error!(%error, "credential staging observation stopped");
@@ -1743,13 +1748,16 @@ pub(super) fn spawn_manager_target_refresher(
                 changed = revisions.changed() => {
                     if changed.is_err() { return; }
                 }
+                changed = profile_updates.changed() => {
+                    if changed.is_err() { return; }
+                    staged_sources = None;
+                }
                 _ = refresh.tick() => {
-                    // A remote ownership check can wait on SSH. Do not hold
-                    // the configuration mutation lock across that probe.
                     let staging = inputs.clone();
                     let wakes = state.session_manager.credential_wakes.clone();
+                    let probe_cancellation = cancellation.clone();
                     let staged = match mj_core::runtime::spawn_blocking(move || {
-                        staging.staged_credentials_with_cache(Some(&wakes))
+                        staging.staged_credentials_with_cache(Some(&wakes), Some(&probe_cancellation), true)
                     }).await {
                         Ok(staged) => staged,
                         Err(error) => {

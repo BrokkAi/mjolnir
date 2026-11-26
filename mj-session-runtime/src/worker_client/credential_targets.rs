@@ -47,15 +47,17 @@ pub fn credential_sync_targets_with_auth(
 }
 
 pub fn staged_credential_sessions(config: &Config, state: &State) -> StagedCredentialSessions {
-    staged_credential_sessions_with_cache(config, state, None)
+    staged_credential_sessions_with_cache(config, state, None, None, false)
 }
 
-/// Observe remote homes in parallel on the daemon's background worker. A
-/// caller with an attachment owner can reuse the observation until reconnect.
+/// Return owned homes. With an attachment owner, remote probes run
+/// independently and their cached observations are reused until reconnect.
 pub fn staged_credential_sessions_with_cache(
     config: &Config,
     state: &State,
-    wakes: Option<&super::CredentialWakes>,
+    wakes: Option<&std::sync::Arc<super::CredentialWakes>>,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+    reprobe_non_owned: bool,
 ) -> StagedCredentialSessions {
     let sessions = state
         .sessions
@@ -82,19 +84,27 @@ pub fn staged_credential_sessions_with_cache(
             .map(|ownership| (session.id.clone(), ownership))
         })
         .collect::<StagedCredentialSessions>();
+    if let Some(wakes) = wakes {
+        for session in remote {
+            if let Some(ownership) = wakes
+                .cached_or_spawn_profile_probe(session, config, cancellation, reprobe_non_owned)
+                .filter(|ownership| ownership.owns_home())
+            {
+                staged.insert(session.id.clone(), ownership);
+            }
+        }
+        return staged;
+    }
     std::thread::scope(|scope| {
         let tasks = remote
             .into_iter()
             .map(|session| {
                 scope.spawn(move || {
-                    let ownership = match wakes {
-                        Some(wakes) => wakes.observe_profile(session, config),
-                        None => local_profile_homes::probe_staged_home_on_target(
-                            session,
-                            config,
-                            &mj_core::targets::ProcessExecutor,
-                        ),
-                    };
+                    let ownership = local_profile_homes::probe_staged_home_on_target(
+                        session,
+                        config,
+                        &mj_core::targets::ProcessExecutor,
+                    );
                     ownership
                         .filter(|ownership| ownership.owns_home())
                         .map(|ownership| (session.id.clone(), ownership))
