@@ -59,8 +59,11 @@ the user would otherwise have to restate, or a constraint that still governs
 open work. When the work an entry describes is finished, delete the entry
 unless it carries guidance beyond the record.
 
-Keep each memory index under its 200-line limit. The harness loads only the
-first 200 lines, so entries past that line are silently lost.
+Keep each memory index under both startup limits: 200 lines and 25 KiB
+(`STARTUP_INDEX_LINES` and `STARTUP_INDEX_BYTES` in
+`mj-core/src/project_memory.rs`). The harness loads the index only up to
+whichever limit it reaches first, so entries past that point are silently
+lost. Keep index lines short and put detail in the topic files.
 
 # Releases
 
