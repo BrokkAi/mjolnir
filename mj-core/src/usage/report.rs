@@ -1,6 +1,6 @@
 //! Read-only session accounting report shared by the daemon and terminal.
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const HOUR_MS: i64 = 3_600_000;
 /// The graph shows this many whole clock hours, ending with the current one.
@@ -28,8 +28,83 @@ pub struct SessionUsageQuery {
     /// cover. None covers every hour the graph shows.
     #[serde(default)]
     pub hour_start_ms: Option<i64>,
+    /// Selected clock hours; when present, overrides `hour_start_ms`.
+    /// An empty set selects no hours.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_hours",
+        deserialize_with = "deserialize_hours"
+    )]
+    pub hour_starts_ms: Option<BTreeSet<i64>>,
     #[serde(default)]
     pub include_suspended: bool,
+}
+
+fn serialize_hours<S: Serializer>(
+    hours: &Option<BTreeSet<i64>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match hours {
+        Some(hours) => serializer.serialize_str(
+            &hours
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_hours<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BTreeSet<i64>>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            if value.is_empty() {
+                return Ok(BTreeSet::new());
+            }
+            value
+                .split(',')
+                .map(|part| part.parse().map_err(serde::de::Error::custom))
+                .collect()
+        })
+        .transpose()
+}
+
+impl SessionUsageQuery {
+    /// Inclusive selected intervals, clipped to now. Adjacent clock hours are
+    /// merged so their shared boundary is not treated as missing coverage.
+    pub fn selected_intervals(&self, now_ms: i64) -> Vec<(i64, i64)> {
+        let starts = match &self.hour_starts_ms {
+            Some(hours) => hours
+                .iter()
+                .copied()
+                .map(hour_start_ms)
+                .collect::<BTreeSet<_>>(),
+            None => match self.hour_start_ms {
+                Some(hour) => BTreeSet::from([hour_start_ms(hour)]),
+                None => return vec![(graph_start_ms(now_ms), now_ms)],
+            },
+        };
+        let mut intervals: Vec<(i64, i64)> = Vec::new();
+        for start in starts {
+            if start > now_ms {
+                break;
+            }
+            let end = now_ms.min(start.saturating_add(HOUR_MS - 1));
+            if let Some(last) = intervals.last_mut()
+                && start <= last.1.saturating_add(1)
+            {
+                last.1 = last.1.max(end);
+            } else {
+                intervals.push((start, end));
+            }
+        }
+        intervals
+    }
 }
 
 /// One bar of the usage graph: the turns that completed in one clock hour.
@@ -203,8 +278,7 @@ pub struct ProfileQuotaUsage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageReport {
-    /// The span `sessions` and `agent_usage` cover: the selected hour, or
-    /// every hour the graph shows.
+    /// Enclosing bounds of the selected hours; gaps do not contribute usage.
     pub since_ms: i64,
     pub until_ms: i64,
     /// One bar per hour the graph shows, oldest first, for the same profile
@@ -223,8 +297,7 @@ pub struct SessionUsageReport {
     /// differ from its parent session's profile.
     #[serde(default)]
     pub profile_usage: Vec<ProfileUsageEstimate>,
-    /// Weekly quota consumed over `since_ms..until_ms`, per profile; filled
-    /// by the daemon, not the store.
+    /// Weekly quota consumed in the selected intervals, filled by the daemon.
     #[serde(default)]
     pub quota_usage: Vec<ProfileQuotaUsage>,
     /// Sum of `sessions`; unknown when any session's cost is unknown.

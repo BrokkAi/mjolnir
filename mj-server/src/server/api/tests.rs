@@ -272,6 +272,8 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
     for path in [
         "/api/v1/usage/report",
         "/api/v1/usage/report?profile=account%2Bapi&hour_start_ms=7200000&include_suspended=true",
+        "/api/v1/usage/report?hour_start_ms=1&hour_starts_ms=7200001%2C0%2C7200001",
+        "/api/v1/usage/report?hour_start_ms=7200000&hour_starts_ms=",
         // A client from before the hour graph still sends a period.
         "/api/v1/usage/report?period=daily",
     ] {
@@ -304,7 +306,18 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
             mj_core::usage::SessionUsageQuery {
                 profile: Some("account+api".into()),
                 hour_start_ms: Some(7_200_000),
-                include_suspended: true
+                include_suspended: true,
+                ..Default::default()
+            },
+            mj_core::usage::SessionUsageQuery {
+                hour_start_ms: Some(1),
+                hour_starts_ms: Some([0, 7_200_001].into_iter().collect()),
+                ..Default::default()
+            },
+            mj_core::usage::SessionUsageQuery {
+                hour_start_ms: Some(7_200_000),
+                hour_starts_ms: Some(Default::default()),
+                ..Default::default()
             },
             mj_core::usage::SessionUsageQuery::default(),
         ]

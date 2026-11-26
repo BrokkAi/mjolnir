@@ -1282,6 +1282,32 @@ mod tests {
 
     type Seen = Arc<Mutex<Vec<String>>>;
 
+    // The client serializer and the server's Axum extractor share this query.
+    #[tokio::test]
+    async fn usage_report_query_round_trips_through_http_form_encoding() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        for hours in [
+            None,
+            Some(std::collections::BTreeSet::new()),
+            Some([0, 7_200_001].into_iter().collect()),
+        ] {
+            let query = mj_core::usage::SessionUsageQuery {
+                hour_start_ms: Some(3_600_000),
+                hour_starts_ms: hours,
+                ..Default::default()
+            };
+            let request = reqwest::Client::new()
+                .get("http://localhost/api/v1/usage/report")
+                .query(&query)
+                .build()
+                .unwrap();
+            let uri: axum::http::Uri = request.url().as_str().parse().unwrap();
+            let Query(decoded) =
+                Query::<mj_core::usage::SessionUsageQuery>::try_from_uri(&uri).unwrap();
+            assert_eq!(decoded, query);
+        }
+    }
+
     fn sample_session(id: &str) -> serde_json::Value {
         serde_json::json!({
             "id": id,

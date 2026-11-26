@@ -83,11 +83,13 @@ those sub-agents' turns. Parents on the chosen profile appear even when they
 have no usage in the period. Earlier versions did not record each turn's
 profile, so their turns count under the session's profile at the time of the
 upgrade, and usage from sub-agents destroyed before the upgrade appears only
-under **All**. **Hourly** is the default period;
-**Daily** covers the trailing 24 hours; **Weekly** and **Monthly** cover the
-trailing seven and thirty days. Check
-**Include suspended sessions** to include inactive parents. The report refreshes
-every thirty seconds, and **Refresh** reloads it immediately.
+under **All**. The graph shows the last 24 clock hours. Click a bar to select
+one hour, Ctrl-click to toggle an hour, Shift-click to select a range from the
+last clicked or Ctrl-clicked hour, or Ctrl+Shift-click to add a range.
+Ctrl-clicking from the full graph removes that hour from the selection. The
+arrow keys select one hour; Enter restores all 24. Check **Include suspended
+sessions** to include inactive parents. The report refreshes every thirty
+seconds, and **Refresh** reloads it immediately.
 
 Costs assume standard base API token rates, including cache reads and default
 cache writes, even for subscription profiles. They exclude tools and speed,
