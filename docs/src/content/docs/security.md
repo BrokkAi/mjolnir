@@ -231,10 +231,8 @@ A guardian is not a sandbox. It judges each action from the evidence it has,
 and a model can be wrong. For untrusted repositories, choose a container or an
 instance instead.
 
-When a new or resumed session pairs Kimi Code, OpenCode, or DSH with a raw
-target that keeps configured approvals, the dashboard's final review explains
-that commands run on the host and offers a compatible sandboxed runtime when
-one is available.
+All harnesses can run on raw targets, including through automatic profile
+selection. Harnesses without a native guardian use the Mjolnir guardian.
 
 Mjolnir does not expose arbitrary extra container-runtime arguments. Container
 names, ownership labels, capabilities, and generated mount modes come from

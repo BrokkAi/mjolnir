@@ -4422,7 +4422,7 @@ fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires a cached agent-dev image and a host that permits perf; optionally set MJ_PERF_TEST_HOST for SSH"]
+#[ignore = "requires a cached session-base image and a host that permits perf; optionally set MJ_PERF_TEST_HOST for SSH"]
 fn podman_session_container_can_record_perf_samples() {
     assert!(
         mj_core::config::instance_name().is_some(),
@@ -4437,7 +4437,7 @@ fn podman_session_container_can_record_perf_samples() {
     let session = mj_core::state::new_session_id().unwrap();
     let name = resource_name(&session).unwrap();
     let template = ContainerTemplate {
-        image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".into(),
+        image: "ghcr.io/brokkai/mjolnir/session-base:latest".into(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: PodmanWorkspaceStorage::ContainerLayer,
@@ -4486,7 +4486,7 @@ test -s /tmp/mj-perf.txt
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman with runc installed, a cached buildpack-deps:noble image, and MJ_INSTANCE=tmp1212"]
+#[ignore = "requires rootless Podman with runc installed, a cached session-base image, and MJ_INSTANCE=tmp1212"]
 fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace() {
     assert_eq!(mj_core::config::instance_name().as_deref(), Some("tmp1212"));
     let runc_conf = tempfile::NamedTempFile::new().unwrap();
@@ -4524,7 +4524,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
         let session = mj_core::state::new_session_id().unwrap();
         let name = resource_name(&session).unwrap();
         let template = ContainerTemplate {
-            image: "docker.io/library/buildpack-deps:noble".to_owned(),
+            image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
             pull_policy: ImagePullPolicy::Never,
             extra_run_args: vec![],
             workspace_storage: storage,
@@ -4576,12 +4576,12 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
 // Hard-won: #1303: an agent's kill of PID 1 stopped the session container
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman and a cached buildpack-deps:noble image"]
+#[ignore = "requires rootless Podman and a cached session-base image"]
 fn podman_session_container_survives_signals_sent_to_pid_1() {
     let session = mj_core::state::new_session_id().unwrap();
     let name = resource_name(&session).unwrap();
     let template = ContainerTemplate {
-        image: "docker.io/library/buildpack-deps:noble".to_owned(),
+        image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: Default::default(),
@@ -5592,7 +5592,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires a running Docker daemon and cached buildpack-deps:noble image"]
+#[ignore = "requires a running Docker daemon and cached session-base image"]
 fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
     let source = docker_overlay_smoke_directory(cfg!(target_os = "macos")).unwrap();
     let session = format!(
@@ -5617,7 +5617,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
     std::os::unix::fs::symlink("payload", source.path().join("link")).unwrap();
     let template = ContainerTemplate {
         build_cache: None,
-        image: "docker.io/library/buildpack-deps:noble".to_owned(),
+        image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: Default::default(),
@@ -5948,7 +5948,7 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman and cached docker.io/library/buildpack-deps:noble image"]
+#[ignore = "requires rootless Podman and cached session-base image"]
 fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout() {
     struct ContainerGuard(String);
     impl Drop for ContainerGuard {
@@ -5974,7 +5974,7 @@ fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout()
                 "dev.mj.managed=true",
                 "--label",
                 &format!("dev.mj.session={session}"),
-                "docker.io/library/buildpack-deps:noble",
+                "ghcr.io/brokkai/mjolnir/session-base:latest",
                 "sleep",
                 "300",
             ],

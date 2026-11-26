@@ -206,12 +206,6 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
     }
 
-    /// Whether this session's harness runs without approvals on its
-    /// recorded target, which selects the YOLO sub-agent choices.
-    fn session_is_yolo_target(&self, _session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
-        Box::pin(async { Ok(false) })
-    }
-
     /// The dashboard's load-balancing preference order, from `[quota] prefer`.
     fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
         Box::pin(async { Ok(Vec::new()) })

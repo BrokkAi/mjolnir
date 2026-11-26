@@ -269,7 +269,7 @@ mod tests {
     fn image_build_print_golden() {
         let base = mj_harness_install::session_image::ImageBase {
             reference: format!(
-                "docker.io/library/buildpack-deps:noble@sha256:{}",
+                "ghcr.io/brokkai/mjolnir/session-base@sha256:{}",
                 "a".repeat(64)
             ),
             user: "hel".into(),

@@ -219,9 +219,9 @@ workspace cleanup.
 
 All container targets use an image and accept optional `pull_policy`,
 `platform`, `cpus`, `memory`, and target `environment`. If `image` is omitted,
-they use `docker.io/library/buildpack-deps:noble`, Ubuntu 24.04 with Git,
-compilers and common development headers. Mjolnir installs the worker, harness
-and any required Node.js runtime in each session. After cloning, the
+they use `ghcr.io/brokkai/mjolnir/session-base:latest`, Mjolnir's Ubuntu
+24.04-based default session image with pinned Node.js and agent harnesses
+preinstalled. Mjolnir installs the worker in each session. After cloning, the
 **Install project tools** step uses mise to install the repository's declared
 tools, including versions in `rust-toolchain.toml` and `.nvmrc`.
 

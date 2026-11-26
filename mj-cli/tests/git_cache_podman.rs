@@ -47,7 +47,7 @@ fn fixture_git(directory: &Path, args: &[&str]) -> Result<String> {
 // Hard-won: a90bd7e75: an ordinary host-only checkout borrowed objects from the snapshot mount.
 // Hard-won: a90bd7e75: an exact host-only checkout needed to fetch an unadvertised commit inside the container.
 #[test]
-#[ignore = "requires Podman, a locally available buildpack-deps:noble image, and a matching portable MJ_WORKER_BINARY"]
+#[ignore = "requires Podman, a locally available session-base image, and a matching portable MJ_WORKER_BINARY"]
 fn podman_bundle_uses_a_host_only_git_source_without_later_history() -> Result<()> {
     let root = tempfile::tempdir()?;
     let repository = root.path().join("project");
@@ -149,7 +149,7 @@ local = {}
 destination = "project"
 [targets.podman]
 kind = "podman"
-image = "docker.io/library/buildpack-deps:noble"
+image = "ghcr.io/brokkai/mjolnir/session-base:latest"
 pull_policy = "never"
 [machines.local]
 kind = "local"

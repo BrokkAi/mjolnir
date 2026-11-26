@@ -272,16 +272,6 @@ impl PermissionMode {
     }
 }
 
-/// Who answers a harness's tool approvals on a target that keeps configured
-/// approvals. See [`HarnessKind::guardian`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardianReviewer {
-    /// The harness's own reviewer (Codex's guardian, Claude's Auto mode, …).
-    Harness,
-    /// The Mjolnir worker reviews each permission request the harness sends.
-    Mjolnir,
-}
-
 /// The Claude Code permission mode a Claude profile's sessions run in on
 /// targets that keep configured approvals (localhost, guardian SSH).
 /// Unconstrained targets always run Claude in bypassPermissions.
@@ -1342,17 +1332,6 @@ impl HarnessKind {
             environment.insert(key.to_owned(), value.to_owned());
         }
         Ok(())
-    }
-
-    /// Whether the harness ships a native reviewer under configured
-    /// approvals. Kimi Code, OpenCode and DSH rely on Mjolnir's reviewer.
-    pub const fn guardian(self) -> GuardianReviewer {
-        match self {
-            Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Antigravity => {
-                GuardianReviewer::Harness
-            }
-            Self::Kimi | Self::OpenCode | Self::Dsh => GuardianReviewer::Mjolnir,
-        }
     }
 
     /// Whether requests that reach Mjolnir are eligible for its guardian.

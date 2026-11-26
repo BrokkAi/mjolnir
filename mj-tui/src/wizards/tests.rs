@@ -6503,10 +6503,7 @@ fn new_session_wizard_keeps_its_frame_across_steps() {
     }
 }
 
-/// An agent using the Mjolnir guardian on a raw machine is warned about once,
-/// at the review, with the sandboxed target one press away; without one the
-/// warning says what is missing instead.
-fn review_warns_once_and_offers_a_sandboxed_target() {
+fn new_review_allows_mjolnir_guardian_on_raw_hosts() {
     let build = |with_podman: bool| {
         let mut configuration = config();
         configuration.profiles = BTreeMap::from([(
@@ -6538,55 +6535,16 @@ fn review_warns_once_and_offers_a_sandboxed_target() {
         lines.join("\n")
     };
 
-    let mut without = build(false);
-    let screen = draw(&mut without);
-    assert_eq!(
-        screen.matches("runs directly on the host").count(),
-        1,
-        "{screen}"
-    );
-    assert!(
-        screen.contains("No compatible sandbox is available"),
-        "{screen}"
-    );
-
-    let mut with = build(true);
-    let screen = draw(&mut with);
-    assert_eq!(
-        screen.matches("runs directly on the host").count(),
-        1,
-        "{screen}"
-    );
-    assert!(
-        screen.contains("Use podman instead (sandboxed)"),
-        "{screen}"
-    );
-    // Activating the offer returns to the target step with the sandbox chosen.
-    let lines = screen.lines().map(str::to_owned).collect::<Vec<_>>();
-    let (column, row) = point(&lines, "Use podman instead");
-    for kind in [
-        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
-    ] {
-        with.handle_mouse(mouse_at(kind, (column, row)));
+    for with_podman in [false, true] {
+        let mut dashboard = build(with_podman);
+        let screen = draw(&mut dashboard);
+        assert!(screen.contains("kimi-1"), "{screen}");
+        assert!(!screen.contains("sandbox"), "{screen}");
+        assert!(!screen.contains("runs directly on the host"), "{screen}");
     }
-    let screen = draw(&mut with);
-    assert!(
-        screen.contains("TARGET") && screen.contains("STATUS"),
-        "{screen}"
-    );
-    let Mode::New(wizard) = &with.mode else {
-        panic!("new session wizard")
-    };
-    assert_eq!(wizard.step, WizardStep::Target);
-    assert_ne!(wizard.target, "localhost");
 }
 
-// Hard-won: 01a64d2e8: trimming blank lines could remove the sandbox button row.
-/// Resuming on a bare target an agent using the Mjolnir guardian: the review
-/// carries the sandbox button, and no worktree, sub-agent or attachment
-/// control follows it, so its row is the last control row.
-fn resume_review_keeps_the_sandbox_button_as_its_last_row() {
+fn resume_review_allows_mjolnir_guardian_on_raw_hosts() {
     let mut session = stopped_session();
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/work/project".into());
@@ -6617,19 +6575,20 @@ fn resume_review_keeps_the_sandbox_button_as_its_last_row() {
         wizard.step = WizardStep::Review;
     }
     let review = captured_drawn(&mut dashboard, 140, 40).join("\n");
-    assert!(review.contains("sandboxed"), "{review}");
+    assert!(review.contains("kimi-1"), "{review}");
+    assert!(!review.contains("sandbox"), "{review}");
 }
 
 #[test]
 fn golden_wizard_target_step() {
     for (label, run) in [
         (
-            "review_warns_once_and_offers_a_sandboxed_target",
-            review_warns_once_and_offers_a_sandboxed_target as fn(),
+            "new_review_allows_mjolnir_guardian_on_raw_hosts",
+            new_review_allows_mjolnir_guardian_on_raw_hosts as fn(),
         ),
         (
-            "resume_review_keeps_the_sandbox_button_as_its_last_row",
-            resume_review_keeps_the_sandbox_button_as_its_last_row,
+            "resume_review_allows_mjolnir_guardian_on_raw_hosts",
+            resume_review_allows_mjolnir_guardian_on_raw_hosts,
         ),
         (
             "new_session_wizard_keeps_its_frame_across_steps",

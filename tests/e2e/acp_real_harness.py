@@ -349,7 +349,7 @@ def main() -> None:
     parser.add_argument("--profile-home", type=Path, required=True, help="Signed-in harness home")
     parser.add_argument("--harness", choices=("codex", "claude", "kimi", "grok", "muse", "opencode", "dsh"), default="codex")
     parser.add_argument("--engine", choices=("docker", "podman"), default="docker")
-    parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/agent-dev:latest")
+    parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/session-base:latest")
     parser.add_argument("--repository", default="octocat/Hello-World")
     parser.add_argument("--artifacts", type=Path, required=True, help="New directory; never reuse live data")
     parser.add_argument("--timeout", type=int, default=660)

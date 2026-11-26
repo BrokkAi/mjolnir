@@ -315,13 +315,9 @@ impl ReviewEnvironment for ControllerEnvironment {
         Box::pin(async move {
             let backend: Arc<dyn crate::server::api::SubagentBackend> =
                 self.profile_backend().await?;
-            super::selection::resolve_choice(
-                &backend,
-                choice,
-                mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-            )
-            .await
-            .map_err(|e| format!("{e:#}"))
+            super::selection::resolve_choice(&backend, choice)
+                .await
+                .map_err(|e| format!("{e:#}"))
         })
     }
 

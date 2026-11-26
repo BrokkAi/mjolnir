@@ -5052,7 +5052,7 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
         container: mj_core::config::ContainerTemplate {
             memory_hard_limit: None,
             build_cache: None,
-            image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+            image: "ghcr.io/brokkai/mjolnir/session-base:latest".to_owned(),
             pull_policy: Default::default(),
             platform: None,
             cpus: None,
@@ -5159,10 +5159,6 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         ExecutionPolicy::ConfiguredApprovals
     );
     assert_eq!(launch.environment["INITIAL_AGENT_MODE"], "agent");
-    assert_eq!(
-        profile.kind.guardian(),
-        mj_core::config::GuardianReviewer::Harness
-    );
 }
 
 fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {

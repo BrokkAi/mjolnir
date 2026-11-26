@@ -177,8 +177,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman  ╭ × Restart agent ───────────────────────────────────────────────────────────────────╮                │
 │  │ No message  │Session: session-1                                                                  │                │
 │  │             │                                                                                    │                │
-│                │Current image: ghcr.io/brokkai/mjolnir/agent-dev:2.51.0 (sha256:previous)           │                │
-│                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
+│                │Current image: ghcr.io/brokkai/mjolnir/session-base:2.51.0 (sha256:previous)        │                │
+│                │Target image: ghcr.io/brokkai/mjolnir/session-base:2.52.0 (sha256:selected)         │                │
 │                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
 │                │running turn.                                                                       │                │
 │                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
@@ -211,8 +211,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman  ╭ × Upgrade container and restart? ──────────────────────────────────────────────────╮                │
 │  │ No message  │Session: session-1                                                                  │                │
 │  │             │                                                                                    │                │
-│                │Current image: ghcr.io/brokkai/mjolnir/agent-dev:2.51.0 (sha256:previous)           │                │
-│                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
+│                │Current image: ghcr.io/brokkai/mjolnir/session-base:2.51.0 (sha256:previous)        │                │
+│                │Target image: ghcr.io/brokkai/mjolnir/session-base:2.52.0 (sha256:selected)         │                │
 │                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
 │                │running turn.                                                                       │                │
 │                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
