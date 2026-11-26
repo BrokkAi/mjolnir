@@ -1920,6 +1920,9 @@ pub struct RelaySnapshot {
     pub continuation: crate::continuation::ContinuationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering: Option<SteeringOperation>,
+    /// Receiver of each accepted legacy Cancel, retained until that command settles.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cancel_steer_receivers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2153,6 +2156,7 @@ impl RelaySnapshot {
             turn_completion: None,
             continuation: Default::default(),
             steering: None,
+            cancel_steer_receivers: BTreeMap::new(),
             cancelling_prompt_id: None,
             native_agents: BTreeMap::new(),
             native_agent_replay: None,

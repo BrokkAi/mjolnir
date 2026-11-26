@@ -686,6 +686,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                                 })
                                 .flatten()
                         });
+                    if matches!(command, RelayCommand::Cancel)
+                        && let Some(receiver) = &snapshot.cancelling_prompt_id
+                    {
+                        snapshot
+                            .cancel_steer_receivers
+                            .insert(command_id.clone(), receiver.clone());
+                    }
                     // Without a prompt or queued recovery target, the stop
                     // is aimed at the harness's own turn. A second stop of the same turn never
                     // downgrades an acknowledged first one.
@@ -1200,6 +1207,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.steered_prompt_contexts.remove(command_id);
             }
             snapshot.frozen_prompt_contexts.remove(command_id);
+            let cancel_receiver = snapshot.cancel_steer_receivers.remove(command_id);
             match (command, outcome) {
                 (
                     RelayCommand::Prompt { .. }
@@ -1383,7 +1391,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         RelayCommand::Steer {
                             active_prompt_id, ..
                         } => Some(active_prompt_id.clone()),
-                        RelayCommand::Cancel => snapshot.cancelling_prompt_id.clone(),
+                        RelayCommand::Cancel => cancel_receiver,
                         _ => unreachable!(),
                     };
                     target.state = RelayDispatchState::Completed;
@@ -1545,6 +1553,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.quota_interrupted_input.clear();
                     snapshot.quota_prompt_contexts.clear();
                     snapshot.steered_prompt_contexts.clear();
+                    snapshot.cancel_steer_receivers.clear();
                     snapshot.activity_turn_started_at_ms = None;
                     snapshot.harness_turn = None;
                     snapshot.capacity_retry = None;
@@ -1759,6 +1768,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot
                 .queued_prompts
                 .retain(|queued| queued.command_id != *command_id);
+            snapshot.cancel_steer_receivers.remove(command_id);
             let mailbox_context = snapshot.mailbox_prompt_contexts.remove(command_id);
             let quota_context = snapshot.quota_prompt_contexts.remove(command_id);
             let steered_context = snapshot.steered_prompt_contexts.remove(command_id);
@@ -2484,6 +2494,7 @@ fn terminalize_removed_prompts(
     terminal_ordinal: u64,
 ) -> Result<()> {
     let mut retained = Vec::new();
+    let mut frozen_contexts = Vec::new();
     for command_id in removed_command_ids {
         let dispatch = snapshot
             .dispatches
@@ -2506,7 +2517,9 @@ fn terminalize_removed_prompts(
         // A removed entry never starts, so nothing else will release the
         // mailbox context it holds (a restart continuation inherits one).
         snapshot.mailbox_prompt_contexts.remove(command_id);
-        snapshot.frozen_prompt_contexts.remove(command_id);
+        if let Some(context) = snapshot.frozen_prompt_contexts.remove(command_id) {
+            frozen_contexts.push(context);
+        }
         retained.extend(
             snapshot
                 .quota_prompt_contexts
@@ -2522,6 +2535,9 @@ fn terminalize_removed_prompts(
     }
     retained.append(&mut snapshot.quota_interrupted_input);
     snapshot.quota_interrupted_input = retained;
+    for context in frozen_contexts.into_iter().rev() {
+        prepend_pending_prompt_context(&mut snapshot.pending_prompt_context, context);
+    }
     snapshot.queued_prompts.retain(|queued| {
         !removed_command_ids
             .iter()

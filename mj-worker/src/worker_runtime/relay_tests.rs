@@ -12050,6 +12050,9 @@ fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
         "removed-original",
         mj_core::diagnostic::QUOTA_STOP_REASON,
     );
+    relay
+        .install_prompt_context("frozen handoff to preserve".into())
+        .unwrap();
     submit(&mut relay, "removed-retry", self::prompt("recovery"));
     relay.claim_pending_commands(true).unwrap();
     relay.set_acp_ready(false);
@@ -12063,6 +12066,10 @@ fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
     let queued = relay.operational_state().queued_prompts[0]
         .command_id
         .clone();
+    relay
+        .install_prompt_context("later pending handoff".into())
+        .unwrap();
+    // Hard-won: 9d5826acf: queue removal discarded the restart's frozen context.
     submit(
         &mut relay,
         "remove-recovery",
@@ -12076,12 +12083,15 @@ fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
     let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
         panic!("not a prompt")
     };
+    let dispatched = serde_json::to_string(&prompt).unwrap();
     assert_eq!(
-        serde_json::to_string(&prompt)
-            .unwrap()
-            .matches("input of removed continuation")
-            .count(),
+        dispatched.matches("input of removed continuation").count(),
         1
+    );
+    assert_eq!(dispatched.matches("frozen handoff to preserve").count(), 1);
+    assert!(
+        dispatched.find("frozen handoff to preserve").unwrap()
+            < dispatched.find("later pending handoff").unwrap()
     );
 
     // A quota failure in a restart continuation retains its original payload.
@@ -12215,6 +12225,56 @@ fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
     assert!(a < b && b < c);
     assert_eq!(text.matches("first correction").count(), 1);
     assert_eq!(text.matches("second correction").count(), 1);
+
+    // A legacy Cancel can be acknowledged after its receiving prompt hits quota.
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay.set_steering_supported(Some(true));
+    submit(
+        &mut relay,
+        "legacy-steer-receiver",
+        self::prompt("legacy original"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    submit(
+        &mut relay,
+        "legacy-steer-queued",
+        self::prompt("late correction"),
+    );
+    submit(&mut relay, "legacy-cancel", RelayCommand::Cancel);
+    let cancel = relay.claim_pending_commands(true).unwrap().remove(0);
+    assert!(matches!(cancel.command, RelayCommand::Cancel));
+    assert_eq!(
+        cancel.steering_prompt.as_ref().unwrap().queued_command_id,
+        "legacy-steer-queued"
+    );
+    // Hard-won: 9d5826acf: a late legacy steer acknowledgement lost its receiver.
+    finish(
+        &mut relay,
+        "legacy-steer-receiver",
+        mj_core::diagnostic::QUOTA_STOP_REASON,
+    );
+    relay
+        .record_command_completed(
+            "legacy-cancel",
+            mj_core::relay::RelayCommandOutcome::Steered {
+                queued_command_id: "legacy-steer-queued".into(),
+            },
+        )
+        .unwrap();
+    submit(
+        &mut relay,
+        "after-late-cancel-steer",
+        self::prompt("continue"),
+    );
+    let next = relay.claim_pending_commands(true).unwrap().remove(0);
+    let Some(CommandRequest::Prompt { prompt, .. }) = unix::acp_command(&next) else {
+        panic!("not a prompt")
+    };
+    let text = serde_json::to_string(&prompt).unwrap();
+    assert_eq!(text.matches("legacy original").count(), 1);
+    assert_eq!(text.matches("late correction").count(), 1);
+    assert!(text.find("legacy original").unwrap() < text.find("late correction").unwrap());
 
     // A failed receiving turn returns confirmed steers for the next prompt.
     let root = tempfile::tempdir().unwrap();
