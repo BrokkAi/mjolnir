@@ -430,13 +430,35 @@ pub fn inspect_migration_preconditions(
             result.carried_moves += 1;
         }
     }
-    let mut discovery = connection.prepare("SELECT d.sequence,d.target_template_id FROM project_discovery_changes d LEFT JOIN session_targets t ON t.session_id=d.session_id WHERE t.session_id IS NULL AND (d.sequence > (SELECT sequence FROM project_discovery_progress WHERE singleton=1) OR EXISTS(SELECT 1 FROM project_discovery_failures f WHERE f.sequence=d.sequence)) ORDER BY d.sequence")?;
+    let mut discovery = connection.prepare("SELECT d.sequence,d.target_template_id,s.target_template_id,t.kind,s.target_runtime_json FROM project_discovery_changes d LEFT JOIN sessions s ON s.session_id=d.session_id LEFT JOIN session_targets t ON t.session_id=d.session_id WHERE d.sequence > (SELECT sequence FROM project_discovery_progress WHERE singleton=1) OR EXISTS(SELECT 1 FROM project_discovery_failures f WHERE f.sequence=d.sequence) ORDER BY d.sequence")?;
     for row in discovery.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
     })? {
-        let (sequence, id) = row?;
-        if template_kinds.get(&id).is_some_and(|kinds| kinds.len() > 1) {
-            result.blockers.push(format!("project discovery change {sequence} has ambiguous historical template {id:?} without a recorded locator"));
+        let (sequence, id, current, target_kind, runtime) = row?;
+        if let Some(kinds) = template_kinds.get(&id).filter(|kinds| kinds.len() > 1) {
+            let kind = if let Some(kind) = target_kind {
+                Some(kind)
+            } else {
+                runtime
+                    .as_deref()
+                    .map(serde_json::from_str::<mj_core::state::TargetRuntimeSettings>)
+                    .transpose()?
+                    .filter(|runtime| {
+                        matches!(runtime.connection, mj_core::state::TargetConnection::Local)
+                    })
+                    .map(|runtime| runtime.kind)
+            };
+            if current.as_deref() != Some(id.as_str())
+                || !kind.as_ref().is_some_and(|kind| kinds.contains(kind))
+            {
+                result.blockers.push(format!("project discovery change {sequence} has ambiguous historical template {id:?} without a matching current placement"));
+            }
         }
     }
     result.waiting_worker_restart_intents =

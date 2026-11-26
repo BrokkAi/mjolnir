@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 163;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 164;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3891,8 +3891,8 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
     if version < 163 {
         migrate_host_bare_target_kind(connection)?;
     }
-    // Revision 164 is compatible: this O(1) sidecar is ignored by older
-    // readers and remains intact when they update sessions.
+    // Revision 164 is breaking: older readers ignore pinned legacy project-memory
+    // identities and compute different directories after migration. O(1) DDL.
     if version < 164 {
         let transaction =
             Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
@@ -3901,6 +3901,7 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
                  session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
                  memory_key TEXT NOT NULL CHECK(length(trim(memory_key)) > 0)
              ) STRICT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 164 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (164, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version=164;",
@@ -5158,7 +5159,7 @@ mod reader_tests {
     }
 
     #[test]
-    fn memory_key_sidecar_upgrades_163_without_raising_compatibility_floor() {
+    fn memory_key_sidecar_upgrades_163_and_raises_compatibility_floor() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("upgrade.sqlite3");
         save_session_to(&path, &super::super::tests::session("kept", "project")).unwrap();
@@ -5168,8 +5169,9 @@ mod reader_tests {
         migrate_schema(&connection, None).unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, 164);
-        assert_eq!(state.minimum_compatible, Some(163));
-        state.ensure_supported_by(163).unwrap();
+        assert_eq!(state.minimum_compatible, Some(164));
+        assert!(state.ensure_supported_by(163).is_err());
+        state.ensure_supported_by(164).unwrap();
         super::super::pin_session_memory_key_with(&connection, "kept", "pinned").unwrap();
         assert_eq!(
             super::super::read_pinned_memory_key_with(&connection, "kept")
@@ -5235,7 +5237,7 @@ mod reader_tests {
         migrate_schema(&connection, None).unwrap();
         assert_eq!(
             read_schema_state(&connection).unwrap().minimum_compatible,
-            Some(163)
+            Some(164)
         );
         assert_eq!(
             connection

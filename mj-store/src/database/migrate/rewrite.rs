@@ -68,15 +68,17 @@ fn rewrite_unambiguous_template(
     kinds: &BTreeMap<String, BTreeSet<String>>,
     resolved: bool,
 ) -> Result<()> {
-    if let Some(kinds) = kinds.get(id) {
-        if kinds.len() > 1 {
-            ensure!(
-                resolved,
-                "historical template {id:?} has multiple local kinds and no recorded locator"
-            );
-        } else if let Some(kind) = kinds.first() {
-            rewrite_template(id, kind, spec)?;
-        }
+    let mut all_kinds = kinds.get(id).cloned().unwrap_or_default();
+    if let Some(configured) = spec.source_templates.get(id) {
+        all_kinds.extend(configured.keys().cloned());
+    }
+    if all_kinds.len() > 1 {
+        ensure!(
+            resolved,
+            "historical template {id:?} has multiple local kinds and no recorded locator"
+        );
+    } else if let Some(kind) = all_kinds.first() {
+        rewrite_template(id, kind, spec)?;
     }
     Ok(())
 }
@@ -196,15 +198,10 @@ fn rewrite_optional_runtime(
     kind: Option<&str>,
     spec: &MigrationRewriteSpec,
 ) {
-    if runtime.is_none()
-        && let Some(kind) = kind
-    {
-        let mut synthesized =
-            TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare);
-        if kind != "local-bare" {
-            synthesized.execution_policy = mj_core::config::ExecutionPolicy::Unconstrained;
-        }
-        *runtime = Some(synthesized);
+    if runtime.is_none() && kind == Some("local-bare") {
+        *runtime = Some(TargetRuntimeSettings::from(
+            &mj_core::config::TargetTemplate::LocalBare,
+        ));
     }
     if let Some(runtime) = runtime {
         rewrite_runtime(runtime, kind, spec);
@@ -483,10 +480,7 @@ pub fn apply_store_migration(
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let fence = read_store_fence(&tx)?.context("staged store is not fenced")?;
     ensure!(
-        fence.destination == spec.expected_fence.destination
-            && fence.fenced_at == spec.expected_fence.fenced_at
-            && fence.fenced_host == spec.expected_fence.fenced_host
-            && fence.fenced_data_dir == spec.expected_fence.fenced_data_dir,
+        fence.matches_snapshot(&spec.expected_fence),
         "staged store fence does not match migration source"
     );
     let preconditions = inspect_migration_preconditions(&tx, &spec.old_data_root)?;
@@ -523,6 +517,7 @@ pub fn apply_store_migration(
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let mut original_sessions = BTreeMap::new();
     for (id, mut template, runtime, worktree) in sessions {
         let mut runtime: Option<TargetRuntimeSettings> = runtime
             .as_deref()
@@ -539,6 +534,7 @@ pub fn apply_store_migration(
                 })
                 .map(|runtime| runtime.kind.clone())
         });
+        original_sessions.insert(id.clone(), (template.clone(), kind.clone()));
         if let Some(kind) = &kind {
             rewrite_template(&mut template, kind, spec)?;
         }
@@ -803,10 +799,17 @@ pub fn apply_store_migration(
         if let Some(worktree) = &mut worktree {
             rewrite_worktree(worktree, spec);
         }
-        if let Some(kind) = local_sessions.get(&id).map(String::as_str) {
-            rewrite_template(&mut template, kind, spec)?;
-        } else if !targets.contains_key(&id) {
-            rewrite_unambiguous_template(&mut template, spec, &template_kinds, processed)?;
+        if let Some(kinds) = spec.source_templates.get(&template) {
+            if kinds.len() == 1 {
+                rewrite_template(&mut template, kinds.keys().next().expect("one kind"), spec)?;
+            } else if kinds.len() > 1 && !processed {
+                let kind = original_sessions.get(&id)
+                    .filter(|(current, _)| current == &template)
+                    .and_then(|(_, kind)| kind.as_deref())
+                    .filter(|kind| kinds.contains_key(*kind))
+                    .with_context(|| format!("project discovery change {sequence} has ambiguous historical template {template:?}"))?;
+                rewrite_template(&mut template, kind, spec)?;
+            }
         }
         tx.execute("UPDATE project_discovery_changes SET target_template_id=?2,managed_worktree=?3 WHERE sequence=?1",params![sequence,template,worktree.as_ref().map(serde_json::to_string).transpose()?])?;
     }
@@ -1165,6 +1168,107 @@ mod tests {
     }
 
     #[test]
+    fn migration_rewrite_discovery_preserves_historical_kinds_and_refuses_ambiguity() {
+        let (_root, path, mut spec) = fixture();
+        spec.pinned_memory_keys.clear();
+        spec.source_templates.insert(
+            "localhost".into(),
+            BTreeMap::from([("local-bare".into(), "source-bare".into())]),
+        );
+        spec.source_templates.insert(
+            "podman".into(),
+            BTreeMap::from([("local-podman".into(), "source-podman".into())]),
+        );
+        spec.source_templates
+            .get_mut("local")
+            .unwrap()
+            .insert("local-docker".into(), "source-docker".into());
+        let mut current = super::super::super::tests::session("one", "project");
+        current.checkpoint = None;
+        current.target_template_id = "podman".into();
+        save_session_to(&path, &current).unwrap();
+        let mut other = super::super::super::tests::session("other", "project");
+        other.checkpoint = None;
+        other.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: DataLayout::at(&spec.old_data_root).worker_root("other"),
+        }));
+        save_session_to(&path, &other).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('old-env','other','reclaimed',?1)", [serde_json::to_string(&EnvironmentPlacement::from_session(&other)).unwrap()]).unwrap();
+        connection.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,kind,resource_id,target_template_id) VALUES ('old-lease','old-env','other','local-docker','old','local')", []).unwrap();
+        connection
+            .execute("DELETE FROM project_discovery_changes", [])
+            .unwrap();
+        for template in ["localhost", "podman", "remote-ssh", "local"] {
+            connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('one',?1)", [template]).unwrap();
+        }
+        let progress = connection.last_insert_rowid();
+        connection
+            .execute(
+                "UPDATE project_discovery_progress SET sequence=?1 WHERE singleton=1",
+                [progress],
+            )
+            .unwrap();
+        for template in ["localhost", "podman", "remote-ssh"] {
+            connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('one',?1)", [template]).unwrap();
+        }
+        connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('other','local')", []).unwrap();
+        connection.execute("INSERT INTO project_discovery_changes(session_id,target_template_id) VALUES ('one','local')", []).unwrap();
+        let bad = connection.last_insert_rowid();
+        set_store_fence(&connection, &spec.expected_fence).unwrap();
+        assert!(
+            inspect_migration_preconditions(&connection, &spec.old_data_root)
+                .unwrap()
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains(&format!("change {bad}"))
+                    && blocker.contains("ambiguous"))
+        );
+        assert!(
+            apply_store_migration(&path, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        connection
+            .execute(
+                "DELETE FROM project_discovery_changes WHERE sequence=?1",
+                [bad],
+            )
+            .unwrap();
+        assert!(
+            inspect_migration_preconditions(&connection, &spec.old_data_root)
+                .unwrap()
+                .blockers
+                .is_empty()
+        );
+        drop(connection);
+        apply_store_migration(&path, &spec).unwrap();
+        let connection = Connection::open(path).unwrap();
+        let mut query = connection
+            .prepare("SELECT target_template_id FROM project_discovery_changes ORDER BY sequence")
+            .unwrap();
+        let actual: Vec<String> = query
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            actual,
+            [
+                "source-bare",
+                "source-podman",
+                "remote-ssh",
+                "local",
+                "source-bare",
+                "source-podman",
+                "remote-ssh",
+                "source-bare"
+            ]
+        );
+    }
+
+    #[test]
     fn migration_rewrites_retained_moves_leases_and_host_history() {
         let (_root, path, mut spec) = fixture();
         spec.source_templates
@@ -1237,6 +1341,8 @@ mod tests {
                 .iter()
                 .any(|placement| placement.session_id == "remote" && placement.references_ec2_path)
         );
+        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('podman-env','podman','reclaimed',?1)",[serde_json::to_string(&EnvironmentPlacement::from_session(&podman)).unwrap()]).unwrap();
+        connection.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,kind,resource_id,target_template_id,runtime_json) VALUES ('podman-lease','podman-env','podman','local-podman','podman-old','podman',NULL)",[]).unwrap();
         let placement = EnvironmentPlacement::from_session(&session);
         connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('env','one','active',?1)",[serde_json::to_string(&placement).unwrap()]).unwrap();
         connection.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,kind,workspace,target_template_id,runtime_json) VALUES ('lease','env','one','local-bare',?1,'local',?2)",params![path_to_blob(&DataLayout::at(&spec.old_data_root).worker_root("one")),serde_json::to_string(&session.target_runtime).unwrap()]).unwrap();
@@ -1314,7 +1420,53 @@ mod tests {
         let connection = Connection::open(path).unwrap();
         assert_recorded_target(&connection, "one", "ssh-host-bare");
         assert_recorded_target(&connection, "legacy", "ssh-host-bare");
-        assert_recorded_target(&connection, "podman", "ssh-podman");
+        let (template, runtime): (String, Option<String>) = connection.query_row("SELECT target_template_id,target_runtime_json FROM sessions WHERE session_id='podman'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(template, "source-podman");
+        assert!(runtime.is_none());
+        let (lease_template, lease_runtime): (String, Option<String>) = connection.query_row("SELECT target_template_id,runtime_json FROM environment_workers WHERE lease_id='podman-lease'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(lease_template, "source-podman");
+        assert!(lease_runtime.is_none());
+        let mut container: mj_core::config::ContainerTemplate = serde_json::from_str("{}").unwrap();
+        container.environment = mj_core::config::Environment::from_sources(BTreeMap::from([
+            (
+                "LITERAL".into(),
+                mj_core::config::EnvironmentValue::Literal("kept".into()),
+            ),
+            (
+                "SECRET".into(),
+                mj_core::config::EnvironmentValue::FromSecret("key".into()),
+            ),
+        ]));
+        let mut config = mj_core::config::Config::default();
+        config.targets.insert(
+            "source-podman".into(),
+            mj_core::config::TargetTemplate::SshPodman {
+                ssh: spec.source_ssh.clone(),
+                container,
+            },
+        );
+        let targets = super::super::super::state_io::read_targets(&connection, None).unwrap();
+        let locator = &targets["podman"];
+        let settings = mj_core::state::target_runtime_settings_for(
+            "podman",
+            &template,
+            Some(&spec.source_machine_id),
+            Some(locator),
+            None,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(settings.environment["LITERAL"], "kept");
+        assert_eq!(
+            settings.environment_references["SECRET"],
+            mj_core::config::EnvironmentValue::FromSecret("key".into())
+        );
+        mj_core::targets::TargetLocator::try_from(mj_core::targets::RecordedTarget {
+            locator,
+            runtime: Some(&settings),
+            session_id: "podman",
+        })
+        .unwrap();
         let reclaimed_runtime: TargetRuntimeSettings = serde_json::from_str(
             &connection
                 .query_row(

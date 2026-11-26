@@ -1,15 +1,13 @@
 //! Read-only host migration inventory and safety checks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use mj_core::config::{
     Classification, Config, ConfigLayout, DaemonRuntime, DataLayout, EnvironmentValue, HarnessKind,
-    Machine, classify_config_entry, classify_data_entry,
+    Machine, MigrateAction, classify_config_entry, classify_data_entry,
 };
-use mj_core::project_memory::ProjectMemoryIdentity;
-use mj_core::state::State;
 use mj_store::database::{
     MigrationPreconditions, StoreMigrationInventory, inspect_migration_inventory,
     inspect_migration_preconditions,
@@ -27,8 +25,6 @@ pub struct ClassifiedEntry {
 pub struct HomeCopy {
     pub source: PathBuf,
     pub destination: PathBuf,
-    /// Subtrees omitted from a copied skills directory.
-    pub exclusions: Vec<PathBuf>,
     /// External credentials are copied with owner-only permissions.
     pub private: bool,
 }
@@ -44,7 +40,6 @@ pub struct Ec2Resource {
 pub struct MigrationPreflight {
     pub preconditions: MigrationPreconditions,
     pub inventory: StoreMigrationInventory,
-    pub pinned_memory_keys: BTreeMap<String, String>,
     pub data_entries: Vec<ClassifiedEntry>,
     pub config_entries: Vec<ClassifiedEntry>,
     pub home_copies: Vec<HomeCopy>,
@@ -61,7 +56,6 @@ pub struct MigrationPreflight {
 pub fn inspect_preflight(
     connection: &Connection,
     config: &Config,
-    state: &State,
     old_data_root: &Path,
     old_config_root: &Path,
     old_home: &Path,
@@ -103,37 +97,6 @@ pub fn inspect_preflight(
     let (ec2_resources, ec2_warnings) = inspect_ec2_resources(old_config_root)?;
     let preconditions = inspect_migration_preconditions(connection, old_data_root)?;
     let inventory = inspect_migration_inventory(connection)?;
-    let mut pinned_memory_keys = BTreeMap::new();
-    for session in state
-        .sessions
-        .values()
-        .filter(|session| session.project.is_none())
-    {
-        let owner = state.project_identity_session(session);
-        let pinned = mj_store::database::read_pinned_memory_key_with(connection, &session.id)?;
-        let pinned = if pinned.is_some() || owner.id == session.id {
-            pinned
-        } else {
-            mj_store::database::read_pinned_memory_key_with(connection, &owner.id)?
-        };
-        if let Some(key) = pinned {
-            pinned_memory_keys.insert(session.id.clone(), key);
-            continue;
-        }
-        let checkout = owner.checkout();
-        let bundle = checkout
-            .project_directory()
-            .is_none()
-            .then(|| owner.project_bundle(config))
-            .flatten();
-        let identity = ProjectMemoryIdentity::for_legacy_session(
-            session,
-            &checkout,
-            bundle,
-            owner.managed_worktree.as_deref(),
-        )?;
-        pinned_memory_keys.insert(session.id.clone(), identity.key()?);
-    }
     let mut home_copies = Vec::new();
     let mut warnings = ec2_warnings;
     let mut checked_destinations = BTreeSet::new();
@@ -178,31 +141,26 @@ pub fn inspect_preflight(
             }
             continue;
         };
-        let destination = new_home.join(relative);
-        check_destination(&destination, &destination_exists, &mut checked_destinations)?;
-        for entry in mj_worker_staging::worker_binary::profile_configuration_paths(profile.kind) {
-            let source = profile.home.join(entry);
-            if exists(&source)? {
-                let exclusions = profile
-                    .kind
-                    .harness_owned_skill_paths()
-                    .iter()
-                    .map(|path| profile.home.join(path))
-                    .filter(|path| path.starts_with(&source))
-                    .collect();
-                home_copies.push(HomeCopy {
-                    source,
-                    destination: destination.join(entry),
-                    exclusions,
-                    private: false,
-                });
-            }
+        if exists(&profile.home)? {
+            let destination = new_home.join(relative);
+            check_destination(&destination, &destination_exists, &mut checked_destinations)?;
+            home_copies.push(HomeCopy {
+                source: profile.home.clone(),
+                destination,
+                private: false,
+            });
+        } else {
+            warnings.push(format!(
+                "profile {id} home does not exist on source: {}",
+                profile.home.display()
+            ));
         }
-        if profile.kind == HarnessKind::Muse
+        if matches!(profile.kind, HarnessKind::Muse | HarnessKind::OpenCode)
             && let Some(data) = profile.kind.nested_data_dir(&profile.home)
+            && !data.starts_with(&profile.home)
         {
             plan_extra_home_file(
-                &data.join("model-catalog"),
+                &data,
                 old_home,
                 new_home,
                 &destination_exists,
@@ -210,26 +168,6 @@ pub fn inspect_preflight(
                 &mut home_copies,
                 &mut warnings,
             )?;
-        }
-        if profile.kind == HarnessKind::OpenCode
-            && let Some(data) = profile.kind.nested_data_dir(&profile.home)
-        {
-            for path in [
-                data.join("opencode.db"),
-                data.join("opencode.db-wal"),
-                data.join("auth.json"),
-                profile.home.join(".data/opencode/auth.json"),
-            ] {
-                plan_extra_home_file(
-                    &path,
-                    old_home,
-                    new_home,
-                    &destination_exists,
-                    &mut checked_destinations,
-                    &mut home_copies,
-                    &mut warnings,
-                )?;
-            }
         }
     }
     for (label, path) in [
@@ -249,7 +187,6 @@ pub fn inspect_preflight(
                 home_copies.push(HomeCopy {
                     source: path.clone(),
                     destination,
-                    exclusions: Vec::new(),
                     private: true,
                 });
             } else {
@@ -389,10 +326,39 @@ pub fn inspect_preflight(
             ));
         }
     }
+    // Keep private entries even inside a copied profile so their restrictive mode is applied.
+    home_copies.sort_by(|a, b| {
+        a.source
+            .components()
+            .count()
+            .cmp(&b.source.components().count())
+    });
+    let mut deduplicated: Vec<HomeCopy> = Vec::new();
+    for copy in home_copies {
+        if !copy.private
+            && deduplicated.iter().any(|parent| {
+                !parent.private
+                    && copy.source.starts_with(&parent.source)
+                    && copy.destination.starts_with(&parent.destination)
+            })
+        {
+            continue;
+        }
+        if copy.private
+            && deduplicated.iter().any(|other| {
+                other.private
+                    && other.source == copy.source
+                    && other.destination == copy.destination
+            })
+        {
+            continue;
+        }
+        deduplicated.push(copy);
+    }
+    let home_copies = deduplicated;
     Ok(MigrationPreflight {
         preconditions,
         inventory,
-        pinned_memory_keys,
         data_entries: inventory_layout(old_data_root, true)?,
         config_entries: inventory_layout(old_config_root, false)?,
         home_copies,
@@ -443,7 +409,6 @@ fn plan_extra_home_file(
         copies.push(HomeCopy {
             source: source.to_path_buf(),
             destination,
-            exclusions: Vec::new(),
             private: false,
         });
     } else {
@@ -462,14 +427,28 @@ fn plan_extra_home_file(
 }
 
 fn tree_size(path: &Path) -> Result<u64> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
     if !metadata.is_dir() {
         return Ok(metadata.len());
     }
     let mut total = 0_u64;
-    for entry in std::fs::read_dir(path)? {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         total = total
-            .checked_add(tree_size(&entry?.path())?)
+            .checked_add(tree_size(&entry.path())?)
             .context("migration inventory size exceeds u64")?;
     }
     Ok(total)
@@ -488,16 +467,30 @@ fn inventory_layout(root: &Path, data: bool) -> Result<Vec<ClassifiedEntry>> {
         } else {
             classify_config_entry(relative)
         };
-        let metadata = std::fs::symlink_metadata(path)?;
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
         // These two mixed directories need their individual children classified.
         let depth = relative.components().count();
         let mixed = data
             && metadata.is_dir()
-            && ((relative == Path::new("sessions"))
-                || (relative.starts_with("sessions") && depth == 2)
+            && (((relative == Path::new("sessions")
+                || (relative.starts_with("sessions") && depth == 2))
+                && class == Classification::Known(MigrateAction::Copy))
                 || relative == Path::new("workers"));
         if mixed {
-            let entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+            let entries = match std::fs::read_dir(path) {
+                Ok(entries) => entries
+                    .filter_map(|entry| match entry {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        other => Some(other),
+                    })
+                    .collect::<std::io::Result<Vec<_>>>()?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
             if entries.is_empty() {
                 output.push(ClassifiedEntry {
                     path: relative.to_path_buf(),
@@ -513,15 +506,32 @@ fn inventory_layout(root: &Path, data: bool) -> Result<Vec<ClassifiedEntry>> {
             output.push(ClassifiedEntry {
                 path: relative.to_path_buf(),
                 classification: class,
-                size_bytes: tree_size(path)?,
+                size_bytes: match class {
+                    Classification::Known(
+                        MigrateAction::KeepWithLocalWorkers
+                        | MigrateAction::Skip
+                        | MigrateAction::Recreate,
+                    )
+                    | Classification::NestedStore => 0,
+                    _ => tree_size(path)?,
+                },
             });
         }
         Ok(())
     }
     let mut result = Vec::new();
-    if root.is_dir() {
-        for entry in std::fs::read_dir(root)? {
-            visit(root, &entry?.path(), data, &mut result)?;
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(entries) = entries {
+        for entry in entries {
+            match entry {
+                Ok(entry) => visit(root, &entry.path(), data, &mut result)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     result.sort_by(|a, b| a.path.cmp(&b.path));
@@ -755,7 +765,7 @@ mod tests {
     use mj_core::state::TargetLocator;
 
     #[test]
-    fn preflight_captures_legacy_key_and_unmanaged_allowlist_and_refuses_collisions() {
+    fn preflight_copies_complete_unmanaged_homes_and_refuses_collisions() {
         let root = tempfile::tempdir().unwrap();
         let old_home = root.path().join("old-home");
         let new_home = root.path().join("new-home");
@@ -771,6 +781,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(profile_home.join("skills/.system/owned"), "owned").unwrap();
+        std::fs::write(profile_home.join("history.jsonl"), "history").unwrap();
+        std::fs::write(profile_home.join("custom-user-file"), "custom").unwrap();
+        let opencode_home = old_home.join(".opencode-personal");
+        std::fs::create_dir_all(opencode_home.join(".data/opencode")).unwrap();
+        std::fs::write(opencode_home.join(".data/opencode/auth.json"), "auth").unwrap();
         std::fs::create_dir_all(old_home.join(".secrets")).unwrap();
         std::fs::write(old_home.join(".secrets/token"), "private").unwrap();
         std::fs::create_dir_all(old_data.join("sessions/one")).unwrap();
@@ -786,13 +801,22 @@ mod tests {
         let db_path = old_data.join("mj.sqlite3");
         mj_store::database::save_session_to(&db_path, &session).unwrap();
         let connection = Connection::open(db_path).unwrap();
-        let mut state = State::default();
-        state.environment_owners.insert("one".into(), "one".into());
-        state.sessions.insert("one".into(), session);
         let mut config = Config::default();
         config.profiles.insert(
             "personal".into(),
             HarnessProfile::new(HarnessKind::Codex, profile_home.clone()),
+        );
+        config.profiles.insert(
+            "shared".into(),
+            HarnessProfile::new(HarnessKind::Codex, profile_home.clone()),
+        );
+        config.profiles.insert(
+            "opencode".into(),
+            HarnessProfile::new(HarnessKind::OpenCode, opencode_home.clone()),
+        );
+        config.profiles.insert(
+            "missing".into(),
+            HarnessProfile::new(HarnessKind::Codex, old_home.join("missing")),
         );
         config.profiles.insert(
             "managed".into(),
@@ -806,7 +830,6 @@ mod tests {
             inspect_preflight(
                 &connection,
                 &config,
-                &state,
                 &old_data,
                 &old_config,
                 &old_home,
@@ -823,16 +846,45 @@ mod tests {
             "{:?}",
             preflight.preconditions.blockers
         );
-        assert_eq!(preflight.pinned_memory_keys["one"].len(), 64);
         assert!(preflight.data_entries.iter().any(|entry| entry.path
             == Path::new("sessions/one/attachments.deleted")
             && entry.classification == Classification::Known(MigrateAction::Copy)));
-        let skills = preflight
-            .home_copies
-            .iter()
-            .find(|entry| entry.source == profile_home.join("skills"))
-            .unwrap();
-        assert_eq!(skills.exclusions, vec![profile_home.join("skills/.system")]);
+        assert_eq!(
+            preflight
+                .home_copies
+                .iter()
+                .filter(|entry| entry.source == profile_home)
+                .count(),
+            1
+        );
+        assert!(
+            preflight
+                .home_copies
+                .iter()
+                .any(|entry| entry.source == opencode_home)
+        );
+        assert!(
+            !preflight
+                .home_copies
+                .iter()
+                .any(|entry| entry.source.starts_with(&opencode_home)
+                    && entry.source != opencode_home)
+        );
+        for file in ["history.jsonl", "custom-user-file", "skills/.system/owned"] {
+            assert!(profile_home.join(file).exists());
+            assert!(
+                preflight
+                    .home_copies
+                    .iter()
+                    .any(|copy| profile_home.join(file).starts_with(&copy.source))
+            );
+        }
+        assert!(
+            preflight
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("home does not exist on source"))
+        );
         assert!(
             preflight
                 .home_copies
@@ -843,7 +895,7 @@ mod tests {
             preflight
                 .home_copies
                 .iter()
-                .any(|entry| entry.source == profile_home.join("auth.json"))
+                .any(|entry| entry.source == profile_home)
         );
         assert!(
             preflight
@@ -851,9 +903,6 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("IP literal"))
         );
-        mj_store::database::pin_session_memory_key_with(&connection, "one", &"b".repeat(64))
-            .unwrap();
-        assert_eq!(inspect().unwrap().pinned_memory_keys["one"], "b".repeat(64));
         std::fs::create_dir_all(new_home.join(".codex-personal")).unwrap();
         assert!(
             inspect()
@@ -873,6 +922,50 @@ mod tests {
         );
         std::fs::write(&resource, "{").unwrap();
         assert!(format!("{:#}", inspect().unwrap_err()).contains("parse EC2 resource record"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_does_not_walk_local_worker_or_nested_store_trees() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let worker = data.join("workers/live-session/work");
+        let nested = data.join("instances/other");
+        std::fs::create_dir_all(&worker).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let db = data.join("mj.sqlite3");
+        mj_store::database::save_session_to(
+            &db,
+            &mj_store::database::test_session("one", "project"),
+        )
+        .unwrap();
+        let connection = Connection::open(&db).unwrap();
+        let result = inspect_preflight(
+            &connection,
+            &Config::default(),
+            &data,
+            &root.path().join("config"),
+            &root.path().join("oldhome"),
+            &root.path().join("newhome"),
+            &root.path().join("newdata"),
+            &root.path().join("newconfig"),
+            "source",
+            |_| Ok(false),
+        );
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = result.unwrap();
+        for path in ["workers/live-session", "instances"] {
+            let entry = result
+                .data_entries
+                .iter()
+                .find(|entry| entry.path == Path::new(path))
+                .unwrap();
+            assert_eq!(entry.size_bytes, 0);
+        }
     }
 
     #[cfg(unix)]

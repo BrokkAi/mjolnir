@@ -21,6 +21,14 @@ pub struct StoreFenceRecord {
 }
 
 impl StoreFenceRecord {
+    /// Match the source snapshot identity; the optional note is informational.
+    pub fn matches_snapshot(&self, other: &Self) -> bool {
+        self.destination == other.destination
+            && self.fenced_at == other.fenced_at
+            && self.fenced_host == other.fenced_host
+            && self.fenced_data_dir == other.fenced_data_dir
+    }
+
     /// The refusal a daemon or client at `current_data_dir` on this host gets.
     pub fn refusal(&self, current_data_dir: &Path) -> StoreFenced {
         StoreFenced::new(
