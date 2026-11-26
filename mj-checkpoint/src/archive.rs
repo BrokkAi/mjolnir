@@ -1484,10 +1484,9 @@ fn plan_payload_parts(
 /// the files that made it too large come from.
 fn manifest_too_large_message(manifest_bytes: u64, payloads: &[PayloadDescriptor]) -> String {
     let mut message = format!(
-        "the recovery copy lists {} files, so its manifest ({}) exceeds the {} limit",
+        "the recovery copy lists {} files, so its manifest ({manifest_bytes} bytes) \
+         exceeds the {MAX_MANIFEST_BYTES}-byte limit",
         payloads.len(),
-        mj_core::text::format_resource_bytes(manifest_bytes),
-        mj_core::text::format_resource_bytes(MAX_MANIFEST_BYTES),
     );
     // Archive paths are `/`-separated. The deepest directory holding at least
     // half of the payloads names the source without listing every subfolder.
