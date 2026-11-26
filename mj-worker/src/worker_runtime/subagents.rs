@@ -237,6 +237,34 @@ pub(super) fn configure_claude_subagent_mcp(
     Ok(true)
 }
 
+/// DSH composes every profile over a home-level `cordis.patch.yml`, the
+/// supported deployment seam for removing plugins. A session whose delegation
+/// policy suppresses native sub-agents gets DSH's native-delegation rows
+/// disabled there, so DSH never presents itself as the root agent above
+/// Mjolnir's tree. A native session gets an empty patch, so a retained home
+/// cannot keep an earlier launch's suppression.
+///
+/// The worker writes this on every harness start, because an upgrade or
+/// recovery replaces the launch configuration without restaging the profile.
+/// A home that is not the session's private staged profile may be the person's
+/// own and is left alone.
+pub(super) fn configure_dsh_native_subagents(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+    suppress_native: bool,
+) -> Result<()> {
+    if !private_staged_home(root, session_id, home) {
+        return Ok(());
+    }
+    let path = home
+        .join(mj_core::harness_runtime::DSH_HOME_DIRECTORY)
+        .join(mj_core::harness_runtime::DSH_HOME_PATCH_FILE);
+    let patch = mj_core::harness_runtime::dsh_native_subagents_patch(suppress_native);
+    mj_core::config::atomic_write(&path, patch.as_bytes())
+        .with_context(|| format!("write DSH home patch {}", path.display()))
+}
+
 /// Kimi binds stdio servers to a runtime through its private MCP profile.
 pub(super) fn configure_kimi_subagent_mcp(
     root: &Path,

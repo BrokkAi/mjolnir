@@ -2,7 +2,7 @@
 """Pin check: Mjolnir's DSH home patch disables the pinned DSH's native sub-agent rows.
 
 Mjolnir writes `<dsh-home>/cordis.patch.yml` for every dsh-acp session
-(`stage_dsh_home_patch` in mj-worker-staging/src/worker_binary/install.rs) with
+(`configure_dsh_native_subagents` in mj-worker/src/worker_runtime/subagents.rs) with
 the text of `dsh_native_subagents_patch` (mj-core/src/harness_runtime.rs): the
 `DSH_NATIVE_SUBAGENT_PLUGIN_ROWS` disabled for a session that must not delegate
 natively, or `[]` for one that may. The home patch is DSH's supported
