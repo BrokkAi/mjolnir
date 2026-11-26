@@ -21,6 +21,7 @@ impl Controller {
             if connection.snapshot().operational.execution == mj_core::relay::RelayExecutionState::Closed { executor.end_resumable_work("restore sealed legacy Restart")?; return Ok(false); }
             let harness = self.state.sessions[session_id].harness_kind;
             let native = super::readiness::wait_for_native_session(&mut connection, executor, harness).await?;
+            super::resume::release_settled_in_place_hold(session_id, &mut connection).await?;
             self.mark_worker_connected(session_id, Some(native))?;
             Ok(true)
         }).await

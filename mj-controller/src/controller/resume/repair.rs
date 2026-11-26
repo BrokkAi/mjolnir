@@ -23,6 +23,48 @@ const REPAIR: WorkerRestartMessages = WorkerRestartMessages {
     native_session: "wait for the retained native session",
 };
 
+/// Reconcile a retained worker's dispatch fence before publishing it as ready.
+pub(in crate::controller) async fn release_settled_in_place_hold(
+    session_id: &str,
+    relay: &mut crate::session_manager::StandaloneSession,
+) -> Result<mj_core::state::ManagedSessionSnapshot> {
+    use crate::session_manager::move_ownership::{
+        OrphanedInPlaceMoveHoldAction, classify_orphaned_in_place_move_hold,
+    };
+    let mut snapshot = relay.sync().await?;
+    if relay.protocol_version() >= mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL
+        && let (Some(hold), Some(store_id)) = (
+            snapshot.operational.in_place_move_hold.as_ref(),
+            snapshot.operational.store_id.as_deref(),
+        )
+    {
+        let current_move = crate::database::load_move_operation(session_id)?;
+        match classify_orphaned_in_place_move_hold(hold, current_move.as_ref()) {
+            OrphanedInPlaceMoveHoldAction::Release {
+                operation_id,
+                expected_harness_restarted,
+            } => {
+                relay
+                    .release_in_place_move_dispatch_checked(
+                        &operation_id,
+                        store_id,
+                        expected_harness_restarted,
+                    )
+                    .await
+                    .context("release settled in-place Move dispatch hold during repair")?;
+                snapshot = relay.sync().await?;
+            }
+            OrphanedInPlaceMoveHoldAction::KeepUnsettled { operation_id } => {
+                tracing::warn!(session_id, operation_id, reload_phase = ?hold.reload_phase,
+                    harness_restarted = hold.harness_restarted,
+                    "keeping an in-place Move dispatch hold whose reload took effect; no active Move can settle it");
+            }
+            OrphanedInPlaceMoveHoldAction::OwnedByActiveMove => {}
+        }
+    }
+    Ok(snapshot)
+}
+
 impl Controller {
     pub(in crate::controller) async fn repair_existing_environment(
         &mut self,
@@ -156,7 +198,7 @@ impl Controller {
                 .await?
             };
             executor.end_resumable_work("resume repair publication")?;
-            let snapshot = relay.sync().await?;
+            let snapshot = release_settled_in_place_hold(session_id, &mut relay).await?;
             self.mark_worker_connected(
                 session_id,
                 relay.snapshot().operational.native_session_id.clone(),

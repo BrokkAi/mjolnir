@@ -3787,6 +3787,7 @@ impl Controller {
                 };
                 let source_session = self.state.sessions[&id].clone();
                 let mut candidate_id = None;
+                let mut live_native_session_id = None;
                 let mut reload_progress = if operation.in_place_harness_restarted { InPlaceReloadProgress::Started } else if had_prior_expected_store_id { InPlaceReloadProgress::Unknown } else { InPlaceReloadProgress::BeforeCommit };
                 let post_hold: Result<()> = async {
                     if operation.in_place_held_command_ids.is_empty() && !held_ids.is_empty() {
@@ -3837,6 +3838,7 @@ impl Controller {
                             waited?;
                             resumed?;
                         }
+                        live_native_session_id = status.native_session_id.clone();
                         if let Some(hold) = status.in_place_move_hold.filter(|hold| hold.operation_id == operation.operation_id) {
                             match hold.reload_phase {
                                 Some(InPlaceReloadPhase::Started) => reload_progress = InPlaceReloadProgress::Started,
@@ -3949,6 +3951,7 @@ impl Controller {
                             }
                             quiesce_result?;
                         }
+                        live_native_session_id = operational.native_session_id.clone();
                         }
                         let previous_session = self
                             .state
@@ -3970,6 +3973,9 @@ impl Controller {
                             None
                         };
                         self.apply_in_place_destination(operation)?;
+                        if native_continuity && let Some(live_id) = live_native_session_id {
+                            self.state.sessions.get_mut(&id).unwrap().native_session_id = Some(live_id);
+                        }
                         if reload_progress == InPlaceReloadProgress::Started {
                             if let Some(launch) = self.committed_in_place_launch(operation, executor)? {
                                 self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = launch.environment.get("AWS_PROFILE").cloned();

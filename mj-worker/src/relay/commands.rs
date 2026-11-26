@@ -1051,10 +1051,7 @@ impl DurableRelay {
         let hold = self.snapshot.in_place_move_hold.as_ref()?;
         matches!(
             hold.reload_phase,
-            Some(
-                mj_core::relay::InPlaceReloadPhase::Committed
-                    | mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { .. }
-            )
+            Some(mj_core::relay::InPlaceReloadPhase::Committed)
         )
         .then(|| {
             (
@@ -1062,6 +1059,16 @@ impl DurableRelay {
                 self.snapshot.store_id.clone().expect("held store"),
             )
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn failed_after_commit_reload_message(&self) -> Option<String> {
+        match &self.snapshot.in_place_move_hold.as_ref()?.reload_phase {
+            Some(mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { message }) => {
+                Some(message.clone())
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn mark_in_place_harness_committed(
