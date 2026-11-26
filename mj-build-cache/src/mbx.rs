@@ -917,7 +917,8 @@ cat -- "$1""#;
 /// effective configuration, so the file itself is the only accurate source.
 fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result<Option<String>> {
     let directory = configuration::host_directory(host, executor)?;
-    configuration::read_file(host, &directory.join("config.toml"), executor)
+    let path = mj_core::target_path::join(&directory, Path::new("config.toml"));
+    configuration::read_file(host, &path, executor)
 }
 
 #[derive(Default)]
@@ -1615,10 +1616,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
     fn installed_worker_reads_cache_configuration_from_its_recorded_host() {
         let executor = ProbeExecutor::new(&[
             ("XDG_CONFIG_HOME", 0, "/home/builder/.config/mbx"),
@@ -1638,6 +1635,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(config.contains("50GB"));
+        assert!(
+            executor
+                .ran()
+                .iter()
+                .any(|command| command.contains("/home/builder/.config/mbx/config.toml"))
+        );
         assert!(
             executor
                 .seen

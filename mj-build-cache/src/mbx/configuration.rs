@@ -46,7 +46,7 @@ pub fn read_file(
     let command = host.shell_command(
         READ_CONFIG_SCRIPT,
         LABEL,
-        [path.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(path)],
         READ_PURPOSE,
     );
     let output = executor.execute(&command)?;
