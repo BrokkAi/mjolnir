@@ -335,4 +335,130 @@ describe('Composer', () => {
       expect(uploads(fetchMock.calls)).toHaveLength(0);
     });
   });
+
+  describe('turn controls', () => {
+    const interruptCommand = { type: 'cancel_turn_for', data: { active_prompt_id: 'p-active' } } as const;
+    const steerCommand = {
+      type: 'steer',
+      data: { active_prompt_id: 'p-active', queued_prompt_id: 'p-queued' },
+    } as const;
+
+    it('interrupts the displayed turn with its published command, never the untargeted action', async () => {
+      const fetchMock = installRoutes();
+      render(
+        <Composer
+          session={session({
+            turn_controls: { status: 'ready', primary: null, interrupt: interruptCommand, message: null },
+            capabilities: { ...session().capabilities, interrupt_turn: true },
+            verdict: { ...session().verdict, interrupt: true },
+          })}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
+
+      await waitFor(() => expect(actionBodies(fetchMock.calls)).toHaveLength(1));
+      expect(actionBodies(fetchMock.calls)[0]).toEqual({
+        action: 'turn-control',
+        session_id: 's1',
+        command: interruptCommand,
+      });
+    });
+
+    it('offers no untargeted interrupt when the worker published controls without one', () => {
+      installRoutes();
+      render(
+        <Composer
+          session={session({
+            turn_controls: { status: 'unavailable', primary: null, interrupt: null, message: 'No turn to steer.' },
+            capabilities: { ...session().capabilities, interrupt_turn: true },
+            verdict: { ...session().verdict, interrupt: true },
+          })}
+        />,
+      );
+      expect(screen.queryByRole('button', { name: 'Interrupt' })).not.toBeInTheDocument();
+    });
+
+    it('still sends the untargeted interrupt for a session that publishes no controls', async () => {
+      const fetchMock = installRoutes();
+      render(
+        <Composer
+          session={session({
+            capabilities: { ...session().capabilities, interrupt_turn: true },
+            verdict: { ...session().verdict, interrupt: true },
+          })}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
+      await waitFor(() => expect(actionBodies(fetchMock.calls)).toHaveLength(1));
+      expect(actionBodies(fetchMock.calls)[0]).toEqual({ action: 'interrupt-turn', session_id: 's1' });
+    });
+
+    it('sends the published primary command for steering queued input', async () => {
+      const fetchMock = installRoutes();
+      render(
+        <Composer
+          session={session({
+            turn_controls: {
+              status: 'ready',
+              primary: { kind: 'steer', command: steerCommand },
+              interrupt: interruptCommand,
+              message: null,
+            },
+          })}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Steer' }));
+
+      await waitFor(() => expect(actionBodies(fetchMock.calls)).toHaveLength(1));
+      expect(actionBodies(fetchMock.calls)[0]).toEqual({
+        action: 'turn-control',
+        session_id: 's1',
+        command: steerCommand,
+      });
+    });
+
+    it('explains an unconfirmed steering delivery and recovers with resolve_steering or removal', async () => {
+      const fetchMock = installRoutes();
+      render(
+        <Composer
+          session={session({
+            turn_controls: { status: 'unconfirmed', primary: null, interrupt: null, message: 'Waiting for the worker.' },
+            steering: {
+              command_id: 'steer-1',
+              active_prompt_id: 'p-active',
+              queued_prompt_id: 'p-queued',
+              status: 'unconfirmed',
+              message: 'The worker did not confirm delivery.',
+            },
+          })}
+        />,
+      );
+
+      const notice = screen.getByTestId('steering-notice');
+      expect(notice).toHaveTextContent('The worker did not confirm delivery.');
+      expect(notice).toHaveTextContent('retrying can deliver it twice');
+      expect(screen.queryByRole('button', { name: 'Steer' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry queued prompt' }));
+      await waitFor(() => expect(actionBodies(fetchMock.calls)).toHaveLength(1));
+      expect(actionBodies(fetchMock.calls)[0]).toEqual({
+        action: 'turn-control',
+        session_id: 's1',
+        command: { type: 'resolve_steering', data: { steering_id: 'steer-1' } },
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Remove queued prompt' }));
+      await waitFor(() => expect(actionBodies(fetchMock.calls)).toHaveLength(2));
+      expect(actionBodies(fetchMock.calls)[1]).toEqual({
+        action: 'remove-queued-prompt',
+        session_id: 's1',
+        queue_id: 'p-queued',
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Keep queued' }));
+      expect(screen.queryByTestId('steering-notice')).not.toBeInTheDocument();
+    });
+  });
 });

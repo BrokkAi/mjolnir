@@ -7,8 +7,8 @@ import { useUiStore } from '../../stores/useUiStore';
 /**
  * The one owner of "which conversation is open". While the route names a
  * conversation, the transcript cache follows it (cached rows show at once and
- * a request goes out only if the cache is behind), and a summary row gets its
- * detail fetched. Views read; they do not open or close conversations.
+ * a request goes out only if the cache is behind), and a summary or stale-detail row
+ * gets its detail fetched in place. Views read; they do not open or close conversations.
  */
 export function useConversationRoute(): void {
   const route = useUiStore(state => state.route);
@@ -16,7 +16,11 @@ export function useConversationRoute(): void {
   const sessionId = effectiveRoute(route, implicit, false).name === 'conversation' && route.name === 'conversation'
     ? route.sessionId
     : null;
-  const isSummary = useSessionStore(state => (sessionId ? state.sessionsById[sessionId]?.detail === false : false));
+  // A summary row has no detail yet; a stale detail row has detail older than the stream.
+  // Either way the fetch runs while the mounted conversation, if any, stays as it is.
+  const needsDetail = useSessionStore(state =>
+    sessionId ? state.sessionsById[sessionId]?.detail === false || state.staleDetailIds[sessionId] === true : false,
+  );
 
   useEffect(() => {
     if (!sessionId) return;
@@ -25,10 +29,10 @@ export function useConversationRoute(): void {
   }, [sessionId]);
 
   useEffect(() => {
-    if (!sessionId || !isSummary) return;
+    if (!sessionId || !needsDetail) return;
     useSessionStore
       .getState()
       .ensureSessionDetail(sessionId)
       .catch(error => console.warn('Could not load session detail', error));
-  }, [sessionId, isSummary]);
+  }, [sessionId, needsDetail]);
 }

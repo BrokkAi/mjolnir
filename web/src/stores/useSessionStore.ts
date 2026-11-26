@@ -7,10 +7,12 @@
 // snapshot, since neither needs the other.
 //
 // Rows live in `sessionsById`. A summary row (`detail: false`) is replaced by
-// a detail row only when `ensureSessionDetail` fetched it for the same summary
-// object still in the map; any later change to the row (or a `detail_changed`
-// notice) reverts to the summary, so a view never shows detail older than the
-// stream.
+// a detail row when `ensureSessionDetail` fetched it and nothing changed the
+// row meanwhile. A later stream change (a new summary row or a `detail_changed`
+// notice) never takes a detail row away: the row stays in place, marked in
+// `staleDetailIds`, and the next detail fetch replaces it. A mounted
+// conversation therefore keeps its scroll, focus, attachments and open
+// elicitations while its detail refreshes.
 
 import { create } from 'zustand';
 import {
@@ -31,6 +33,7 @@ import {
   type InternedTable,
   type RuntimeCursor,
   type SessionRow,
+  type SessionSummary,
   type SnapshotMetadata,
   type ViewerFrame,
   type ViewerSnapshotWire,
@@ -47,11 +50,6 @@ export type ConnectionState = StreamStatus | 'upgrading';
 const sameCursor = (a: RuntimeCursor | null, b: RuntimeCursor | null): boolean =>
   Boolean(a && b && a.incarnation === b.incarnation && a.sequence === b.sequence);
 
-interface Attached {
-  summary: SessionRow;
-  detail: SessionRow;
-}
-
 interface SessionState {
   auth: AuthState;
   streamStatus: StreamStatus;
@@ -59,9 +57,9 @@ interface SessionState {
   bootError: string | null;
   meta: SnapshotMetadata | null;
   sessionsById: Record<string, SessionRow>;
-  /** Rows replaced by a fetched detail row, keyed by session. */
-  attached: Record<string, Attached>;
-  /** Bumped by `detail_changed`, so an in-flight detail fetch can tell it is stale. */
+  /** Sessions whose detail row is older than the stream; a fetch replaces it in place. */
+  staleDetailIds: Record<string, true>;
+  /** Bumped by every row change and `detail_changed`, so an in-flight detail fetch can tell it is stale. */
   detailEpochs: Record<string, number>;
   detailLoadingIds: Record<string, true>;
   detailErrors: Record<string, string>;
@@ -77,6 +75,7 @@ interface SessionState {
   applySnapshot: (snapshot: ViewerSnapshotWire, versions?: Record<string, ConversationVersion>) => void;
   /** Apply a stream frame. Returns whether state changed. Throws when the frame cannot apply. */
   applyFrame: (frame: ViewerFrame) => boolean;
+  /** Fetch detail for a summary row or a stale detail row; resolves with the fresh row. */
   ensureSessionDetail: (id: string) => Promise<SessionRow | undefined>;
   dispatchAction: (action: ControllerAction) => Promise<ActionResult>;
   /** Record a conversation version seen outside the stream; never lowers a known `latest_seq`. */
@@ -100,7 +99,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   bootError: null,
   meta: null,
   sessionsById: {},
-  attached: {},
+  staleDetailIds: {},
   detailEpochs: {},
   detailLoadingIds: {},
   detailErrors: {},
@@ -164,7 +163,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       bootError: null,
       meta: null,
       sessionsById: {},
-      attached: {},
+      staleDetailIds: {},
       detailEpochs: {},
       detailLoadingIds: {},
       detailErrors: {},
@@ -185,7 +184,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set(state => ({
       meta: meta as SnapshotMetadata,
       sessionsById: rows,
-      attached: {},
+      staleDetailIds: {},
       detailEpochs: Object.fromEntries(Object.keys(rows).map(id => [id, (state.detailEpochs[id] ?? 0) + 1])),
       interned,
       cursor,
@@ -237,25 +236,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
     set(current => {
       const sessionsById = { ...current.sessionsById };
-      const attached = { ...current.attached };
+      const staleDetailIds = { ...current.staleDetailIds };
       const detailEpochs = { ...current.detailEpochs };
       const conversationVersions = { ...current.conversationVersions };
       for (const [id, row] of changes) {
-        delete attached[id];
         detailEpochs[id] = (detailEpochs[id] ?? 0) + 1;
-        if (row) sessionsById[id] = row;
-        else {
+        const held = sessionsById[id];
+        if (!row) {
           delete sessionsById[id];
+          delete staleDetailIds[id];
           delete conversationVersions[id];
+        } else if (held && held.detail !== false && row.detail === false) {
+          // Keep the mounted detail row; the summary's fields are newer, the rest refreshes.
+          sessionsById[id] = overlaySummary(held, row);
+          staleDetailIds[id] = true;
+        } else {
+          sessionsById[id] = row;
+          delete staleDetailIds[id];
         }
       }
       for (const id of frame.detail_changed ?? []) {
         detailEpochs[id] = (detailEpochs[id] ?? 0) + 1;
-        const held = attached[id];
-        if (held) {
-          delete attached[id];
-          if (sessionsById[id] === held.detail) sessionsById[id] = held.summary;
-        }
+        const held = sessionsById[id];
+        if (held && held.detail !== false) staleDetailIds[id] = true;
       }
       for (const [id, version] of Object.entries(frame.conversation_versions ?? {})) {
         if (sessionsById[id]) conversationVersions[id] = version;
@@ -263,7 +266,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const { sessions: _s, cursor: _c, interned: _i, ...metadata } = frame.metadata as Record<string, unknown>;
       return {
         sessionsById,
-        attached,
+        staleDetailIds,
         detailEpochs,
         conversationVersions,
         interned,
@@ -277,7 +280,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   ensureSessionDetail: async id => {
     for (;;) {
       const current = get().sessionsById[id];
-      if (!current || current.detail !== false) return current;
+      if (!current || (current.detail !== false && !get().staleDetailIds[id])) return current;
       const active = detailRequests.get(id);
       if (active) {
         await active;
@@ -292,17 +295,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             throw new Error('The server returned an invalid session detail row');
           }
           set(state => {
-            // The summary changed or was invalidated while fetching: this answer is stale.
-            if (state.sessionsById[id] !== current || (state.detailEpochs[id] ?? 0) !== epoch) return state;
+            // The row changed or was invalidated while fetching: this answer is stale.
+            if (!state.sessionsById[id] || (state.detailEpochs[id] ?? 0) !== epoch) return state;
             const { [id]: _error, ...detailErrors } = state.detailErrors;
+            const { [id]: _stale, ...staleDetailIds } = state.staleDetailIds;
             return {
               sessionsById: { ...state.sessionsById, [id]: result.row },
-              attached: { ...state.attached, [id]: { summary: current, detail: result.row } },
+              staleDetailIds,
               detailErrors,
             };
           });
         } catch (error) {
-          if (get().sessionsById[id] !== current) return;
+          if ((get().detailEpochs[id] ?? 0) !== epoch) return;
           set(state => ({ detailErrors: { ...state.detailErrors, [id]: describe(error) } }));
           throw error;
         } finally {
@@ -333,6 +337,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return { conversationVersions: { ...state.conversationVersions, [id]: version } };
     }),
 }));
+
+/** A summary row's fields laid over the detail row it must not unmount. */
+function overlaySummary(held: SessionRow, summary: SessionSummary): SessionRow {
+  const {
+    detail: _detail,
+    queued_prompt_count: _queued,
+    pending_elicitation_count: _pending,
+    pending_elicitation_ids: _ids,
+    ...fields
+  } = summary;
+  return { ...held, ...fields } as SessionRow;
+}
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

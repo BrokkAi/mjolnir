@@ -152,6 +152,8 @@ interface TranscriptState {
   loadEarlierHistory: (id: string) => Promise<void>;
   addOptimisticPrompt: (id: string, commandId: string, text: string) => void;
   removePendingPrompt: (id: string, commandId: string) => void;
+  /** Drop optimistic prompts the session now lists in its queue: the queue shows them, not the transcript. */
+  retireQueuedPrompts: (id: string, queuedIds: readonly string[]) => void;
   invalidateSession: (id: string) => void;
   clearAll: () => void;
 }
@@ -362,6 +364,16 @@ export const useTranscriptStore = create<TranscriptState>((set, get) => {
         ...current,
         pendingLocalPrompts: current.pendingLocalPrompts.filter(prompt => prompt.commandId !== commandId),
       })),
+
+    retireQueuedPrompts: (id, queuedIds) =>
+      patch(id, current =>
+        current.pendingLocalPrompts.some(prompt => queuedIds.includes(prompt.commandId))
+          ? {
+              ...current,
+              pendingLocalPrompts: current.pendingLocalPrompts.filter(prompt => !queuedIds.includes(prompt.commandId)),
+            }
+          : current,
+      ),
 
     invalidateSession: id => {
       epochs.set(id, epochOf(id) + 1);

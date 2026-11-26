@@ -3,6 +3,10 @@
 // One key per (session, request): `mj-elicit:${sessionId}:${reqId}`. Values are
 // plain JSON, never the request itself, so a changed form simply gets its
 // still-valid answers merged back by `mergeDraftValues`.
+//
+// `memory` always holds the whole draft, secret fields included, for a peek or
+// reopen in this tab. `sessionStorage` gets the draft without its secret
+// fields, so a typed secret never reaches browser storage.
 
 import type { DraftValues } from './elicitationLogic';
 
@@ -51,9 +55,9 @@ export function loadElicitationDraft(
   requestId: string,
 ): StoredElicitationDraft | null {
   const key = elicitationDraftKey(sessionId, requestId);
-  // `memory` holds only drafts that storage could not take, so it is always the newer copy.
-  const fallback = memory.get(key);
-  if (fallback) return fallback;
+  // `memory` is written on every save, so it is the newer and fuller copy.
+  const held = memory.get(key);
+  if (held) return held;
   const store = storage();
   if (!store) return null;
   try {
@@ -69,19 +73,20 @@ export function saveElicitationDraft(
   sessionId: string,
   requestId: string,
   draft: StoredElicitationDraft,
+  secretFieldIds: ReadonlySet<string>,
 ): void {
   const key = elicitationDraftKey(sessionId, requestId);
+  memory.set(key, draft);
   const store = storage();
-  if (!store) {
-    memory.set(key, draft);
-    return;
+  if (!store) return;
+  const values: DraftValues = {};
+  for (const [id, value] of Object.entries(draft.values)) {
+    if (!secretFieldIds.has(id)) values[id] = value;
   }
   try {
-    store.setItem(key, JSON.stringify(draft));
-    memory.delete(key);
+    store.setItem(key, JSON.stringify({ values, step: draft.step }));
   } catch {
-    // Private mode or a full quota: the answer still works for this render.
-    memory.set(key, draft);
+    // Private mode or a full quota: the in-memory copy still serves this tab.
   }
 }
 

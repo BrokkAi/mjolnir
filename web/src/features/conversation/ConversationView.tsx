@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle, LoaderCircle, RefreshCw } from 'lucide-react';
 import { isSummaryRow } from '../../api/types';
 import type { ViewerSession } from '../../api/types';
@@ -128,6 +128,13 @@ export default function ConversationView({ sessionId, subagentParentId, childKin
   const closeSheet = useCallback(() => setSheet(null), []);
 
   const detail = session && !isSummaryRow(session) ? session : undefined;
+
+  // A prompt the session accepted into its queue is shown in the queue; its
+  // optimistic transcript row must not linger (or return) as "Sending…".
+  const queuedKey = detail?.queued_prompts?.map(prompt => prompt.id).join('\n') ?? '';
+  useEffect(() => {
+    if (queuedKey) useTranscriptStore.getState().retireQueuedPrompts(sessionId, queuedKey.split('\n'));
+  }, [sessionId, queuedKey, cached?.pendingLocalPrompts.length]);
 
   const streamingKey = useMemo(() => selectStreamingEntryKey(session, cached), [session, cached]);
   const scroll = useConversationScroll({

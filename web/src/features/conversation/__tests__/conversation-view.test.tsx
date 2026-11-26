@@ -1,8 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyTranscript, useTranscriptStore } from '../../../stores/useTranscriptStore';
 import { useSessionStore } from '../../../stores/useSessionStore';
-import { entry, jsonResponse, liveRow, mockFetch, snapshot } from '../../../test-utils';
+import { useConversationRoute } from '../../../components/shell/useConversationRoute';
+import { useUiStore } from '../../../stores/useUiStore';
+import { cursor, entry, jsonResponse, liveRow, mockFetch, snapshot } from '../../../test-utils';
 import ConversationView from '../ConversationView';
 
 /**
@@ -105,5 +107,93 @@ describe('ConversationView', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('network down');
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(fetchMock.urls().some(url => url.startsWith('/api/v1/conversations/s1'))).toBe(true);
+  });
+
+  it('keeps the conversation, composer and focus mounted while detail refreshes after detail_changed', async () => {
+    useSessionStore.getState().applyFrame({
+      kind: 'snapshot',
+      cursor: cursor(1),
+      snapshot: snapshot([liveRow('s1', { title: 'Build the thing' })], { sequence: 1 }),
+    });
+    let rowRequests = 0;
+    let release!: () => void;
+    const fetchMock = mockFetch({
+      '/api/v1/sessions/s1/client-state': () => jsonResponse({ draft: '', through_event_ordinal: 0 }),
+      '/api/v1/conversations/s1': () => jsonResponse({ latest_seq: 1, entries: [] }),
+      '/api/v1/sessions/s1/row': () => {
+        rowRequests += 1;
+        return new Promise<Response>(resolve => {
+          release = () => resolve(jsonResponse({ revision: 2, row: liveRow('s1', { title: 'Refreshed' }) }));
+        });
+      },
+    });
+    useUiStore.setState({ route: { name: 'conversation', sessionId: 's1' }, implicitRoute: false });
+    function Harness() {
+      useConversationRoute();
+      return <ConversationView sessionId="s1" />;
+    }
+    render(<Harness />);
+
+    const textarea = screen.getByLabelText('Message');
+    const feed = screen.getByTestId('conversation-scroll');
+    textarea.focus();
+    expect(rowRequests).toBe(0);
+
+    act(() => {
+      useSessionStore.getState().applyFrame({
+        kind: 'delta',
+        from: cursor(1),
+        cursor: cursor(2),
+        metadata: { revision: 2, server_time_ms: 2, generated_at: 't2' },
+        sessions: [],
+        detail_changed: ['s1'],
+        interned: {},
+      });
+    });
+
+    // The background refresh starts, and nothing unmounted meanwhile.
+    await waitFor(() => expect(rowRequests).toBe(1));
+    expect(fetchMock.urls()).toContain('/api/v1/sessions/s1/row');
+    expect(screen.queryByText('Loading session details…')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Message')).toBe(textarea);
+    expect(screen.getByTestId('conversation-scroll')).toBe(feed);
+    expect(document.activeElement).toBe(textarea);
+
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Refreshed'));
+    expect(screen.getByLabelText('Message')).toBe(textarea);
+    expect(document.activeElement).toBe(textarea);
+    expect(useSessionStore.getState().staleDetailIds.s1).toBeUndefined();
+  });
+
+  it('retires an optimistic prompt once the session queues it, and it does not return when the queue empties', () => {
+    mockFetch({ '/api/v1/sessions/s1/client-state': () => jsonResponse({ draft: '', through_event_ordinal: 0 }) });
+    useTranscriptStore.getState().addOptimisticPrompt('s1', 'cmd-1', 'run the tests');
+    useTranscriptStore.getState().addOptimisticPrompt('s1', 'cmd-2', 'another');
+    render(<ConversationView sessionId="s1" />);
+    expect(screen.getAllByText('run the tests')).toHaveLength(1);
+
+    const queued = (ids: string[]) =>
+      act(() => {
+        useSessionStore.getState().applySnapshot(
+          snapshot([
+            liveRow('s1', {
+              title: 'Build the thing',
+              queued_prompts: ids.map(id => ({ id, text: 'run the tests', created_at: '1' })),
+            }),
+          ]),
+        );
+      });
+
+    queued(['cmd-1']);
+    const pending = () => useTranscriptStore.getState().entries.s1.pendingLocalPrompts.map(prompt => prompt.commandId);
+    expect(pending()).toEqual(['cmd-2']);
+    // The queue strip shows the prompt; the transcript no longer says "Sending…" for it.
+    expect(screen.getAllByText('run the tests')).toHaveLength(1);
+
+    queued([]);
+    expect(pending()).toEqual(['cmd-2']);
   });
 });

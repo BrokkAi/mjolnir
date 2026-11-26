@@ -35,6 +35,8 @@ import { CommandPalette, paletteMatches, type PaletteItem } from './CommandPalet
 import { PromptHistoryModal } from './PromptHistoryModal';
 import { flushDraftSave, getPendingDraft, noteServerDraft, scheduleDraftSave, writeDraftNow } from './draftQueue';
 import { describeError } from './format';
+import { SteeringNotice } from './SteeringNotice';
+import { turnControlView } from './turnControls';
 
 /**
  * The mobile-safe composer.
@@ -506,10 +508,18 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
   const configLabel = modelOption ? currentChoiceName(modelOption) : 'Config';
   const canConfig = Boolean(capabilities.set_config) && !transitioning && configOptions.length > 0;
 
-  const interrupt = Boolean(capabilities.interrupt_turn) && session.verdict.interrupt;
+  const turnControls = turnControlView(session);
+  const interrupt = turnControls.published ? turnControls.interrupt !== null : turnControls.legacyInterrupt;
+  // Pending and unconfirmed deliveries show their status instead of a second press.
+  const primaryControl = turnControls.pending || turnControls.uncertain || turnControls.unavailable ? null : turnControls.primary;
+  const controlStatus = turnControls.pending
+    ? turnControls.message || 'Steering…'
+    : turnControls.uncertain
+      ? 'Unconfirmed'
+      : null;
   const interruptAll = Boolean(capabilities.interrupt_all) && session.verdict.interrupt_all;
   const cancelOperation = Boolean(capabilities.cancel_operation) && Boolean(session.operation?.cancellable);
-  const showActions = interrupt || interruptAll || cancelOperation;
+  const showActions = interrupt || interruptAll || cancelOperation || primaryControl !== null || controlStatus !== null;
 
   const hasContent = text.trim().length > 0 || attachments.length > 0;
   const uploading = attachments.some(item => item.uploading);
@@ -548,18 +558,51 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
           </p>
         )}
 
+        <SteeringNotice session={session} />
+
         {showActions && (
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            {primaryControl && (
+              <button
+                type="button"
+                disabled={interruptPending !== null}
+                title={turnControls.message || primaryControl.label}
+                onClick={() =>
+                  void runInterrupt('turn-primary', () =>
+                    useSessionStore.getState().dispatchAction({
+                      action: 'turn-control',
+                      session_id: session.id,
+                      command: primaryControl.command,
+                    }),
+                  )
+                }
+                className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-accent/50 bg-accent/10 px-2.5 py-1 text-[11.5px] font-medium text-accent disabled:opacity-60"
+              >
+                {interruptPending === 'turn-primary' && <LoaderCircle className="size-3.5 animate-spin" aria-hidden />}
+                {primaryControl.label}
+              </button>
+            )}
+            {controlStatus && (
+              <span
+                className="inline-flex min-h-8 items-center rounded-full border border-line px-2.5 py-1 text-[11.5px] text-muted"
+                title={turnControls.message || controlStatus}
+              >
+                {controlStatus}
+              </span>
+            )}
             {interrupt && (
               <button
                 type="button"
                 disabled={interruptPending !== null}
                 onClick={() =>
                   void runInterrupt('interrupt', () =>
-                    useSessionStore.getState().dispatchAction({
-                      action: 'interrupt-turn',
-                      session_id: session.id,
-                    }),
+                    useSessionStore.getState().dispatchAction(
+                      // The published command names the displayed turn; only a session
+                      // that publishes no controls gets the untargeted action.
+                      turnControls.interrupt
+                        ? { action: 'turn-control', session_id: session.id, command: turnControls.interrupt }
+                        : { action: 'interrupt-turn', session_id: session.id },
+                    ),
                   )
                 }
                 className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-warn/50 bg-warn/10 px-2.5 py-1 text-[11.5px] font-medium text-warn disabled:opacity-60"

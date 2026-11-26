@@ -85,8 +85,9 @@ export function ElicitationSheet({
   // Persist every keystroke: a peek, a route change or a reconnect remounts
   // this component and must find the same answer.
   useEffect(() => {
-    saveElicitationDraft(session.id, request.id, draft);
-  }, [draft, request.id, session.id]);
+    const secretFieldIds = new Set(request.fields.filter(field => field.secret).map(field => field.id));
+    saveElicitationDraft(session.id, request.id, draft, secretFieldIds);
+  }, [draft, request.fields, request.id, session.id]);
 
   const setValue = (fieldId: string, value: string | boolean | string[] | undefined) => {
     setDraft(state => ({

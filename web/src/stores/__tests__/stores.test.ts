@@ -128,17 +128,43 @@ describe('session store: snapshot and stream frames', () => {
     expect(sessions().cursor).toEqual(cursor(1, 'new'));
   });
 
-  it('attaches a fetched detail row and reverts to the summary when the stream says detail changed', async () => {
+  it('keeps an attached detail row in place when the stream says detail changed, then swaps in the fresh row', async () => {
     sessions().applySnapshot(snapshot([summaryRow('s1')], { sequence: 1 }));
     const detail = liveRow('s1', { title: 'Detailed' });
-    mockFetch({ '/api/v1/sessions/s1/row': () => jsonResponse({ revision: 1, row: detail }) });
+    let fresh = detail;
+    mockFetch({ '/api/v1/sessions/s1/row': () => jsonResponse({ revision: 1, row: fresh }) });
 
     await sessions().ensureSessionDetail('s1');
     expect(sessions().sessionsById.s1).toEqual(detail);
     expect(sessions().sessionsById.s1.detail).toBeUndefined();
 
+    const mounted = sessions().sessionsById.s1;
     sessions().applyFrame(delta(1, 2, { detail_changed: ['s1'] }));
-    expect(sessions().sessionsById.s1.detail).toBe(false);
+    // The mounted row stays a detail row, marked stale, so a view never unmounts.
+    expect(sessions().sessionsById.s1).toBe(mounted);
+    expect(sessions().staleDetailIds.s1).toBe(true);
+
+    fresh = liveRow('s1', { title: 'Fresher' });
+    await sessions().ensureSessionDetail('s1');
+    expect(sessions().sessionsById.s1.title).toBe('Fresher');
+    expect(sessions().staleDetailIds.s1).toBeUndefined();
+  });
+
+  it('overlays a changed summary row on the detail row instead of dropping back to a summary', async () => {
+    sessions().applySnapshot(snapshot([summaryRow('s1')], { sequence: 1 }));
+    mockFetch({
+      '/api/v1/sessions/s1/row': () => jsonResponse({ revision: 1, row: liveRow('s1', { title: 'Detailed' }) }),
+    });
+    await sessions().ensureSessionDetail('s1');
+
+    const changed = { ...summaryRow('s1'), title: 'Renamed' } as unknown as WireSessionRow;
+    sessions().applyFrame(delta(1, 2, { sessions: [['s1', changed]] }));
+
+    const row = sessions().sessionsById.s1;
+    expect(row.detail).toBeUndefined();
+    expect(row.title).toBe('Renamed');
+    expect('queued_prompt_count' in row).toBe(false);
+    expect(sessions().staleDetailIds.s1).toBe(true);
   });
 
   it('drops a detail answer that arrives after the summary changed and reads the row again', async () => {
