@@ -6242,6 +6242,7 @@ mod reader_tests {
             ("external", external.clone()),
             ("nested", nested.clone()),
             ("legacy", legacy.clone()),
+            ("symlinked", sessions.join("symlinked.hel.zip")),
         ] {
             save_session_to(&path, &checkpoint_session(id, archive)).unwrap();
         }
@@ -6257,12 +6258,35 @@ mod reader_tests {
                 ],
             )
             .unwrap();
+        // A revision-159 row written through a symlinked spelling of the data
+        // directory misses the lexical match but names the same directory.
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(&sessions).unwrap();
+            let alias = directory.path().join("alias");
+            std::os::unix::fs::symlink(directory.path(), &alias).unwrap();
+            previous
+                .execute(
+                    "UPDATE session_checkpoints SET archive_path = ?2 WHERE session_id = ?1",
+                    params![
+                        "symlinked",
+                        super::super::values::path_to_blob(
+                            &alias.join("sessions").join("symlinked.hel.zip")
+                        )
+                    ],
+                )
+                .unwrap();
+        }
         drop(previous);
 
         let upgraded = open_writer(&path).unwrap();
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(160));
+        assert_eq!(
+            checkpoint_archive_column(&upgraded, "symlinked"),
+            PathBuf::from("symlinked.hel.zip")
+        );
         assert!(state.ensure_supported_by(159).is_err());
         assert_eq!(
             checkpoint_archive_column(&upgraded, "managed"),

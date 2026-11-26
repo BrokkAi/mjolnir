@@ -1065,6 +1065,12 @@ pub(super) fn checkpoint_archive_blob(path: &Path, sessions_root: &Path) -> Vec<
 /// Migration 160: rewrite managed absolute archive paths to bare file names.
 /// The table holds one small row per suspended session. Rows outside
 /// `sessions/` are left alone.
+///
+/// Writers stored the lexical `sessions_dir()` join, but the store may now be
+/// opened through another spelling of the same directory (a symlink, `..`).
+/// A row that misses the lexical match is also compared by canonical parent
+/// directory, so it is not left absolute while the revision advances. A parent
+/// that cannot be canonicalized leaves the row unchanged.
 pub(super) fn relativize_checkpoint_archive_paths(
     connection: &Connection,
     sessions_root: &Path,
@@ -1078,8 +1084,23 @@ pub(super) fn relativize_checkpoint_archive_paths(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let canonical_root = std::fs::canonicalize(sessions_root).ok();
+    // Rows share a parent, so each distinct parent is canonicalized once.
+    let mut managed_parents = std::collections::HashMap::<PathBuf, bool>::new();
     for (session_id, stored) in rows {
-        let encoded = encode_checkpoint_archive_path(&stored, sessions_root);
+        let mut encoded = encode_checkpoint_archive_path(&stored, sessions_root);
+        if encoded == stored
+            && stored.is_absolute()
+            && let (Some(root), Some(parent), Some(name)) =
+                (&canonical_root, stored.parent(), stored.file_name())
+        {
+            let managed = *managed_parents
+                .entry(parent.to_path_buf())
+                .or_insert_with(|| std::fs::canonicalize(parent).is_ok_and(|real| real == *root));
+            if managed {
+                encoded = PathBuf::from(name);
+            }
+        }
         if encoded != stored {
             connection.execute(
                 "UPDATE session_checkpoints SET archive_path = ?2 WHERE session_id = ?1",
