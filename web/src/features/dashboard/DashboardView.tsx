@@ -109,7 +109,7 @@ export default function DashboardView({ workspaceId, subagentParentId, childKind
     }
     return sortSessions(
       Object.values(rows).filter(row => {
-        if (row.subagent_parent_id) return false;
+        if (row.subagent_parent_id || !row.verdict.live_dashboard) return false;
         return workspaceId ? row.workspace_id === workspaceId : true;
       }),
     );

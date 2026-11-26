@@ -299,7 +299,7 @@ test('resume confirms a raw-checkout conversion and wiki restores an archive', a
     await page.getByRole('tab', { name: 'Session Wiki' }).click();
     await expect(page.getByRole('button', { name: /Archived debugging chat/ })).toBeVisible();
     await page.getByRole('button', { name: /Archived debugging chat/ }).click();
-    await expect(page.getByRole('heading', { name: 'Brief' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Brief', level: 3 })).toBeVisible();
     await expect(page.getByText('The bug was a stale cache.')).toBeVisible();
     await page.getByRole('button', { name: 'Restore session' }).click();
     await expect.poll(() => server.requests('POST', '/api/v1/wiki/sessions/wk1/restore').length).toBe(1);
@@ -467,7 +467,11 @@ test('settings edits save and the git identity card round-trips', async ({ brows
     groups: [
       {
         heading: 'General',
-        rows: [{ path: ['tips'], label: 'Show tips', control: 'checkbox', checked }],
+        rows: [
+          { path: ['tips'], label: 'Show tips', control: 'checkbox', checked },
+          { path: ['model'], label: 'A very long model selection label that wraps on a narrow screen', control: 'choice', value: 'very-long-model-name-without-breaks-123456789012345678901234567890', choices: ['very-long-model-name-without-breaks-123456789012345678901234567890', 'b', 'c', 'd'].map(value => ({ value, label: value })) },
+          { path: ['instruction'], label: 'A very long text setting label that also wraps on a narrow screen', control: 'text', value: '', placeholder: '', number: false },
+        ],
       },
     ],
     removable: false,
@@ -498,6 +502,9 @@ test('settings edits save and the git identity card round-trips', async ({ brows
     await page.goto(`${server.url}/#settings`);
     const toggle = page.getByRole('switch', { name: 'Show tips' });
     await expect(toggle).toBeVisible();
+    await expect(page.getByRole('combobox', { name: /A very long model selection label/ })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: /A very long text setting label/ })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await toggle.click();
     await expect.poll(() => server.requests('POST', '/api/v1/settings/edit').length).toBe(1);
     expect(lastRequest('POST', '/api/v1/settings/edit').body.edit).toEqual({
@@ -532,7 +539,7 @@ test('settings edits save and the git identity card round-trips', async ({ brows
 
 test('suspend and destroy run through their confirmation dialogs', async ({ browser }) => {
   server.setSnapshot(snapshot({ sessions: [liveSession('s1', { title: 'Lifecycle session' })] }));
-  server.handle('POST', '/api/v1/sessions/s1/lifecycle/suspend-preflight', () => ({
+  server.handle('GET', '/api/v1/sessions/s1/suspend-preflight', () => ({
     json: {
       session_id: 's1',
       untracked: [

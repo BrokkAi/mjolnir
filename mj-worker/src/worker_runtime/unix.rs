@@ -4489,7 +4489,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                 {
                     unavailable_request(envelope, message)
                 } else {
-                    restart_harness_in_place_response(
+                    Box::pin(restart_harness_in_place_response(
                         envelope,
                         request_commands.as_ref(),
                         &relay,
@@ -4497,7 +4497,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                         &relay_root,
                         &shared_subagents,
                         preparation_tx.as_ref(),
-                    )
+                    ))
                     .await
                 };
                 write_logged_response(
