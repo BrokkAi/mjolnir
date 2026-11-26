@@ -41,7 +41,7 @@ pub(crate) struct SeenHints {
 
 impl SeenHints {
     pub(crate) fn load() -> Self {
-        Self::load_from(mj_core::config::config_dir().join("client-hints.json"))
+        Self::load_from(mj_core::config::ConfigLayout::current().client_hints())
     }
 
     fn load_from(path: PathBuf) -> Self {

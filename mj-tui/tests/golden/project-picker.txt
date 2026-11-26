@@ -6,18 +6,18 @@ action: None
 ╭ Sessions ─────  ╭ × Add attached directory ────────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │No sessions yet  │ Target: podman (local Podman)                                                    │                 │
-│Create new work  │                                                                                  │                 │
-│                 │ Podman uses :O copy-on-write overlays; read-only skips the overlay.              │                 │
+│Create new work  │                                                                                  │  ───────────────╯
+│                 │ Podman uses :O copy-on-write overlays; read-only skips the overlay.              │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │ Choose or type a directory on the controller.                                    │                 │
-│                 │                                                                                  │                 │
-│                 │ Source:                                                                          │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │ Destinatio                                                                       │  ───────────────╮
+│                 │ Source:                                                                          │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
+│                 │ Destinatio                                                                       │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │ Access:   ro · read-only ▾                                                       │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │ Recent on this host:                                                             │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │ Recent on this host:                                                             │                 │
 │                 │ /opt/recent-3                                                                    │                 │
 │                 │ /opt/recent-4                                                                    │  ───────────────╯
 │                 │ /opt/recent-5                                                                    │  ──────── ▁   ▄ ╮
@@ -25,8 +25,8 @@ action: None
 │                 │ /opt/recent-7                                                                    │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Add directory                                              │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │   Cancel     Back     Add directory                                              │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -67,27 +67,27 @@ action: None
 ╭ Sessions ─────  ╭ × New session · 3/4 choose a project ────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │No sessions yet  │ bifrost2  BrokkAi/bifrost-dev  +1 more                                  Add…     │                 │
-│Create new work  │ hel       BrokkAi/hel                                                   Remove   │                 │
-│                 │                                                                                  │                 │
+│Create new work  │ hel       BrokkAi/hel                                                   Remove   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
-│                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   BrokkAi/bifrost-dev  (primary)                                                 │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │                 │
+│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Next                                                       │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Back     Next                                                       │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -98,27 +98,27 @@ action: None
 ╭ Sessions ─────  ╭ × New session · 3/4 choose a project ────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │No sessions yet  │ bifrost2  BrokkAi/bifrost-dev  +1 more                                  Add…     │                 │
-│Create new work  │ hel       BrokkAi/hel                                                   Remove   │                 │
-│                 │                                                                                  │                 │
+│Create new work  │ hel       BrokkAi/hel                                                   Remove   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
-│                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   BrokkAi/bifrost-dev  (primary)                                                 │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │                 │
+│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Next                                                       │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Back     Next                                                       │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -129,27 +129,27 @@ action: None
 ╭ Sessions ─────  ╭ × New session · 3/4 choose a project ────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │No sessions yet  │ bifrost2  BrokkAi/bifrost-dev  +1 more                                  Add…     │                 │
-│Create new work  │ hel       BrokkAi/hel                                                   Remove   │                 │
-│                 │                                                                                  │                 │
+│Create new work  │ hel       BrokkAi/hel                                                   Remove   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
-│                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   BrokkAi/bifrost-dev  (primary)                                                 │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │                 │
+│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Next                                                       │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Back     Next                                                       │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -160,18 +160,12 @@ action: None
 ╭ Sessions ─────  ╭ × Choose a project ──────────────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │No sessions yet  │   ●Recent     GitHub     URL or Path                                             │                 │
-│Create new work  │                                                                                  │                 │
-│                 │ Pick up a recent project, or find another on GitHub or by URL or path.           │                 │
+│Create new work  │                                                                                  │  ───────────────╯
+│                 │ Pick up a recent project, or find another on GitHub or by URL or path.           │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │ No recent projects yet. Choose GitHub or URL or path above to get started.       │                 │
-│                 │                                                                                  │                 │
-│                 │ ☐ Use several repositories together                                              │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │ ☐ Use several repositories together                                              │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
@@ -179,8 +173,14 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Use project                                                │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Back     Use project                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -191,27 +191,27 @@ action: None
 ╭ Sessions ─────  ╭ × New session · 3/4 choose a project ────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │No sessions yet  │ bifrost2  BrokkAi/bifrost-dev  +1 more                                  Add…     │                 │
-│Create new work  │ hel       BrokkAi/hel                                                   Remove   │                 │
-│                 │                                                                                  │                 │
+│Create new work  │ hel       BrokkAi/hel                                                   Remove   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
-│                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   BrokkAi/bifrost-dev  (primary)                                                 │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │                 │
+│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Back     Next                                                       │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Back     Next                                                       │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -225,28 +225,28 @@ action: None
 ╭ Sess  ╭ × New session · 4/4 review ──────────────────────────────────────────────────────╮       │
 │ Crea  │                                                                                  │       │
 │No se  │ Profile: claude-1                                                                │       │
-│Creat  │ Project: hel                                                                     │       │
-│       │ Target: podman (local Podman)                                                    │       │
+│Creat  │ Project: hel                                                                     │  ─────╯
+│       │ Target: podman (local Podman)                                                    │  ─────╮
 │       │ Compute: 4 CPU / 8.0G                                                            │       │
-│       │                                                                                  │       │
-│       │ Attached directories: 0                                                          │       │
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │ Sub-agents Native ▾                                                              │  ─────╮
-│       │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │       │
 │       │                                                                                  │  d    │
-╰─────  │                                                                                  │  ─────╯
+╰─────  │ Attached directories: 0                                                          │  ─────╯
 ╭ Targ  │                                                                                  │     ▄ ╮
 │  Hos  │                                                                                  │       │
-╰─────  │                                                                                  │  ─────╯
-╭ Prof  │                                                                                  │     ▄ ╮
+╰─────  │ Sub-agents Native ▾                                                              │  ─────╯
+╭ Prof  │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │     ▄ ╮
 │ANTHR  │                                                                                  │       │
 │ + re  │                                                                                  │       │
 │OPENA  │                                                                                  │       │
 │ + 2   │                                                                                  │       │
-╰─────  │   Cancel     Back     Add directory…     Create                                  │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Back     Add directory…     Create                                  │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 Selected project hel.
 action: None
@@ -257,28 +257,28 @@ action: None
 ╭ Sess  ╭ × Choose a project ──────────────────────────────────────────────────────────────╮       │
 │ Crea  │                                                                                  │       │
 │No se  │   Recent     GitHub     ●URL or Path                                             │       │
-│Creat  │                                                                                  │       │
-│       │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed.         │       │
+│Creat  │                                                                                  │  ─────╯
+│       │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed.         │  ─────╮
 │       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │ ☒ Use several repositories together                                              │       │
-│       │                                                                                  │  ─────╯
-│       │ Main  owner/main                                                                 │  ─────╮
-│       │ Also  owner/remove                                                               │       │
-│       │ Also  owner/shared                                                               │  d    │
+│       │                                                                                  │  d    │
 ╰─────  │                                                                                  │  ─────╯
-╭ Targ  │   Add repository     Make main     Remove                                        │     ▄ ╮
+╭ Targ  │ ☒ Use several repositories together                                              │     ▄ ╮
 │  Hos  │                                                                                  │       │
-╰─────  │                                                                                  │  ─────╯
-╭ Prof  │                                                                                  │     ▄ ╮
-│ANTHR  │                                                                                  │       │
+╰─────  │ Main  owner/main                                                                 │  ─────╯
+╭ Prof  │ Also  owner/remove                                                               │     ▄ ╮
+│ANTHR  │ Also  owner/shared                                                               │       │
 │ + re  │                                                                                  │       │
-│OPENA  │                                                                                  │       │
+│OPENA  │   Add repository     Make main     Remove                                        │       │
 │ + 2   │                                                                                  │       │
-╰─────  │   Cancel     Back     Use 3 repositories                                         │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Back     Use 3 repositories                                         │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === project_picker_multiple_sources_wait_for_submit_and_remove_selected (100x30) ===
@@ -288,28 +288,28 @@ action: None
 ╭ Sess  ╭ × Choose a project ──────────────────────────────────────────────────────────────╮       │
 │ Crea  │                                                                                  │       │
 │No se  │   Recent     GitHub     ●URL or Path                                             │       │
-│Creat  │                                                                                  │       │
-│       │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed.         │       │
+│Creat  │                                                                                  │  ─────╯
+│       │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed.         │  ─────╮
 │       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │ ☒ Use several repositories together                                              │       │
-│       │                                                                                  │  ─────╯
-│       │ Main  owner/main                                                                 │  ─────╮
-│       │ Also  owner/shared                                                               │       │
 │       │                                                                                  │  d    │
-╰─────  │   Add repository     Make main     Remove                                        │  ─────╯
-╭ Targ  │                                                                                  │     ▄ ╮
-│  Hos  │                                                                                  │       │
 ╰─────  │                                                                                  │  ─────╯
-╭ Prof  │                                                                                  │     ▄ ╮
+╭ Targ  │ ☒ Use several repositories together                                              │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │ Main  owner/main                                                                 │  ─────╯
+╭ Prof  │ Also  owner/shared                                                               │     ▄ ╮
 │ANTHR  │                                                                                  │       │
-│ + re  │                                                                                  │       │
+│ + re  │   Add repository     Make main     Remove                                        │       │
 │OPENA  │                                                                                  │       │
 │ + 2   │                                                                                  │       │
-╰─────  │   Cancel     Back     Use 2 repositories                                         │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Back     Use 2 repositories                                         │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateBundle { sources: ["owner/main", "owner/shared"] }
@@ -353,28 +353,28 @@ project request: Github { query: "" }
 ╭ Sess  ╭ × Choose a project ──────────────────────────────────────────────────────────────╮       │
 │ Crea  │                                                                                  │       │
 │No se  │   Recent     ●GitHub     URL or Path                                             │       │
-│Creat  │                                                                                  │       │
-│       │ Your GitHub repositories. Search by name or owner/repository.                    │       │
+│Creat  │                                                                                  │  ─────╯
+│       │ Your GitHub repositories. Search by name or owner/repository.                    │  ─────╮
 │       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Search                                                                         │       │
-│       │                                                                                  │  ─────╯
-│       │ ✓ app  owner/app                                                                 │  ─────╮
-│       │   shared  owner/shared                                                           │       │
 │       │                                                                                  │  d    │
-╰─────  │ ☒ Use several repositories together                                              │  ─────╯
-╭ Targ  │                                                                                  │     ▄ ╮
-│  Hos  │ Main  owner/app                                                                  │       │
 ╰─────  │                                                                                  │  ─────╯
-╭ Prof  │   Add repository     Make main     Remove                                        │     ▄ ╮
+╭ Targ  │   Search                                                                         │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │ ✓ app  owner/app                                                                 │  ─────╯
+╭ Prof  │   shared  owner/shared                                                           │     ▄ ╮
 │ANTHR  │                                                                                  │       │
-│ + re  │                                                                                  │       │
+│ + re  │ ☒ Use several repositories together                                              │       │
 │OPENA  │                                                                                  │       │
-│ + 2   │                                                                                  │       │
-╰─────  │   Cancel     Back     Use 1 repository                                           │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+│ + 2   │ Main  owner/app                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │   Add repository     Make main     Remove                                        │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Back     Use 1 repository                                           │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary (100x30) ===
@@ -384,28 +384,28 @@ project request: Github { query: "" }
 ╭ Sess  ╭ × Choose a project ──────────────────────────────────────────────────────────────╮       │
 │ Crea  │                                                                                  │       │
 │No se  │   Recent     ●GitHub     URL or Path                                             │       │
-│Creat  │                                                                                  │       │
-│       │ Your GitHub repositories. Search by name or owner/repository.                    │       │
+│Creat  │                                                                                  │  ─────╯
+│       │ Your GitHub repositories. Search by name or owner/repository.                    │  ─────╮
 │       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Search                                                                         │       │
-│       │                                                                                  │  ─────╯
-│       │ ✓ app  owner/app                                                                 │  ─────╮
-│       │ ✓ shared  owner/shared                                                           │       │
 │       │                                                                                  │  d    │
-╰─────  │ ☒ Use several repositories together                                              │  ─────╯
-╭ Targ  │                                                                                  │     ▄ ╮
-│  Hos  │ Main  owner/shared                                                               │       │
-╰─────  │ Also  owner/app                                                                  │  ─────╯
-╭ Prof  │                                                                                  │     ▄ ╮
-│ANTHR  │   Add repository     Make main     Remove                                        │       │
-│ + re  │                                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │   Search                                                                         │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │ ✓ app  owner/app                                                                 │  ─────╯
+╭ Prof  │ ✓ shared  owner/shared                                                           │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│ + re  │ ☒ Use several repositories together                                              │       │
 │OPENA  │                                                                                  │       │
-│ + 2   │                                                                                  │       │
-╰─────  │   Cancel     Back     Use 2 repositories                                         │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+│ + 2   │ Main  owner/shared                                                               │       │
+╰─────  │ Also  owner/app                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │   Add repository     Make main     Remove                                        │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Back     Use 2 repositories                                         │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateBundle { sources: ["owner/shared", "owner/app"] }
@@ -1444,28 +1444,28 @@ action: None
 ╭ Sess  ╭ × Add attached directory ────────────────────────────────────────────────────────╮       │
 │ Crea  │                                                                                  │       │
 │No se  │ Target: podman (local Podman)                                                    │       │
-│Creat  │                                                                                  │       │
-│       │ Podman uses :O copy-on-write overlays; read-only skips the overlay.              │       │
+│Creat  │                                                                                  │  ─────╯
+│       │ Podman uses :O copy-on-write overlays; read-only skips the overlay.              │  ─────╮
 │       │                                                                                  │       │
-│       │ Source:   /opt/                                                                  │       │
-│       │           ╭ matches ─────────────────────────────────────────────────────────╮   │       │
-│       │ Destinatio│/opt/directory-0/                                                 │   │       │
-│       │           │/opt/directory-1/                                                 │   │  ─────╯
-│       │ Access:   │/opt/directory-2/                                                 │   │  ─────╮
-│       │           │/opt/directory-3/                                                 │   │       │
-│       │           │/opt/directory-4/                                                 │   │  d    │
-╰─────  │           │/opt/directory-5/                                                 │   │  ─────╯
-╭ Targ  │           │/opt/directory-6/                                                 │   │     ▄ ╮
-│  Hos  │           │/opt/directory-7/                                                 │   │       │
+│       │ Source:   /opt/                                                                  │  d    │
+╰─────  │           ╭ matches ─────────────────────────────────────────────────────────╮   │  ─────╯
+╭ Targ  │ Destinatio│/opt/directory-0/                                                 │   │     ▄ ╮
+│  Hos  │           │/opt/directory-1/                                                 │   │       │
+╰─────  │ Access:   │/opt/directory-2/                                                 │   │  ─────╯
+╭ Prof  │           │/opt/directory-3/                                                 │   │     ▄ ╮
+│ANTHR  │           │/opt/directory-4/                                                 │   │       │
+│ + re  │           │/opt/directory-5/                                                 │   │       │
+│OPENA  │           │/opt/directory-6/                                                 │   │       │
+│ + 2   │           │/opt/directory-7/                                                 │   │       │
 ╰─────  │           ╰──────────────────────────────────────────────────────────────────╯   │  ─────╯
-╭ Prof  │                                                                                  │     ▄ ╮
-│ANTHR  │                                                                                  │       │
-│ + re  │                                                                                  │       │
-│OPENA  │                                                                                  │       │
-│ + 2   │                                                                                  │       │
-╰─────  │   Cancel     Back     Add directory                                              │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Back     Add directory                                              │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === directory_completion_lists_every_candidate_and_selects_with_keys (100x30) ===
@@ -1475,28 +1475,28 @@ action: None
 ╭ Sess  ╭ × Add attached directory ────────────────────────────────────────────────────────╮       │
 │ Crea  │                                                                                  │       │
 │No se  │ Target: podman (local Podman)                                                    │       │
-│Creat  │                                                                                  │       │
-│       │ Podman uses :O copy-on-write overlays; read-only skips the overlay.              │       │
+│Creat  │                                                                                  │  ─────╯
+│       │ Podman uses :O copy-on-write overlays; read-only skips the overlay.              │  ─────╮
 │       │                                                                                  │       │
-│       │ Source:   /opt/directory-1/                                                      │       │
-│       │                                                                                  │       │
-│       │ Destinatio                                                                       │       │
-│       │                                                                                  │  ─────╯
-│       │ Access:   ro · read-only ▾                                                       │  ─────╮
-│       │                                                                                  │       │
-│       │                                                                                  │  d    │
+│       │ Source:   /opt/directory-1/                                                      │  d    │
 ╰─────  │                                                                                  │  ─────╯
-╭ Targ  │                                                                                  │     ▄ ╮
+╭ Targ  │ Destinatio                                                                       │     ▄ ╮
 │  Hos  │                                                                                  │       │
-╰─────  │                                                                                  │  ─────╯
+╰─────  │ Access:   ro · read-only ▾                                                       │  ─────╯
 ╭ Prof  │                                                                                  │     ▄ ╮
 │ANTHR  │                                                                                  │       │
 │ + re  │                                                                                  │       │
 │OPENA  │                                                                                  │       │
 │ + 2   │                                                                                  │       │
-╰─────  │   Cancel     Back     Add directory                                              │  ─────╯
-╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│Nothi                                                                                             │
+╰─────  │                                                                                  │  ─────╯
+╭ Noti  │                                                                                  │     ▄ ╮
+│Nothi  │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │   Cancel     Back     Add directory                                              │       │
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                                  │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: None
@@ -1506,7 +1506,7 @@ action: None
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│No sessions yet                             ││                                                                                            │
+│No sessions yet                             ││                                      ✦  M J O L N I R                                      │
 │Create new work or open a                                                                                                                 │
 │                                                                                                                                          │
 │                           ╭ × New session · 2/3 local project ───────────────────────────────────────────────╮                           │
@@ -1516,29 +1516,29 @@ action: None
 │                           │ /work/newer                                                                      │                           │
 │                           │                                                                                  │                           │
 │                           │ Error: previous path was invalid                                                 │                           │
-│                           │                                                                                  │                           │
-│                           │ Recent on this host:                                                             │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │ Recent on this host:                                                             │  ─────────────────────────╮
 │                           │                                                                                  │                           │
 │                           │ › /work/newer                                                                    │                           │
-│                           │   /work/older                                                                    │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ─────────────────────────╮
-│                           │                                                                                  │                           │
+│                           │   /work/older                                                                    │  ─────────────────────────╯
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││ + 2 refreshing…                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
@@ -1547,7 +1547,7 @@ action: None
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│No sessions yet                             ││                                                                                            │
+│No sessions yet                             ││                                      ✦  M J O L N I R                                      │
 │Create new work or open a                                                                                                                 │
 │                                                                                                                                          │
 │                           ╭ × New session · 2/3 local project ───────────────────────────────────────────────╮                           │
@@ -1557,29 +1557,29 @@ action: None
 │                           │ /work/newer                                                                      │                           │
 │                           │                                                                                  │                           │
 │                           │ Error: previous path was invalid                                                 │                           │
-│                           │                                                                                  │                           │
-│                           │ Recent on this host:                                                             │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │ Recent on this host:                                                             │  ─────────────────────────╮
 │                           │                                                                                  │                           │
 │                           │ › /work/newer                                                                    │                           │
-│                           │   /work/older                                                                    │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ─────────────────────────╮
-│                           │                                                                                  │                           │
+│                           │   /work/older                                                                    │  ─────────────────────────╯
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││ + 2 refreshing…                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
@@ -1588,7 +1588,7 @@ action: None
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│No sessions yet                             ││                                                                                            │
+│No sessions yet                             ││                                      ✦  M J O L N I R                                      │
 │Create new work or open a                                                                                                                 │
 │                                                                                                                                          │
 │                           ╭ × New session · 2/3 local project ───────────────────────────────────────────────╮                           │
@@ -1598,29 +1598,29 @@ action: None
 │                           │ /work/older                                                                      │                           │
 │                           │                                                                                  │                           │
 │                           │ Recent on this host:                                                             │                           │
-│                           │                                                                                  │                           │
-│                           │   /work/newer                                                                    │                           │
-│                           │ › /work/older                                                                    │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ─────────────────────────╮
-│                           │                                                                                  │                           │
+│                           │   /work/newer                                                                    │  ─────────────────────────╮
+│                           │ › /work/older                                                                    │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││ + 2 refreshing…                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 action: ValidateProjectDirectory { target_template_id: "localhost", directory: "/work/older" }

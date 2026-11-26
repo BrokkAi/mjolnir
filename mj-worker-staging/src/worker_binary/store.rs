@@ -45,7 +45,7 @@ pub fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
     let command = targets::locator_command(SshTrafficClass::Control, locator, vec!["true".into()]);
     format!(
         "{:?}:{}:{:?}:{root}",
-        data_dir(),
+        DataLayout::current().root(),
         command.program,
         command.args
     )
@@ -618,7 +618,7 @@ if [ "$mode" != hit ]; then
         fi
     fi
 fi
-chmod 700 -- "$temporary"
+chmod -- 700 "$temporary"
 promote_worker_binary "$temporary" "$destination"
 case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
 collect_worker_store "$store" "$digest" || echo 'worker binary store collection failed' >&2
@@ -899,7 +899,7 @@ fn transfer_binary(
             [
                 "sh",
                 "-c",
-                "umask 077; cat > \"$1\" && chmod 700 -- \"$1\"",
+                "umask 077; cat > \"$1\" && chmod -- 700 \"$1\"",
                 "mj-upload",
                 destination,
             ],

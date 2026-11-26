@@ -5,18 +5,12 @@
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           25                                                         │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           25                                                         │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -24,8 +18,14 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │ Resolving the build cache defaults on the machine…                                           │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │ Resolving the build cache defaults on the machine…                                           │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -37,18 +37,12 @@ Enter open · / searc                                                           
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Default                                                    │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           107                                                        │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           107                                                        │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -56,8 +50,14 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │ Resolving the build cache defaults on the machine…                                           │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │ Resolving the build cache defaults on the machine…                                           │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -70,27 +70,27 @@ editor value: 107
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           10GiB                                                      │                     │
-│                     │ Enter a whole number of gigabytes.                                                           │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
+│                     │ Total cache budget (GB)           10GiB                                                      │  ───────────────────╯
+│                     │ Enter a whole number of gigabytes.                                                           │  ──────────── ▁   ▄ ╮
+│                     │   Compile scheduling              2 settings  ›                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │ Resolving the build cache defaults on the machine…                                           │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │ Resolving the build cache defaults on the machine…                                           │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -103,27 +103,27 @@ stored size after rejection: "100GiB"
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           0                                                          │                     │
-│                     │ Enter at least 1 GB, or clear the field to use the default.                                  │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
+│                     │ Total cache budget (GB)           0                                                          │  ───────────────────╯
+│                     │ Enter at least 1 GB, or clear the field to use the default.                                  │  ──────────── ▁   ▄ ╮
+│                     │   Compile scheduling              2 settings  ›                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │ Resolving the build cache defaults on the machine…                                           │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │ Resolving the build cache defaults on the machine…                                           │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -137,18 +137,12 @@ saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           12                                                         │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           12                                                         │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -157,7 +151,13 @@ saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Settings saved. New
@@ -169,18 +169,12 @@ Settings saved. New
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           12                                                         │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           12                                                         │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -189,7 +183,13 @@ Settings saved. New
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Settings saved. New
@@ -202,16 +202,10 @@ budget after Use default: null
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Compile scheduling                              │                     │
 │ Create   Open   Fi  │ mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's          │                     │
 │hel ───────────────  │ defaults.                                                                                    │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Concurrent compile permits        Default                                                    │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Concurrent compile permits        Default                                                    │  ───────────────────╮
 │  │ No messages yet  │ Compile admission budget          Default                                                    │                     │
 │  │                  │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
@@ -222,7 +216,13 @@ budget after Use default: null
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -234,16 +234,10 @@ Enter open · / searc                                                           
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Compile scheduling                              │                     │
 │ Create   Open   Fi  │ mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's          │                     │
 │hel ───────────────  │ defaults.                                                                                    │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Concurrent compile permits        12                                                         │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Concurrent compile permits        12                                                         │  ───────────────────╮
 │  │ No messages yet  │ Compile admission budget          6GiB                                                       │                     │
 │  │                  │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
@@ -254,7 +248,13 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -267,18 +267,12 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           Resolving…                                                 │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           Resolving…                                                 │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -287,7 +281,13 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -299,18 +299,12 @@ Enter open · / searc                                                           
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           Resolving…                                                 │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           Resolving…                                                 │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -319,7 +313,13 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -332,18 +332,12 @@ Tab-reached Save action: true
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           Resolving…                                                 │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           Resolving…                                                 │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -352,7 +346,13 @@ Tab-reached Save action: true
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -364,16 +364,10 @@ Enter open · / searc                                                           
 ╭ Sessions ─────────  │ Settings › Machines › local                                                                  │                     │
 │ Create   Open   Fi  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │hel ───────────────  │                                                                                              │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Build caches                    Enabled by default · automatic budget  ›          Remove   │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │   Build caches                    Enabled by default · automatic budget  ›          Remove   │  ───────────────────╮
 │  │ No messages yet  │                                                                                              │                     │
 │  │                  │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
@@ -384,7 +378,13 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -396,18 +396,12 @@ Enter open · / searc                                                           
 ╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │                     │
+│› ■ ACP pretty name  │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Enabled                           Default (on) ▾                                             │  ───────────────────╮
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
-│                     │ Total cache budget (GB)           250                                                        │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │ Total cache budget (GB)           250                                                        │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
@@ -415,8 +409,14 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │ Resolving the build cache defaults on the machine…                                           │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │ Resolving the build cache defaults on the machine…                                           │                     │
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -437,13 +437,6 @@ Enter open · / searc                                                           
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -455,10 +448,17 @@ Enter open · / searc                                                           
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │  ─────────────────────────────╯
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │   Back     Save and Close                                                                    │                               │
-│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ─────────────────────────────╯
-│                                                                                                                                 ────────────────────── ▁   ▄ ╮
+│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                               │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -479,13 +479,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │   Compile scheduling              2 settings  ›                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -498,9 +491,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │  ─────────────────────────────╯
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
 │                               │   Back     Save and Close                                                                    │                               │
-│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ─────────────────────────────╯
-│                                                                                                                                 ────────────────────── ▁   ▄ ╮
+│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                               │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -521,13 +521,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -539,10 +532,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │  ─────────────────────────────╯
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │   Back     Save and Close                                                                    │                               │
-│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ─────────────────────────────╯
-│                                                                                                                                 ────────────────────── ▁   ▄ ╮
+│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                               │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -564,13 +564,6 @@ summary contains changed state: true
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -582,10 +575,17 @@ summary contains changed state: true
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │  ─────────────────────────────╯
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │   Back     Save and Close                                                                    │                               │
-│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ─────────────────────────────╯
-│                                                                                                                                 ────────────────────── ▁   ▄ ╮
+│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                               │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -606,13 +606,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │   Compile scheduling              2 settings  ›                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -625,9 +618,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │  ─────────────────────────────╯
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
 │                               │   Back     Save and Close                                                                    │                               │
-│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ─────────────────────────────╯
-│                                                                                                                                 ────────────────────── ▁   ▄ ╮
+│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                               │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
@@ -648,13 +648,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -666,10 +659,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │  ─────────────────────────────╯
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
+│                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │   Back     Save and Close                                                                    │                               │
-│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ─────────────────────────────╯
-│                                                                                                                                 ────────────────────── ▁   ▄ ╮
+│                               ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                               │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette

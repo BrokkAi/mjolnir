@@ -89,30 +89,23 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│[1] asks ───────────────────────────────────││                                                                                            │
+│[1] asks ───────────────────────────────────││                                      ✦  M J O L N I R                                      │
 │  × ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Review failed  podman  codex-1            ││                                                                                            │
+│  Review failed  podman  codex-1            ││                         Select a session to open its conversation.                         │
 │  │ Choose a path                           ││                                                                                            │
-│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                                                                            │
 │                                            ││                                                                                            │
-│[2] done ───────────────────────────────────││                         Select a session to open its conversation.                         │
+│[2] done ───────────────────────────────────││                                                                                            │
 │  ✓ ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                                                                            │
-│[3] quiet ──────────────────────────────────││                                                                                            │
-│  · ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│  │                                         │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
-│                                            ││No conversation open.                                                                       │
-│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│[3] quiet ──────────────────────────────────││No conversation open.                                                                       │
+│  · ACP pretty name                     ◇ ⋯ ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│  Idle  podman  codex-1                     │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│  │ No messages yet                         │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  │                                         ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
@@ -122,6 +115,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · b panes · q detach · : / ? palette
 attention levels: asks=Failed, remote=Unreachable, done=Unread, quiet=Idle, missing=Inactive; queue: [asks:Failed, remote:Unreachable, done:Unread]
@@ -265,18 +265,11 @@ workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -298,6 +291,13 @@ workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 workspace summary: None; badge: absent
@@ -745,30 +745,23 @@ action: Open { session_id: "asks" }; folded projects: {}
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│[1] asks ───────────────────────────────────││                                                                                            │
+│[1] asks ───────────────────────────────────││                                      ✦  M J O L N I R                                      │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
-│[2] done ───────────────────────────────────││                         Select a session to open its conversation.                         │
-│  · ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Idle  podman  codex-1                     ││                                                                                            │
+│  Idle  podman  codex-1                     ││                         Select a session to open its conversation.                         │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
 │                                            ││                                                                                            │
-│[3] quiet ──────────────────────────────────││                                                                                            │
+│[2] done ───────────────────────────────────││                                                                                            │
 │  · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│  │                                         │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
-│                                            ││No conversation open.                                                                       │
-│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│[3] quiet ──────────────────────────────────││No conversation open.                                                                       │
+│  · ACP pretty name                     ◇ ⋯ ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│  Idle  podman  codex-1                     │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│  │ No messages yet                         │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  │                                         ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
@@ -778,6 +771,13 @@ action: Open { session_id: "asks" }; folded projects: {}
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Nothing is waiting for you.
 action: None; notice: Some("Nothing is waiting for you.")
@@ -831,18 +831,11 @@ footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g se
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
-│hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
+│hel ────────────────────────────────────────────────────────────││                                                          ✦  M J O L N I R                                                          │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
-│  Idle  podman  codex-1                                         ││                                                                                                                                    │
+│  Idle  podman  codex-1                                         ││                                             Select a session to open its conversation.                                             │
 │  │ No messages yet                                             ││                                                                                                                                    │
-│  │                                                             ││                                                          ✦  M J O L N I R                                                          │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                             Select a session to open its conversation.                                             │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
+│  │                                                             ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
@@ -864,6 +857,13 @@ footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g se
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
+│                                                                ││                                                                                                                                    │
+│                                                                ││                                                                                                                                    │
+│                                                                ││                                                                                                                                    │
+│                                                                ││                                                                                                                                    │
+│                                                                ││                                                                                                                                    │
+│                                                                ││                                                                                                                                    │
+│                                                                ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette

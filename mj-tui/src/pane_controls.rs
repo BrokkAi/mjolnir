@@ -1286,14 +1286,20 @@ mod tests {
     /// The keyboard path: `.` on the focused pane opens the same menu, Enter
     /// runs the entry under the cursor, and Esc closes it without running
     /// anything.
-    /// Minimized, Targets and Profiles are the last two rows above the
-    /// footer, so neither has room for the menu under its title and the
-    /// menu opens upward, still starting at the title's first column.
+    /// Minimized, with Notifications minimized as well, Targets and Profiles
+    /// are the last rows above the footer, so neither has room for the menu
+    /// under its title and the menu opens upward, still starting at the
+    /// title's first column. (A Standard Notifications band reserves its full
+    /// height below them, which would leave room for the menu to open down.)
     #[test]
     fn a_minimized_pane_menu_opens_above_its_row() {
         for (_, index, name, focus, _) in TITLE_MENUS {
             let mut d = dashboard_with_session(running_session());
-            for pane in [SupportPane::Targets, SupportPane::Quota] {
+            for pane in [
+                SupportPane::Targets,
+                SupportPane::Quota,
+                SupportPane::Notifications,
+            ] {
                 d.set_pane_size(pane, crate::PaneSize::Minimized);
             }
             drawn(&mut d, 140, 40);
@@ -1310,7 +1316,11 @@ mod tests {
             // The minimized row carries the same dropdown mark, and clicking
             // it opens the same menu from the same cell.
             let mut d = dashboard_with_session(running_session());
-            for pane in [SupportPane::Targets, SupportPane::Quota] {
+            for pane in [
+                SupportPane::Targets,
+                SupportPane::Quota,
+                SupportPane::Notifications,
+            ] {
                 d.set_pane_size(pane, crate::PaneSize::Minimized);
             }
             let lines = drawn(&mut d, 140, 40);

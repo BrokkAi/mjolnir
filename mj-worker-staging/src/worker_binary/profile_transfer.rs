@@ -23,7 +23,7 @@ fn upload_generations() -> &'static Mutex<HashMap<HostKey, u64>> {
 
 fn host_key(ssh: &SshTarget) -> HostKey {
     (
-        mj_core::config::data_dir(),
+        mj_core::config::DataLayout::current().root().to_path_buf(),
         ssh.destination.clone(),
         ssh.ssh_args.clone(),
     )

@@ -50,7 +50,7 @@ fn test_config() -> Config {
                     container: mj_core::config::ContainerTemplate {
                         memory_hard_limit: None,
                         build_cache: None,
-                        image: "agent-dev:latest".to_owned(),
+                        image: "session-base:latest".to_owned(),
                         pull_policy: Default::default(),
                         platform: None,
                         cpus: None,

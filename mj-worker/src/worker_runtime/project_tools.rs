@@ -554,7 +554,7 @@ mod tests {
     // Hard-won: review of a045f704a: a version mismatch was not counted, so a recipe pinning a package the image has at another version skipped `apply`.
     #[test]
     fn package_version_mismatches_need_apply_except_for_any_version() {
-        // Output of mise 2026.11.9 on buildpack-deps:noble.
+        // Output of mise 2026.11.9 on Ubuntu noble.
         let status = serde_json::json!({"apt": {"available": true, "packages": [
             {"package": "curl", "requested_version": "latest", "desired_state": "present",
              "state": "installed", "installed_version": "8.5.0-2ubuntu10.16"},

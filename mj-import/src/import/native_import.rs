@@ -229,6 +229,7 @@ pub fn import_native_session(
             notifications_ignored: false,
             project: Some(project.into()),
             target_runtime: None,
+            machine_id: None,
             launch_base: None,
             launch_branch: None,
             checkout: None,

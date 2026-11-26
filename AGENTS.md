@@ -296,6 +296,9 @@ corresponding managed-install assets when changing a pin.
 - dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs`.
   Sessions and the model discovery probe use `dsh_acp_launch_script()` for
   the `npx -y @brokkai/dsh-acp@<version>` fallback.
+  Then run `python3 tests/e2e/dsh_native_subagent_patch.py`: Mjolnir's DSH
+  home patch disables native sub-agent plugin rows by id, and the script
+  checks those ids still exist and still remove the root-agent identity.
 - OpenCode: regenerate `mj-core/assets/opencode-provider-environment.txt`
   with `scripts/generate-opencode-provider-environment.py` from a checkout of
   the new tag. The test

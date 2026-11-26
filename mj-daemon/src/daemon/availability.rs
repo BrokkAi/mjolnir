@@ -400,7 +400,7 @@ pub(super) fn project(
         });
     }
     for (id, _) in config.machines_without_runtimes() {
-        let Some(probe) = machines.get(id) else {
+        let Some(probe) = machines.get(id.as_str()) else {
             continue;
         };
         let reason = finding_reason(probe);
@@ -439,7 +439,7 @@ pub(super) fn project(
         });
         projection
             .machines_without_runtime
-            .insert(id.to_owned(), reason);
+            .insert(id.to_string(), reason);
         projection.target_notes.push(note);
     }
     projection
@@ -480,8 +480,8 @@ fn target_finding(
             }
         }
         _ => {
-            let Some(probe) =
-                target_machine_id(target, &config.machines).and_then(|id| machines.get(id))
+            let Some(probe) = target_machine_id(target, &config.machines)
+                .and_then(|id| machines.get(id.as_str()))
             else {
                 return unknown;
             };
@@ -491,7 +491,7 @@ fn target_finding(
                     remediation,
                     answered_nothing,
                 } => TargetFinding::Unreachable {
-                    machine: probe.machine_id.clone(),
+                    machine: probe.machine_id.to_string(),
                     detail: detail.clone(),
                     remediation: remediation.clone(),
                     answered_nothing: *answered_nothing,
@@ -636,7 +636,10 @@ mod tests {
             build_cache: None,
         };
         let config = Config {
-            machines: BTreeMap::from([("mac".into(), machine.clone())]),
+            machines: BTreeMap::from([(
+                mj_core::config::MachineId::new("mac").unwrap(),
+                machine.clone(),
+            )]),
             targets: BTreeMap::from([
                 (
                     "apple".into(),
@@ -673,7 +676,7 @@ mod tests {
                 targets: config.targets.clone(),
                 local: vec![runtime.clone()],
                 machines: vec![MachineProbe {
-                    machine_id: "mac".into(),
+                    machine_id: mj_core::config::MachineId::new("mac").unwrap(),
                     machine: machine.clone(),
                     outcome: MachineProbeOutcome::Answered(vec![runtime]),
                 }],

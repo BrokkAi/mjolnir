@@ -4729,7 +4729,9 @@ fn a_machine_without_a_runtime_keeps_the_target_step_and_says_why() {
         workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
         build_cache: None,
     };
-    config.machines.insert("nas".into(), nas);
+    config
+        .machines
+        .insert(mj_core::config::MachineId::new("nas").unwrap(), nas);
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
     crate::test_support::answer_availability(&mut dashboard, |dashboard| {
@@ -4753,7 +4755,10 @@ fn unreachable_only_target_blocking_notice_keeps_remediation() {
     config.targets.clear();
     config.targets.insert("machine".into(), bare_ssh_target());
     config.default_targets = ["machine".to_owned()].into();
-    config.machines.insert("machine".into(), bare_ssh_machine());
+    config.machines.insert(
+        mj_core::config::MachineId::new("machine").unwrap(),
+        bare_ssh_machine(),
+    );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
     crate::test_support::answer_availability(&mut dashboard, |dashboard| {
@@ -5069,10 +5074,10 @@ fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
             .config
             .targets
             .insert("machine".into(), bare_ssh_target());
-        dashboard
-            .config
-            .machines
-            .insert("machine".into(), bare_ssh_machine());
+        dashboard.config.machines.insert(
+            mj_core::config::MachineId::new("machine").unwrap(),
+            bare_ssh_machine(),
+        );
         // A second runtime on the same machine shares its one line.
         let TargetTemplate::SshBare { ssh, .. } = bare_ssh_target() else {
             unreachable!("a bare SSH target");
@@ -6084,8 +6089,8 @@ fn single_profile_raw_resume_starts_checks_without_confirm() {
 #[test]
 fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_skipped() {
     use mj_core::subagent::SubagentPolicy;
-    // DSH shows a stored Native as None, which is what it does there; an
-    // untouched Move still retains the stored policy.
+    // An untouched Move retains the stored policy for every destination,
+    // including one whose harness normalizes Native to another choice.
     for (destination, stored) in [HarnessKind::Claude, HarnessKind::Dsh]
         .into_iter()
         .flat_map(|destination| {
@@ -6503,10 +6508,7 @@ fn new_session_wizard_keeps_its_frame_across_steps() {
     }
 }
 
-/// An agent using the Mjolnir guardian on a raw machine is warned about once,
-/// at the review, with the sandboxed target one press away; without one the
-/// warning says what is missing instead.
-fn review_warns_once_and_offers_a_sandboxed_target() {
+fn new_review_allows_mjolnir_guardian_on_raw_hosts() {
     let build = |with_podman: bool| {
         let mut configuration = config();
         configuration.profiles = BTreeMap::from([(
@@ -6538,55 +6540,16 @@ fn review_warns_once_and_offers_a_sandboxed_target() {
         lines.join("\n")
     };
 
-    let mut without = build(false);
-    let screen = draw(&mut without);
-    assert_eq!(
-        screen.matches("runs directly on the host").count(),
-        1,
-        "{screen}"
-    );
-    assert!(
-        screen.contains("No compatible sandbox is available"),
-        "{screen}"
-    );
-
-    let mut with = build(true);
-    let screen = draw(&mut with);
-    assert_eq!(
-        screen.matches("runs directly on the host").count(),
-        1,
-        "{screen}"
-    );
-    assert!(
-        screen.contains("Use podman instead (sandboxed)"),
-        "{screen}"
-    );
-    // Activating the offer returns to the target step with the sandbox chosen.
-    let lines = screen.lines().map(str::to_owned).collect::<Vec<_>>();
-    let (column, row) = point(&lines, "Use podman instead");
-    for kind in [
-        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
-    ] {
-        with.handle_mouse(mouse_at(kind, (column, row)));
+    for with_podman in [false, true] {
+        let mut dashboard = build(with_podman);
+        let screen = draw(&mut dashboard);
+        assert!(screen.contains("kimi-1"), "{screen}");
+        assert!(!screen.contains("sandbox"), "{screen}");
+        assert!(!screen.contains("runs directly on the host"), "{screen}");
     }
-    let screen = draw(&mut with);
-    assert!(
-        screen.contains("TARGET") && screen.contains("STATUS"),
-        "{screen}"
-    );
-    let Mode::New(wizard) = &with.mode else {
-        panic!("new session wizard")
-    };
-    assert_eq!(wizard.step, WizardStep::Target);
-    assert_ne!(wizard.target, "localhost");
 }
 
-// Hard-won: 01a64d2e8: trimming blank lines could remove the sandbox button row.
-/// Resuming on a bare target an agent using the Mjolnir guardian: the review
-/// carries the sandbox button, and no worktree, sub-agent or attachment
-/// control follows it, so its row is the last control row.
-fn resume_review_keeps_the_sandbox_button_as_its_last_row() {
+fn resume_review_allows_mjolnir_guardian_on_raw_hosts() {
     let mut session = stopped_session();
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/work/project".into());
@@ -6617,19 +6580,20 @@ fn resume_review_keeps_the_sandbox_button_as_its_last_row() {
         wizard.step = WizardStep::Review;
     }
     let review = captured_drawn(&mut dashboard, 140, 40).join("\n");
-    assert!(review.contains("sandboxed"), "{review}");
+    assert!(review.contains("kimi-1"), "{review}");
+    assert!(!review.contains("sandbox"), "{review}");
 }
 
 #[test]
 fn golden_wizard_target_step() {
     for (label, run) in [
         (
-            "review_warns_once_and_offers_a_sandboxed_target",
-            review_warns_once_and_offers_a_sandboxed_target as fn(),
+            "new_review_allows_mjolnir_guardian_on_raw_hosts",
+            new_review_allows_mjolnir_guardian_on_raw_hosts as fn(),
         ),
         (
-            "resume_review_keeps_the_sandbox_button_as_its_last_row",
-            resume_review_keeps_the_sandbox_button_as_its_last_row,
+            "resume_review_allows_mjolnir_guardian_on_raw_hosts",
+            resume_review_allows_mjolnir_guardian_on_raw_hosts,
         ),
         (
             "new_session_wizard_keeps_its_frame_across_steps",
@@ -6869,18 +6833,18 @@ fn golden_create_delegation_availability_and_submission() {
             SubagentPolicy::None
         );
     }
-    // DSH has no sub-agents of its own, so Native is not offered. Create
-    // starts on a remembered Mjolnir only when it is configured, and on None
-    // otherwise, and submits what it shows.
+    // DSH has sub-agents of its own, so Native is offered. Create starts on
+    // the remembered choice, falls back to Native when a remembered Mjolnir is
+    // unconfigured, and submits what it shows.
     let mjolnir = SubagentPolicy::Mjolnir {
         orchestrators: false,
         straightforward: None,
         subtle: None,
     };
     for (remembered, configured, expected) in [
-        (SubagentPolicy::Native, true, SubagentPolicy::None),
+        (SubagentPolicy::Native, true, SubagentPolicy::Native),
         (mjolnir.clone(), true, mjolnir.clone()),
-        (mjolnir.clone(), false, SubagentPolicy::None),
+        (mjolnir.clone(), false, SubagentPolicy::Native),
     ] {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Dsh;
@@ -6905,7 +6869,7 @@ fn golden_create_delegation_availability_and_submission() {
         assert_eq!(new_wizard(&dashboard).subagents.selected(), expected);
         assert_eq!(
             new_wizard(&dashboard).subagents.policies(),
-            ["Mjolnir", "None"]
+            ["Native", "Mjolnir", "None"]
         );
         let Mode::New(wizard) = &mut dashboard.mode else {
             unreachable!()
@@ -6982,8 +6946,18 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
             .unwrap()
             .contains("Claude, Codex, DSH, or OpenCode")
     );
-    // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
+    // DSH has native sub-agents now, so it lists all three and keeps Native.
+    // Unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
+    draft.update_choices("claude-1", &config);
+    assert_eq!(draft.policies(), ["Native", "Mjolnir", "None"]);
+    assert_eq!(draft.enabled_policies(), [true, false, true]);
+    assert_eq!(draft.selected(), SubagentPolicy::Native);
+    assert!(!draft.select_policy(1));
+    assert!(draft.select_policy(2));
+    assert_eq!(draft.selected(), SubagentPolicy::None);
+    // Antigravity has no native sub-agents of its own, so Native reads as None.
+    config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Antigravity;
     draft.update_choices("claude-1", &config);
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);

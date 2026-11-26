@@ -1266,7 +1266,7 @@ fn stage_mode_0600_file(
 ) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let script = format!(
-        "set -euo pipefail\nmkdir -p -- {}\numask 077\ncat > {}\nchmod 0600 -- {}\n",
+        "set -euo pipefail\nmkdir -p -- {}\numask 077\ncat > {}\nchmod -- 0600 {}\n",
         shell_quote(&parent.to_string_lossy()),
         shell_quote(&path.to_string_lossy()),
         shell_quote(&path.to_string_lossy()),

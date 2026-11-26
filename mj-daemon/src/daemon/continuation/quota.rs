@@ -39,26 +39,16 @@ pub(super) fn destinations(
     model: &str,
     candidates: Vec<SubagentCandidate>,
     now: i64,
-    execution_policy: mj_core::config::ExecutionPolicy,
     placement: mj_controller::profile_scheduler::Placement,
     category: Option<&str>,
     telemetry: &mj_controller::quota_telemetry::QuotaTelemetrySnapshot,
     power_ranking: &mj_controller::power_ranking::PowerRankingSnapshot,
 ) -> Result<Vec<SubagentCandidate>> {
     let mut wrapped = wrap_destinations(
-        eligible_destinations(
-            config,
-            source,
-            harness,
-            model,
-            candidates,
-            now,
-            execution_policy,
-        ),
+        eligible_destinations(config, source, harness, model, candidates, now),
         model,
     );
     let ctx = mj_controller::profile_scheduler::SchedulingContext {
-        execution_policy,
         placement,
         category,
         ranking_anchor: None,
@@ -78,12 +68,10 @@ fn eligible_destinations(
     model: &str,
     mut candidates: Vec<SubagentCandidate>,
     now: i64,
-    execution_policy: mj_core::config::ExecutionPolicy,
 ) -> Vec<SubagentCandidate> {
     candidates.retain(|c| {
         c.profile_id != source
             && c.harness == harness
-            && mj_controller::profile_scheduler::guardian_eligible(c.harness, execution_policy)
             && config
                 .native_continuity(harness, source, &c.profile_id)
                 .unwrap_or(false)
@@ -421,18 +409,6 @@ pub(super) async fn prepare(
                 ),
                 None => format!("the quota for profile {source} has no known reset time"),
             };
-            let execution_policy = if state
-                .owner()
-                .controller()
-                .state
-                .sessions
-                .get(id)
-                .is_some_and(|session| session.is_yolo_target(&config))
-            {
-                mj_core::config::ExecutionPolicy::Unconstrained
-            } else {
-                mj_core::config::ExecutionPolicy::ConfiguredApprovals
-            };
             let placement = if owned_child {
                 mj_controller::profile_scheduler::Placement::Orchestrator
             } else if child {
@@ -461,21 +437,12 @@ pub(super) async fn prepare(
             let power_ranking = state.power_ranking.snapshot();
             let mut refused = false;
             let mut remaining = wrap_destinations(
-                eligible_destinations(
-                    &config,
-                    &source,
-                    harness,
-                    &model,
-                    candidates,
-                    now_ms / 1000,
-                    execution_policy,
-                ),
+                eligible_destinations(&config, &source, harness, &model, candidates, now_ms / 1000),
                 &model,
             );
             while !remaining.is_empty() {
                 let reservation = state.quota_telemetry.draw_and_reserve(
                     &mut remaining,
-                    execution_policy,
                     placement,
                     Some(category),
                     None,
@@ -974,7 +941,7 @@ mod tests {
         use mj_core::state::SessionState;
         let mut config = Config::default();
         for id in ["source", "destination"] {
-            let home = mj_core::config::data_dir().join(id);
+            let home = mj_core::config::DataLayout::current().root().join(id);
             std::fs::create_dir_all(&home).unwrap();
             config
                 .profiles
@@ -983,7 +950,9 @@ mod tests {
         let workspace = mj_core::workspace::DEFAULT_WORKSPACE_ID;
         let mut parent = runtime_test_session("parent-session", workspace, SessionState::Running);
         parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join("parent-session"),
+            worker_root: mj_core::config::DataLayout::current()
+                .root()
+                .join("parent-session"),
         }));
         let mut owner = runtime_test_session("owner-session", workspace, SessionState::Parked);
         owner.harness_kind = HarnessKind::Claude;
@@ -991,12 +960,16 @@ mod tests {
         config
             .targets
             .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
-        let checkout = mj_core::config::data_dir().join("checkout");
+        let checkout = mj_core::config::DataLayout::current()
+            .root()
+            .join("checkout");
         std::fs::create_dir_all(&checkout).unwrap();
         parent.project_directory = Some(checkout.clone());
         owner.project_directory = Some(checkout);
         owner.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-            worker_root: mj_core::config::data_dir().join("owner-session"),
+            worker_root: mj_core::config::DataLayout::current()
+                .root()
+                .join("owner-session"),
         }));
         mj_controller::database::save_session(&parent).unwrap();
         mj_controller::database::register_subagent_with_startup(

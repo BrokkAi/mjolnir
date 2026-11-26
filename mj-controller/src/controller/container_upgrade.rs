@@ -102,7 +102,7 @@ impl Controller {
                         plan.capture_control_state(executor)?;
                     }
                     executor.end_resumable_work("replace session container")?;
-                    plan.replace(session_id, executor)?;
+                    plan.replace(session_id, crate::database::ownership_identity()?.as_str(), executor)?;
                     executor.begin_resumable_work()?;
                     let liveness = probe_worker_liveness(executor, &backend, session_id, &root)?;
                     ensure!(liveness.status == 0, "cannot establish replacement worker liveness; environment retained");
@@ -290,6 +290,7 @@ impl Controller {
             &locator,
             template,
             session_id,
+            crate::database::ownership_identity()?.as_str(),
             &mounts,
             &targets::container_workspace_root(record.container_workspace.as_deref()),
             for_resume,
@@ -457,11 +458,10 @@ impl Controller {
         };
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());
         let root = targets::worker_root(&backend, session_id)?;
-        let image = mj_core::state::ContainerSettings::upgrade_image(session, &container.image);
         let mut plan = targets::inspect_retained_container(
             &backend,
             session_id,
-            image,
+            &container.image,
             operation_id,
             Path::new(&workspace),
             Path::new(&root),
@@ -503,17 +503,14 @@ impl Controller {
             .target_runtime
             .as_mut()
             .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
+            && plan.replaces_settings()
         {
-            if plan.replaces_settings() {
-                settings
-                    .resource_allocation
-                    .clone_from(&record.resource_allocation);
-                settings
-                    .additional_mounts
-                    .clone_from(&record.additional_mounts);
-            } else if plan.image_changed() {
-                settings.record_upgrade_image(&plan.target_image);
-            }
+            settings
+                .resource_allocation
+                .clone_from(&record.resource_allocation);
+            settings
+                .additional_mounts
+                .clone_from(&record.additional_mounts);
         }
         self.persist_session_state(session_id)
     }

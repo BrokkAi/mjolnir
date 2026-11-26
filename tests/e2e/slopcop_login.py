@@ -11,7 +11,7 @@ Build mj with --features test-hooks and the portable worker
 
     python3 tests/e2e/slopcop_login.py --mj target/debug/mj \
         --worker target/worker/x86_64-unknown-linux-musl/debug/mj-worker \
-        --image ghcr.io/brokkai/mjolnir/agent-dev:latest --instance slopcop-login
+        --image ghcr.io/brokkai/mjolnir/session-base:latest --instance slopcop-login
 """
 
 import argparse

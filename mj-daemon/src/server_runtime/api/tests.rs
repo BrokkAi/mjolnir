@@ -685,11 +685,7 @@ async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
     assert_eq!(candidates.unavailable[0].0, "codex-high");
     let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
     let error = crate::server::api::resolve_reviewer_model_profile_selection(
-        &backend,
-        "luna",
-        None,
-        mj_core::config::ExecutionPolicy::Unconstrained,
-        "reviewer",
+        &backend, "luna", None, "reviewer",
     )
     .await
     .unwrap_err();
@@ -1160,6 +1156,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -9465,7 +9462,7 @@ async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_bud
         .unwrap(),
     );
     config.machines.insert(
-        "builder".into(),
+        mj_core::config::MachineId::new("builder").unwrap(),
         serde_json::from_value(serde_json::json!({
             "kind":"ssh","host":"ec2-host","user":"ec2-user"
         }))

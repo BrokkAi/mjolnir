@@ -458,11 +458,11 @@ const MBX_CONFIG_SCRIPT: &str = r#"set -eu
 directory=$1
 shift
 mkdir -p -- "$directory"
-chmod 700 -- "$directory"
+chmod -- 700 "$directory"
 temporary=$(mktemp "$directory/.config.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 cat > "$temporary"
-chmod 600 -- "$temporary"
+chmod -- 600 "$temporary"
 mv -f -- "$temporary" "$directory/config.toml"
 trap - EXIT HUP INT TERM
 for root in "$HOME/.config" "$@"; do
@@ -516,7 +516,7 @@ write_shim() {
         printf '%s\n' '#!/bin/sh' '# mjolnir-mbx-shim'
         printf '%s\n' "$body"
     } >"$temporary"
-    chmod 755 -- "$temporary"
+    chmod -- 755 "$temporary"
     mv -f -- "$temporary" "$target"
     trap - EXIT HUP INT TERM
 }

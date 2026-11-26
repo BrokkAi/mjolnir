@@ -369,6 +369,7 @@ fn a_container_launch_gives_the_engine_only_literal_environment_entries() {
     let plan = targets::provision_plan_named(
         &target,
         session_id,
+        "test-instance",
         &bundle,
         &[],
         None,
@@ -1192,7 +1193,7 @@ fn deployment_capacity_targets_ignore_bare_session_churn() {
                 record.project_directory = Some(workspace.into());
                 record.target = Some(Box::new(if local {
                     TargetLocator::LocalBare {
-                        worker_root: data_dir().join("workers").join(id),
+                        worker_root: mj_core::config::DataLayout::current().worker_root(id),
                     }
                 } else {
                     TargetLocator::SshBare {

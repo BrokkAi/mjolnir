@@ -32,7 +32,7 @@ pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
     let restarts = crate::database::load_session_restarts()?;
     let checkpoints = crate::database::load_session_checkpoints()?;
     let removed = reconcile_managed_checkpoint_archives_in(
-        &sessions_dir(),
+        &mj_core::config::DataLayout::current().sessions_dir(),
         checkpoints.iter().map(|(_, checkpoint)| checkpoint),
         &operations,
         &legacy_operations,

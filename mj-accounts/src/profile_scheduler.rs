@@ -307,7 +307,6 @@ impl AsRef<ScheduledCandidate> for ScheduledCandidate {
 
 /// Shared context for a single automatic scheduling draw.
 pub struct SchedulingContext<'a> {
-    pub execution_policy: mj_core::config::ExecutionPolicy,
     pub placement: Placement,
     pub category: Option<&'a str>,
     pub ranking_anchor: Option<&'a str>,
@@ -317,26 +316,9 @@ pub struct SchedulingContext<'a> {
     pub now_seconds: i64,
 }
 
-/// Hard raw-target guardian filter: under `ConfiguredApprovals`, only harnesses
-/// with a native guardian (`GuardianReviewer::Harness`: Codex, Claude, Grok,
-/// Muse, Antigravity) are eligible for automatic scheduling. Under
-/// `Unconstrained`, all harnesses stay eligible. Explicit `--profile` pins
-/// never enter this filter.
-pub fn guardian_eligible(
-    harness: mj_core::config::HarnessKind,
-    execution_policy: mj_core::config::ExecutionPolicy,
-) -> bool {
-    match execution_policy {
-        mj_core::config::ExecutionPolicy::Unconstrained => true,
-        mj_core::config::ExecutionPolicy::ConfiguredApprovals => {
-            harness.guardian() == mj_core::config::GuardianReviewer::Harness
-        }
-    }
-}
-
 /// Generalized pool-first, velocity- and value-weighted draw across
-/// `candidates`. Filters out guardian-ineligible, exhausted, and disallowed
-/// paid-credit candidates, deduplicates to one entry per quota pool
+/// `candidates`. Filters out exhausted and disallowed paid-credit
+/// candidates, deduplicates to one entry per quota pool
 /// `(profile_id, binding_window_scope)`, and orders the surviving pools by
 /// tier, `[quota] prefer`, Efraimidis–Spirakis weighted sample, `ranking_anchor`,
 /// and `profile_id`.
@@ -630,15 +612,12 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     raw_candidates: Vec<T>,
     ctx: &SchedulingContext<'_>,
 ) -> Vec<ScoredPool<T>> {
-    // 1. Hard guardian filter + pool-first deduplication.
+    // 1. Pool-first deduplication.
     let mut pools: std::collections::BTreeMap<(String, Option<String>), (f64, T)> =
         std::collections::BTreeMap::new();
 
     for item in raw_candidates {
         let cand = item.as_ref();
-        if !guardian_eligible(cand.harness, ctx.execution_policy) {
-            continue;
-        }
         if ctx.placement == Placement::Orchestrator && !cand.harness.supports_delegation_tools() {
             continue;
         }
@@ -1233,7 +1212,7 @@ mod tests {
         use crate::quota_telemetry::{
             QuotaTelemetrySnapshot, RecentPlacement, WindowKey, WindowKind, WindowTelemetry,
         };
-        use mj_core::config::{ExecutionPolicy, HarnessKind};
+        use mj_core::config::HarnessKind;
         let now = 1_000_000;
         let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
         let mut telemetry = QuotaTelemetrySnapshot::default();
@@ -1256,7 +1235,6 @@ mod tests {
         })
         .collect();
         let template = SchedulingContext {
-            execution_policy: ExecutionPolicy::Unconstrained,
             placement: Placement::Child,
             category: Some("subtle"),
             ranking_anchor: None,
@@ -1352,7 +1330,7 @@ mod tests {
         use crate::quota_telemetry::{
             QuotaTelemetrySnapshot, RecentPlacement, WindowKey, WindowKind, WindowTelemetry,
         };
-        use mj_core::config::{ExecutionPolicy, HarnessKind};
+        use mj_core::config::HarnessKind;
         let now = 1_000_000;
         let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
         let mut telemetry = QuotaTelemetrySnapshot::default();
@@ -1409,7 +1387,6 @@ mod tests {
             prepare_scored_pools(
                 candidates,
                 &SchedulingContext {
-                    execution_policy: ExecutionPolicy::Unconstrained,
                     placement: Placement::Child,
                     category: Some("subtle"),
                     ranking_anchor: None,
@@ -1555,7 +1532,6 @@ mod tests {
         let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
         let telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
         let ctx = SchedulingContext {
-            execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
             placement: Placement::Child,
             category: Some("straightforward"),
             ranking_anchor: None,
@@ -1648,7 +1624,6 @@ mod tests {
             .insert("codex-hot".into(), burst);
 
         let ctx = SchedulingContext {
-            execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
             placement: Placement::Child,
             category: Some("subtle"),
             ranking_anchor: None,
@@ -1683,85 +1658,6 @@ mod tests {
         rank_scheduled_candidates(&mut candidates, &ctx);
         assert_eq!(candidates[0].profile_id, "codex-cool");
         assert_eq!(candidates[1].profile_id, "codex-hot");
-    }
-
-    #[test]
-    fn raw_target_guardian_filter_excludes_mjolnir_guardian_harnesses() {
-        let now = 1_000_000;
-        let reset = now + 3 * 86_400;
-        let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
-        let telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
-        let make_candidates = || {
-            vec![
-                scheduled_sub(
-                    "kimi1",
-                    mj_core::config::HarnessKind::Kimi,
-                    "kimi-k2.5",
-                    None,
-                    Some(200),
-                    vec![week_window(90, reset)],
-                    None,
-                    false,
-                ),
-                scheduled_sub(
-                    "opencode1",
-                    mj_core::config::HarnessKind::OpenCode,
-                    "gpt-6.1-sol",
-                    None,
-                    Some(200),
-                    vec![week_window(90, reset)],
-                    None,
-                    false,
-                ),
-                ScheduledCandidate {
-                    profile_id: "dsh1".into(),
-                    harness: mj_core::config::HarnessKind::Dsh,
-                    model: "deepseek-chat".into(),
-                    effort: None,
-                    quota: CandidateQuota::UsagePriced,
-                    may_consume_credits: false,
-                    cache_identity: None,
-                },
-                scheduled_sub(
-                    "claude1",
-                    mj_core::config::HarnessKind::Claude,
-                    "claude-opus-5-5",
-                    Some("xhigh"),
-                    Some(200),
-                    vec![week_window(90, reset)],
-                    None,
-                    false,
-                ),
-            ]
-        };
-
-        let mut guarded = make_candidates();
-        let guarded_ctx = SchedulingContext {
-            execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-            placement: Placement::TopLevel,
-            category: Some("primary"),
-            ranking_anchor: None,
-            prefer: &[],
-            telemetry: &telemetry,
-            power_ranking: ranking,
-            now_seconds: now,
-        };
-        rank_scheduled_candidates(&mut guarded, &guarded_ctx);
-        assert_eq!(
-            guarded
-                .iter()
-                .map(|c| c.profile_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["claude1"]
-        );
-
-        let mut unconstrained = make_candidates();
-        let unconstrained_ctx = SchedulingContext {
-            execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
-            ..guarded_ctx
-        };
-        rank_scheduled_candidates(&mut unconstrained, &unconstrained_ctx);
-        assert_eq!(unconstrained.len(), 4);
     }
 
     #[test]
@@ -1802,7 +1698,6 @@ mod tests {
         };
         let telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
         let ctx = SchedulingContext {
-            execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
             placement: Placement::Child,
             category: Some("straightforward"),
             ranking_anchor: None,
@@ -1867,7 +1762,6 @@ mod tests {
         let telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
         let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
         let ctx = SchedulingContext {
-            execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
             placement: Placement::Orchestrator,
             category: Some("orchestrator"),
             ranking_anchor: None,

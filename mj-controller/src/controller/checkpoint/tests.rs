@@ -4073,8 +4073,8 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
             self.commands.lock().unwrap().push(command.purpose.clone());
             let stdout = match command.purpose.as_str() {
                 "inspect retained session container" => serde_json::to_vec(&serde_json::json!([{
-                    "Id": "source-container", "Name": self.name, "Image": "sha256:source", "ImageName": "agent-dev:2.51.0",
-                    "Config": {"Image":"agent-dev:2.51.0", "Labels": {"dev.mj.managed":"true", "dev.mj.session":LATCH_RELAY_SESSION}},
+                    "Id": "source-container", "Name": self.name, "Image": "sha256:source", "ImageName": "session-base:2.51.0",
+                    "Config": {"Image":"session-base:2.51.0", "Labels": {"dev.mj.managed":"true", "dev.mj.session":LATCH_RELAY_SESSION}},
                     "HostConfig": {}, "Mounts": [], "State": {"Running":true}
                 }]))?,
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
@@ -4714,7 +4714,7 @@ async fn suspended_archive_serializes_compact_tool_and_terminal_bodies() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    let data_dir = mj_core::config::data_dir();
+    let data_dir = mj_core::config::DataLayout::current().root().to_path_buf();
     let relay_root = data_dir.join("relay");
     std::fs::create_dir_all(&relay_root).unwrap();
     let mut relay =

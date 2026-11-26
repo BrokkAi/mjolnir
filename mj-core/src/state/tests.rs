@@ -285,6 +285,7 @@ fn sample_state() -> State {
         notifications_ignored: false,
         project: None,
         target_runtime: None,
+        machine_id: None,
         launch_base: None,
         launch_branch: None,
         checkout: None,
@@ -350,6 +351,27 @@ fn sample_state() -> State {
         subagents: Default::default(),
         mount_history: [("local".into(), vec![PathBuf::from("/home/test/cache")])].into(),
         container_sizes: Default::default(),
+    }
+}
+
+/// Stored rows from builds that recorded the creation image still load: the
+/// field is gone, so it is ignored whether it holds an image or `null`.
+#[test]
+fn container_settings_ignore_the_retired_default_image_field() {
+    for recorded in [
+        serde_json::json!("ghcr.io/brokkai/mjolnir/session-base:latest"),
+        serde_json::Value::Null,
+    ] {
+        let settings: ContainerSettings = serde_json::from_value(serde_json::json!({
+            "additional_mounts": [],
+            "resource_allocation": null,
+            "default_image": recorded,
+        }))
+        .unwrap();
+        assert!(settings.additional_mounts.is_empty());
+        assert_eq!(settings.resource_allocation, None);
+        let rewritten = serde_json::to_value(&settings).unwrap();
+        assert!(rewritten.get("default_image").is_none());
     }
 }
 
@@ -2575,5 +2597,85 @@ fn a_managed_checkout_directory_keeps_posix_separators() {
     assert_eq!(
         crate::target_path::text(&directory),
         "/srv/repo/.mj/clones/s1/packages/app"
+    );
+}
+
+#[test]
+fn target_runtime_follows_the_recorded_machine_when_its_template_is_gone() {
+    use crate::config::{Config, Machine, MachineId, SshConnection};
+
+    let machine_id = MachineId::new("builder").unwrap();
+    let ssh = |key: &str| SshConnection {
+        host: "builder.test".into(),
+        user: Some("dev".into()),
+        identity_file: Some(key.into()),
+        extra_args: vec!["-p".into(), "2222".into()],
+    };
+    let machine = |key: &str| Machine::Ssh {
+        ssh: ssh(key),
+        workspace_prefix: crate::config::DEFAULT_WORKSPACE_PREFIX.into(),
+        build_cache: None,
+    };
+    let template: crate::config::TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind": "ssh-podman", "host": "builder.test", "user": "dev",
+        "identity_file": "/keys/old", "extra_args": ["-p", "2222"], "image": "test"
+    }))
+    .unwrap();
+    let frozen = TargetRuntimeSettings::from(&template);
+    // The runtime's template was deleted, so only the machine can refresh it.
+    let mut config = Config::default();
+    config
+        .machines
+        .insert(machine_id.clone(), machine("/keys/old"));
+    let identity = |config: &Config| {
+        let settings = target_runtime_settings_for(
+            "session",
+            "deleted-template",
+            Some(&machine_id),
+            None,
+            Some(&frozen),
+            config,
+        )
+        .unwrap();
+        match &settings.connection {
+            TargetConnection::Ssh { ssh } => ssh.identity_file.clone(),
+            other => panic!("expected an SSH connection, found {other:?}"),
+        }
+    };
+    assert_eq!(identity(&config), Some("/keys/old".into()));
+
+    config
+        .machines
+        .insert(machine_id.clone(), machine("/keys/new"));
+    assert_eq!(identity(&config), Some("/keys/new".into()));
+
+    config.machines.remove(&machine_id);
+    assert_eq!(
+        identity(&config),
+        Some("/keys/old".into()),
+        "a machine that is gone leaves the frozen settings"
+    );
+
+    // The template now names the same host with another key. While the
+    // recorded machine reaches the placement it answers, even when its own
+    // options have not changed since the placement was frozen.
+    let repointed: crate::config::TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind": "ssh-podman", "host": "builder.test", "user": "dev",
+        "identity_file": "/keys/other", "extra_args": ["-p", "2222"], "image": "test"
+    }))
+    .unwrap();
+    config.targets.insert("deleted-template".into(), repointed);
+    assert_eq!(
+        identity(&config),
+        Some("/keys/other".into()),
+        "with no machine, the template refreshes the placement"
+    );
+    config
+        .machines
+        .insert(machine_id.clone(), machine("/keys/old"));
+    assert_eq!(
+        identity(&config),
+        Some("/keys/old".into()),
+        "a machine that reaches the placement is not overridden by the template"
     );
 }

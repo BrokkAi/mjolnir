@@ -77,7 +77,7 @@ pub struct Notice {
 pub struct Vapid(signature::EcdsaKeyPair);
 impl Vapid {
     pub fn load() -> Result<Self> {
-        let path = mj_core::config::data_dir().join("web-push-vapid.pk8");
+        let path = mj_core::config::DataLayout::current().web_push_vapid();
         std::fs::create_dir_all(path.parent().context("key directory")?)?;
         if !path.exists() {
             let document = signature::EcdsaKeyPair::generate_pkcs8(

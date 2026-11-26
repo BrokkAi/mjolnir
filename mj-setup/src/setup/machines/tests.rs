@@ -27,7 +27,7 @@ fn found(kind: RuntimeKind, status: CheckStatus) -> RuntimeProbe {
 /// What a probe of `machine` found: a worker platform and Docker, no Podman.
 fn answered(machine_id: &str, machine: &Machine) -> MachineProbe {
     MachineProbe {
-        machine_id: machine_id.to_owned(),
+        machine_id: mj_core::config::MachineId::new(machine_id).unwrap(),
         machine: machine.clone(),
         outcome: MachineProbeOutcome::Answered(vec![
             found(RuntimeKind::Bare, CheckStatus::Ready),
@@ -49,9 +49,15 @@ fn probed_runtimes_are_added_once_and_only_to_the_machine_that_was_probed() {
     let moved = ssh_machine("moved.example.test");
     let busy = ssh_machine("busy.example.test");
     Config::update_to(&path, |config| {
-        config.machines.insert("builder".into(), builder.clone());
-        config.machines.insert("moved".into(), moved.clone());
-        config.machines.insert("busy".into(), busy.clone());
+        config
+            .machines
+            .insert(MachineId::new("builder").unwrap(), builder.clone());
+        config
+            .machines
+            .insert(MachineId::new("moved").unwrap(), moved.clone());
+        config
+            .machines
+            .insert(MachineId::new("busy").unwrap(), busy.clone());
         // An existing runtime takes the id the bare runtime would like.
         config
             .targets
@@ -68,9 +74,10 @@ fn probed_runtimes_are_added_once_and_only_to_the_machine_that_was_probed() {
     // While they were probed, one machine moved to another host and another
     // gained its Podman runtime from a different client, which it keeps.
     Config::update_to(&path, |config| {
-        config
-            .machines
-            .insert("moved".into(), ssh_machine("elsewhere.example.test"));
+        config.machines.insert(
+            MachineId::new("moved").unwrap(),
+            ssh_machine("elsewhere.example.test"),
+        );
         let (id, podman) = machine_runtime("busy", &busy, RuntimeKind::Podman).unwrap();
         config.targets.insert(id, podman);
         Ok(())
@@ -85,11 +92,11 @@ fn probed_runtimes_are_added_once_and_only_to_the_machine_that_was_probed() {
             .collect::<BTreeMap<_, Vec<_>>>(),
         BTreeMap::from([
             (
-                "builder".to_owned(),
+                mj_core::config::MachineId::new("builder").unwrap(),
                 vec!["builder-2".to_owned(), "builder-docker".to_owned()]
             ),
             (
-                "busy".to_owned(),
+                mj_core::config::MachineId::new("busy").unwrap(),
                 vec!["busy".to_owned(), "busy-docker".to_owned()]
             ),
         ])
@@ -105,10 +112,15 @@ fn probed_runtimes_are_added_once_and_only_to_the_machine_that_was_probed() {
         assert!(table.contains("machine = \"builder\""), "{table}");
     }
     let config = Config::load_from(&path).unwrap();
-    assert_eq!(config.machine_runtimes("moved").count(), 0);
     assert_eq!(
         config
-            .machine_runtimes("busy")
+            .machine_runtimes(&mj_core::config::MachineId::new("moved").unwrap())
+            .count(),
+        0
+    );
+    assert_eq!(
+        config
+            .machine_runtimes(&mj_core::config::MachineId::new("busy").unwrap())
             .map(|(id, _)| id)
             .collect::<Vec<_>>(),
         ["busy", "busy-docker", "busy-podman"]
@@ -209,7 +221,12 @@ echo '{"ServerVersion":"27.3.1","OSType":"linux"}'"#,
             r#"case "$*" in --version) echo 'container 1.2.3';; 'system status --format json') echo '{"status":"unregistered"}'; exit 1;; *) exit 64;; esac"#,
         ),
     ]);
-    let probe = probe_machine("mac", &ssh_machine("mac.example.test"), &mac).unwrap();
+    let probe = probe_machine(
+        &mj_core::config::MachineId::new("mac").unwrap(),
+        &ssh_machine("mac.example.test"),
+        &mac,
+    )
+    .unwrap();
     assert_eq!(mac.ssh_calls.get(), 1, "the machine is asked once");
     let status = |kind| {
         probe
@@ -254,7 +271,12 @@ fn a_linux_machine_is_never_asked_for_apple_container() {
         ("container", &format!("touch '{}'", marker.display())),
         ("sw_vers", &format!("touch '{}'", marker.display())),
     ]);
-    let probe = probe_machine("builder", &ssh_machine("builder.example.test"), &linux).unwrap();
+    let probe = probe_machine(
+        &mj_core::config::MachineId::new("builder").unwrap(),
+        &ssh_machine("builder.example.test"),
+        &linux,
+    )
+    .unwrap();
     let rejected = probe
         .rejected()
         .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
@@ -337,7 +359,12 @@ fn a_machine_whose_ssh_fails_is_unreachable_with_the_ssh_error() {
         // Hard-won: bd97f0dc1: a stalled check on a reachable host read as "did not answer"
         (None, "did not finish within 15 seconds", false),
     ] {
-        let probe = probe_machine("nas", &ssh_machine("nas"), &Refused(stderr)).unwrap();
+        let probe = probe_machine(
+            &mj_core::config::MachineId::new("nas").unwrap(),
+            &ssh_machine("nas"),
+            &Refused(stderr),
+        )
+        .unwrap();
         let MachineProbeOutcome::Unreachable {
             detail,
             answered_nothing,

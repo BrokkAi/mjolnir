@@ -113,7 +113,7 @@ fn typing_in_the_search_does_not_reach_the_page_shortcuts() {
 fn cache_search_aliases_find_every_machine_and_preserve_the_draft() {
     for query in ["mbx", "cache", "build cache"] {
         let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.config.machines.insert("builder".into(), serde_json::from_value(json!({
+        dashboard.config.machines.insert(mj_core::config::MachineId::new("builder").unwrap(), serde_json::from_value(json!({
             "kind":"ssh", "host":"builder.example.com", "build_cache":{"enabled":true,"max_total_size":"50GB"}
         })).unwrap());
         dashboard.begin_setup();

@@ -178,7 +178,6 @@ mod new_session;
 pub(crate) mod paths;
 mod resume;
 mod targets;
-pub(super) use targets::SandboxOffer;
 
 impl DashboardState {
     /// Handles a wizard event through its persistent component form.
@@ -575,18 +574,6 @@ impl DashboardState {
             }
             WizardControl::Add => {}
             WizardControl::Submit => return wizard.submit_review(self),
-            WizardControl::UseSandboxedTarget => {
-                if let Some(index) = self
-                    .sandbox_offer(&wizard)
-                    .and_then(|offer| offer.alternative)
-                {
-                    wizard.set_target_step_skipped(false);
-                    wizard.set_step(WizardStep::Target);
-                    wizard.form_mut().focus(WizardControl::Next);
-                    return self.select_wizard_target(wizard, index);
-                }
-            }
-
             _ => {
                 return match wizard.activate_extra(self, id) {
                     Ok(action) => action,

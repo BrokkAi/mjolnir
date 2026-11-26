@@ -279,7 +279,7 @@ mod tests {
     fn a_mac_prepares_native_caches_for_bare_sessions_but_not_containers() {
         let mut config = Config::default().with_local_targets();
         config.machines.insert(
-            "local".into(),
+            mj_core::config::MachineId::new("local").unwrap(),
             mj_core::config::Machine::Local {
                 build_cache: Some(mj_core::config::TargetBuildCache {
                     tools_directory: Some("/cache/native".into()),
@@ -313,7 +313,7 @@ mod tests {
             ..Default::default()
         };
         config.machines.insert(
-            "local".into(),
+            mj_core::config::MachineId::new("local").unwrap(),
             mj_core::config::Machine::Local {
                 build_cache: Some(settings.clone()),
             },

@@ -73,7 +73,10 @@ pub fn project_memory_mcp_delivery(
 }
 
 pub fn canonical_memory_root(project_key: &str) -> PathBuf {
-    data_dir().join("projects").join(project_key).join("memory")
+    DataLayout::current()
+        .projects_dir()
+        .join(project_key)
+        .join("memory")
 }
 
 pub fn stage_memory_replica<'a>(

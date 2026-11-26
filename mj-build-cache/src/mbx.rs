@@ -2113,6 +2113,12 @@ mod tests {
             r#"{"version":1,"since_secs":1789824719,"builds":155,"cached_compilations":12050,"avoided_compiler_ns":6004997818721,"reflinked_bytes":47612059386}"#,
         )];
         answers.push(("hel-home", 0, "/home/builder"));
+        answers.push(("hel-mbx-home", 0, "/home/builder"));
+        answers.push((
+            "$resolved\" --version",
+            0,
+            "/home/builder/.local/bin/mbx\nmbx 1.22.0",
+        ));
         answers.extend(native_host());
         let executor = ProbeExecutor::new(&answers);
         let machine = serde_json::from_value(serde_json::json!({
@@ -2122,6 +2128,13 @@ mod tests {
         let preview = preview_build_cache(&machine, &executor)
             .expect("the host answers")
             .expect("an SSH machine can hold a cache");
+        assert_eq!(preview.mbx_profile_file.as_deref(), Some("~/.profile"));
+        assert!(
+            executor
+                .ran()
+                .iter()
+                .any(|command| command.contains("/home/builder/.local/bin"))
+        );
         assert_eq!(
             preview.stats,
             Some(mj_core::state::BuildCacheStats {
