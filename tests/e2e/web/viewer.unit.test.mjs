@@ -1291,11 +1291,14 @@ test('commit refuses unready, pending, or failed preflight even when called dire
 function delegationContext(kind = 'codex', configured = true) {
   const context = vm.createContext({
     snapshot: { targets: [], profiles: [{ id: 'profile', harness_kind: kind }], subagents_configured: configured },
+    viewerState: { rows: new Map() },
     document: { createTextNode: text => text },
     el: (tag, className = '', text = '') => Object.assign(makeNode(tag), { className, textContent: text }),
   });
+  vm.runInContext(sourceBetween('function isSubagentSession(', '\nfunction liveSessions('), context);
+  vm.runInContext(sourceBetween('function sessionById(', '\nasync function ensureSessionDetail('), context);
   vm.runInContext(sourceBetween('function subagentChoiceApplies(', '\nfunction targetIsBare('), context);
-  vm.runInContext(sourceBetween('function moveSubagentChange(', '\nfunction moveStoppedChildren('), context);
+  vm.runInContext(sourceBetween('function moveDelegationApplies(', '\nfunction moveStoppedChildren('), context);
   vm.runInContext(sourceBetween('function rememberedDelegationPolicy(', '\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
   return context;
 }
@@ -1402,7 +1405,9 @@ test('Move retains per-type session overrides without global configuration', () 
     [{ mode: 'mjolnir', straightforward: { model: 'gpt-6-luna' } }, /straightforward: gpt-6-luna/],
     [{ mode: 'mjolnir', straightforward: { model: 'gpt-6-sol', effort: 'high' }, subtle: { model: 'gpt-6-luna', effort: 'max' } }, /subtle: gpt-6-luna/],
   ]) {
-    const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: policy });
+    const session = { id: 'session', profile_id: 'profile', subagents: policy };
+    context.viewerState.rows.set(session.id, session);
+    const draft = context.freshMoveDraft(session);
     const body = makeNode();
     context.renderSubagentFields(body, draft, 'move-session', () => {});
     const select = body.children[0].children[1];
@@ -1422,7 +1427,9 @@ test('Move retains per-type session overrides without global configuration', () 
   // Subtle alone never satisfies [subagents.straightforward], so Mjolnir stays
   // disabled as a new choice while an unchanged Move retains the stored policy.
   const subtleOnly = { mode: 'mjolnir', subtle: { model: 'gpt-6-luna' } };
-  const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: subtleOnly });
+  const session = { id: 'session', profile_id: 'profile', subagents: subtleOnly };
+  context.viewerState.rows.set(session.id, session);
+  const draft = context.freshMoveDraft(session);
   const body = makeNode();
   context.renderSubagentFields(body, draft, 'move-session', () => {});
   const select = body.children[0].children[1];
@@ -1438,7 +1445,9 @@ test('Move keeps legacy delegation unchanged without resending obsolete selector
   Object.assign(context, { targetLaunchable: () => true, selectedWorkspaceId: () => 'test' });
   vm.runInContext(sourceBetween('function freshMoveDraft(', '\n/// The delegation policy a Move'), context);
   for (const mode of ['single_model', 'all_models', 'mjolnir', 'none']) {
-    const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: mode === 'mjolnir' ? { mode } : { mode, model: 'obsolete', effort: 'adaptive' } });
+    const session = { id: 'session', profile_id: 'profile', subagents: mode === 'mjolnir' ? { mode } : { mode, model: 'obsolete', effort: 'adaptive' } };
+    context.viewerState.rows.set(session.id, session);
+    const draft = context.freshMoveDraft(session);
     const body = makeNode();
     context.renderSubagentFields(body, draft, 'move-session', () => {});
     const select = body.children[0].children[1];

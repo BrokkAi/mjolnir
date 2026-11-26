@@ -17714,10 +17714,7 @@ async fn resolve_suspend_blockers_refuses_non_idle_borrower() {
     );
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent].state, SessionState::Parked);
-    assert_eq!(
-        stored.sessions[borrower].state,
-        SessionState::Provisioning
-    );
+    assert_eq!(stored.sessions[borrower].state, SessionState::Provisioning);
 }
 
 #[cfg(unix)]

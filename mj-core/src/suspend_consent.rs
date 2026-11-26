@@ -638,7 +638,9 @@ mod tests {
             },
         ]);
         assert!(formatted.starts_with("Cannot suspend until these blockers are resolved:\n"));
-        assert!(formatted.contains("\n1. Hidden tracked edits (1 item)\n  - linked/file\n  Fix: preserve work\n"));
+        assert!(formatted.contains(
+            "\n1. Hidden tracked edits (1 item)\n  - linked/file\n  Fix: preserve work\n"
+        ));
         assert!(formatted.contains("\n2. Missing Git origin\n  Fix: set an origin\n"));
         assert!(!formatted.contains("(0 "));
         assert!(

@@ -26,6 +26,7 @@ const snapshot = {
 
 function loaded() {
   const context = vm.createContext({ snapshot: structuredClone(snapshot), structuredClone, freshProjectPicker: () => ({}), selectedWorkspaceId: () => 'w1' });
+  vm.runInContext(sourceBetween('function isSubagentSession(', '\nfunction liveSessions('), context);
   vm.runInContext(sourceBetween('function availabilityMissing(', '\nfunction targetResourceKind('), context);
   context.setNewTargetSizing = () => {};
   context.delegationPolicy = value => value;

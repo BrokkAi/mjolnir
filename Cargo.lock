@@ -770,6 +770,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -1519,7 +1520,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "url",
  "vte 0.14.1",
  "windows-sys 0.61.2",

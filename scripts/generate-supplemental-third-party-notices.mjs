@@ -191,7 +191,7 @@ async function checkedInLegalFile(relativePath) {
 
 
 async function sqliteNativePayload(metadata) {
-  const packageInfo = resolvedPackage(metadata, "libsqlite3-sys", "0.39.1");
+  const packageInfo = resolvedPackage(metadata, "libsqlite3-sys");
   const amalgamation = await readFile(
     path.join(packageRoot(packageInfo), "sqlite3", "sqlite3.c"),
     "utf8",
