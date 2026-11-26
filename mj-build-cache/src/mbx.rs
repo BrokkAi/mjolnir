@@ -690,11 +690,11 @@ fn read_stats(
         reflinked_bytes: u64,
     }
 
-    let path = directory.join(TALLY_RELATIVE);
+    let path = mj_core::target_path::join(directory, Path::new(TALLY_RELATIVE));
     let command = host.shell_command(
         READ_CONFIG_SCRIPT,
         LABEL,
-        [path.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(&path)],
         "read the container host build cache totals",
     );
     let output = executor.execute(&command).ok()?;
@@ -884,7 +884,7 @@ fn native_cache_directory(
 ) -> Result<PathBuf> {
     let command = host.command(
         vec![
-            native.program.to_string_lossy().into_owned(),
+            mj_core::target_path::text(&native.program),
             "cache".to_owned(),
             "dir".to_owned(),
             "--json".to_owned(),
@@ -1052,7 +1052,7 @@ pub fn effective_target_root(config_file: &str, directory: &Path) -> PathBuf {
         .and_then(|config| config.target_root);
     let path = mj_core::target_path::normalize(&match configured {
         Some(root) => mj_core::target_path::join(directory, &root),
-        None => directory.join("targets"),
+        None => mj_core::target_path::join(directory, Path::new("targets")),
     });
     PathBuf::from(mj_core::target_path::text(&path))
 }
@@ -1077,7 +1077,7 @@ fn nearest_existing_ancestor(
     let command = host.shell_command(
         NEAREST_ANCESTOR_SCRIPT,
         LABEL,
-        [directory.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(directory)],
         "locate the build cache volume",
     );
     let output = checked(executor.execute(&command)?, &command)?;
@@ -1108,7 +1108,7 @@ fn reflinks_supported(
     let command = host.shell_command(
         REFLINK_SCRIPT,
         LABEL,
-        [volume.to_string_lossy().into_owned()],
+        [mj_core::target_path::text(volume)],
         "probe the build cache volume for reflinks",
     );
     Ok(executor.execute(&command)?.status == 0)
@@ -1136,8 +1136,8 @@ fn cross_reflinks_supported(
         CROSS_REFLINK_SCRIPT,
         LABEL,
         [
-            store.to_string_lossy().into_owned(),
-            target_root.to_string_lossy().into_owned(),
+            mj_core::target_path::text(store),
+            mj_core::target_path::text(target_root),
         ],
         "probe the managed target root for reflinks from the build cache",
     );
@@ -1154,7 +1154,7 @@ fn create_directory(
             "mkdir".to_owned(),
             "-p".to_owned(),
             "--".to_owned(),
-            directory.to_string_lossy().into_owned(),
+            mj_core::target_path::text(directory),
         ],
         "create the build cache directory",
     );
@@ -2104,23 +2104,24 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
     fn the_preview_reports_what_the_cache_has_already_done() {
         let _isolated = isolated();
         // Ahead of the configuration read, which tests the same `[ -f ]`.
         let mut answers = vec![(
-            "tally.json",
+            "/mnt/fast/mbx-cache/actions/savings/v1/tally.json",
             0,
             r#"{"version":1,"since_secs":1789824719,"builds":155,"cached_compilations":12050,"avoided_compiler_ns":6004997818721,"reflinked_bytes":47612059386}"#,
         )];
+        answers.push(("hel-home", 0, "/home/builder"));
         answers.extend(native_host());
         let executor = ProbeExecutor::new(&answers);
-        let preview = preview_build_cache(&configured_local_machine(), &executor)
+        let machine = serde_json::from_value(serde_json::json!({
+            "kind": "ssh", "host": "linux.test", "user": "builder"
+        }))
+        .unwrap();
+        let preview = preview_build_cache(&machine, &executor)
             .expect("the host answers")
-            .expect("a local machine can hold a cache");
+            .expect("an SSH machine can hold a cache");
         assert_eq!(
             preview.stats,
             Some(mj_core::state::BuildCacheStats {
