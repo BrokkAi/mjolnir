@@ -52,7 +52,7 @@ pub(crate) struct MigrateArgs {
     remote_command: String,
     /// Inspect and report the migration without changing either host.
     #[arg(long)]
-    dry_run: bool,
+    pub(crate) dry_run: bool,
     /// Copy logs, diagnostics, backups, and other optional data.
     #[arg(long)]
     include_logs: bool,
@@ -173,6 +173,7 @@ mod unix {
     };
     use mj_core::targets::{SshTarget, remote_command_line};
     use rusqlite::{Connection, OpenFlags};
+    use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
@@ -185,12 +186,43 @@ mod unix {
         )?)
     }
 
-    fn metadata_if_present(path: &Path) -> Result<Option<std::fs::Metadata>> {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) => Ok(Some(metadata)),
+    fn config_fingerprint(path: &Path) -> Result<Option<[u8; 32]>> {
+        match std::fs::read(path) {
+            Ok(contents) => Ok(Some(Sha256::digest(contents).into())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
         }
+    }
+
+    fn copied_ssh_credentials(
+        ssh: &SshConnection,
+        old_config: &Path,
+        old_home: &Path,
+    ) -> Result<bool> {
+        use mj_core::config::migration_paths::{
+            extract_ssh_identity_arg_paths, extract_ssh_known_hosts_arg_paths, strip_normal_prefix,
+        };
+        let identities = ssh
+            .identity_file
+            .iter()
+            .cloned()
+            .chain(extract_ssh_identity_arg_paths(&ssh.extra_args));
+        for path in identities {
+            let path = mj_core::path_input::expand_home(&path, Some(old_home))?;
+            if strip_normal_prefix(&path, old_config)
+                .is_some_and(|rel| !rel.starts_with("instances"))
+                || strip_normal_prefix(&path, old_home).is_some()
+            {
+                return Ok(true);
+            }
+        }
+        for path in extract_ssh_known_hosts_arg_paths(&ssh.extra_args) {
+            let path = mj_core::path_input::expand_home(&path, Some(old_home))?;
+            if strip_normal_prefix(&path, &old_config.join("ec2")).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn ssh_target(ssh: &SshConnection) -> SshTarget {
@@ -251,7 +283,12 @@ mod unix {
         let data = DataLayout::current();
         let config_layout = ConfigLayout::current();
         mj_core::config::ensure_may_control_store(data.root(), "migrate this Mjolnir store")?;
+        let initial_config_sha256 = config_fingerprint(&config_layout.config_toml())?;
         let config = Config::load()?;
+        ensure!(
+            initial_config_sha256 == config_fingerprint(&config_layout.config_toml())?,
+            "config.toml changed while loading; re-run mj migrate"
+        );
         ensure!(
             !matches!(config.daemon.runtime, DaemonRuntime::Ssh),
             "run mj migrate on the daemon host"
@@ -268,7 +305,6 @@ mod unix {
             "SSH destination cannot start with '-'"
         );
         let configured = config.machines.get(args.destination.as_str());
-        let configured_destination = configured.is_some();
         let mut dest = match configured {
             Some(Machine::Ssh { ssh, .. }) => ssh_target(ssh),
             Some(_) => bail!("destination machine is not an SSH host"),
@@ -334,8 +370,8 @@ mod unix {
             config,
             data,
             config_layout,
-            configured_destination,
             &dest.destination,
+            initial_config_sha256,
             stream,
         )
         .await;
@@ -356,14 +392,15 @@ mod unix {
         config: Config,
         data: DataLayout,
         config_layout: ConfigLayout,
-        configured_destination: bool,
         destination_ssh: &str,
+        initial_config_sha256: Option<[u8; 32]>,
         mut stream: MigrationStream<R, W>,
     ) -> Result<()>
     where
         R: tokio::io::AsyncRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
+        let configured_destination = config.machines.contains_key(args.destination.as_str());
         let hello = stream.hello().await?;
         let fence = database::read_configured_store_fence()?;
         let resuming = match (&fence, &hello.destination_status) {
@@ -407,6 +444,8 @@ mod unix {
         let new_data = hello.data_dir.clone();
         let new_config = hello.config_dir.clone();
         let inspect_host = source_host.clone();
+        let inspect_old_home = old_home.clone();
+        let inspect_old_config = old_config.clone();
         let mut inspect = mj_core::runtime::spawn_blocking(move || {
             let connection = open_db(&old_data.join("mj.sqlite3"))?;
             let cache = std::cell::RefCell::new(BTreeMap::new());
@@ -414,8 +453,8 @@ mod unix {
                 &connection,
                 &source_config,
                 &old_data,
-                &old_config,
-                &old_home,
+                &inspect_old_config,
+                &inspect_old_home,
                 &new_home,
                 &new_data,
                 &new_config,
@@ -553,20 +592,21 @@ mod unix {
         } else {
             None
         };
-        let third_hosts = config
-            .machines
-            .iter()
-            .filter_map(|(id, machine)| {
-                if configured_destination && id.as_str() == args.destination {
-                    return None;
-                }
-                if let Machine::Ssh { ssh, .. } = machine {
-                    Some(ssh_target(ssh))
+        let mut third_hosts = Vec::new();
+        for (id, machine) in &config.machines {
+            if configured_destination && id.as_str() == args.destination {
+                continue;
+            }
+            if let Machine::Ssh { ssh, .. } = machine {
+                if copied_ssh_credentials(ssh, &old_config, &old_home)? {
+                    eprintln!(
+                        "Skipping preflight SSH probe for machine {id}: its SSH credentials will be copied during migration"
+                    );
                 } else {
-                    None
+                    third_hosts.push(ssh_target(ssh));
                 }
-            })
-            .collect();
+            }
+        }
         let probe = stream
             .probe_ssh(ProbeSshRequest {
                 read_only: args.dry_run,
@@ -586,17 +626,27 @@ mod unix {
             .filter(|ip| !ip.is_private() && !ip.is_loopback() && !ip.is_link_local());
         if let Some(ip) = destination_ip {
             for resource in &preflight.ec2_resources {
-                let resource = resource.clone();
+                let check_resource = resource.clone();
                 let check = mj_core::runtime::spawn_blocking(move || {
                     mj_controller::migrate::preflight::check_ec2_ingress(
                         &Default::default(),
-                        &resource,
+                        &check_resource,
                         ip,
                         false,
                     )
                 })
                 .await
-                .context("join EC2 ingress check")??;
+                .context("join EC2 ingress check")?;
+                let check = match check {
+                    Ok(check) => check,
+                    Err(error) => {
+                        eprintln!(
+                            "Warning: could not check EC2 SSH ingress for {} in {} ({error:#}); verify that {ip}/32 is allowed before proceeding",
+                            resource.instance_id, resource.region
+                        );
+                        continue;
+                    }
+                };
                 if !check.admitted {
                     eprintln!(
                         "Warning: EC2 instance {} does not allow SSH from {ip}",
@@ -639,33 +689,21 @@ mod unix {
                 );
             }
         }
-        let mut data_size: u64 = preflight
+        let data_size: u64 = preflight
             .data_entries
             .iter()
             .filter(|entry| {
-                args.include_logs
+                (args.include_logs
                     || entry.classification
                         != mj_core::config::Classification::Known(
                             mj_core::config::MigrateAction::CopyOptional,
-                        )
+                        ))
+                    && !(!migrate_wiki
+                        && preflight.sessionwiki_db == data.root().join("sessionwiki/index.db")
+                        && entry.path == Path::new("sessionwiki"))
             })
             .map(|entry| entry.size_bytes)
             .sum();
-        // The inventory counts the SessionWiki directory as a tree, but the
-        // transfer excludes its database and sidecars when the index is skipped.
-        if !migrate_wiki
-            && preflight.sessionwiki_db == data.root().join("sessionwiki/index.db")
-            && metadata_if_present(&data.root().join("sessionwiki"))?
-                .is_some_and(|metadata| metadata.is_dir())
-        {
-            for suffix in ["", "-wal", "-shm"] {
-                let mut path = preflight.sessionwiki_db.as_os_str().to_owned();
-                path.push(suffix);
-                if let Some(metadata) = metadata_if_present(Path::new(&path))? {
-                    data_size = data_size.saturating_sub(metadata.len());
-                }
-            }
-        }
         let config_size: u64 = preflight
             .config_entries
             .iter()
@@ -742,6 +780,7 @@ mod unix {
             config,
             data,
             config_layout,
+            initial_config_sha256,
             source_host: source_ssh,
             machine_id,
             destination_label: args.destination.clone(),
@@ -758,6 +797,14 @@ mod unix {
             worker_roots: Vec::new(),
         };
         let phase = sender.phase1_with_hello(hello).await?;
+        #[cfg(feature = "test-hooks")]
+        if mj_core::test_hooks::test_hooks_enabled() {
+            mj_core::runtime::spawn_blocking(|| {
+                mj_core::test_hooks::reach_test_hook("migrate_after_phase1")
+            })
+            .await
+            .context("join migration test hook")??;
+        }
         let outcome = sender.phase2(phase, &mut hooks).await?;
         let summary = &outcome.summary;
         eprintln!(
@@ -791,6 +838,7 @@ mod unix {
         config: Config,
         data: DataLayout,
         config_layout: ConfigLayout,
+        initial_config_sha256: Option<[u8; 32]>,
         source_host: SshConnection,
         machine_id: MachineId,
         destination_label: String,
@@ -824,6 +872,15 @@ mod unix {
             Ok(())
         }
         async fn recheck(&mut self, pinned_user_version: i64) -> Result<()> {
+            ensure!(
+                config_fingerprint(&self.config_layout.config_toml())?
+                    == self.initial_config_sha256,
+                "config.toml changed during Phase 1 pre-sync; re-run mj migrate so preflight and copied files match the updated configuration"
+            );
+            ensure!(
+                !self.data.config_rename_journal().exists(),
+                "finish the pending configuration rename before migrating"
+            );
             let connection = open_db(&self.data.database())?;
             let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             ensure!(

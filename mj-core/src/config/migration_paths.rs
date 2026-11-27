@@ -76,6 +76,17 @@ pub fn extract_ssh_identity_arg_paths(args: &[String]) -> Vec<PathBuf> {
     paths
 }
 
+/// Extract known-hosts paths from the SSH argument forms this module relocates.
+pub fn extract_ssh_known_hosts_arg_paths(args: &[String]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for_each_ssh_path(&mut args.to_vec(), |path, identity| {
+        if !identity {
+            paths.push(path.clone());
+        }
+    });
+    paths
+}
+
 pub fn relocate_ec2_ssh_args(args: &mut [String], old_config: &Path, new_config: &Path) {
     for_each_ssh_path(args, |path, _| {
         relocate_ec2_path(path, old_config, new_config)

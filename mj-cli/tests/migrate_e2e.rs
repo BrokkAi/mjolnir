@@ -97,7 +97,6 @@ struct World {
     a: common::DaemonStorage,
     b: common::DaemonStorage,
     sshd: Sshd,
-    external_wiki: bool,
 }
 impl World {
     fn new() -> Option<Self> {
@@ -134,12 +133,7 @@ impl World {
         .unwrap();
         let a = common::DaemonStorage::new(aroot, aconfig, adata);
         let b = common::DaemonStorage::new(broot, bconfig, bdata);
-        Some(Self {
-            a,
-            b,
-            sshd,
-            external_wiki: false,
-        })
+        Some(Self { a, b, sshd })
     }
     fn wiki_dir(&self, destination: bool) -> PathBuf {
         let root = if destination {
@@ -147,11 +141,7 @@ impl World {
         } else {
             self.a.path()
         };
-        root.join(if self.external_wiki {
-            "wiki"
-        } else {
-            "data/sessionwiki"
-        })
+        root.join("data/sessionwiki")
     }
     fn command(&self, destination: bool) -> Command {
         let root = if destination {
@@ -182,10 +172,13 @@ impl World {
             .args(["daemon", "endpoint", "--json"]))
     }
     fn migration_command(&self, extra: &[&str], hook: Option<&str>) -> Command {
+        self.migration_to("127.0.0.1", extra, hook)
+    }
+    fn migration_to(&self, destination: &str, extra: &[&str], hook: Option<&str>) -> Command {
         let mut cmd = self.command(false);
         cmd.args([
             "migrate",
-            "127.0.0.1",
+            destination,
             "--disconnect-local",
             "--source-host",
             "mj-migration-source.invalid",
@@ -365,7 +358,17 @@ fn full_migration_and_dry_run_over_real_sshd() {
     .unwrap();
     fs::create_dir_all(world.a.path().join("secrets")).unwrap();
     fs::write(world.a.path().join("secrets/token"), "github-secret").unwrap();
-    fs::write(world.a.path().join("config/config.toml"), "version = 1\n[phone]\nenabled = false\n[github]\nsession_token_path = '~/secrets/token'\n[profiles.personal]\nkind = 'codex'\nhome = '~/personal-profile'\n").unwrap();
+    let ec2 = world.a.path().join("config/ec2/fixture");
+    fs::create_dir_all(&ec2).unwrap();
+    fs::write(ec2.join("key"), "key fixture").unwrap();
+    fs::write(ec2.join("known_hosts"), "known hosts fixture").unwrap();
+    let identity = serde_json::to_string(&ec2.join("key").to_string_lossy()).unwrap();
+    let known_hosts_arg = serde_json::to_string(&format!(
+        "UserKnownHostsFile={}",
+        ec2.join("known_hosts").display()
+    ))
+    .unwrap();
+    fs::write(world.a.path().join("config/config.toml"), format!("version = 1\n[phone]\nenabled = false\n[github]\nsession_token_path = '~/secrets/token'\n[profiles.personal]\nkind = 'codex'\nhome = '~/personal-profile'\n[machines.ec2-box]\nkind = 'ssh'\nhost = 'ec2-box.invalid'\nidentity_file = {identity}\nextra_args = ['-o', {known_hosts_arg}]\n")).unwrap();
     success(&world.endpoint(false));
     seed_rich_store(&world);
     let identity = fs::read(world.a.path().join("data/instance-identity")).unwrap();
@@ -391,6 +394,12 @@ fn full_migration_and_dry_run_over_real_sshd() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
+    let log_dir = world.a.path().join("data/logs");
+    let mut logs_before: Vec<_> = fs::read_dir(&log_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    logs_before.sort();
     let dry = world.migrate(&[
         "--dry-run",
         "--include-sessionwiki",
@@ -399,6 +408,16 @@ fn full_migration_and_dry_run_over_real_sshd() {
     ]);
     success(&dry);
     let stderr = String::from_utf8_lossy(&dry.stderr);
+    assert!(
+        stderr.contains("Skipping preflight SSH probe for machine ec2-box"),
+        "{stderr}"
+    );
+    let mut logs_after: Vec<_> = fs::read_dir(&log_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    logs_after.sort();
+    assert_eq!(logs_after, logs_before, "dry run changed source logs");
     assert!(
         stderr.contains(&format!("Destination home: {}", world.b.path().display())),
         "{stderr}"
@@ -411,7 +430,12 @@ fn full_migration_and_dry_run_over_real_sshd() {
         .collect();
     assert_eq!(entries_after, destination_entries);
     success(&world.endpoint(false));
-    success(&world.migrate(&["--include-sessionwiki", "--source-ssh-arg=-o", &known_hosts]));
+    let migration = world.migrate(&["--include-sessionwiki", "--source-ssh-arg=-o", &known_hosts]);
+    success(&migration);
+    assert!(
+        String::from_utf8_lossy(&migration.stderr)
+            .contains("Skipping preflight SSH probe for machine ec2-box")
+    );
     let wiki =
         rusqlite::Connection::open(world.b.path().join("data/sessionwiki/index.db")).unwrap();
     let marker: String = wiki
@@ -448,6 +472,24 @@ fn full_migration_and_dry_run_over_real_sshd() {
         config.github.session_token_path.as_deref(),
         Some(world.b.path().join("secrets/token").as_path())
     );
+    let mj_core::config::Machine::Ssh {
+        ssh: third_host, ..
+    } = &config.machines["ec2-box"]
+    else {
+        panic!("third host must use SSH");
+    };
+    assert_eq!(
+        third_host.identity_file.as_deref(),
+        Some(world.b.path().join("config/ec2/fixture/key").as_path())
+    );
+    assert!(third_host.extra_args.contains(&format!(
+            "UserKnownHostsFile={}",
+            world
+                .b
+                .path()
+                .join("config/ec2/fixture/known_hosts")
+                .display()
+        )));
     let machine = &config.machines["migration-source"];
     let mj_core::config::Machine::Ssh { ssh, .. } = machine else {
         panic!("source machine must use SSH")
@@ -710,10 +752,7 @@ fn crash_windows_and_competing_b_autostarter() {
 
 #[test]
 fn rollback_and_destination_refusals() {
-    let Some(mut world) = World::new() else {
-        return;
-    };
-    world.external_wiki = true;
+    let Some(world) = World::new() else { return };
     seed_local_sessions(&world);
     success(&world.endpoint(false));
     let a_wiki = world.wiki_dir(false).join("index.db");
@@ -733,6 +772,11 @@ fn rollback_and_destination_refusals() {
         db.execute("INSERT INTO marker VALUES (?1)", [value])
             .unwrap();
     }
+    fs::write(
+        a_wiki.parent().unwrap().join("index.db.bak-v1"),
+        "source backup",
+    )
+    .unwrap();
     let db = rusqlite::Connection::open(&b_wiki).unwrap();
     db.execute_batch("BEGIN; SELECT * FROM marker;").unwrap();
     let output = world.migrate(&["--include-sessionwiki", "--overwrite-sessionwiki"]);
@@ -778,6 +822,44 @@ fn rollback_and_destination_refusals() {
         .unwrap();
     assert_eq!(marker, "source-data");
     drop(migrated_wiki);
+    assert_ne!(
+        fs::read(world.wiki_dir(true).join("index.db.bak-v1"))
+            .ok()
+            .as_deref(),
+        Some(b"source backup".as_slice())
+    );
+
+    let Some(world) = World::new() else { return };
+    success(&world.endpoint(false));
+    let a_wiki = world.wiki_dir(false).join("index.db");
+    fs::write(
+        a_wiki.parent().unwrap().join("index.db.bak-v1"),
+        "source backup",
+    )
+    .unwrap();
+    let b_wiki = world.wiki_dir(true).join("index.db");
+    fs::create_dir_all(b_wiki.parent().unwrap()).unwrap();
+    let db = rusqlite::Connection::open(&b_wiki).unwrap();
+    db.execute_batch(
+        "CREATE TABLE marker(value TEXT); INSERT INTO marker VALUES ('destination-data');",
+    )
+    .unwrap();
+    drop(db);
+    success(&world.migrate(&["--skip-sessionwiki", "--no-start"]));
+    assert!(!world.wiki_dir(true).join("index.db.bak-v1").exists());
+    success(&world.endpoint(true));
+    let db = rusqlite::Connection::open(&b_wiki).unwrap();
+    let marker: String = db
+        .query_row("SELECT value FROM marker", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(marker, "destination-data");
+    assert_ne!(
+        fs::read(world.wiki_dir(true).join("index.db.bak-v1"))
+            .ok()
+            .as_deref(),
+        Some(b"source backup".as_slice())
+    );
+    drop(db);
 
     let Some(world) = World::new() else { return };
     success(&world.endpoint(false));
@@ -915,4 +997,136 @@ fn dry_run_source_probe_keeps_destination_untouched() {
     success(&run(&mut cmd));
     assert!(world.b.path().join("data/mj.sqlite3").is_file());
     assert!(!world.b.path().join("data/daemon.json").exists());
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn config_change_during_presync_rolls_back_source() {
+    let Some(world) = World::new() else { return };
+    seed_local_sessions(&world);
+    success(&world.endpoint(false));
+    let hooks = world.a.path().join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let log_path = world.a.path().join("config-change.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let mut cmd = world.migration_command(&[], None);
+    cmd.env("MJ_CHAOS_ISOLATED", "1")
+        .env("MJ_TEST_HOOK", "migrate_after_phase1")
+        .env("MJ_TEST_HOOK_DIR", &hooks)
+        .stdout(Stdio::null())
+        .stderr(log)
+        .process_group(0);
+    let mut migration = RunningChild(mj_core::subprocess::spawn_child(&mut cmd).unwrap());
+    let reached = hooks.join("migrate_after_phase1.reached");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !reached.exists() {
+        if let Some(status) = migration.0.try_wait().unwrap() {
+            panic!(
+                "migration exited before phase 1 hook: {status}: {}",
+                fs::read_to_string(&log_path).unwrap_or_default()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "migration did not reach phase 1 hook"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let config = world.a.path().join("config/config.toml");
+    let mut contents = fs::read_to_string(&config).unwrap();
+    contents.push_str("\n# changed while migration was syncing\n");
+    fs::write(&config, contents).unwrap();
+    fs::write(hooks.join("migrate_after_phase1.continue"), "continue").unwrap();
+    assert!(!wait_child(&mut migration.0).success());
+    let log = fs::read_to_string(log_path).unwrap();
+    assert!(
+        log.contains("config.toml changed during Phase 1 pre-sync"),
+        "{log}"
+    );
+    assert!(!world.b.path().join("data/mj.sqlite3").exists());
+    assert!(
+        fs::symlink_metadata(
+            world
+                .a
+                .path()
+                .join("data/workers/linked-auth/profile/auth.json")
+        )
+        .unwrap()
+        .file_type()
+        .is_symlink()
+    );
+    success(&world.endpoint(false));
+}
+
+#[test]
+fn unavailable_aws_ingress_check_warns_and_continues() {
+    let Some(world) = World::new() else { return };
+    success(&world.endpoint(false));
+    let ec2 = world.a.path().join("config/ec2/fixture");
+    fs::create_dir_all(&ec2).unwrap();
+    fs::write(
+        ec2.join("resources.json"),
+        r#"{"state":"active","instance_id":"i-unavailable","region":"test-region"}"#,
+    )
+    .unwrap();
+    let tools_dir = world.a.path().join("fake-tools");
+    fs::create_dir(&tools_dir).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &tools_dir,
+        "aws",
+        "printf 'fixture AWS unavailable\\n' >&2\nexit 1\n",
+    );
+    let mut cmd = world.migration_to("203.0.113.10", &["--dry-run", "--no-aws-modify"], None);
+    cmd.arg("--ssh-arg")
+        .arg("-o")
+        .arg("--ssh-arg")
+        .arg("HostName=127.0.0.1");
+    cmd.env(
+        "PATH",
+        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools_dir.display()),
+    );
+    let output = run(&mut cmd);
+    success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not check EC2 SSH ingress for i-unavailable in test-region"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("203.0.113.10/32"), "{stderr}");
+    assert!(!world.b.path().join("data").exists());
+    success(&world.endpoint(false));
+}
+
+#[test]
+fn third_hosts_without_copied_credentials_are_still_probed() {
+    let Some(world) = World::new() else { return };
+    let key = world.a.path().join("config/keys/copied");
+    fs::create_dir_all(key.parent().unwrap()).unwrap();
+    fs::write(&key, "key fixture").unwrap();
+    let identity = serde_json::to_string(&key.to_string_lossy()).unwrap();
+    fs::write(world.a.path().join("arg-key"), "argument key").unwrap();
+    let known_hosts = world.a.path().join("config/ec2/fixture/known_hosts");
+    fs::create_dir_all(known_hosts.parent().unwrap()).unwrap();
+    fs::write(&known_hosts, "known hosts fixture").unwrap();
+    let known_arg =
+        serde_json::to_string(&format!("-oUserKnownHostsFile={}", known_hosts.display())).unwrap();
+    fs::write(world.a.path().join("config/config.toml"), format!("version = 1\n[phone]\nenabled = false\n[machines.copied]\nkind = 'ssh'\nhost = 'copied.invalid'\nidentity_file = {identity}\n[machines.arg-key]\nkind = 'ssh'\nhost = 'arg-key.invalid'\nextra_args = ['-i', '~/arg-key']\n[machines.known-only]\nkind = 'ssh'\nhost = 'known-only.invalid'\nextra_args = [{known_arg}]\n[machines.ambient]\nkind = 'ssh'\nhost = 'ambient.invalid'\n")).unwrap();
+    success(&world.endpoint(false));
+    let output = world.migrate(&["--dry-run"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Skipping preflight SSH probe for machine copied"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Skipping preflight SSH probe for machine arg-key"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Skipping preflight SSH probe for machine known-only"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ambient.invalid"), "{stderr}");
+    assert!(!world.b.path().join("data").exists());
 }

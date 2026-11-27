@@ -654,10 +654,14 @@ fn main() -> Result<()> {
         std::env::set_current_dir(&home)
             .with_context(|| format!("set background working directory to {}", home.display()))?;
     }
-    let log = Some(logging::ControllerLog::start(
-        command_name(cli.command.as_ref()),
-        process_kind(cli.command.as_ref()),
-    )?);
+    let log = if matches!(&cli.command, Some(Command::Migrate(args)) if args.dry_run) {
+        None
+    } else {
+        Some(logging::ControllerLog::start(
+            command_name(cli.command.as_ref()),
+            process_kind(cli.command.as_ref()),
+        )?)
+    };
     install_panic_logging();
     let daemon_run = matches!(cli.command, Some(Command::DaemonRun));
     let result = run(cli);

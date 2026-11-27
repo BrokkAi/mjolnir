@@ -935,6 +935,9 @@ async fn scan_source(
             name.push(suffix);
             excluded.insert(PathBuf::from(name));
         }
+        if sessionwiki_db == data_dir.join("sessionwiki/index.db") {
+            excluded.insert(data_dir.join("sessionwiki"));
+        }
         scan_layout(
             &data_dir,
             TransferScope::Data,
@@ -953,27 +956,6 @@ async fn scan_source(
             &BTreeSet::new(),
             &mut out,
         )?;
-        // The separately published index owns this directory when it has no
-        // entries other than the database and its SQLite sidecars.
-        if sessionwiki_db == data_dir.join("sessionwiki/index.db") {
-            let directory = PathBuf::from("sessionwiki");
-            let key = (TransferScope::Data, directory.clone());
-            if matches!(
-                out.get(&key).map(|entry| &entry.kind),
-                Some(FileKind::Directory { .. })
-            ) {
-                let mut only_index = true;
-                for child in std::fs::read_dir(data_dir.join(&directory))? {
-                    if !excluded.contains(&child?.path()) {
-                        only_index = false;
-                        break;
-                    }
-                }
-                if only_index {
-                    out.remove(&key);
-                }
-            }
-        }
         scan_layout(
             &config_dir,
             TransferScope::Config,
