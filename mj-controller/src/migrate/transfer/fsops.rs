@@ -137,13 +137,17 @@ pub(super) fn publish_entry(src: &Path, dst: &Path, mode: PublishMode) -> Result
 /// is never visible with the default mode while its contents are placed. The
 /// real mode is applied once it is filled. Fails with `AlreadyExists` atomically.
 fn create_dir_owner_only(dst: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
+        builder.create(dst)
     }
-    builder.create(dst)
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(dst)
+    }
 }
 
 fn collision(dst: &Path, error: std::io::Error) -> anyhow::Error {
@@ -174,18 +178,17 @@ pub(super) fn publish_entry_no_replace(
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     if source.file_type().is_symlink() {
-        let target = std::fs::read_link(src)?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, dst).map_err(|error| collision(dst, error))?;
-        #[cfg(not(unix))]
-        bail!(
-            "cannot publish symlink {} on this platform",
-            target.display()
-        );
-        on_created()?;
-        if mode == PublishMode::Move {
-            std::fs::remove_file(src)?;
+        {
+            let target = std::fs::read_link(src)?;
+            std::os::unix::fs::symlink(&target, dst).map_err(|error| collision(dst, error))?;
+            on_created()?;
+            if mode == PublishMode::Move {
+                std::fs::remove_file(src)?;
+            }
         }
+        #[cfg(not(unix))]
+        bail!("cannot publish symlink {} on this platform", src.display());
     } else if source.is_dir() {
         create_dir_owner_only(dst).map_err(|error| collision(dst, error))?;
         on_created()?;
@@ -269,9 +272,11 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     let metadata =
         std::fs::symlink_metadata(src).with_context(|| format!("inspect {}", src.display()))?;
     if metadata.file_type().is_symlink() {
-        let target = std::fs::read_link(src)?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, dst)?;
+        {
+            let target = std::fs::read_link(src)?;
+            std::os::unix::fs::symlink(&target, dst)?;
+        }
         #[cfg(not(unix))]
         bail!("cannot publish symlink {} on this platform", src.display());
     } else if metadata.is_dir() {

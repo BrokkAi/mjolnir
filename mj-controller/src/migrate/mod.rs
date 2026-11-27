@@ -1,5 +1,8 @@
 //! Controller host migration support.
 
+#[cfg(feature = "migrate-cli")]
+pub mod cli;
+pub mod orchestrator;
 pub mod pin;
 pub mod preflight;
 pub mod protocol;
