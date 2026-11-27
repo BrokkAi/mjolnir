@@ -679,6 +679,117 @@ fn wait_child(child: &mut Child) -> std::process::ExitStatus {
     }
 }
 
+#[test]
+fn empty_destination_resumes_only_matching_migration_fence() {
+    let Some(world) = World::new() else { return };
+    success(&world.endpoint(false));
+    let source_db = world.a.path().join("data/mj.sqlite3");
+    for (destination, note) in [("other-host", "mj migrate"), ("127.0.0.1", "manual")] {
+        success(&run(world.command(false).args([
+            "daemon",
+            "fence",
+            "--to",
+            destination,
+            "--note",
+            note,
+        ])));
+        let fence = mj_controller::database::read_store_fence_file(&source_db)
+            .unwrap()
+            .unwrap();
+        let result = world.migrate(&[]);
+        assert!(!result.status.success(), "unrelated fence must be refused");
+        let after = mj_controller::database::read_store_fence_file(&source_db)
+            .unwrap()
+            .unwrap();
+        assert!(after.matches_snapshot(&fence));
+        assert!(!world.b.path().join("data/mj.sqlite3").exists());
+    }
+    success(&run(world.command(false).args([
+        "daemon",
+        "fence",
+        "--to",
+        "127.0.0.1",
+        "--note",
+        "mj migrate",
+    ])));
+    let result = world.migrate(&[]);
+    success(&result);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("resuming cutover"));
+    success(&world.endpoint(true));
+    assert!(!world.endpoint(false).status.success());
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn activated_publication_with_fresh_sessionwiki_resumes_without_overwrite() {
+    let Some(world) = World::new() else { return };
+    success(&world.endpoint(false));
+    let source_wiki = world.wiki_dir(false).join("index.db");
+    fs::create_dir_all(source_wiki.parent().unwrap()).unwrap();
+    let db = rusqlite::Connection::open(&source_wiki).unwrap();
+    db.execute_batch("CREATE TABLE marker(value TEXT); INSERT INTO marker VALUES ('source');")
+        .unwrap();
+    drop(db);
+
+    let hooks = world.b.path().join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let mut cmd =
+        world.migration_command(&["--include-sessionwiki"], Some("migrate_before_unfence"));
+    let log = world.a.path().join("wiki-migration-test.log");
+    cmd.stdout(Stdio::null())
+        .stderr(fs::File::create(&log).unwrap())
+        .process_group(0);
+    let mut migration = RunningChild(mj_core::subprocess::spawn_child(&mut cmd).unwrap());
+    let marker = hooks.join("migrate_before_unfence.reached");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !marker.exists() {
+        if let Some(status) = migration.0.try_wait().unwrap() {
+            panic!(
+                "migration exited before activation: {status}: {}",
+                fs::read_to_string(&log).unwrap_or_default()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "receiver did not reach activation"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let pid: i32 = fs::read_to_string(marker)
+        .unwrap()
+        .trim()
+        .strip_prefix("pid=")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    assert!(!wait_child(&mut migration.0).success());
+
+    let dest_db = world.b.path().join("data/mj.sqlite3");
+    let fence = mj_controller::database::read_store_fence_file(&dest_db)
+        .unwrap()
+        .unwrap();
+    mj_controller::database::clear_store_fence_file(&dest_db, &fence).unwrap();
+    let dest_wiki = world.wiki_dir(true).join("index.db");
+    fs::rename(
+        dest_wiki.with_file_name("index.db.mj-migrate-pending"),
+        &dest_wiki,
+    )
+    .unwrap();
+    let stage = world.b.path().join("data/.mj-migrate-stage");
+    assert!(stage.join("publication.json").exists());
+    let result = world.migrate(&["--include-sessionwiki"]);
+    success(&result);
+    assert!(!stage.exists());
+    success(&world.endpoint(true));
+    assert!(!world.endpoint(false).status.success());
+    let db = rusqlite::Connection::open(dest_wiki).unwrap();
+    let value: String = db
+        .query_row("SELECT value FROM marker", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "source");
+}
+
 #[cfg(feature = "test-hooks")]
 #[test]
 fn crash_windows_and_competing_b_autostarter() {

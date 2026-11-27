@@ -465,6 +465,15 @@ mod unix {
             {
                 Some(f.clone())
             }
+            (Some(f), DestinationStatus::Empty)
+                if f.destination == args.destination && f.note.as_deref() == Some("mj migrate") =>
+            {
+                eprintln!(
+                    "Source is already fenced for migration to {}; resuming cutover.",
+                    args.destination
+                );
+                Some(f.clone())
+            }
             (Some(f), _) => return Err(f.refusal(data.root()).into()),
             (None, DestinationStatus::ResumablePublication { .. }) => {
                 eprintln!(
@@ -568,8 +577,14 @@ mod unix {
                 && args.dest_instance.is_none()
                 && preflight.sessionwiki_db.exists()
         };
+        let resuming_publication = resuming.is_some()
+            && matches!(
+                hello.destination_status,
+                DestinationStatus::ResumablePublication { .. }
+            );
         ensure!(
             !migrate_wiki
+                || resuming_publication
                 || hello.sessionwiki_status != SessionWikiStatus::Existing
                 || args.overwrite_sessionwiki,
             "destination SessionWiki already exists; use --overwrite-sessionwiki or --skip-sessionwiki"
