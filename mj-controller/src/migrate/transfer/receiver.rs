@@ -463,13 +463,41 @@ impl Receiver {
             Request::Hello(hello) => self.hello(hello).await,
             Request::ProbePaths { paths } => {
                 let mut exists_map = BTreeMap::new();
+                let publication = self.stage.read_publication()?;
                 for path in paths {
                     ensure!(
                         path.is_absolute(),
                         "probe path must be absolute: {}",
                         path.display()
                     );
-                    exists_map.insert(path.clone(), exists(&path)?);
+                    let metadata = symlink_metadata_opt(&path)?;
+                    let owned = publication.as_ref().is_some_and(|record| {
+                        let identity = metadata.as_ref().and_then(FileIdentity::of);
+                        if record.final_db_placed
+                            && path == self.config.data_dir.join(MAIN_DB)
+                            && identity.is_some()
+                            && identity == record.final_db_identity
+                        {
+                            return true;
+                        }
+                        [
+                            (&self.config.home_dir, &record.owned_home_targets),
+                            (&self.config.data_dir, &record.owned_data_entries),
+                            (&self.config.config_dir, &record.owned_config_entries),
+                        ]
+                        .into_iter()
+                        .any(|(root, entries)| {
+                            entries.iter().any(|entry| {
+                                root.join(&entry.path) == path
+                                    && identity.is_some()
+                                    && identity == entry.identity
+                                    && metadata.as_ref().is_some_and(|found| {
+                                        verify_owned(&path, entry, found).is_ok()
+                                    })
+                            })
+                        })
+                    });
+                    exists_map.insert(path.clone(), metadata.is_some() && !owned);
                 }
                 Ok(vec![(
                     Response::ProbePathsAck { exists: exists_map },
@@ -857,13 +885,16 @@ fn probe_ssh(request: &ProbeSshRequest) -> ProbeSshAck {
             &source.data_root,
             &source.expected_identity,
             &source.engines,
+            request.read_only,
         ) {
             Ok(user) => source_user = Some(user),
             Err(error) => failures.push(format!("{error:#}")),
         }
     }
     for host in &request.third_hosts {
-        if let Err(error) = super::super::preflight::probe_third_host_directly(&executor, host) {
+        if let Err(error) =
+            super::super::preflight::probe_third_host_directly(&executor, host, request.read_only)
+        {
             failures.push(format!("{error:#}"));
         }
     }
@@ -1422,13 +1453,6 @@ fn publish(
             PublishMode::Copy,
         )?;
     }
-    // An overwritten index stays untouched, and exclusively locked, until the
-    // activation commit below.
-    let pending_wiki = if request.migrate_sessionwiki {
-        publish_sessionwiki(config, stage, request, &mut record)?
-    } else {
-        None
-    };
     let mut published_data = 0;
     for name in publishable_names(&raw_data, skipped_data_name)? {
         install_entry(
@@ -1443,6 +1467,14 @@ fn publish(
         published_data += 1;
     }
     summary.data_entries = published_data;
+    // An overwritten index stays untouched, and exclusively locked, until the
+    // activation commit below.
+    let pending_wiki = if request.migrate_sessionwiki {
+        publish_sessionwiki(config, stage, request, &mut record)?
+    } else {
+        None
+    };
+
     install_entry(
         stage,
         &mut record,

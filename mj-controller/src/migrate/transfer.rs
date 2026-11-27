@@ -6,7 +6,9 @@ mod receiver;
 mod sender;
 
 pub use receiver::{PublicationHook, PublicationStep, ReceiverConfig, StartDaemon, run_receiver};
-pub use sender::{CutoverHooks, Phase1, Sender, SenderOutcome, SenderPlan, run_migration_sender};
+pub use sender::{
+    CutoverHooks, MigrationStream, Phase1, Sender, SenderOutcome, SenderPlan, run_migration_sender,
+};
 
 #[cfg(all(test, unix))]
 mod tests;

@@ -117,6 +117,9 @@ pub struct HelloAck {
 /// effective there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeSshRequest {
+    /// Avoid writing SSH host-key files during a dry run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
     pub source: Option<SourceProbe>,
     pub third_hosts: Vec<mj_core::targets::SshTarget>,
 }

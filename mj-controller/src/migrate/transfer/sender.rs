@@ -144,6 +144,59 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Link<R, W> {
     }
 }
 
+/// A preflight conversation that keeps the same buffered link for transfer.
+pub struct MigrationStream<R, W> {
+    link: Link<R, W>,
+}
+
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MigrationStream<R, W> {
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            link: Link {
+                reader: tokio::io::BufReader::with_capacity(256 * 1024, reader),
+                writer: tokio::io::BufWriter::with_capacity(256 * 1024, writer),
+                pending: 0,
+            },
+        }
+    }
+
+    pub async fn hello(&mut self) -> Result<HelloAck> {
+        hello(&mut self.link).await
+    }
+
+    pub async fn probe_paths(&mut self, paths: Vec<PathBuf>) -> Result<BTreeMap<PathBuf, bool>> {
+        let (reply, _) = self.link.request(&Request::ProbePaths { paths }).await?;
+        match reply {
+            Response::ProbePathsAck { exists } => Ok(exists),
+            other => bail!("expected ProbePathsAck, got {other:?}"),
+        }
+    }
+
+    pub async fn probe_ssh(&mut self, request: ProbeSshRequest) -> Result<ProbeSshAck> {
+        let (reply, _) = self.link.request(&Request::ProbeSsh(request)).await?;
+        match reply {
+            Response::ProbeSshAck(ack) => Ok(ack),
+            other => bail!("expected ProbeSshAck, got {other:?}"),
+        }
+    }
+
+    pub async fn done(&mut self) -> Result<()> {
+        let (reply, _) = self.link.request(&Request::Done).await?;
+        ensure!(
+            matches!(reply, Response::DoneAck),
+            "expected DoneAck, got {reply:?}"
+        );
+        Ok(())
+    }
+
+    pub fn into_sender(self, plan: SenderPlan) -> Sender<R, W> {
+        Sender {
+            link: self.link,
+            plan,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Origin {
     Nothing,
@@ -163,6 +216,47 @@ struct Pin {
     handle: PinHandle,
     db_path: PathBuf,
     initial_wal: WalIdentity,
+}
+
+async fn hello<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    link: &mut Link<R, W>,
+) -> Result<HelloAck> {
+    let (reply, _) = link
+        .request(&Request::Hello(Hello {
+            mj_version: env!("CARGO_PKG_VERSION").to_owned(),
+            schema_version: mj_store::database::STORE_SCHEMA_VERSION,
+            protocol_version: PROTOCOL_VERSION,
+            os_family: "unix".to_owned(),
+        }))
+        .await?;
+    let Response::HelloAck(ack) = reply else {
+        bail!("expected HelloAck, got {reply:?}");
+    };
+    match &ack.destination_status {
+        DestinationStatus::Empty | DestinationStatus::ResumablePublication { .. } => {}
+        DestinationStatus::ExistingStore { .. } => bail!(
+            "the destination already has an mj.sqlite3 or config.toml; clean it manually or \
+                 migrate into another instance with --dest-instance"
+        ),
+        DestinationStatus::ContainerDaemon => {
+            bail!(
+                "the destination runs a container-hosted daemon, which migration does not support"
+            )
+        }
+    }
+    ensure!(
+        ack.os_family == "unix" && ack.protocol_version == PROTOCOL_VERSION,
+        "the destination speaks another migration protocol (protocol {}, {})",
+        ack.protocol_version,
+        ack.os_family
+    );
+    ensure!(
+        ack.schema_version == mj_store::database::STORE_SCHEMA_VERSION,
+        "the destination's store schema is {} but this host's is {}; run the same Mjolnir version on both",
+        ack.schema_version,
+        mj_store::database::STORE_SCHEMA_VERSION
+    );
+    Ok(*ack)
 }
 
 /// The state Phase 1 leaves for Phase 2.
@@ -191,48 +285,16 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
     }
 
     pub async fn hello(&mut self) -> Result<HelloAck> {
-        let (reply, _) = self
-            .link
-            .request(&Request::Hello(Hello {
-                mj_version: env!("CARGO_PKG_VERSION").to_owned(),
-                schema_version: mj_store::database::STORE_SCHEMA_VERSION,
-                protocol_version: PROTOCOL_VERSION,
-                os_family: "unix".to_owned(),
-            }))
-            .await?;
-        let Response::HelloAck(ack) = reply else {
-            bail!("expected HelloAck, got {reply:?}");
-        };
-        match &ack.destination_status {
-            DestinationStatus::Empty | DestinationStatus::ResumablePublication { .. } => {}
-            DestinationStatus::ExistingStore { .. } => bail!(
-                "the destination already has an mj.sqlite3 or config.toml; clean it manually or \
-                 migrate into another instance with --dest-instance"
-            ),
-            DestinationStatus::ContainerDaemon => {
-                bail!(
-                    "the destination runs a container-hosted daemon, which migration does not support"
-                )
-            }
-        }
-        ensure!(
-            ack.os_family == "unix" && ack.protocol_version == PROTOCOL_VERSION,
-            "the destination speaks another migration protocol (protocol {}, {})",
-            ack.protocol_version,
-            ack.os_family
-        );
-        ensure!(
-            ack.schema_version == mj_store::database::STORE_SCHEMA_VERSION,
-            "the destination's store schema is {} but this host's is {}; run the same Mjolnir version on both",
-            ack.schema_version,
-            mj_store::database::STORE_SCHEMA_VERSION
-        );
-        Ok(*ack)
+        hello(&mut self.link).await
     }
 
     /// Phase 1, with daemon A running.
     pub async fn phase1(&mut self) -> Result<Phase1> {
         let destination = self.hello().await?;
+        self.phase1_with_hello(destination).await
+    }
+
+    pub async fn phase1_with_hello(&mut self, destination: HelloAck) -> Result<Phase1> {
         let home_targets = self.home_targets(&destination.home_dir)?;
         let mut targets = vec![DbTarget::Main];
         if self.plan.migrate_sessionwiki {
@@ -891,6 +953,27 @@ async fn scan_source(
             &BTreeSet::new(),
             &mut out,
         )?;
+        // The separately published index owns this directory when it has no
+        // entries other than the database and its SQLite sidecars.
+        if sessionwiki_db == data_dir.join("sessionwiki/index.db") {
+            let directory = PathBuf::from("sessionwiki");
+            let key = (TransferScope::Data, directory.clone());
+            if matches!(
+                out.get(&key).map(|entry| &entry.kind),
+                Some(FileKind::Directory { .. })
+            ) {
+                let mut only_index = true;
+                for child in std::fs::read_dir(data_dir.join(&directory))? {
+                    if !excluded.contains(&child?.path()) {
+                        only_index = false;
+                        break;
+                    }
+                }
+                if only_index {
+                    out.remove(&key);
+                }
+            }
+        }
         scan_layout(
             &config_dir,
             TransferScope::Config,

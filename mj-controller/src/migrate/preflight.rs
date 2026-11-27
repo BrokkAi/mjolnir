@@ -924,9 +924,10 @@ pub fn probe_source_directly(
     source_data_root: &Path,
     expected_identity: &str,
     engines: &[String],
+    read_only: bool,
 ) -> Result<String> {
     let arguments = source_probe_arguments(source_data_root, expected_identity, engines)?;
-    let output = probe_ssh_directly(executor, source, arguments)?;
+    let output = probe_ssh_directly(executor, source, arguments, read_only)?;
     Ok(String::from_utf8(output)?.trim().to_owned())
 }
 
@@ -958,35 +959,68 @@ pub fn probe_third_host_from_destination(
 pub fn probe_third_host_directly(
     executor: &impl mj_core::targets::CommandExecutor,
     third_host: &mj_core::targets::SshTarget,
+    read_only: bool,
 ) -> Result<()> {
-    probe_ssh_directly(executor, third_host, vec!["true".into()])?;
+    probe_ssh_directly(executor, third_host, vec!["true".into()], read_only)?;
     Ok(())
 }
 
 fn batch_mode_command(
     target: &mj_core::targets::SshTarget,
     arguments: Vec<String>,
+    read_only: bool,
 ) -> mj_core::targets::CommandSpec {
-    use mj_core::targets::{SshTrafficClass, ssh_command_owned};
-    let mut inner_target = target.clone();
-    inner_target
-        .ssh_args
-        .extend(["-o".into(), "BatchMode=yes".into()]);
-    ssh_command_owned(SshTrafficClass::Control, &inner_target, arguments)
+    use mj_core::targets::{CommandSpec, remote_command_line};
+    // The receiver's preflight is read-only, including during --dry-run. A
+    // shared SSH session would create its control socket under the data root;
+    // accepting or updating host keys could also write the user's files.
+    let mut args = vec![
+        "-T".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ClearAllForwardings=yes".into(),
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
+    ];
+    if read_only {
+        args.extend([
+            "-o".into(),
+            "StrictHostKeyChecking=yes".into(),
+            "-o".into(),
+            "UpdateHostKeys=no".into(),
+        ]);
+    }
+    args.extend(target.ssh_args.clone());
+    args.push(target.destination.clone());
+    args.push(remote_command_line(&arguments));
+    CommandSpec::new("ssh", args)
 }
 
 fn probe_ssh_directly(
     executor: &impl mj_core::targets::CommandExecutor,
     target: &mj_core::targets::SshTarget,
     arguments: Vec<String>,
+    read_only: bool,
 ) -> Result<Vec<u8>> {
-    let command =
-        batch_mode_command(target, arguments).purpose("probe SSH from migration destination");
+    ensure!(
+        !target.destination.starts_with('-'),
+        "SSH destination cannot start with '-'"
+    );
+    let command = batch_mode_command(target, arguments, read_only)
+        .purpose("probe SSH from migration destination");
     let output = executor.execute(&command)?;
     ensure!(
         output.status == 0,
-        "destination cannot reach {} over SSH: {}",
+        "destination cannot reach {} over SSH{}: {}",
         target.destination,
+        if read_only {
+            " (dry-run probes require an already trusted host key)"
+        } else {
+            ""
+        },
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(output.stdout)
@@ -999,7 +1033,7 @@ fn probe_nested_ssh(
     arguments: Vec<String>,
 ) -> Result<Vec<u8>> {
     use mj_core::targets::{SshTrafficClass, ssh_command};
-    let inner = batch_mode_command(target, arguments);
+    let inner = batch_mode_command(target, arguments, false);
     let mut command = vec![inner.program];
     command.extend(inner.args);
     let outer = ssh_command(SshTrafficClass::Control, destination, command)

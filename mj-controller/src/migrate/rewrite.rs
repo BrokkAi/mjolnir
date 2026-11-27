@@ -355,17 +355,19 @@ pub fn rewrite_staged_config_and_files(
         let managed = profile
             .kind
             .managed_profile_home_in(&spec.old_config_root, id);
-        if profile.home == managed {
+        let expanded_home = mj_core::path_input::expand_home(&profile.home, Some(&spec.old_home))?;
+        if expanded_home == managed {
             profile.home = profile
                 .kind
                 .managed_profile_home_in(&spec.new_config_root, id);
         } else if let Some(relative) =
-            migration_paths::strip_normal_prefix(&profile.home, &spec.old_home)
+            migration_paths::strip_normal_prefix(&expanded_home, &spec.old_home)
         {
             profile.home = spec.new_home.join(relative);
         }
     }
-    let relocate_credential = |path: &mut std::path::PathBuf| {
+    let relocate_credential = |path: &mut std::path::PathBuf| -> Result<()> {
+        *path = mj_core::path_input::expand_home(path, Some(&spec.old_home))?;
         migration_paths::relocate_ssh_identity_path(
             path,
             &spec.old_config_root,
@@ -373,12 +375,13 @@ pub fn rewrite_staged_config_and_files(
             &spec.old_home,
             &spec.new_home,
         );
+        Ok(())
     };
     if let Some(path) = &mut config.github.session_token_path {
-        relocate_credential(path);
+        relocate_credential(path)?;
     }
     if let Some(app) = &mut config.github.app {
-        relocate_credential(&mut app.private_key_path);
+        relocate_credential(&mut app.private_key_path)?;
     }
     config.daemon = DaemonConfig::default();
     config.validate()?;
