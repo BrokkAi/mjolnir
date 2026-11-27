@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::Path;
 
 const RECORD_FILE: &str = ".hel-memory-record.json";
-const RETIRED_SEEDS_DIR: &str = "retired-memory-seeds";
+const RETIRED_SEEDS_DIR: &str = ".retired-memory-seeds";
 
 fn retain_documents(tree: &mut ProjectMemorySnapshot) {
     tree.files.retain(|_, content| is_memory_document(content));
@@ -251,10 +251,7 @@ fn verified_base(
 }
 
 /// The worker is the only seeder; a retained or restored replica always wins.
-pub(super) fn ensure_project_memory_replica(
-    memory: &ProjectMemoryLaunchConfig,
-    worker_root: &Path,
-) -> Result<()> {
+pub(super) fn ensure_project_memory_replica(memory: &ProjectMemoryLaunchConfig) -> Result<()> {
     let seed = mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root);
     if !memory.root.exists() {
         let parent = memory
@@ -293,16 +290,19 @@ pub(super) fn ensure_project_memory_replica(
         std::fs::rename(baseline.path(), &memory.baseline_root)?;
     }
     if seed.exists() {
-        retire_seed(&seed, worker_root)?;
+        retire_seed(&seed)?;
     }
     Ok(())
 }
 
-/// Move a seed into the worker-owned retired directory before any cleanup. The
-/// rename is the consumption marker: startup only seeds from the exact seed
-/// path, and a leftover in the retired directory is never mistaken for a seed.
-fn retire_seed(seed: &Path, worker_root: &Path) -> Result<()> {
-    let retired_root = worker_root.join(RETIRED_SEEDS_DIR);
+/// Move a seed into a retired directory on the seed's own filesystem before
+/// any cleanup. The sibling directory is never read as a seed; startup only
+/// seeds from the exact seed path. A failed rename fails closed.
+fn retire_seed(seed: &Path) -> Result<()> {
+    let parent = seed
+        .parent()
+        .with_context(|| format!("project memory seed {} has no parent", seed.display()))?;
+    let retired_root = parent.join(RETIRED_SEEDS_DIR);
     match std::fs::create_dir(&retired_root) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -315,20 +315,14 @@ fn retire_seed(seed: &Path, worker_root: &Path) -> Result<()> {
             });
         }
     }
-    let name = seed
-        .file_name()
-        .with_context(|| format!("project memory seed {} has no file name", seed.display()))?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let mut attempt = 0_u64;
+    let mut sequence = 0_u64;
     loop {
-        let retired = format!(
-            "{}.retired-{}-{nonce}-{attempt}",
-            name.to_string_lossy(),
-            std::process::id()
-        );
+        let retired = format!("seed-{}-{nonce}-{sequence}", std::process::id());
+        let destination = retired_root.join(&retired);
         #[cfg(unix)]
         let renamed = {
             let retired_dir = remove_tree::open_dir_nofollow(&retired_root).with_context(|| {
@@ -405,21 +399,14 @@ fn retire_seed(seed: &Path, worker_root: &Path) -> Result<()> {
                     std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
                 ) =>
             {
-                attempt = attempt.wrapping_add(1);
-                continue;
-            }
-            #[cfg(unix)]
-            Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
-                // The profile and worker root are normally one filesystem. If
-                // they are not, remove the consumed seed in place; a failure
-                // aborts startup instead of leaving a reusable seed.
-                remove_tree::remove_dir_all_checked(seed).with_context(|| {
-                    format!(
-                        "remove project memory seed {} across filesystems",
-                        seed.display()
-                    )
-                })?;
-                return Ok(());
+                // Retry only when the destination really exists; any other
+                // error with this shape is a failure for this seed.
+                if destination.exists() {
+                    sequence = sequence.wrapping_add(1);
+                    continue;
+                }
+                return Err(error)
+                    .with_context(|| format!("retire project memory seed {}", seed.display()));
             }
             Err(error) => {
                 return Err(error)
@@ -462,14 +449,13 @@ fn rename_into_dir(
     }
 }
 
-/// Best-effort cleanup of the worker-owned retired seed directory. Every entry
-/// there was placed by `retire_seed`; nothing in the retained profile is
-/// scanned or deleted. The directory is opened without following a symlink.
-fn sweep_retired_memory_seeds(worker_root: &Path) {
-    let root = worker_root.join(RETIRED_SEEDS_DIR);
+/// Best-effort cleanup of the seed's sibling retired directory. Every entry
+/// there was placed by `retire_seed`; the live seed path is never touched. The
+/// directory is opened without following a symlink.
+fn sweep_retired_memory_seeds(root: &Path) {
     #[cfg(unix)]
     {
-        let directory = match remove_tree::open_dir_nofollow(&root) {
+        let directory = match remove_tree::open_dir_nofollow(root) {
             Ok(directory) => directory,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
             Err(error) => {
@@ -561,8 +547,7 @@ fn sweep_retired_memory_seeds(worker_root: &Path) {
 /// Retired seeds are consumed garbage; a large or stalled tree must not delay
 /// startup. The detached thread loses its work at process exit, and the next
 /// start tries again.
-fn spawn_retired_seed_cleanup(worker_root: &Path) {
-    let root = worker_root.to_owned();
+fn spawn_retired_seed_cleanup(root: std::path::PathBuf) {
     if let Err(error) = std::thread::Builder::new()
         .name("retired-memory-seed-gc".into())
         .spawn(move || sweep_retired_memory_seeds(&root))
@@ -578,10 +563,12 @@ fn spawn_retired_seed_cleanup(worker_root: &Path) {
 pub(super) fn prepare_project_memory(
     memory: &ProjectMemoryLaunchConfig,
     session_id: &str,
-    worker_root: &Path,
 ) -> Result<()> {
-    spawn_retired_seed_cleanup(worker_root);
-    ensure_project_memory_replica(memory, worker_root)?;
+    let seed = mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root);
+    if let Some(parent) = seed.parent() {
+        spawn_retired_seed_cleanup(parent.join(RETIRED_SEEDS_DIR));
+    }
+    ensure_project_memory_replica(memory)?;
     let span = tracing::info_span!("project_memory_recovery", %session_id);
     span.in_scope(|| {
         if let Err(error) = recover_project_memory(memory) {
@@ -683,7 +670,7 @@ mod tests {
         let outside = temp.path().join("outside");
         std::fs::write(&outside, "outside").unwrap();
         std::os::unix::fs::symlink(&outside, memory.root.join("link.md")).unwrap();
-        prepare_project_memory(&memory, "session", temp.path()).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
         assert_eq!(
             Record::load(&memory).unwrap().base.files,
             [("/note.md".into(), "tracked".into())].into()
@@ -710,7 +697,7 @@ mod tests {
         let seed = mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root);
         std::fs::create_dir_all(&seed).unwrap();
         std::fs::write(seed.join("note.md"), "seed version").unwrap();
-        ensure_project_memory_replica(&memory, temp.path()).unwrap();
+        ensure_project_memory_replica(&memory).unwrap();
         recover_project_memory(&memory).unwrap();
         assert!(!seed.exists());
         let seeded = snapshot_documents(&memory.root).unwrap();
@@ -723,7 +710,7 @@ mod tests {
             ProjectMemoryDeliveryOutcome::Delivered
         );
         std::fs::remove_dir_all(&memory.root).unwrap();
-        ensure_project_memory_replica(&memory, temp.path()).unwrap();
+        ensure_project_memory_replica(&memory).unwrap();
         recover_project_memory(&memory).unwrap();
         assert_eq!(snapshot_documents(&memory.root).unwrap(), updated);
         assert_eq!(Record::load(&memory).unwrap().base, updated);
@@ -747,7 +734,7 @@ mod tests {
         let retired: Vec<_> = (0..3)
             .map(|index| {
                 temp.path()
-                    .join(format!("retired-memory-seeds/stale-{index}"))
+                    .join(format!(".retired-memory-seeds/stale-{index}"))
             })
             .collect();
         for path in &retired {
@@ -759,7 +746,7 @@ mod tests {
         let retained = temp.path().join(".hel-memory-seed.retired-backup");
         std::fs::create_dir_all(&retained).unwrap();
         std::fs::write(retained.join("note.md"), "keep").unwrap();
-        prepare_project_memory(&memory, "session", temp.path()).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
         for _ in 0..200 {
             if retired.iter().all(|path| !path.exists()) {
                 break;
@@ -773,14 +760,36 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_seed_is_never_reused_as_a_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        let retired = temp.path().join(".retired-memory-seeds/stale");
+        std::fs::create_dir_all(&retired).unwrap();
+        std::fs::write(retired.join("note.md"), "retired version").unwrap();
+        ensure_project_memory_replica(&memory).unwrap();
+        assert!(
+            !memory.root.join("note.md").exists(),
+            "the sibling retired directory must never be read as a seed"
+        );
+        assert!(Record::load(&memory).unwrap().base.files.is_empty());
+    }
+
+    #[test]
     fn a_consumed_seed_is_moved_out_of_the_seed_path() {
         let temp = tempfile::tempdir().unwrap();
         let seed = temp.path().join(".hel-memory-seed");
         std::fs::create_dir_all(&seed).unwrap();
         std::fs::write(seed.join("note.md"), "seed version").unwrap();
-        retire_seed(&seed, temp.path()).unwrap();
+        retire_seed(&seed).unwrap();
         assert!(!seed.exists());
-        assert!(temp.path().join("retired-memory-seeds").is_dir());
+        assert!(temp.path().join(".retired-memory-seeds").is_dir());
     }
 
     #[cfg(unix)]
@@ -798,8 +807,8 @@ mod tests {
         let outside = temp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("keep.md"), "keep").unwrap();
-        std::os::unix::fs::symlink(&outside, temp.path().join("retired-memory-seeds")).unwrap();
-        prepare_project_memory(&memory, "session", temp.path()).unwrap();
+        std::os::unix::fs::symlink(&outside, temp.path().join(".retired-memory-seeds")).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
         assert!(outside.join("keep.md").exists());
     }
 
@@ -818,7 +827,7 @@ mod tests {
         std::fs::create_dir_all(&seed).unwrap();
         std::fs::write(seed.join("note.md"), "seed version").unwrap();
         std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let result = retire_seed(&seed, temp.path());
+        let result = retire_seed(&seed);
         std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)).unwrap();
         result.unwrap();
         assert!(!seed.exists());
@@ -840,7 +849,7 @@ mod tests {
                 std::fs::create_dir_all(&memory.baseline_root).unwrap();
                 std::fs::write(memory.baseline_root.join("legacy.md"), "legacy").unwrap();
             }
-            ensure_project_memory_replica(&memory, temp.path()).unwrap();
+            ensure_project_memory_replica(&memory).unwrap();
             recover_project_memory(&memory).unwrap();
             let expected = if legacy {
                 ProjectMemorySnapshot {
@@ -1041,7 +1050,7 @@ mod tests {
         let mut record = Record::load(&memory).unwrap();
         record.incoming = Some(incoming.clone());
         record.save(&memory).unwrap();
-        prepare_project_memory(&memory, "session", temp.path()).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
         let record = Record::load(&memory).unwrap();
         assert!(record.incoming.is_none());
         assert_eq!(record.base, replica);
@@ -1075,7 +1084,7 @@ mod tests {
         std::fs::write(&target, "outside").unwrap();
         std::fs::remove_file(memory.root.join("note.md")).unwrap();
         std::os::unix::fs::symlink(&target, memory.root.join("note.md")).unwrap();
-        prepare_project_memory(&memory, "session", temp.path()).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
         let (base, next_id, replica) = handout(&memory, &canonical);
         assert_ne!(next_id, id);
         assert!(!base.files.contains_key("/note.md"));
@@ -1102,7 +1111,7 @@ mod tests {
         record.save(&memory).unwrap();
         std::fs::remove_dir_all(&memory.root).unwrap();
         std::fs::write(&memory.root, "not a directory").unwrap();
-        prepare_project_memory(&memory, "session", temp.path()).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
         assert_eq!(
             Record::load(&memory).unwrap().incoming,
             Some(incoming.clone())

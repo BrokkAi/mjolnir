@@ -295,7 +295,7 @@ fn apply_committed_reload_with(
     super::resolve_relative_harness_home(&mut launch, &std::env::current_dir()?);
     #[cfg(unix)]
     if let Some(memory) = &launch.project_memory {
-        super::project_memory::ensure_project_memory_replica(memory, root)?;
+        super::project_memory::ensure_project_memory_replica(memory)?;
     }
     if let Some(login) = &manifest.shared_login {
         let relative = relative(&login.relative_marker)?;
