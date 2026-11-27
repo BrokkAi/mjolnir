@@ -97,6 +97,122 @@ async fn capture_harness_failure(
     .context("capture harness failure lifecycle revision")?
 }
 
+fn apply_worker_recovery_update(
+    worker_recovery: &mut watch::Receiver<Option<WorkerRecoveryPlan>>,
+    target: &mut RelaySessionTarget,
+    storage_wait: &mut Option<String>,
+    last_recovery_probe: &mut Option<tokio::time::Instant>,
+    schedule: &mut SyncSchedule,
+    view_tx: &watch::Sender<ManagedSessionView>,
+    updates: &CoalescedUpdateSender,
+) -> bool {
+    let next = worker_recovery.borrow_and_update().clone();
+    if target.worker_recovery == next {
+        return false;
+    }
+    target.worker_recovery = next;
+    let target_missing = matches!(
+        view_tx.borrow().error.as_ref(),
+        Some(ViewError::TargetMissing(_))
+    );
+    if storage_wait.is_some() || target_missing {
+        *storage_wait = None;
+        *last_recovery_probe = None;
+        if target_missing {
+            let snapshot = view_tx.borrow().snapshot.clone();
+            publish_view(
+                &target.session_id,
+                ManagedSessionView {
+                    attention: Default::default(),
+                    snapshot,
+                    connected: false,
+                    error: None,
+                },
+                view_tx,
+                updates,
+            );
+        }
+        schedule.after(Duration::ZERO);
+    }
+    true
+}
+
+#[cfg(test)]
+mod recovery_update_tests {
+    use super::*;
+    use mj_core::targets::CommandPlan;
+
+    // Hard-won: 39b578023: a watch wake could consume a plan update without releasing storage wait.
+    #[tokio::test]
+    async fn watched_plan_is_applied_once_even_when_the_wake_was_marked_seen() {
+        let plan = WorkerRecoveryPlan {
+            source_target: mj_core::state::TargetLocator::LocalBare {
+                worker_root: PathBuf::from("/test-worker"),
+            },
+            target: None,
+            workspace: None,
+            exit_record: None,
+            liveness_probe: CommandSpec::new("printf", ["dead"]).into(),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: CommandPlan {
+                description: "test restart".into(),
+                commands: vec![],
+            }
+            .into(),
+        };
+        let mut target = RelaySessionTarget {
+            session_id: "session".into(),
+            spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+            worker_recovery: Some(plan.clone()),
+            project_memory: None,
+        };
+        let (sender, mut receiver) = watch::channel(Some(plan.clone()));
+        let mut storage_wait = Some("host".to_owned());
+        let probe = tokio::time::Instant::now();
+        let mut last_recovery_probe = Some(probe);
+        let mut schedule = SyncSchedule::immediately();
+        schedule.after(Duration::from_secs(60));
+        let deadline = schedule.deadline;
+        let (view_tx, _view_rx) = watch::channel(ManagedSessionView::default());
+        let (updates, _updates_rx) = coalesced_update_channel();
+
+        sender.send_replace(Some(plan.clone()));
+        receiver.changed().await.unwrap();
+        assert!(!apply_worker_recovery_update(
+            &mut receiver,
+            &mut target,
+            &mut storage_wait,
+            &mut last_recovery_probe,
+            &mut schedule,
+            &view_tx,
+            &updates
+        ));
+        assert_eq!(storage_wait.as_deref(), Some("host"));
+        assert_eq!(last_recovery_probe, Some(probe));
+        assert_eq!(schedule.deadline, deadline);
+
+        let mut revised = plan;
+        revised.liveness_probe = CommandSpec::new("printf", ["starting"]).into();
+        sender.send_replace(Some(revised.clone()));
+        receiver.changed().await.unwrap();
+        assert!(!receiver.has_changed().unwrap());
+        assert!(apply_worker_recovery_update(
+            &mut receiver,
+            &mut target,
+            &mut storage_wait,
+            &mut last_recovery_probe,
+            &mut schedule,
+            &view_tx,
+            &updates
+        ));
+        assert_eq!(target.worker_recovery, Some(revised));
+        assert!(storage_wait.is_none());
+        assert!(last_recovery_probe.is_none());
+        assert!(schedule.deadline < deadline);
+    }
+}
+
 pub fn run_session_actor(
     target: RelaySessionTarget,
     commands: mpsc::Receiver<ActorCommand>,
@@ -168,12 +284,15 @@ async fn run_session_actor_inner(
         RecoveryChanged(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
-        if storage_wait.is_some() && worker_recovery.has_changed().unwrap_or(false) {
-            storage_wait = None;
-            last_recovery_probe = None;
-            schedule.after(Duration::ZERO);
-        }
-        target.worker_recovery = worker_recovery.borrow_and_update().clone();
+        apply_worker_recovery_update(
+            &mut worker_recovery,
+            &mut target,
+            &mut storage_wait,
+            &mut last_recovery_probe,
+            &mut schedule,
+            &view_tx,
+            &updates,
+        );
         let usable = connection.is_some() && !lifecycle.is_leased();
         if usable != profile_connection_usable {
             updates
@@ -209,9 +328,9 @@ async fn run_session_actor_inner(
             event = async {
                 tokio::select! {
                     completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => Event::Reviewer(completed),
-                    // A definitive missing target has no relay to poll. The
-                    // daemon owns persistence; a changed desired target
-                    // retires this actor and starts a fresh one.
+                    // A definitive missing target has no relay to poll.
+                    // A changed recovery plan clears the error and retries;
+                    // a changed actor identity starts a fresh actor.
                     () = tokio::time::sleep_until(schedule.deadline), if !matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_)))
                         // A sealed relay has nothing left to follow. Its lifecycle
                         // owner may stop the target after returning the connection.
@@ -233,7 +352,7 @@ async fn run_session_actor_inner(
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
-                    changed = worker_recovery.changed(), if storage_wait.is_some() && recovery_watch_open => Event::RecoveryChanged(changed),
+                    changed = worker_recovery.changed(), if recovery_watch_open && (storage_wait.is_some() || matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_)))) => Event::RecoveryChanged(changed),
                 }
             } => event,
         };
@@ -290,14 +409,18 @@ async fn run_session_actor_inner(
             Event::RecoveryChanged(changed) => {
                 if changed.is_err() {
                     recovery_watch_open = false;
-                } else {
-                    storage_wait = None;
-                    last_recovery_probe = None;
-                    schedule.after(Duration::ZERO);
                 }
             }
             Event::Storage(changed) => {
-                target.worker_recovery = worker_recovery.borrow_and_update().clone();
+                apply_worker_recovery_update(
+                    &mut worker_recovery,
+                    &mut target,
+                    &mut storage_wait,
+                    &mut last_recovery_probe,
+                    &mut schedule,
+                    &view_tx,
+                    &updates,
+                );
                 storage.borrow_and_update();
                 let Some(host) = storage_wait.as_deref() else {
                     continue;
@@ -511,7 +634,15 @@ async fn run_session_actor_inner(
                         schedule.after(RECONNECT_INTERVAL);
                     }
                     Err(error) => {
-                        target.worker_recovery = worker_recovery.borrow_and_update().clone();
+                        apply_worker_recovery_update(
+                            &mut worker_recovery,
+                            &mut target,
+                            &mut storage_wait,
+                            &mut last_recovery_probe,
+                            &mut schedule,
+                            &view_tx,
+                            &updates,
+                        );
                         harness_readiness.lost_contact();
                         connection = None;
                         updates.publish_cpu(&target.session_id, None);
@@ -529,10 +660,11 @@ async fn run_session_actor_inner(
                                 consecutive_failures = failures,
                                 error = %format!("{error:#}"), "session relay sync retry failed");
                         }
-                        let recovery_due = !integrity
+                        let recovery_eligible = !integrity
                             && recovery_waiting.is_none()
                             && failures >= UNREACHABLE_FAILURE_THRESHOLD
-                            && worker_connect_needs_restart(&error)
+                            && worker_connect_needs_restart(&error);
+                        let recovery_due = recovery_eligible
                             && target.worker_recovery.is_some()
                             && last_recovery_probe.is_none_or(|last: tokio::time::Instant| {
                                 last.elapsed() >= WORKER_RESTART_COOLDOWN
@@ -615,7 +747,20 @@ async fn run_session_actor_inner(
                         }
                         // The durable outcome lookup above can yield while the
                         // manager publishes a newer recovery plan.
-                        target.worker_recovery = worker_recovery.borrow_and_update().clone();
+                        apply_worker_recovery_update(
+                            &mut worker_recovery,
+                            &mut target,
+                            &mut storage_wait,
+                            &mut last_recovery_probe,
+                            &mut schedule,
+                            &view_tx,
+                            &updates,
+                        );
+                        let recovery_due = recovery_eligible
+                            && target.worker_recovery.is_some()
+                            && last_recovery_probe.is_none_or(|last: tokio::time::Instant| {
+                                last.elapsed() >= WORKER_RESTART_COOLDOWN
+                            });
                         let storage_problem = target
                             .worker_recovery
                             .as_ref()

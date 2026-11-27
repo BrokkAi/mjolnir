@@ -724,6 +724,105 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
     manager.shutdown.shutdown().await.unwrap();
 }
 
+#[cfg(unix)]
+// Hard-won: 39b578023: a new recovery plan left the same actor parked on a missing workspace.
+#[tokio::test]
+async fn missing_workspace_actor_retries_when_recovery_plan_changes() {
+    const CHILD: &str = "MJ_TEST_MISSING_WORKSPACE_PLAN_CHANGE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "missing_workspace_actor_retries_when_recovery_plan_changes",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.target = Some(Box::new(recovery_source_target()));
+    crate::database::save_session(&record).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing-workspace");
+    let restored = directory.path().join("restored-workspace");
+    let restarted = directory.path().join("worker-restarted");
+    std::fs::create_dir(&restored).unwrap();
+    let mut target = RelaySessionTarget {
+        session_id: LEASED_RELAY_SESSION.into(),
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+        worker_recovery: Some(WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
+            target: None,
+            workspace: Some(WorkerWorkspace {
+                target: mj_core::state::ManagedWorktreeTarget::Local,
+                directory: missing.clone(),
+            }),
+            exit_record: None,
+            liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: CommandPlan {
+                description: "restart with restored workspace".into(),
+                commands: vec![CommandSpec::new(
+                    "touch",
+                    [restarted.to_string_lossy().into_owned()],
+                )],
+            }
+            .into(),
+        }),
+        project_memory: None,
+    };
+    let manager = spawn_session_manager().unwrap();
+    manager.targets.send_replace(vec![target.clone()]);
+    let handle = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let mut view = handle.view.clone();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        view.wait_for(|view| matches!(view.error, Some(ViewError::TargetMissing(_)))),
+    )
+    .await
+    .expect("missing workspace was not reported")
+    .unwrap();
+    assert!(!restarted.exists());
+    target
+        .worker_recovery
+        .as_mut()
+        .unwrap()
+        .workspace
+        .as_mut()
+        .unwrap()
+        .directory = restored;
+    manager.targets.send_replace(vec![target]);
+    let same = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(
+        handle.commands.same_channel(&same.commands),
+        "plan update replaced the actor"
+    );
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if !matches!(view.borrow().error, Some(ViewError::TargetMissing(_)))
+                && restarted.exists()
+            {
+                break;
+            }
+            view.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("actor did not retry recovery with the updated workspace");
+    assert!(!missing.exists(), "the old workspace must remain missing");
+    manager.shutdown.shutdown().await.unwrap();
+}
+
 /// precision-3260: the worker stopped with "No space left on device", and
 /// every recovery attempt uploaded a replacement into the same full disk.
 /// Recovery now reads the dead worker's exit record, tells the storage owner,
