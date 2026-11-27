@@ -174,6 +174,82 @@ fn test_recovery_plan() -> WorkerRecoveryPlan {
     }
 }
 
+// Hard-won: fc669db12: a command could win selection just before a new plan cleared TargetMissing.
+#[tokio::test]
+async fn pending_plan_is_applied_before_command_rejects_missing_target() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct PublishOnQueueRelease {
+        recovery: watch::Sender<Option<WorkerRecoveryPlan>>,
+        plan: WorkerRecoveryPlan,
+        fired: AtomicBool,
+    }
+    impl futures::task::ArcWake for PublishOnQueueRelease {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.fired.store(true, Ordering::SeqCst);
+            this.recovery.send_replace(Some(this.plan.clone()));
+        }
+    }
+
+    let mut target = target("sh");
+    let plan = test_recovery_plan();
+    target.worker_recovery = Some(plan.clone());
+    let mut corrected = plan;
+    corrected.liveness_probe = CommandSpec::new("printf", ["starting"]).into();
+    let (recovery, recovery_rx) = watch::channel(target.worker_recovery.clone());
+    let (commands, receiver) = mpsc::channel(1);
+    let (_releases_tx, releases_rx) = mpsc::unbounded_channel();
+    let (_retirement_tx, retirement_rx) = watch::channel(false);
+    let (view_tx, _view_rx) = watch::channel(ManagedSessionView {
+        error: Some(ViewError::TargetMissing("old workspace missing".into())),
+        ..ManagedSessionView::default()
+    });
+    let (updates, _updates_rx) = coalesced_update_channel();
+    let mut actor = Box::pin(actor::run_session_actor(
+        target,
+        receiver,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates,
+        recovery_rx,
+    ));
+    assert!(futures::poll!(actor.as_mut()).is_pending());
+
+    let (job, mut result) = test_relay_job(true);
+    commands.try_send(ActorCommand::RelayJob { job }).unwrap();
+    // A full queue parks this reservation. Dequeuing the job wakes its waiter
+    // synchronously, publishing the plan after select picked the command.
+    let wake = Arc::new(PublishOnQueueRelease {
+        recovery,
+        plan: corrected,
+        fired: AtomicBool::new(false),
+    });
+    let waker = futures::task::waker(wake.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut reservation = Box::pin(commands.reserve());
+    assert!(matches!(
+        reservation.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(futures::poll!(actor.as_mut()).is_pending());
+    assert!(
+        wake.fired.load(Ordering::SeqCst),
+        "the plan was not published during dequeue"
+    );
+    let error = result
+        .try_recv()
+        .expect("actor answered the job")
+        .unwrap_err();
+    assert!(
+        RelayJobDeferred::marks(&error),
+        "stale missing-target error: {error:#}"
+    );
+    assert_eq!(error.to_string(), RELAY_JOB_RECONNECTING);
+}
+
 // Hard-won: post-create credential sync: recovery metadata changes must not retire a connected actor.
 #[test]
 fn recovery_plan_changes_keep_only_the_same_actor_identity() {

@@ -111,13 +111,13 @@ fn apply_worker_recovery_update(
         return false;
     }
     target.worker_recovery = next;
+    let had_probe = last_recovery_probe.take().is_some();
     let target_missing = matches!(
         view_tx.borrow().error.as_ref(),
         Some(ViewError::TargetMissing(_))
     );
-    if storage_wait.is_some() || target_missing {
+    if storage_wait.is_some() || target_missing || had_probe {
         *storage_wait = None;
-        *last_recovery_probe = None;
         if target_missing {
             let snapshot = view_tx.borrow().snapshot.clone();
             publish_view(
@@ -210,6 +210,41 @@ mod recovery_update_tests {
         assert!(storage_wait.is_none());
         assert!(last_recovery_probe.is_none());
         assert!(schedule.deadline < deadline);
+
+        last_recovery_probe = Some(probe);
+        schedule.after(Duration::from_secs(60));
+        let deadline = schedule.deadline;
+        let mut corrected = target.worker_recovery.clone().unwrap();
+        corrected.liveness_probe = CommandSpec::new("printf", ["alive"]).into();
+        sender.send_replace(Some(corrected));
+        assert!(apply_worker_recovery_update(
+            &mut receiver,
+            &mut target,
+            &mut storage_wait,
+            &mut last_recovery_probe,
+            &mut schedule,
+            &view_tx,
+            &updates
+        ));
+        assert!(storage_wait.is_none());
+        assert!(last_recovery_probe.is_none());
+        assert!(schedule.deadline < deadline);
+
+        schedule.after(Duration::from_secs(60));
+        let deadline = schedule.deadline;
+        let mut healthy = target.worker_recovery.clone().unwrap();
+        healthy.liveness_probe = CommandSpec::new("printf", ["dead"]).into();
+        sender.send_replace(Some(healthy));
+        assert!(apply_worker_recovery_update(
+            &mut receiver,
+            &mut target,
+            &mut storage_wait,
+            &mut last_recovery_probe,
+            &mut schedule,
+            &view_tx,
+            &updates
+        ));
+        assert_eq!(schedule.deadline, deadline);
     }
 }
 
@@ -352,7 +387,7 @@ async fn run_session_actor_inner(
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
-                    changed = worker_recovery.changed(), if recovery_watch_open && (storage_wait.is_some() || matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_)))) => Event::RecoveryChanged(changed),
+                    changed = worker_recovery.changed(), if recovery_watch_open && (storage_wait.is_some() || last_recovery_probe.is_some() || matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_)))) => Event::RecoveryChanged(changed),
                 }
             } => event,
         };
@@ -997,6 +1032,15 @@ async fn run_session_actor_inner(
             Event::Command(command) => {
                 let Some(command) = command else { break };
                 let command = *command;
+                apply_worker_recovery_update(
+                    &mut worker_recovery,
+                    &mut target,
+                    &mut storage_wait,
+                    &mut last_recovery_probe,
+                    &mut schedule,
+                    &view_tx,
+                    &updates,
+                );
                 handled_command = true;
                 lifecycle.set_retirement_requested(*retirement.borrow());
                 if !lifecycle.accepts_new_work() {
