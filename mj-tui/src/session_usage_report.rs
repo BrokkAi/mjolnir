@@ -394,6 +394,145 @@ fn provider_totals(
     lines
 }
 
+fn quota_forecast_lines(report: &SessionUsageReport, now: i64) -> Vec<String> {
+    let mut forecasts: Vec<_> = report
+        .quota_projections
+        .iter()
+        .filter(|p| p.pace_ratio.is_some_and(|pace| pace > 1.0))
+        .collect();
+    if forecasts.is_empty() {
+        return Vec::new();
+    }
+    forecasts.sort_by(|left, right| {
+        right
+            .pace_ratio
+            .unwrap_or(0.0)
+            .total_cmp(&left.pace_ratio.unwrap_or(0.0))
+            .then_with(|| {
+                left.projected_exhaustion_epoch_seconds
+                    .unwrap_or(i64::MAX)
+                    .cmp(&right.projected_exhaustion_epoch_seconds.unwrap_or(i64::MAX))
+            })
+            .then_with(|| left.profile_id.cmp(&right.profile_id))
+            .then_with(|| left.window_label.cmp(&right.window_label))
+    });
+    let duration = |end: i64| {
+        let secs = end.saturating_sub(now);
+        let hours = secs / 3600;
+        if hours >= 24 {
+            format!("{}d {}h", hours / 24, hours % 24)
+        } else if hours >= 1 {
+            format!("{hours}h")
+        } else {
+            let mins = (secs / 60).max(1);
+            format!("{mins}m")
+        }
+    };
+    let mut lines = Vec::with_capacity(forecasts.len() + 1);
+    lines.push("Quota Pace & Forecast".into());
+    for p in forecasts {
+        let exhaustion = p
+            .projected_exhaustion_epoch_seconds
+            .map(duration)
+            .unwrap_or_else(|| "unknown".into());
+        let reset = p
+            .resets_at_epoch_seconds
+            .map(duration)
+            .unwrap_or_else(|| "unknown".into());
+        lines.push(format!(
+            "{}  {}  {}% left  {:.1}× pace  exhausts in {} (resets in {})",
+            p.profile_id,
+            p.window_label,
+            p.remaining_percent,
+            p.pace_ratio.unwrap_or_default(),
+            exhaustion,
+            reset
+        ));
+    }
+    lines
+}
+
+fn assemble_summary_lines(
+    mut provider_lines: Vec<String>,
+    mut forecast_lines: Vec<String>,
+    budget: usize,
+) -> Vec<String> {
+    if budget == 0 {
+        return Vec::new();
+    }
+    if provider_lines.len() + forecast_lines.len() <= budget {
+        provider_lines.extend(forecast_lines);
+        return provider_lines;
+    }
+    if forecast_lines.is_empty() {
+        let explanation = provider_lines.last().cloned().unwrap_or_default();
+        let visible = budget.saturating_sub(2);
+        let hidden = provider_lines.len().saturating_sub(1 + visible);
+        provider_lines.truncate(visible);
+        provider_lines.push(format!("… {hidden} more provider rows (enlarge terminal)"));
+        if budget > 1 {
+            provider_lines.push(explanation);
+        }
+        return provider_lines;
+    }
+    // Keep exhaustion warnings visible even when provider totals fill a short
+    // terminal, reserving at most one summary line for clipped provider totals.
+    let min_provider = usize::from(!provider_lines.is_empty() && budget >= 4);
+    let forecast_budget = forecast_lines
+        .len()
+        .min(budget.saturating_sub(min_provider));
+    let provider_budget = budget.saturating_sub(forecast_budget);
+
+    if provider_budget == 0 {
+        provider_lines.clear();
+    } else if provider_lines.len() > provider_budget {
+        if provider_budget == 1 {
+            let count = provider_lines.len().saturating_sub(1).max(1);
+            provider_lines = vec![format!("… {count} provider rows (enlarge terminal)")];
+        } else {
+            let explanation = provider_lines.last().cloned().unwrap_or_default();
+            let visible = provider_budget.saturating_sub(2);
+            let hidden = provider_lines.len().saturating_sub(1 + visible);
+            provider_lines.truncate(visible);
+            provider_lines.push(format!("… {hidden} more provider rows (enlarge terminal)"));
+            provider_lines.push(explanation);
+        }
+    }
+
+    if forecast_budget == 0 {
+        forecast_lines.clear();
+    } else if forecast_lines.len() > forecast_budget {
+        let warnings = forecast_lines.len().saturating_sub(1);
+        if forecast_budget == 1 {
+            let top = forecast_lines.swap_remove(1);
+            forecast_lines = vec![if warnings > 1 {
+                format!("{top} (+{} more)", warnings - 1)
+            } else {
+                top
+            }];
+        } else if forecast_budget == 2 {
+            let top = forecast_lines.swap_remove(1);
+            let more = warnings.saturating_sub(1);
+            forecast_lines = vec![
+                if more > 0 {
+                    format!("Quota Pace & Forecast (+{more} more)")
+                } else {
+                    "Quota Pace & Forecast".into()
+                },
+                top,
+            ];
+        } else {
+            let shown_warnings = forecast_budget - 2;
+            let hidden = warnings.saturating_sub(shown_warnings);
+            forecast_lines.truncate(1 + shown_warnings);
+            forecast_lines.push(format!("… {hidden} more quota warnings (enlarge terminal)"));
+        }
+    }
+
+    provider_lines.extend(forecast_lines);
+    provider_lines
+}
+
 pub(crate) fn render(
     frame: &mut Frame,
     area: Rect,
@@ -491,72 +630,24 @@ pub(crate) fn render(
     ];
     let visible_hints = &hints[usize::from(compact)..];
     let footer_height = visible_hints.len() as u16 + 1;
-    let mut provider_lines = match &dialog.report {
+    let provider_lines = match &dialog.report {
         Some(Ok(report)) => provider_totals(dashboard, report, inner.width),
         _ => Vec::new(),
     };
-    if let Some(Ok(report)) = &dialog.report {
-        let now = mj_core::clock::epoch_seconds() as i64;
-        let forecasts: Vec<_> = report
-            .quota_projections
-            .iter()
-            .filter(|p| p.pace_ratio.is_some_and(|pace| pace > 1.0))
-            .collect();
-        if !forecasts.is_empty() {
-            provider_lines.push("Quota Pace & Forecast".into());
-            for p in forecasts {
-                let duration = |end: i64| {
-                    let secs = end.saturating_sub(now);
-                    let hours = secs / 3600;
-                    if hours >= 24 {
-                        format!("{}d {}h", hours / 24, hours % 24)
-                    } else if hours >= 1 {
-                        format!("{hours}h")
-                    } else {
-                        let mins = (secs / 60).max(1);
-                        format!("{mins}m")
-                    }
-                };
-                let exhaustion = p
-                    .projected_exhaustion_epoch_seconds
-                    .map(duration)
-                    .unwrap_or_else(|| "unknown".into());
-                let reset = p
-                    .resets_at_epoch_seconds
-                    .map(duration)
-                    .unwrap_or_else(|| "unknown".into());
-                provider_lines.push(format!(
-                    "{}  {}  {}% left  {:.1}× pace  exhausts in {} (resets in {})",
-                    p.profile_id,
-                    p.window_label,
-                    p.remaining_percent,
-                    p.pace_ratio.unwrap_or_default(),
-                    exhaustion,
-                    reset
-                ));
-            }
-        }
-    }
+    let forecast_lines = match &dialog.report {
+        Some(Ok(report)) => quota_forecast_lines(report, mj_core::clock::epoch_seconds() as i64),
+        _ => Vec::new(),
+    };
     // Keep the chart and at least one selectable detail row on short screens.
-    let provider_height = provider_lines.len().min(
-        inner
-            .height
-            .saturating_sub(header_height + bar_rows + row_gap + footer_height + 1)
-            as usize,
-    ) as u16;
-    if provider_lines.len() > provider_height as usize && provider_height > 0 {
-        let explanation = provider_lines.last().cloned().unwrap_or_default();
-        let visible = provider_height.saturating_sub(2) as usize;
-        let hidden = provider_lines.len() - 1 - visible;
-        provider_lines.truncate(visible);
-        provider_lines.push(format!("… {hidden} more provider rows (enlarge terminal)"));
-        if provider_height > 1 {
-            provider_lines.push(explanation);
-        }
-    }
+    let summary_budget = inner
+        .height
+        .saturating_sub(header_height + bar_rows + row_gap + footer_height + 1)
+        as usize;
+    let summary_lines = assemble_summary_lines(provider_lines, forecast_lines, summary_budget);
+    let provider_height = summary_lines.len() as u16;
     let chart_y = inner.y + header_height + provider_height;
     frame.render_widget(
-        Paragraph::new(provider_lines.join("\n")),
+        Paragraph::new(summary_lines.join("\n")),
         Rect::new(
             inner.x,
             chart_y - provider_height,
@@ -949,4 +1040,65 @@ fn render_hour_chart(
         &columns,
         shown > 0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_terminal_keeps_quota_forecast_warnings_visible_when_provider_rows_overflow() {
+        let providers = vec![
+            "Codex $40 · ~20%".into(),
+            "Claude $30 · ~15%".into(),
+            "Kimi $10 · ~50%".into(),
+            "Gemini $5 · ~10%".into(),
+            "Weekly quota consumed in window · all account use".into(),
+        ];
+        let now = 1_000_000;
+        let report = SessionUsageReport {
+            quota_projections: vec![
+                mj_core::usage::ProfileQuotaProjection {
+                    profile_id: "codex2".into(),
+                    window_label: "Week".into(),
+                    remaining_percent: 30,
+                    resets_at_epoch_seconds: Some(now + 48 * 3600),
+                    observed_pct_per_hour: Some(0.9),
+                    sustainable_pct_per_hour: Some(0.625),
+                    pace_ratio: Some(1.44),
+                    projected_exhaustion_epoch_seconds: Some(now + 33 * 3600),
+                },
+                mj_core::usage::ProfileQuotaProjection {
+                    profile_id: "kimi".into(),
+                    window_label: "5h".into(),
+                    remaining_percent: 12,
+                    resets_at_epoch_seconds: Some(now + 3 * 3600),
+                    observed_pct_per_hour: Some(10.0),
+                    sustainable_pct_per_hour: Some(4.0),
+                    pace_ratio: Some(2.5),
+                    projected_exhaustion_epoch_seconds: Some(now + 4320),
+                },
+            ],
+            ..Default::default()
+        };
+        let forecasts = quota_forecast_lines(&report, now);
+        // Tight budget (4 rows) cannot fit 5 provider lines + 3 forecast lines;
+        // forecasts must stay visible with worst pace first.
+        let lines = assemble_summary_lines(providers.clone(), forecasts.clone(), 4);
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().any(|line| line == "Quota Pace & Forecast"));
+        let kimi_pos = lines.iter().position(|line| line.starts_with("kimi  5h"));
+        let codex_pos = lines
+            .iter()
+            .position(|line| line.starts_with("codex2  Week"));
+        assert!(kimi_pos.is_some());
+        assert!(codex_pos.is_some());
+        assert!(kimi_pos < codex_pos);
+
+        // Even tighter budget (2 rows) still surfaces the worst warning.
+        let tight = assemble_summary_lines(providers, forecasts, 2);
+        assert_eq!(tight.len(), 2);
+        assert!(tight[0].starts_with("Quota Pace & Forecast"));
+        assert!(tight[1].starts_with("kimi  5h"));
+    }
 }

@@ -444,7 +444,8 @@ impl Policy {
         let surfaced = surface_quota_reports(&reports, &self.state.owner().controller().config);
         self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
             reports: surfaced,
-            quota_projections: self.state.quota_telemetry.snapshot().projections,
+            // Filled under `RuntimeState::quota` lock inside `publish_quotas`.
+            quota_projections: Vec::new(),
             probing: self.probing.clone(),
             cycles: self.cycles,
         });

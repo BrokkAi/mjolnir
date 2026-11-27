@@ -997,6 +997,7 @@ impl QuotaTelemetryStore {
                         reason = ?decision.reason,
                         estimated_cost_usd = ?decision.estimated_cost_usd,
                         binding_profile = ?decision.binding_profile,
+                        binding_window = ?decision.binding_window,
                         binding_remaining_pct = ?decision.binding_remaining_pct,
                         "quota placement decision"
                     );
@@ -1015,6 +1016,7 @@ impl QuotaTelemetryStore {
                         reason = ?decision.reason,
                         estimated_cost_usd = ?decision.estimated_cost_usd,
                         binding_profile = ?decision.binding_profile,
+                        binding_window = ?decision.binding_window,
                         binding_remaining_pct = ?decision.binding_remaining_pct,
                         "quota placement decision"
                     );
@@ -1027,6 +1029,7 @@ impl QuotaTelemetryStore {
                         reason = ?decision.reason,
                         estimated_cost_usd = ?decision.estimated_cost_usd,
                         binding_profile = ?decision.binding_profile,
+                        binding_window = ?decision.binding_window,
                         binding_remaining_pct = ?decision.binding_remaining_pct,
                         "quota placement decision"
                     );

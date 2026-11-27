@@ -1414,7 +1414,7 @@ impl DashboardState {
             return Some((4, u8::MAX, u8::MAX, id));
         }
         if quota.is_usage_priced() {
-            return Some((3, u8::MAX, u8::MAX, id));
+            return Some((2, u8::MAX, u8::MAX, id));
         }
         let primary = quota.summary_window().and_then(quota_remaining_percent);
         let five_hour = quota.five_hour_window().and_then(quota_remaining_percent);
@@ -1422,10 +1422,10 @@ impl DashboardState {
             return None;
         }
         Some(match primary {
-            // Subscriptions at the 1% reserve floor rank behind unknown quota,
-            // matching `profile_scheduler`'s reserve-floor tiering.
+            // Subscriptions at the 1% reserve floor rank behind unknown quota
+            // and usage-priced fallback, matching `profile_scheduler`'s tiering.
             Some(primary) if primary <= 1 || five_hour.is_some_and(|v| v <= 1) => (
-                2,
+                3,
                 100u8.saturating_sub(primary),
                 100u8.saturating_sub(five_hour.unwrap_or(100)),
                 id,
@@ -1906,5 +1906,71 @@ mod verdict_tests {
             )]));
             assert_eq!(presentation_attention(&dashboard, "session"), expected);
         }
+    }
+
+    #[test]
+    fn dashboard_prediction_ranks_usage_priced_ahead_of_reserve_floor_subscription() {
+        use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
+        use mj_core::config::HarnessKind;
+        let mut dashboard = DashboardState::new(
+            Config::default(),
+            State {
+                version: mj_core::state::STATE_VERSION,
+                ..Default::default()
+            },
+            BTreeMap::new(),
+        );
+        let sub_report = |profile_id: &str, remaining: u8| ProfileQuota {
+            monthly_price_usd: None,
+            paid_credits: None,
+            banked_resets: None,
+            profile_id: profile_id.to_owned(),
+            harness: HarnessKind::Codex,
+            windows: vec![QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(remaining),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+                duration_seconds: Some(7 * 86_400),
+                model_scope: None,
+            }],
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: 100,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        dashboard
+            .quotas
+            .insert("sub-floor".to_owned(), sub_report("sub-floor", 1));
+        dashboard.quotas.insert(
+            "dsf".to_owned(),
+            ProfileQuota {
+                monthly_price_usd: None,
+                paid_credits: None,
+                banked_resets: None,
+                profile_id: "dsf".to_owned(),
+                harness: HarnessKind::Dsh,
+                windows: Vec::new(),
+                extra: Some(API_LABEL.to_owned()),
+                error: None,
+                refreshed_at_epoch_seconds: 100,
+                rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
+            },
+        );
+        assert_eq!(
+            dashboard.predicted_profile_for_candidates(&["sub-floor", "dsf"]),
+            Some("dsf".to_owned())
+        );
+        dashboard
+            .quotas
+            .insert("sub-safe".to_owned(), sub_report("sub-safe", 50));
+        assert_eq!(
+            dashboard.predicted_profile_for_candidates(&["sub-floor", "dsf", "sub-safe"]),
+            Some("sub-safe".to_owned())
+        );
     }
 }

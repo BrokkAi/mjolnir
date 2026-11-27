@@ -334,6 +334,7 @@ pub struct PlacementDecision {
     pub reason: PlacementDecisionReason,
     pub estimated_cost_usd: Option<f64>,
     pub binding_profile: Option<String>,
+    pub binding_window: Option<crate::quota_telemetry::WindowKind>,
     pub binding_remaining_pct: Option<f64>,
 }
 
@@ -405,20 +406,19 @@ pub fn order_scheduled_candidates_by_draw_with_decision<T: AsRef<ScheduledCandid
         .map(|p| p.item.as_ref().profile_id.clone())
         .collect();
     let exhausted = subscription_profiles.difference(&available_subs).count();
-    let binding = scored
+    let spill_binding = scored
         .iter()
         .filter(|p| matches!(p.tier, 3 | 4))
-        .flat_map(|p| {
-            let c = p.item.as_ref();
-            let windows = match &c.quota {
-                CandidateQuota::Subscription { windows, .. } => windows.as_slice(),
-                _ => &[],
-            };
-            evaluate_applying_windows(windows, &c.model, ctx.now_seconds)
-                .into_iter()
-                .map(move |w| (c.profile_id.clone(), w.remaining_pct))
+        .filter_map(|p| {
+            p.binding_failure
+                .map(|failure| (p.item.as_ref().profile_id.clone(), failure))
         })
-        .min_by(|a, b| a.1.total_cmp(&b.1));
+        .min_by(|a, b| {
+            a.1.margin_pct
+                .total_cmp(&b.1.margin_pct)
+                .then_with(|| a.1.remaining_pct.total_cmp(&b.1.remaining_pct))
+                .then_with(|| a.0.cmp(&b.0))
+        });
     let mut keyed: Vec<(f64, ScoredPool<T>)> = scored
         .into_iter()
         .enumerate()
@@ -468,13 +468,21 @@ pub fn order_scheduled_candidates_by_draw_with_decision<T: AsRef<ScheduledCandid
             },
             _ => PlacementDecisionReason::UnsafeSubscriptionFallback,
         };
+        let binding = match p.tier {
+            2 => spill_binding.as_ref().map(|(id, f)| (id.clone(), *f)),
+            3 | 4 => p
+                .binding_failure
+                .map(|f| (p.item.as_ref().profile_id.clone(), f)),
+            _ => None,
+        };
         PlacementDecision {
             chosen_profile: p.item.as_ref().profile_id.clone(),
             chosen_tier: p.tier,
             reason,
             estimated_cost_usd: p.estimated_cost_usd,
-            binding_profile: binding.as_ref().map(|b| b.0.clone()),
-            binding_remaining_pct: binding.as_ref().map(|b| b.1),
+            binding_profile: binding.as_ref().map(|(id, _)| id.clone()),
+            binding_window: binding.as_ref().map(|(_, f)| f.kind),
+            binding_remaining_pct: binding.as_ref().map(|(_, f)| f.remaining_pct),
         }
     });
     candidates.extend(keyed.into_iter().map(|(_, pool)| pool.item));
@@ -508,6 +516,28 @@ pub fn rank_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     candidates.extend(scored.into_iter().map(|pool| pool.item));
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BindingWindowFailure {
+    kind: crate::quota_telemetry::WindowKind,
+    remaining_pct: f64,
+    margin_pct: f64,
+}
+
+fn record_binding_failure(slot: &mut Option<BindingWindowFailure>, cand: BindingWindowFailure) {
+    let replace = match *slot {
+        None => true,
+        Some(existing) => {
+            cand.margin_pct
+                .total_cmp(&existing.margin_pct)
+                .then_with(|| cand.remaining_pct.total_cmp(&existing.remaining_pct))
+                == std::cmp::Ordering::Less
+        }
+    };
+    if replace {
+        *slot = Some(cand);
+    }
+}
+
 struct ScoredPool<T> {
     item: T,
     tier: u8,
@@ -515,6 +545,7 @@ struct ScoredPool<T> {
     is_anchor: bool,
     paid_cost_usd: Option<f64>,
     estimated_cost_usd: Option<f64>,
+    binding_failure: Option<BindingWindowFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -864,15 +895,15 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
         let cand = item.as_ref();
         let is_anchor = ctx.ranking_anchor == Some(cand.profile_id.as_str());
 
-        let (tier, weight) = match &cand.quota {
-            CandidateQuota::Unknown => (1u8, 1.0),
+        let (tier, weight, binding_failure) = match &cand.quota {
+            CandidateQuota::Unknown => (1u8, 1.0, None),
             CandidateQuota::UsagePriced => {
                 let tp200_api = lookup
                     .as_ref()
                     .and_then(|l| l.tasks_per_200_api.or(l.tasks_per_200_sub))
                     .filter(|v| v.is_finite() && *v > 0.0)
                     .unwrap_or(1.0);
-                (2u8, tp200_api)
+                (2u8, tp200_api, None)
             }
             CandidateQuota::Subscription {
                 windows,
@@ -890,12 +921,12 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
                             .filter(|v| v.is_finite() && *v > 0.0)
                             .unwrap_or(1.0);
-                        (2u8, tp200 * credit_w)
+                        (2u8, tp200 * credit_w, None)
                     } else if windows.is_empty() && paid_credits.is_some() {
                         // Exhausted paid-only subscription with 0 credits.
                         continue;
                     } else {
-                        (1u8, 1.0)
+                        (1u8, 1.0, None)
                     }
                 } else if evals.iter().any(|e| e.remaining_pct <= 0.0) {
                     // Exhausted subscription: fall back to Paid credits if allowed, else drop (tier 6).
@@ -908,7 +939,7 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
                             .filter(|v| v.is_finite() && *v > 0.0)
                             .unwrap_or(1.0);
-                        (2u8, tp200 * credit_w)
+                        (2u8, tp200 * credit_w, None)
                     } else {
                         continue;
                     }
@@ -950,11 +981,10 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                     let mut all_above_reserve = true;
                     let mut five_hour_safe = true;
                     let mut weekly_safe = true;
+                    let mut failing_tier3: Option<BindingWindowFailure> = None;
+                    let mut failing_tier4: Option<BindingWindowFailure> = None;
 
                     for ev in &evals {
-                        if ev.h_w <= 0.0 {
-                            all_above_reserve = false;
-                        }
                         match ev.kind {
                             crate::quota_telemetry::WindowKind::Long => {
                                 u_long = Some(u_long.map_or(ev.u_w, |cur| cur.min(ev.u_w)));
@@ -963,6 +993,7 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                                 u_5h = Some(u_5h.map_or(ev.u_w, |cur| cur.min(ev.u_w)));
                             }
                         }
+                        let mut runway_margin: Option<f64> = None;
                         if ev.t_left_hours > 0.0 {
                             let wt = ctx.telemetry.window_telemetry(
                                 &cand.profile_id,
@@ -1000,20 +1031,40 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             let new_burn = burn(cand_est_usd);
                             let rem_eff =
                                 ev.remaining_pct - RESERVE_FLOOR_PCT - reserved - new_burn;
-                            let safe = rem_eff
-                                >= v_60m * cat_stats.runway_duration_hours.min(ev.t_left_hours);
-                            match ev.kind {
-                                crate::quota_telemetry::WindowKind::Short5h => {
-                                    if !safe {
+                            let required =
+                                v_60m * cat_stats.runway_duration_hours.min(ev.t_left_hours);
+                            let margin = rem_eff - required;
+                            runway_margin = Some(margin);
+                            if margin < 0.0 {
+                                let failure = BindingWindowFailure {
+                                    kind: ev.kind,
+                                    remaining_pct: ev.remaining_pct,
+                                    margin_pct: margin,
+                                };
+                                match ev.kind {
+                                    crate::quota_telemetry::WindowKind::Short5h => {
                                         five_hour_safe = false;
+                                        record_binding_failure(&mut failing_tier3, failure);
                                     }
-                                }
-                                crate::quota_telemetry::WindowKind::Long => {
-                                    if !safe {
+                                    crate::quota_telemetry::WindowKind::Long => {
                                         weekly_safe = false;
+                                        record_binding_failure(&mut failing_tier4, failure);
                                     }
                                 }
                             }
+                        }
+                        if ev.h_w <= 0.0 {
+                            all_above_reserve = false;
+                            let reserve_margin = ev.remaining_pct - RESERVE_FLOOR_PCT;
+                            record_binding_failure(
+                                &mut failing_tier4,
+                                BindingWindowFailure {
+                                    kind: ev.kind,
+                                    remaining_pct: ev.remaining_pct,
+                                    margin_pct: runway_margin
+                                        .map_or(reserve_margin, |m| m.min(reserve_margin)),
+                                },
+                            );
                         }
                     }
 
@@ -1027,14 +1078,18 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                     }
                     .max(f64::MIN_POSITIVE);
 
-                    let tier = if !all_above_reserve || !weekly_safe {
-                        4u8
+                    // Tier 2 (Unified Paid) intentionally precedes Tier 3/4
+                    // single-task runway-unsafe and 1%-floor subscriptions so
+                    // bursts spill before stranding turns (distinct from any
+                    // deferred multi-day cross-role reserve).
+                    let (tier, binding_failure) = if !all_above_reserve || !weekly_safe {
+                        (4u8, failing_tier4)
                     } else if five_hour_safe {
-                        0u8
+                        (0u8, None)
                     } else {
-                        3u8
+                        (3u8, failing_tier3)
                     };
-                    (tier, weight)
+                    (tier, weight, binding_failure)
                 }
             }
         };
@@ -1052,6 +1107,7 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
             tier,
             weight,
             is_anchor,
+            binding_failure,
         });
     }
 
@@ -1905,8 +1961,76 @@ mod tests {
             now_seconds: now,
         };
         let mut candidates = vec![cand, paid];
-        order_scheduled_candidates_by_draw(&mut candidates, &[0.1, 1.0], &ctx);
+        let decision =
+            order_scheduled_candidates_by_draw_with_decision(&mut candidates, &[0.1, 1.0], &ctx)
+                .unwrap();
         assert_eq!(candidates[0].profile_id, "paid");
+        assert_eq!(
+            decision.binding_window,
+            Some(crate::quota_telemetry::WindowKind::Short5h)
+        );
+    }
+
+    #[test]
+    fn paid_spill_reports_failing_5h_window_instead_of_lower_safe_weekly_window() {
+        let now = 1_000_000;
+        let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
+        let mut telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
+        telemetry.windows.insert(
+            crate::quota_telemetry::WindowKey {
+                profile_id: "sub".into(),
+                cache_identity: "id-sub".into(),
+                window_kind: crate::quota_telemetry::WindowKind::Short5h,
+                model_scope: None,
+            },
+            crate::quota_telemetry::WindowTelemetry {
+                trailing_60m_pct_per_hour: 120.0,
+                ..Default::default()
+            },
+        );
+        let five_hour = crate::quota::QuotaWindow {
+            label: "5h".into(),
+            remaining_percent: Some(60),
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: Some(now + 4 * 3600),
+            duration_seconds: Some(5 * 3600),
+            model_scope: None,
+        };
+        let weekly = week_window(20, now + 5 * 86_400);
+        let sub = scheduled_sub(
+            "sub",
+            mj_core::config::HarnessKind::Codex,
+            "gpt-6.1-sol",
+            Some("high"),
+            Some(200),
+            vec![five_hour, weekly],
+            None,
+            false,
+        );
+        let mut paid = sub.clone();
+        paid.profile_id = "dsf".into();
+        paid.quota = CandidateQuota::UsagePriced;
+        let ctx = SchedulingContext {
+            placement: Placement::Child,
+            category: Some("subtle"),
+            ranking_anchor: None,
+            telemetry: &telemetry,
+            power_ranking: ranking,
+            now_seconds: now,
+        };
+        let mut candidates = vec![sub, paid];
+        let decision =
+            order_scheduled_candidates_by_draw_with_decision(&mut candidates, &[0.5, 0.5], &ctx)
+                .unwrap();
+        assert_eq!(decision.chosen_profile, "dsf");
+        assert_eq!(decision.binding_profile.as_deref(), Some("sub"));
+        assert_eq!(
+            decision.binding_window,
+            Some(crate::quota_telemetry::WindowKind::Short5h)
+        );
+        assert_eq!(decision.binding_remaining_pct, Some(60.0));
     }
 
     #[test]

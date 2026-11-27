@@ -839,10 +839,13 @@ impl RuntimeState {
     }
 
     /// Replace what the daemon says about quota, and wake every attached
-    /// surface when it changed.
-    pub(crate) fn publish_quotas(&self, snapshot: mj_client::quota::QuotaSnapshot) {
+    /// surface when it changed. Projections are read from `quota_telemetry`
+    /// while holding `self.quota` so probe updates and telemetry refreshes
+    /// serialize and cannot roll back newer forecasts.
+    pub(crate) fn publish_quotas(&self, mut snapshot: mj_client::quota::QuotaSnapshot) {
         {
             let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+            snapshot.quota_projections = self.quota_telemetry.snapshot().projections;
             if *quota.snapshot == snapshot {
                 return;
             }
@@ -852,8 +855,8 @@ impl RuntimeState {
     }
 
     pub(crate) fn publish_quota_projections(&self) {
-        let projections = self.quota_telemetry.snapshot().projections;
         let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+        let projections = self.quota_telemetry.snapshot().projections;
         if quota.snapshot.quota_projections == projections {
             return;
         }
