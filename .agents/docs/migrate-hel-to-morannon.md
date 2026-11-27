@@ -45,9 +45,10 @@ Both hosts must run the **same** build (commit including the `mj migrate` fixes,
 
    This installs `mj`, `mj-worker`, `mj-worker-x86_64-unknown-linux-musl`, and `mj-voice-worker` into `/home/jonathan/.cargo/bin/`.
 
-2. Trigger the automatic daemon handoff on `hel` so the live daemon matches the new binary:
+2. Trigger the automatic daemon handoff on `hel` using a startup-capable command (not just `mj daemon status`, which talks to the old daemon directly), then verify the running build matches `mj --version`:
 
    ```bash
+   mj daemon endpoint --json
    mj daemon status
    ```
 
@@ -235,7 +236,7 @@ Add `--include-logs` only if you also want `backups/`, `logs/`, and `moves/` (~1
    ssh morannon '
      set -euo pipefail
      ~/.cargo/bin/mj daemon status
-     ~/.cargo/bin/mj sessions | head -n 40
+     ~/.cargo/bin/mj sessions | awk "NR <= 40"
      ls -lh ~/.local/share/sessionwiki/index.db
    '
    ```
@@ -266,10 +267,10 @@ Add `--include-logs` only if you also want `backups/`, `logs/`, and `moves/` (~1
 - **Uncertain disconnect right at the end of Phase 2**: **Never** clear `hel`'s `store_fence` row before checking whether `morannon` finished **unfencing and activating**:
 
   ```bash
-  ssh morannon '~/.cargo/bin/mj daemon status'
+  ssh morannon '~/.cargo/bin/mj daemon status || true'
   ssh morannon 'python3 -c "import os, sqlite3; p = os.path.expanduser(\"~/.local/share/mjolnir/mj.sqlite3\"); print(\"no-db\" if not os.path.exists(p) else sqlite3.connect(f\"file:{p}?mode=ro\", uri=True).execute(\"SELECT COUNT(*) FROM store_fence\").fetchone()[0])"'
   ```
 
   - Do **not** treat the mere existence of `~/.local/share/mjolnir/mj.sqlite3` on `morannon` as success: if SSH dropped after the receiver placed `mj.sqlite3` but before it cleared the destination fence, `mj.sqlite3` exists while **both** hosts are still fenced (`store_fence` count is `1` and `mj daemon status` refuses).
-  - If `morannon`'s store is **unfenced** (`store_fence` count is `0` and `mj daemon status` does not report a migration fence — if `--no-start` was not passed, the daemon is running), cutover **succeeded** — do **not** unfence or start `hel`.
+  - If `morannon`'s store is **unfenced** (`store_fence` count is `0`), `morannon` already owns the store and cutover **succeeded** — keep `hel` fenced and do **not** start `hel`. Because the receiver unfences `morannon` before attempting daemon startup, `mj daemon status` can still report the daemon stopped if startup failed (or if `--no-start` was passed); in that case, start or troubleshoot the daemon on `morannon` (`ssh morannon '~/.cargo/bin/mj daemon endpoint --json'`) rather than re-activating `hel`.
   - If `morannon` has no `mj.sqlite3` yet **or** its `store_fence` count is still non-zero (still fenced), re-run the **exact same** `mj migrate` command from `hel` so recovery finishes unfencing `morannon`, cleans up staging, and starts `morannon`'s daemon.
