@@ -798,6 +798,7 @@ dependencies = [
  "brokk-mj-worker-runtime",
  "brokk-mj-worker-staging",
  "chrono",
+ "clap",
  "flate2",
  "futures",
  "http-body-util",

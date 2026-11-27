@@ -5,6 +5,7 @@ use crate::archive::git::{
 };
 use crate::archive::{RepositoryPayload, StagedPayload, write_archive_hashed_repository_payloads};
 use mj_core::hex::lower_hex;
+use mj_core::remove_tree;
 
 use super::restore::prepare_private_destination;
 
@@ -68,7 +69,7 @@ pub fn capture_checkpoint_with_native_state(
         {
             return Ok(captured);
         }
-        fs::remove_dir_all(&resolved.stage_path).with_context(|| {
+        remove_tree::remove_dir_all_checked(&resolved.stage_path).with_context(|| {
             format!(
                 "remove stale checkpoint prestage {}",
                 resolved.stage_path.display()
@@ -208,7 +209,7 @@ pub(super) fn refresh_checkpoint_stage(
     }
     let repositories_root = spec.stage_path.join("repositories");
     if repositories_root.exists() {
-        fs::remove_dir_all(&repositories_root).with_context(|| {
+        remove_tree::remove_dir_all_checked(&repositories_root).with_context(|| {
             format!(
                 "replace prestaged repository state {}",
                 repositories_root.display()
@@ -654,7 +655,7 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
             manifest: Some(archive_manifest),
         })
     })();
-    if let Err(cleanup_error) = fs::remove_dir_all(&stage_path)
+    if let Err(cleanup_error) = remove_tree::remove_dir_all_checked(&stage_path)
         && cleanup_error.kind() != std::io::ErrorKind::NotFound
     {
         return match result {

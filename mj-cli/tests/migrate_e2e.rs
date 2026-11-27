@@ -1533,3 +1533,45 @@ fn third_hosts_without_copied_credentials_are_still_probed() {
     assert!(stderr.contains("ambient.invalid"), "{stderr}");
     assert!(!world.b.path().join("data").exists());
 }
+
+/// A configured destination is also an SSH-to-self target: cutover would leave
+/// sessions on B that reach B through `[machines.<id>]`, so preflight must
+/// catch a B-to-B hop that fails before the source is fenced.
+#[test]
+fn configured_destination_ssh_to_self_is_probed_in_preflight() {
+    let Some(world) = World::new() else { return };
+    let write_config = |with_identity: bool| {
+        let mut extra_args = Vec::new();
+        if with_identity {
+            extra_args.push("-i".to_owned());
+            extra_args.push(world.sshd.key.display().to_string());
+        }
+        extra_args.extend([
+            "-p".to_owned(),
+            world.sshd.port.to_string(),
+            "-o".to_owned(),
+            format!("UserKnownHostsFile={}", world.sshd.known_hosts.display()),
+        ]);
+        fs::write(
+            world.a.path().join("config/config.toml"),
+            format!(
+                "version = 1\n[phone]\nenabled = false\n[machines.morannon]\nkind = 'ssh'\nhost = '127.0.0.1'\nextra_args = {}\n",
+                serde_json::to_string(&extra_args).unwrap()
+            ),
+        )
+        .unwrap();
+    };
+    write_config(false);
+    success(&world.endpoint(false));
+    let output = run(&mut world.migration_to("morannon", &["--dry-run"], None));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("destination SSH probes failed"), "{stderr}");
+    assert!(stderr.contains("127.0.0.1"), "{stderr}");
+    assert!(!world.b.path().join("data").exists());
+
+    write_config(true);
+    let output = run(&mut world.migration_to("morannon", &["--dry-run"], None));
+    success(&output);
+    assert!(!world.b.path().join("data").exists());
+}

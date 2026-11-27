@@ -1,5 +1,6 @@
 //! Session-private immutable attachment blobs resolved at the ACP boundary.
 use crate::hex::lower_hex;
+use crate::remove_tree;
 use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, ResourceLink, TextContent};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -360,7 +361,7 @@ impl AttachmentStore {
     pub fn remove_session_data(&self) -> Result<()> {
         let _lock = self.lock()?;
         fs::File::create(self.root.with_extension("deleted"))?.sync_all()?;
-        match fs::remove_dir_all(&self.root) {
+        match remove_tree::remove_dir_all_checked(&self.root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),

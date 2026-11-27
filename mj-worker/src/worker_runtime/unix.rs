@@ -1086,7 +1086,7 @@ async fn restart_harness_in_place_response(
             ),
         };
     };
-    if staged {
+    let candidates_dir = if staged {
         let validation = candidate_id
             .as_deref()
             .context("staged reload requires candidate_id")
@@ -1105,7 +1105,23 @@ async fn restart_harness_in_place_response(
                 body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
             };
         }
-    }
+        let path = relay_root.join(mj_core::worker_launch::RELOAD_CANDIDATES_DIR);
+        match mj_core::remove_tree::open_dir_nofollow(&path) {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                // The candidate can still be retired; the startup sweep will
+                // reclaim it without a live handle.
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not anchor the reload candidates directory for cleanup"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let writer = match PreparationWriter::try_acquire(
         &relay.preparation_writer,
         format!("in-place harness restart {}", restart_guard.operation_id),
@@ -1296,6 +1312,29 @@ async fn restart_harness_in_place_response(
             "ACP runtime is unavailable for in-place harness restart".into(),
         ),
     };
+    // A committed reload renames the candidate before the replacement bridge
+    // starts. Sweep it for every outcome after the commit, including a startup
+    // failure or an unknown resolution; before a commit this is a no-op. The
+    // deletion belongs to this worker's GC, never to the committed reload.
+    if let Some(candidates) = candidates_dir
+        && let Some(candidate_id) = candidate_id
+    {
+        // A detached OS thread, not Tokio's blocking pool: dropping a blocking
+        // handle detaches the response, but Tokio still waits for it when the
+        // worker runtime shuts down. A stalled delete must not hold the worker
+        // open. The startup sweep retries anything this thread loses.
+        if let Err(error) = std::thread::Builder::new()
+            .name("retired-candidate-gc".into())
+            .spawn(move || {
+                super::reload_commit::sweep_retired_candidate_in(&candidates, &candidate_id);
+            })
+        {
+            tracing::warn!(
+                %error,
+                "could not start retired reload candidate cleanup; the next worker start will retry"
+            );
+        }
+    }
     RelayResponseEnvelope {
         request_id,
         protocol_version,

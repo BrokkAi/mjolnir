@@ -1,5 +1,6 @@
 //! Durable, replayable promotion of a privately staged harness profile.
 use anyhow::{Context, Result, ensure};
+use mj_core::remove_tree::{self, RemoveOutcome};
 use mj_core::worker_launch::{
     PENDING_RELOAD_FILE, PendingInPlaceReload, RELOAD_CANDIDATE_MANIFEST_FILE,
     RELOAD_CANDIDATES_DIR, ReloadCandidateManifest, validate_candidate_id,
@@ -146,7 +147,7 @@ pub fn sync_pending_reload_dir(root: &Path) -> Result<()> {
 
 fn remove(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path)?,
+        Ok(metadata) if metadata.is_dir() => remove_tree::remove_dir_all_checked(path)?,
         Ok(_) => std::fs::remove_file(path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
@@ -203,21 +204,21 @@ pub fn apply_committed_reload(
     root: &Path,
     pending: &PendingInPlaceReload,
 ) -> Result<ReloadCandidateManifest> {
-    apply_committed_reload_with(root, pending, remove_applied_candidate)
+    apply_committed_reload_with(root, pending, retire_applied_candidate)
 }
 
-/// Apply an already-committed reload, then hand the consumed candidate to
-/// `remove_candidate`.
+/// Apply an already-committed reload, then retire the consumed candidate.
 ///
-/// The candidate is garbage by the time `remove_candidate` runs: the overlay is
+/// The candidate is garbage by the time `retire_candidate` runs: the overlay is
 /// in the live home, `ownership.json` and `launch.json` are published, and
-/// `pending-reload.json` is gone. Its removal therefore cannot decide whether
-/// the reload succeeded; startup sweeps whatever a failed removal leaves.
-/// `remove_candidate` is a parameter so tests can exercise that boundary.
+/// `pending-reload.json` is gone. Renaming it out of the candidate namespace is
+/// atomic and cannot fail because the tree is still changing; the worker's GC
+/// deletes the retired tree once the replacement bridge is running. A failed
+/// rename is logged and left for the next worker start to sweep.
 fn apply_committed_reload_with(
     root: &Path,
     pending: &PendingInPlaceReload,
-    remove_candidate: impl FnOnce(&Path) -> std::io::Result<()>,
+    retire_candidate: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<ReloadCandidateManifest> {
     let manifest = validate_candidate(
         root,
@@ -340,26 +341,123 @@ fn apply_committed_reload_with(
     std::fs::remove_file(root.join(PENDING_RELOAD_FILE))?;
     mj_core::config::sync_directory(root)?;
     // The reload is committed and `pending-reload.json` is gone. The candidate
-    // is garbage now, so failing to delete it must not turn a completed profile
-    // switch into a failed Move: a process that recreates an entry while this
-    // walk runs makes `remove_dir_all` return ENOTEMPTY, and that failure used
-    // to put a live session in Error with no recovery path (#1712). Worker
-    // startup sweeps whatever is left.
-    if let Err(error) = remove_candidate(&candidate) {
+    // is garbage now, so nothing about its cleanup may turn a completed profile
+    // switch into a failed Move (#1712). Rename it out of the candidate
+    // namespace; the worker's GC deletes it after the replacement bridge opens,
+    // and the next worker start sweeps whatever a crash leaves.
+    let retired = root
+        .join(RELOAD_CANDIDATES_DIR)
+        .join(retired_candidate_name(&pending.candidate_id));
+    if let Err(error) = retire_candidate(&candidate, &retired) {
         tracing::warn!(
             candidate = %candidate.display(),
+            retired = %retired.display(),
             %error,
-            "could not remove the applied reload candidate; the next worker start will sweep it"
+            "could not retire the applied reload candidate; the next worker start will sweep it"
         );
     }
     Ok(manifest)
 }
 
-fn remove_applied_candidate(candidate: &Path) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(candidate) {
+fn retired_candidate_name(candidate_id: &str) -> String {
+    format!(".retired-{candidate_id}")
+}
+
+fn retire_applied_candidate(candidate: &Path, retired: &Path) -> std::io::Result<()> {
+    match std::fs::rename(candidate, retired) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+/// Delete the candidate this worker just retired. Best effort: a tree that
+/// still has entries is left for the next worker start, and the result never
+/// touches the committed reload.
+#[cfg(unix)]
+pub(crate) fn sweep_retired_candidate(root: &Path, candidate_id: &str) {
+    // Callers normally pass a candidate that `validate_candidate` accepted, but
+    // the id can still arrive from a legacy request. Never let it escape the
+    // candidates directory.
+    if let Err(error) = validate_candidate_id(candidate_id) {
+        tracing::warn!(
+            candidate_id,
+            %error,
+            "refusing to sweep an invalid retired reload candidate id"
+        );
+        return;
+    }
+    let candidates = root.join(RELOAD_CANDIDATES_DIR);
+    match remove_tree::open_dir_nofollow(&candidates) {
+        Ok(candidates) => sweep_retired_candidate_in(&candidates, candidate_id),
+        Err(error) => tracing::warn!(
+            path = %candidates.display(),
+            %error,
+            "could not open the reload candidates directory for retired cleanup"
+        ),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn sweep_retired_candidate(root: &Path, candidate_id: &str) {
+    if let Err(error) = validate_candidate_id(candidate_id) {
+        tracing::warn!(
+            candidate_id,
+            %error,
+            "refusing to sweep an invalid retired reload candidate id"
+        );
+        return;
+    }
+    let retired = root
+        .join(RELOAD_CANDIDATES_DIR)
+        .join(retired_candidate_name(candidate_id));
+    sweep_candidate_tree(&retired, "retired reload candidate");
+}
+
+/// Sweep a retired candidate through the candidates directory handle the
+/// reload validated, so a replaced path cannot redirect deletion.
+#[cfg(unix)]
+pub(crate) fn sweep_retired_candidate_in(candidates: &remove_tree::Dir, candidate_id: &str) {
+    if let Err(error) = validate_candidate_id(candidate_id) {
+        tracing::warn!(
+            candidate_id,
+            %error,
+            "refusing to sweep an invalid retired reload candidate id"
+        );
+        return;
+    }
+    let retired = retired_candidate_name(candidate_id);
+    match remove_tree::remove_dir_all_in(candidates, std::ffi::OsStr::new(&retired)) {
+        Ok(RemoveOutcome::Removed) => {}
+        Ok(RemoveOutcome::Leftovers { path }) => tracing::warn!(
+            path = %path.display(),
+            "could not empty retired reload candidate; the next worker start will retry"
+        ),
+        Err(error) => tracing::warn!(
+            path = %retired,
+            %error,
+            "could not remove retired reload candidate; the next worker start will retry"
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn sweep_candidate_tree(path: &Path, what: &str) {
+    match remove_tree::remove_dir_all(path) {
+        Ok(RemoveOutcome::Removed) => {}
+        Ok(RemoveOutcome::Leftovers { path }) => {
+            tracing::warn!(
+                path = %path.display(),
+                "could not empty {what}; the next worker start will retry"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "could not remove {what}; the next worker start will retry"
+            );
+        }
     }
 }
 
@@ -373,49 +471,220 @@ pub fn roll_forward_pending_reload_if_any(root: &Path) -> Result<Option<String>>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    sweep_abandoned_candidates(root)?;
+    retire_abandoned_candidates(root);
+    spawn_abandoned_candidate_cleanup(root);
     Ok(operation)
 }
 
-/// Remove every leftover candidate after there is no `pending-reload.json`.
-///
-/// These are garbage from an applied reload whose cleanup failed, or from a
-/// pre-commit attempt that was abandoned. An entry that will not delete must
-/// not fail worker startup: a recursive delete can return `ENOTEMPTY` when
-/// another process recreates an entry while it walks the tree, and failing here
-/// stranded the session instead of letting it serve on its already-committed
-/// launch. Removal is retried on the next worker start and when the worker root
-/// goes. A candidates root that is not a real directory is still refused.
-fn sweep_abandoned_candidates(root: &Path) -> Result<()> {
-    sweep_abandoned_candidates_with(root, remove)
-}
+const ABANDONED_CANDIDATES_DIR: &str = "abandoned-reload-candidates";
 
-fn sweep_abandoned_candidates_with(
-    root: &Path,
-    remove_entry: impl Fn(&Path) -> Result<()>,
-) -> Result<()> {
-    let candidates = root.join(RELOAD_CANDIDATES_DIR);
-    match std::fs::symlink_metadata(&candidates) {
-        Ok(metadata) => {
-            ensure!(
-                metadata.is_dir(),
-                "reload candidates root is not a directory"
+/// Move every leftover candidate out of the live staging namespace before the
+/// worker serves reload requests. The renames are O(1); deletion happens later
+/// on a detached thread. A candidate that appears after this snapshot stays
+/// live and is never touched by the abandoned cleanup.
+fn retire_abandoned_candidates(root: &Path) {
+    let live = root.join(RELOAD_CANDIDATES_DIR);
+    match std::fs::symlink_metadata(&live) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            tracing::warn!(
+                path = %live.display(),
+                "reload candidates root is not a directory; leaving abandoned candidates in place"
             );
-            for entry in std::fs::read_dir(candidates)? {
-                let entry = entry?;
-                if let Err(error) = remove_entry(&entry.path()) {
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                path = %live.display(),
+                %error,
+                "could not inspect reload candidates root; leaving abandoned candidates in place"
+            );
+            return;
+        }
+    }
+    let abandoned = root.join(ABANDONED_CANDIDATES_DIR);
+    match std::fs::symlink_metadata(&abandoned) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            tracing::warn!(
+                path = %abandoned.display(),
+                "abandoned reload candidates root is not a directory; leaving abandoned candidates in place"
+            );
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(error) = std::fs::create_dir(&abandoned) {
+                tracing::warn!(
+                    path = %abandoned.display(),
+                    %error,
+                    "could not create abandoned reload candidates root; leaving abandoned candidates in place"
+                );
+                return;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %abandoned.display(),
+                %error,
+                "could not inspect abandoned reload candidates root; leaving abandoned candidates in place"
+            );
+            return;
+        }
+    }
+    let entries = match std::fs::read_dir(&live)
+        .and_then(|entries| entries.collect::<std::result::Result<Vec<_>, _>>())
+    {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                path = %live.display(),
+                %error,
+                "could not scan reload candidates; leaving abandoned candidates in place"
+            );
+            return;
+        }
+    };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // The destination deliberately omits the entry name: a long candidate name
+    // may not fit in one component. The sequence keeps destinations unique
+    // across entries.
+    let mut sequence = 0_u64;
+    for entry in entries {
+        loop {
+            let destination = abandoned.join(format!(
+                "abandoned-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
+            match std::fs::rename(entry.path(), &destination) {
+                Ok(()) => {
+                    sequence = sequence.wrapping_add(1);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    sequence = sequence.wrapping_add(1);
+                    break;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                    ) =>
+                {
+                    // Retry only when the destination really exists; any other
+                    // error with this shape is this entry's failure.
+                    if destination.exists() {
+                        sequence = sequence.wrapping_add(1);
+                        continue;
+                    }
                     tracing::warn!(
                         path = %entry.path().display(),
                         %error,
-                        "could not remove an abandoned reload candidate; the next worker start will retry"
+                        "could not retire an abandoned reload candidate; leaving it in place"
                     );
+                    sequence = sequence.wrapping_add(1);
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "could not retire an abandoned reload candidate; leaving it in place"
+                    );
+                    sequence = sequence.wrapping_add(1);
+                    break;
                 }
             }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => return Err(error.into()),
     }
-    Ok(())
+}
+
+/// Delete the worker-owned abandoned trees after the renames are complete.
+/// Startup only schedules this; a large tree cannot delay opening the bridge.
+fn spawn_abandoned_candidate_cleanup(root: &Path) {
+    let abandoned = root.join(ABANDONED_CANDIDATES_DIR);
+    if let Err(error) = std::thread::Builder::new()
+        .name("abandoned-candidate-gc".into())
+        .spawn(move || {
+            sweep_abandoned_candidates_with(&abandoned, remove_abandoned_entry);
+        })
+    {
+        tracing::warn!(
+            %error,
+            "could not start abandoned reload candidate cleanup; the next worker start will retry"
+        );
+    }
+}
+
+/// Best-effort deletion of the entries in an abandoned directory. The caller
+/// has already moved them out of the live namespace. Collect the paths before
+/// removing any, for the same readdir-offset reason as the removal itself.
+fn sweep_abandoned_candidates_with(
+    directory: &Path,
+    mut remove_entry: impl FnMut(&Path) -> Result<()>,
+) {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                path = %directory.display(),
+                %error,
+                "could not scan abandoned reload candidates"
+            );
+            return;
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => paths.push(entry.path()),
+            Err(error) => {
+                tracing::warn!(%error, "could not read an abandoned reload candidate entry");
+            }
+        }
+    }
+    for path in paths {
+        if let Err(error) = remove_entry(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "could not remove an abandoned reload candidate; the next worker start will retry"
+            );
+        }
+    }
+}
+
+fn remove_abandoned_entry(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        match remove_tree::remove_dir_all(path)? {
+            RemoveOutcome::Removed => {}
+            RemoveOutcome::Leftovers { path } => tracing::warn!(
+                path = %path.display(),
+                "could not empty an abandoned reload candidate; the next worker start will retry"
+            ),
+        }
+        return Ok(());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => match std::fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(remove_dir_error) if remove_dir_error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(())
+            }
+            Err(_) => Err(error.into()),
+        },
+    }
 }
 
 const RETIRED_LOGINS: &str = "retired-logins";
@@ -683,6 +952,29 @@ fn reconcile_retired_login(
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    fn wait_for_path_gone(path: &std::path::Path) {
+        for _ in 0..200 {
+            if !path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("{} was not removed", path.display());
+    }
+
+    fn wait_for_dir_empty(path: &std::path::Path) {
+        for _ in 0..200 {
+            let empty = std::fs::read_dir(path)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true);
+            if empty {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("{} was not emptied", path.display());
+    }
     use super::*;
     use mj_core::worker_launch::ReloadSharedLogin;
 
@@ -1364,34 +1656,110 @@ mod tests {
     // session put in Error, because removing the consumed candidate returned
     // ENOTEMPTY after the destination profile and launch were already published.
     #[test]
-    fn committed_reload_survives_a_candidate_that_cannot_be_removed() {
+    fn committed_reload_retires_the_candidate_for_the_worker_gc() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let pending = fixture(root);
         commit_pending_reload(root, &pending).unwrap();
         let candidate = root.join(RELOAD_CANDIDATES_DIR).join(&pending.candidate_id);
-        let removed = apply_committed_reload_with(root, &pending, |_| {
-            Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty))
-        })
-        .expect("a garbage candidate must not unsettle the committed reload");
-        assert_eq!(removed.candidate_id, pending.candidate_id);
+        let retired = root.join(RELOAD_CANDIDATES_DIR).join(".retired-candidate");
+        let applied = apply_committed_reload(root, &pending).unwrap();
+        assert_eq!(applied.candidate_id, pending.candidate_id);
         assert!(
-            candidate.is_dir(),
-            "a failed cleanup leaves the candidate for the next worker start"
+            !candidate.exists(),
+            "the consumed candidate leaves the staging namespace"
+        );
+        assert!(
+            retired.is_dir(),
+            "the worker's GC owns the retired tree, not the commit"
         );
         assert!(!root.join(PENDING_RELOAD_FILE).exists());
         assert_eq!(
             std::fs::read(root.join("launch.json")).unwrap(),
-            std::fs::read(candidate.join("launch.json")).unwrap()
+            std::fs::read(retired.join("launch.json")).unwrap()
         );
         assert_eq!(
             std::fs::read(root.join("home/config.toml")).unwrap(),
             b"destination"
         );
-        // The next worker start sweeps the leftover and serves the committed
-        // launch instead of failing startup.
+        // The next worker start sweeps the retired tree and serves the
+        // committed launch instead of failing startup.
         assert_eq!(roll_forward_pending_reload_if_any(root).unwrap(), None);
-        assert!(!candidate.exists());
+        wait_for_path_gone(&retired);
+    }
+
+    #[test]
+    fn a_failed_candidate_retirement_does_not_unsettle_the_committed_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pending = fixture(root);
+        commit_pending_reload(root, &pending).unwrap();
+        let candidate = root.join(RELOAD_CANDIDATES_DIR).join(&pending.candidate_id);
+        let applied = apply_committed_reload_with(root, &pending, |candidate, retired| {
+            assert!(candidate.is_dir());
+            assert_eq!(retired.file_name().unwrap(), ".retired-candidate");
+            Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty))
+        })
+        .expect("a garbage candidate must not unsettle the committed reload");
+        assert_eq!(applied.candidate_id, pending.candidate_id);
+        assert!(
+            candidate.is_dir(),
+            "a failed retirement leaves the candidate for the next worker start"
+        );
+        assert!(!root.join(PENDING_RELOAD_FILE).exists());
+        assert_eq!(
+            std::fs::read(root.join("home/config.toml")).unwrap(),
+            b"destination"
+        );
+        assert_eq!(roll_forward_pending_reload_if_any(root).unwrap(), None);
+        wait_for_path_gone(&candidate);
+    }
+
+    #[test]
+    fn a_candidate_id_cannot_use_the_retired_namespace() {
+        assert!(validate_candidate_id("candidate").is_ok());
+        assert!(validate_candidate_id(".retired-candidate").is_err());
+    }
+
+    #[test]
+    fn the_worker_gc_sweeps_the_retired_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let retired = root
+            .path()
+            .join(RELOAD_CANDIDATES_DIR)
+            .join(".retired-candidate");
+        std::fs::create_dir_all(retired.join("nested")).unwrap();
+        std::fs::write(retired.join("nested/keep.md"), b"x").unwrap();
+        sweep_retired_candidate(root.path(), "candidate");
+        assert!(!retired.exists());
+    }
+
+    #[test]
+    fn the_worker_gc_removes_a_stray_file_from_the_candidates_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let candidates = root.path().join(RELOAD_CANDIDATES_DIR);
+        std::fs::create_dir_all(&candidates).unwrap();
+        let stray = candidates.join("stray");
+        std::fs::write(&stray, b"x").unwrap();
+        retire_abandoned_candidates(root.path());
+        assert!(!stray.exists(), "the stray stayed in the live namespace");
+        spawn_abandoned_candidate_cleanup(root.path());
+        wait_for_dir_empty(&root.path().join(ABANDONED_CANDIDATES_DIR));
+    }
+
+    // Hard-won: #1712: a candidate id from a legacy request must not become a
+    // path component that escapes the candidates directory.
+    #[test]
+    fn the_worker_gc_refuses_a_candidate_id_that_would_escape_the_candidates_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let candidates = root.path().join(RELOAD_CANDIDATES_DIR);
+        // `.retired-x/../../victim` resolves to `root/victim`.
+        std::fs::create_dir_all(candidates.join(".retired-x")).unwrap();
+        let victim = root.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.md"), b"x").unwrap();
+        sweep_retired_candidate(root.path(), "x/../../victim");
+        assert!(victim.join("keep.md").exists());
     }
 
     // Hard-won: #1712: a leftover reload candidate that would not delete made
@@ -1400,12 +1768,14 @@ mod tests {
     #[test]
     fn an_abandoned_candidate_that_will_not_delete_does_not_fail_worker_start() {
         let root = tempfile::tempdir().unwrap();
-        let candidates = root.path().join(RELOAD_CANDIDATES_DIR);
-        std::fs::create_dir_all(candidates.join("stuck")).unwrap();
-        std::fs::write(candidates.join("stuck/keep"), b"keep").unwrap();
-        std::fs::create_dir_all(candidates.join("sweepable")).unwrap();
-        std::fs::write(candidates.join("sweepable/old"), b"old").unwrap();
-        sweep_abandoned_candidates_with(root.path(), |path| {
+        let abandoned = root.path().join(ABANDONED_CANDIDATES_DIR);
+        std::fs::create_dir_all(abandoned.join("stuck")).unwrap();
+        std::fs::write(abandoned.join("stuck/keep"), b"keep").unwrap();
+        std::fs::create_dir_all(abandoned.join("sweepable")).unwrap();
+        std::fs::write(abandoned.join("sweepable/old"), b"old").unwrap();
+        // This is the loop production startup hands to its detached cleanup
+        // thread; one failing tree must not stop its siblings.
+        sweep_abandoned_candidates_with(&abandoned, |path| {
             if path.ends_with("stuck") {
                 Err(anyhow::Error::new(std::io::Error::from(
                     std::io::ErrorKind::DirectoryNotEmpty,
@@ -1413,10 +1783,45 @@ mod tests {
             } else {
                 remove(path)
             }
-        })
+        });
+        assert!(abandoned.join("stuck").exists());
+        assert!(!abandoned.join("sweepable").exists());
+    }
+
+    // Hard-won: b15961b: abandoned-candidate retirement failure blocked worker startup
+    #[test]
+    fn abandoned_candidate_retirement_failure_does_not_block_startup() {
+        let root = tempfile::tempdir().unwrap();
+        let candidates = root.path().join(RELOAD_CANDIDATES_DIR);
+        std::fs::create_dir_all(candidates.join("leftover")).unwrap();
+        std::fs::write(candidates.join("leftover/launch.json"), b"x").unwrap();
+        std::fs::write(
+            root.path().join(ABANDONED_CANDIDATES_DIR),
+            b"not a directory",
+        )
         .unwrap();
-        assert!(candidates.join("stuck").exists());
-        assert!(!candidates.join("sweepable").exists());
+        assert_eq!(
+            roll_forward_pending_reload_if_any(root.path()).unwrap(),
+            None
+        );
+        assert!(
+            candidates.join("leftover").exists(),
+            "the leftover candidate must still be reported"
+        );
+    }
+
+    #[test]
+    fn abandoned_candidates_leave_the_live_namespace_before_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let candidates = root.path().join(RELOAD_CANDIDATES_DIR);
+        std::fs::create_dir_all(candidates.join("candidate")).unwrap();
+        std::fs::write(candidates.join("candidate/launch.json"), b"x").unwrap();
+        std::fs::write(candidates.join("stray"), b"x").unwrap();
+        retire_abandoned_candidates(root.path());
+        assert!(
+            std::fs::read_dir(&candidates).unwrap().next().is_none(),
+            "no live candidate may remain when the worker starts serving"
+        );
     }
 
     // Hard-won: 075843136: in-place Move restaged canonical memory over unsynced replica edits
@@ -1695,12 +2100,7 @@ mod tests {
             );
             assert!(!root.join(PENDING_RELOAD_FILE).exists());
             assert!(!root.join("github-token").exists());
-            assert_eq!(
-                std::fs::read_dir(root.join(RELOAD_CANDIDATES_DIR))
-                    .unwrap()
-                    .count(),
-                0
-            );
+            wait_for_dir_empty(&root.join(RELOAD_CANDIDATES_DIR));
             assert_eq!(roll_forward_pending_reload_if_any(root).unwrap(), None);
         }
     }
@@ -1735,7 +2135,9 @@ fn reload_commit_orphan_sweep_refuses_a_linked_candidates_root() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("keep"), "outside data").unwrap();
     std::os::unix::fs::symlink(outside.path(), root.path().join(RELOAD_CANDIDATES_DIR)).unwrap();
-    assert!(roll_forward_pending_reload_if_any(root.path()).is_err());
+    // The sweep is garbage collection; refusing to follow the link must warn
+    // and let startup continue.
+    assert!(roll_forward_pending_reload_if_any(root.path()).is_ok());
     assert_eq!(
         std::fs::read(outside.path().join("keep")).unwrap(),
         b"outside data"

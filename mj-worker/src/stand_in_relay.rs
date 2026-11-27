@@ -539,6 +539,13 @@ pub fn serve_latch_relay() {
                                     expected_store_id,
                                 )?;
                                 apply_committed_reload(&worker_root, &pending)?;
+                                // Mirror the worker's post-bridge GC: the
+                                // apply retires the candidate, and cleanup is
+                                // a separate worker-owned pass.
+                                crate::worker_runtime::reload_commit::sweep_retired_candidate(
+                                    &worker_root,
+                                    candidate_id,
+                                );
                             } else {
                                 launch_config.write(&worker_root.join("launch.json"))?;
                             }

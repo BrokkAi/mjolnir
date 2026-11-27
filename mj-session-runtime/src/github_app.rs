@@ -1142,6 +1142,21 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read_to_string(other).unwrap(), "unchanged");
+        // A wiped worker root names the real problem instead of mktemp's
+        // cryptic "No such file or directory".
+        fs::remove_file(root.join("github-token")).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let error = install_configured_session_github_token(
+            &github,
+            &ObservedExecutor,
+            &locator,
+            root.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("session worker root is missing"),
+            "{error:#}"
+        );
     }
 
     #[derive(Clone)]

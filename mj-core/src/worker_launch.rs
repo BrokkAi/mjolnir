@@ -1300,6 +1300,7 @@ pub fn validate_candidate_id(candidate_id: &str) -> Result<()> {
         !candidate_id.is_empty()
             && candidate_id != "."
             && candidate_id != ".."
+            && !candidate_id.starts_with(".retired-")
             && !candidate_id.contains(['/', '\\', ':', '\0']),
         "unsafe reload candidate ID"
     );

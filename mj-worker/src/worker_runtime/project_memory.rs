@@ -2,11 +2,14 @@ use anyhow::{Context, Result};
 use mj_core::project_memory::{
     ProjectMemorySnapshot, ProjectMemoryStore, TreeVersion, is_memory_document,
 };
+use mj_core::remove_tree::{self, RemoveOutcome};
 use mj_core::worker_launch::ProjectMemoryLaunchConfig;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::path::Path;
 
 const RECORD_FILE: &str = ".hel-memory-record.json";
+const RETIRED_SEEDS_DIR: &str = ".retired-memory-seeds";
 
 fn retain_documents(tree: &mut ProjectMemorySnapshot) {
     tree.files.retain(|_, content| is_memory_document(content));
@@ -259,7 +262,12 @@ pub(super) fn ensure_project_memory_replica(memory: &ProjectMemoryLaunchConfig) 
         let temporary = tempfile::tempdir_in(parent)?;
         if seed.is_dir() {
             if memory.baseline_root.exists() {
-                std::fs::remove_dir_all(&memory.baseline_root)?;
+                remove_tree::remove_dir_all_checked(&memory.baseline_root).with_context(|| {
+                    format!(
+                        "remove project memory baseline {}",
+                        memory.baseline_root.display()
+                    )
+                })?;
             }
             let baseline = tempfile::tempdir_in(parent)?;
             super::reload_commit::copy_overlay(&seed, temporary.path())?;
@@ -282,9 +290,273 @@ pub(super) fn ensure_project_memory_replica(memory: &ProjectMemoryLaunchConfig) 
         std::fs::rename(baseline.path(), &memory.baseline_root)?;
     }
     if seed.exists() {
-        std::fs::remove_dir_all(&seed)?;
+        retire_seed(&seed)?;
     }
     Ok(())
+}
+
+/// Move a seed into a retired directory on the seed's own filesystem before
+/// any cleanup. The sibling directory is never read as a seed; startup only
+/// seeds from the exact seed path. A failed rename fails closed.
+fn retire_seed(seed: &Path) -> Result<()> {
+    let parent = seed
+        .parent()
+        .with_context(|| format!("project memory seed {} has no parent", seed.display()))?;
+    let retired_root = parent.join(RETIRED_SEEDS_DIR);
+    match std::fs::create_dir(&retired_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "create retired project memory seed directory {}",
+                    retired_root.display()
+                )
+            });
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut sequence = 0_u64;
+    loop {
+        let retired = format!("seed-{}-{nonce}-{sequence}", std::process::id());
+        let destination = retired_root.join(&retired);
+        #[cfg(unix)]
+        let renamed = {
+            let retired_dir = remove_tree::open_dir_nofollow(&retired_root).with_context(|| {
+                format!(
+                    "open retired project memory seed directory {}",
+                    retired_root.display()
+                )
+            })?;
+            match rename_into_dir(seed, &retired_dir, std::ffi::OsStr::new(&retired)) {
+                Ok(()) => Ok(Some((retired_dir, retired))),
+                Err(error) => Err(error),
+            }
+        };
+        #[cfg(windows)]
+        let renamed = {
+            let target = retired_root.join(&retired);
+            std::fs::rename(seed, &target).map(|()| Some((target, String::new())))
+        };
+        match renamed {
+            Ok(Some((retired_dir, retired_name))) => {
+                // The committed reload only needs the rename. Delete the retired
+                // tree on a detached OS thread so a large or stalled tree cannot
+                // hold the relocation open; startup sweeps anything the thread
+                // loses.
+                if let Err(error) = std::thread::Builder::new()
+                    .name("retired-memory-seed-gc".into())
+                    .spawn(move || {
+                        #[cfg(windows)]
+                        let _ = retired_name;
+                        #[cfg(unix)]
+                        match remove_tree::remove_dir_all_in(
+                            &retired_dir,
+                            std::ffi::OsStr::new(&retired_name),
+                        ) {
+                            Ok(RemoveOutcome::Removed) => {}
+                            Ok(RemoveOutcome::Leftovers { path }) => tracing::warn!(
+                                path = %path.display(),
+                                "could not empty the retired project memory seed; the next start will retry"
+                            ),
+                            Err(error) => tracing::warn!(
+                                path = %retired_name,
+                                %error,
+                                "could not remove the retired project memory seed; the next start will retry"
+                            ),
+                        }
+                        #[cfg(windows)]
+                        match remove_tree::remove_dir_all(&retired_dir) {
+                            Ok(RemoveOutcome::Removed) => {}
+                            Ok(RemoveOutcome::Leftovers { path }) => tracing::warn!(
+                                path = %path.display(),
+                                "could not empty the retired project memory seed; the next start will retry"
+                            ),
+                            Err(error) => tracing::warn!(
+                                path = %retired_dir.display(),
+                                %error,
+                                "could not remove the retired project memory seed; the next start will retry"
+                            ),
+                        }
+                    })
+                {
+                    tracing::warn!(
+                        %error,
+                        "could not start retired project memory seed cleanup; the next start will retry"
+                    );
+                }
+                return Ok(());
+            }
+            Ok(None) => return Ok(()),
+            // Another owner consumed it first.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                // Retry only when the destination really exists; any other
+                // error with this shape is a failure for this seed.
+                if destination.exists() {
+                    sequence = sequence.wrapping_add(1);
+                    continue;
+                }
+                return Err(error)
+                    .with_context(|| format!("retire project memory seed {}", seed.display()));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("retire project memory seed {}", seed.display()));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn rename_into_dir(
+    source: &Path,
+    destination_dir: &remove_tree::Dir,
+    destination_name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    // Resolve the source path with AT_FDCWD. Unlike opening the parent as a
+    // readable directory, this needs only write and search permission on the
+    // profile directory.
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seed path has NUL"))?;
+    let destination = std::ffi::CString::new(destination_name.as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "retired name has NUL")
+    })?;
+    // SAFETY: the destination is a live directory handle, and both names are
+    // valid NUL-terminated strings.
+    let result = unsafe {
+        libc::renameat(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            destination_dir.as_raw_fd(),
+            destination.as_ptr(),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Best-effort cleanup of the seed's sibling retired directory. Every entry
+/// there was placed by `retire_seed`; the live seed path is never touched. The
+/// directory is opened without following a symlink.
+fn sweep_retired_memory_seeds(root: &Path) {
+    #[cfg(unix)]
+    {
+        let directory = match remove_tree::open_dir_nofollow(root) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(
+                    path = %root.display(),
+                    %error,
+                    "could not open retired project memory seeds"
+                );
+                return;
+            }
+        };
+        // Collect before deleting for the same readdir-offset reason as the
+        // candidate sweep.
+        let entries = match directory.entries() {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    path = %root.display(),
+                    %error,
+                    "could not read retired project memory seeds"
+                );
+                return;
+            }
+        };
+        let mut retired = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => retired.push(entry.file_name()),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read a retired project memory seed entry");
+                }
+            }
+        }
+        for name in retired {
+            match remove_tree::remove_dir_all_in(&directory, &name) {
+                Ok(RemoveOutcome::Removed) => {}
+                Ok(RemoveOutcome::Leftovers { path }) => tracing::warn!(
+                    path = %path.display(),
+                    "could not empty a retired project memory seed; the next start will retry"
+                ),
+                Err(error) => tracing::warn!(
+                    name = %name.to_string_lossy(),
+                    %error,
+                    "could not remove a retired project memory seed; the next start will retry"
+                ),
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(
+                    path = %root.display(),
+                    %error,
+                    "could not read retired project memory seeds"
+                );
+                return;
+            }
+        };
+        let mut retired = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => retired.push(entry.path()),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read a retired project memory seed entry");
+                }
+            }
+        }
+        for path in retired {
+            match remove_tree::remove_dir_all(&path) {
+                Ok(RemoveOutcome::Removed) => {}
+                Ok(RemoveOutcome::Leftovers { path }) => tracing::warn!(
+                    path = %path.display(),
+                    "could not empty a retired project memory seed; the next start will retry"
+                ),
+                Err(error) => tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not remove a retired project memory seed; the next start will retry"
+                ),
+            }
+        }
+    }
+}
+
+/// Retired seeds are consumed garbage; a large or stalled tree must not delay
+/// startup. The detached thread loses its work at process exit, and the next
+/// start tries again.
+fn spawn_retired_seed_cleanup(root: std::path::PathBuf) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("retired-memory-seed-gc".into())
+        .spawn(move || sweep_retired_memory_seeds(&root))
+    {
+        tracing::warn!(
+            %error,
+            "could not start retired project memory seed cleanup; the next start will retry"
+        );
+    }
 }
 
 /// Prepare the replica for startup; a failed recovery is retried by Snapshot.
@@ -292,6 +564,10 @@ pub(super) fn prepare_project_memory(
     memory: &ProjectMemoryLaunchConfig,
     session_id: &str,
 ) -> Result<()> {
+    let seed = mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root);
+    if let Some(parent) = seed.parent() {
+        spawn_retired_seed_cleanup(parent.join(RETIRED_SEEDS_DIR));
+    }
     ensure_project_memory_replica(memory)?;
     let span = tracing::info_span!("project_memory_recovery", %session_id);
     span.in_scope(|| {
@@ -442,6 +718,119 @@ mod tests {
             std::fs::read_to_string(memory.baseline_root.join("note.md")).unwrap(),
             "seed version"
         );
+    }
+
+    #[test]
+    fn a_retired_seed_is_swept_on_the_next_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        let retired: Vec<_> = (0..3)
+            .map(|index| {
+                temp.path()
+                    .join(format!(".retired-memory-seeds/stale-{index}"))
+            })
+            .collect();
+        for path in &retired {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("note.md"), "stale").unwrap();
+        }
+        // A profile entry that merely shares a retired-looking prefix is
+        // retained data and must survive.
+        let retained = temp.path().join(".hel-memory-seed.retired-backup");
+        std::fs::create_dir_all(&retained).unwrap();
+        std::fs::write(retained.join("note.md"), "keep").unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
+        for _ in 0..200 {
+            if retired.iter().all(|path| !path.exists()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for path in &retired {
+            assert!(!path.exists(), "{} was not swept", path.display());
+        }
+        assert!(retained.join("note.md").exists());
+    }
+
+    #[test]
+    fn a_retired_seed_is_never_reused_as_a_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        let retired = temp.path().join(".retired-memory-seeds/stale");
+        std::fs::create_dir_all(&retired).unwrap();
+        std::fs::write(retired.join("note.md"), "retired version").unwrap();
+        ensure_project_memory_replica(&memory).unwrap();
+        assert!(
+            !memory.root.join("note.md").exists(),
+            "the sibling retired directory must never be read as a seed"
+        );
+        assert!(Record::load(&memory).unwrap().base.files.is_empty());
+    }
+
+    #[test]
+    fn a_consumed_seed_is_moved_out_of_the_seed_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join(".hel-memory-seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("note.md"), "seed version").unwrap();
+        retire_seed(&seed).unwrap();
+        assert!(!seed.exists());
+        assert!(temp.path().join(".retired-memory-seeds").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_retired_seed_directory_is_not_followed() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.md"), "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, temp.path().join(".retired-memory-seeds")).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
+        assert!(outside.join("keep.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seed_retirement_does_not_need_to_read_the_profile_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid only reads the caller's effective user.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let seed = profile.join(".hel-memory-seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("note.md"), "seed version").unwrap();
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = retire_seed(&seed);
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        assert!(!seed.exists());
     }
 
     #[test]

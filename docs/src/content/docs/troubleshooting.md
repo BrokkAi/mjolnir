@@ -355,6 +355,68 @@ The confirmation value must repeat the full session ID. For stopped, lost, or
 retryable sessions already present in the dashboard, use the resume and recover
 actions described in [Session lifecycle](/sessions/).
 
+## Native history is missing, but the checkout survived
+
+When a session's provider-native history is lost (for example after a container
+writable-layer loss or a deleted harness home) and no matching recovery
+checkpoint exists, Mjolnir refuses to start a blank conversation under the old
+session ID. It leaves the session in `Error`, keeps the surviving checkout, and
+keeps the canonical Mjolnir transcript. Retrying `mj resume` will not recreate
+the missing native history.
+
+Keep the failed session intact until the work is rescued. Do not run
+`mj destroy` first.
+
+Read the surviving transcript from the controller store:
+
+```console
+mj transcript --session <old-id>
+```
+
+A replacement session can also read the earlier conversation with the
+`mj-memory` `read_session` tool.
+
+Inspect changes with `mj diff --session <old-id>`.
+
+When the session's Git setup survived, push a recovery branch and start a fresh
+session on it:
+
+```console
+mj export --session <old-id> --kind branch --branch recovery/<old-id>
+mj new --workspace <workspace> --bundle <bundle> --branch recovery/<old-id> "Continue from session <old-id>..."
+```
+
+When the work is uncommitted, you have no push access, or the worker root was
+wiped (for example the container writable layer was lost), export a patch, or a
+Git bundle for committed history, and fetch any untracked files. Bring them
+into a fresh session:
+
+```console
+mj export --session <old-id> --kind patch --out recovery.patch
+mj fetch --session <old-id> --path <untracked-path>
+mj new --workspace <workspace> --bundle <bundle>
+mj put-file --session <new-id> --path recovery.patch recovery.patch
+```
+
+Apply `recovery.patch` inside the new session. On a bare target, start a fresh
+session directly on the surviving directory with
+`mj new --workspace <workspace> --project-directory <path>`.
+
+`mj diff`, `mj export --kind patch`, `mj export --kind bundle`, and `mj fetch`
+stage the control worker automatically when the old worker binary was wiped
+with the container layer. `mj export --kind branch` requires the session's Git
+setup to still be present on the target.
+
+After you verify the replacement, remove the failed session:
+
+```console
+mj destroy --session <old-id>
+```
+
+Destroy indexes the conversation in SessionWiki before it removes the failed
+session's resources. See [What survives a failure](/durability/#what-survives-a-failure)
+for the surrounding guarantees.
+
 ## Collect useful diagnostics
 
 When the built-in remediation is not enough, collect:

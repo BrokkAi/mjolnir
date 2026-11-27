@@ -26,7 +26,7 @@ mj-harness-install.workspace = true
 mj-build-id.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true
-mj-controller.workspace = true
+mj-controller = { workspace = true, features = ["migrate-cli"] }
 mj-setup.workspace = true
 mj-daemon.workspace = true
 mj-chat.workspace = true
@@ -45,7 +45,6 @@ futures = "0.3"
 libc.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true
-rusqlite.workspace = true
 url.workspace = true
 # The API client pins the certificate the daemon publishes for its viewer.
 rustls.workspace = true
@@ -75,6 +74,7 @@ tikv-jemallocator = { version = "0.7", features = ["background_threads", "stats"
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
+rusqlite.workspace = true
 # The ACP adapter test launches `mj acp` as an agent subprocess.
 agent-client-protocol = { workspace = true, features = ["process"] }
 # The API client test answers itself from a canned in-process router.

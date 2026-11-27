@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use mj_checkpoint::checkpoint::CHECKPOINT_CAPTURE_TEMPORARY_PREFIX;
+use mj_core::remove_tree;
 
 use crate::database::{
     HostSnapshotCacheEntry, delete_host_snapshot_cache_entry,
@@ -209,7 +210,10 @@ pub(super) fn sweep_checkpoint_leftovers_in(
                 continue;
             }
             let (bytes, removed) = if metadata.is_dir() {
-                (tree_bytes(&path), std::fs::remove_dir_all(&path))
+                (
+                    tree_bytes(&path),
+                    remove_tree::remove_dir_all_checked(&path),
+                )
             } else if metadata.is_file() {
                 (metadata.len(), std::fs::remove_file(&path))
             } else {

@@ -1,5 +1,6 @@
 //! Sending a host the shareable content a later reviewer launch will need.
 use super::*;
+use mj_core::remove_tree;
 use mj_core::state::SessionRecord;
 
 /// What one prewarm did for one host and profile.
@@ -72,7 +73,7 @@ pub fn prewarm_profile_content(
         );
         // A failed catalog step may have left a partial change in the stage;
         // stage the plain profile again rather than offer it.
-        std::fs::remove_dir_all(&stage).ok();
+        remove_tree::remove_dir_all(&stage).ok();
         harness::stage_profile(profile, &stage)?;
     }
     stage_managed_skills(profile.kind, &stage, locator.skills_scope())?;

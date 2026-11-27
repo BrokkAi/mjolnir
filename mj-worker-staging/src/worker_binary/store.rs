@@ -490,6 +490,7 @@ fn install_binary_at(
                 r#"set -eu
 allow_collect=$1; shift
 source=$1; temporary=$2; destination=$3
+mkdir -p -- "${temporary%/*}" "${destination%/*}"
 trap 'rm -f -- "$temporary"' EXIT
 if [ "$5" = link ]; then
     if ! ln -- "$source" "$temporary" 2>/dev/null; then
@@ -593,6 +594,7 @@ fn install_ssh_container(
     let can_upload = if room.is_ok() { "1" } else { "0" };
     let inner = r#"set -eu
 store=$1; digest=$2; temporary=$3; destination=$4; upload=$5; mode=$6
+mkdir -p -- "${temporary%/*}" "${destination%/*}"
 trap 'rm -f -- "$temporary"; rm -rf -- "$upload"' EXIT
 cached="$store/$digest/hel"
 if [ "$mode" = hit ]; then
