@@ -1470,6 +1470,24 @@ impl DurableRelay {
                 None,
             )));
         }
+        // Mail changes what the agent sees, so it cannot slide into a cut that
+        // is already being captured. The daemon's durable outbox owns the
+        // event and retries this same command after the barrier ends, or after
+        // a close resumes the session: the cut stays exactly what the barrier
+        // made, and the agent still receives the message once. This is the one
+        // serialized decision point for mailbox delivery and checkpoint cuts;
+        // a checkpoint's own project-memory notice is enqueued while its
+        // barrier is admitted and must be deferred by this refusal.
+        if matches!(command, RelayCommand::DeliverMailboxEvent { .. })
+            && self.snapshot.checkpoint_barrier.is_some()
+        {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "the checkpoint barrier is already admitted; deliver mailbox events after it",
+                true,
+                None,
+            )));
+        }
         if let Err(message) = self
             .snapshot
             .validate_notification_command(&command)

@@ -338,7 +338,9 @@ fn parent_mail(key: &str, wake: bool) -> mj_core::mailbox::MailboxEvent {
 #[test]
 fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     use crate::relay::DurableRelay;
-    use crate::relay::test_support::{ready_checkpoint, relay_request, submit_relay};
+    use crate::relay::test_support::{
+        ready_checkpoint, relay_request, submit_relay, submit_release,
+    };
     use mj_core::relay::{
         RelayCommand, RelayCommandOutcome, RelayErrorCode, RelayObservation, RelayRequest,
         RelayResponseBody, RelayResponsePayload,
@@ -432,8 +434,31 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     };
     let paged: mj_core::relay::CheckpointMailboxRead = serde_json::from_str(&page).unwrap();
     assert_eq!(paged.mailbox, mailbox);
-    // Mail accepted after the cut moves the relay past it, as it would refuse
-    // a Close there; the cut's mail can no longer be read.
+    // Mail submitted after the cut is refused until the barrier ends. The
+    // daemon's outbox retries it, so the cut keeps the mail it had and a Close
+    // still matches it.
+    let refused = source.handle(relay_request(
+        "deliver-late",
+        RelayRequest::Submit {
+            command_id: "deliver-late".into(),
+            command: deliver(parent_mail("late", false)),
+        },
+    ));
+    let RelayResponseBody::Error { error } = refused.body else {
+        panic!("the relay accepted mail after its checkpoint cut");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
+    assert!(error.retryable);
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::CheckpointMailbox { mailbox: held },
+    } = read_at_cut(&mut source)
+    else {
+        panic!("mail submitted after the cut moved it");
+    };
+    assert_eq!(held.pending_events, pending);
+    // Releasing the barrier lets the outbox's retry in; the cut is now past,
+    // so neither the mailbox nor its cached serialization may be served.
+    submit_release(&mut source, "release-late-mail", "suspend-barrier");
     submit_relay(
         &mut source,
         "deliver-late",
