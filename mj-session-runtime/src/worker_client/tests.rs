@@ -5087,6 +5087,57 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
     }
 }
 
+// Hard-won: 0187f165f: a stalled initial snapshot prevented checkpoint preemption.
+#[tokio::test]
+async fn checkpoint_preempts_turn_snapshot_start_and_closes_transfer() {
+    use mj_core::project_memory::ProjectMemorySnapshot;
+    use mj_core::relay::ProjectMemoryTransferAction as Action;
+
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let slot = Arc::new(mj_core::recovery_gate::ProjectMemorySyncSlot::default());
+    let (guard, cancel) = slot.start_turn().unwrap();
+    let (queued, waiting) = tokio::sync::oneshot::channel();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, _writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            request.request,
+            RelayRequest::ProjectMemoryTransfer {
+                action: Action::BeginTurnSnapshot { .. }
+            }
+        ));
+        queued.send(()).unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(
+            line.is_empty(),
+            "cancelled transfer must close its connection"
+        );
+    });
+    let turn = mj_core::runtime::spawn(async move {
+        let _guard = guard;
+        let result = client
+            .project_memory_turn_snapshot(None, ProjectMemorySnapshot::default().version(), &cancel)
+            .await;
+        (client, result)
+    });
+    waiting.await.unwrap();
+    let checkpoint = tokio::time::timeout(Duration::from_secs(1), slot.checkpoint())
+        .await
+        .expect("checkpoint must preempt the stalled snapshot");
+    let (client, result) = turn.await.unwrap();
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert!(client.abandoned.is_some());
+    assert!(client.input.is_none());
+    drop(client);
+    peer.await.unwrap();
+    drop(checkpoint);
+}
+
 /// A job the actor refuses while its connection is leased makes the actor wake
 /// the coordinator when the lease returns, without retaining the job.
 #[cfg(unix)]

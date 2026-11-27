@@ -677,27 +677,29 @@ impl RelayClient {
             mj_core::project_memory::ProjectMemorySnapshot,
         )>,
     > {
-        let started = self
-            .begin_memory_transfer(MemoryAction::BeginTurnSnapshot {
+        let started = tokio::select! {
+            () = cancel.cancelled() => bail!("project-memory synchronization cancelled"),
+            result = self.begin_memory_transfer(MemoryAction::BeginTurnSnapshot {
                 absorbed,
                 head_version,
-            })
-            .await?;
+            }) => result?,
+        };
         if matches!(started, MemoryResult::InSync | MemoryResult::Busy) {
             return Ok(None);
         }
         let bytes = self.download_memory_pages(started, Some(cancel)).await?;
-        mj_core::runtime::spawn_blocking(move || {
-            let snapshot: mj_core::relay::ProjectMemoryTurnSnapshot =
-                serde_json::from_slice(&bytes)?;
-            Ok(Some((
-                snapshot.base.decode()?,
-                snapshot.id,
-                snapshot.tree.decode()?,
-            )))
-        })
-        .await
-        .context("decode project-memory turn snapshot task failed")?
+        tokio::select! {
+            () = cancel.cancelled() => bail!("project-memory synchronization cancelled"),
+            result = mj_core::runtime::spawn_blocking(move || {
+                let snapshot: mj_core::relay::ProjectMemoryTurnSnapshot =
+                    serde_json::from_slice(&bytes)?;
+                Ok(Some((
+                    snapshot.base.decode()?,
+                    snapshot.id,
+                    snapshot.tree.decode()?,
+                )))
+            }) => result.context("decode project-memory turn snapshot task failed")?,
+        }
     }
 
     async fn download_memory_pages(
@@ -742,9 +744,11 @@ impl RelayClient {
                 else {
                     bail!("relay returned an unexpected project-memory page response");
                 };
-                let chunk = mj_core::runtime::spawn_blocking(move || BASE64.decode(chunk))
-                    .await
-                    .context("decode project-memory page task failed")??;
+                let chunk = tokio::select! {
+                    () = memory_cancelled(cancel) => bail!("project-memory synchronization cancelled"),
+                    result = mj_core::runtime::spawn_blocking(move || BASE64.decode(chunk)) =>
+                        result.context("decode project-memory page task failed")??,
+                };
                 anyhow::ensure!(
                     page_id == transfer_id && page_offset == offset,
                     "project-memory page identity or offset changed"
@@ -781,7 +785,12 @@ impl RelayClient {
                 bytes
             }
             Err(error) if cancel.is_some_and(|cancel| cancel.is_cancelled()) => return Err(error),
-            Err(error) => return Err(transfer.abort(error).await),
+            Err(error) => {
+                return tokio::select! {
+                    () = memory_cancelled(cancel) => Err(anyhow!("project-memory synchronization cancelled")),
+                    result = transfer.abort(error) => Err(result),
+                };
+            }
         };
         Ok(bytes)
     }
