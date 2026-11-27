@@ -168,7 +168,7 @@ pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.26.0";
 pub const MUSE_VERSION: &str = "1.4.25-R9361.1";
 pub const OPENCODE_VERSION: &str = "2.2.7";
-pub const DSH_ACP_VERSION: &str = "0.8.1";
+pub const DSH_ACP_VERSION: &str = "0.8.2";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 pub const ANTIGRAVITY_VERSION: &str = "1.5.15";
 
@@ -664,8 +664,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "opencode",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.8.1",
-            display_version: "dsh-acp 0.8.1",
+            install_id: "dsh-acp-0.8.2",
+            display_version: "dsh-acp 0.8.2",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },
@@ -745,12 +745,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn dsh_acp_host_version_gate_compares_patch_in_rust_and_shell() {
-        // The pin is 0.8.1; 0.8.0 fails every turn longer than 180 s.
-        assert_eq!(DSH_ACP_VERSION, "0.8.1", "update the cases with the pin");
+        // The pin is 0.8.2; 0.8.1 omits native DSH per-turn usage.
+        assert_eq!(DSH_ACP_VERSION, "0.8.2", "update the cases with the pin");
         let cases = [
             ("dsh-acp 0.8.0", false),
-            ("dsh-acp 0.8.1", true),
+            ("dsh-acp 0.8.1", false),
             ("dsh-acp 0.8.2", true),
+            ("dsh-acp 0.8.3", true),
             ("dsh-acp 0.9.0", true),
             ("dsh-acp 1.0.0", true),
             ("dsh-acp 0.7.9", false),
@@ -759,7 +760,7 @@ mod tests {
             ("dsh-acp 0.9.0-rc.1", false),
             ("dsh-acp ", false),
             ("dsh-acp", false),
-            ("0.8.1", false),
+            ("0.8.2", false),
             ("other 0.9.0", false),
             ("", false),
             ("garbage", false),
