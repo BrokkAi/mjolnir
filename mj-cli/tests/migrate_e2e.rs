@@ -184,6 +184,27 @@ impl World {
         hook: Option<&str>,
         disconnected: bool,
     ) -> Command {
+        self.migration_with_paths(
+            destination,
+            extra,
+            hook,
+            disconnected,
+            "migration-b",
+            &self.b.path().join("data"),
+            &self.b.path().join("config"),
+        )
+    }
+    #[allow(clippy::too_many_arguments, reason = "test both destination instances")]
+    fn migration_with_paths(
+        &self,
+        destination: &str,
+        extra: &[&str],
+        hook: Option<&str>,
+        disconnected: bool,
+        instance: &str,
+        data_dir: &std::path::Path,
+        config_dir: &std::path::Path,
+    ) -> Command {
         let mut cmd = self.command(false);
         cmd.args(["migrate", destination]);
         if disconnected {
@@ -197,13 +218,12 @@ impl World {
             "--source-machine-id",
             "migration-source",
             "--dest-instance",
-            "migration-b",
+            instance,
             "--remote-command",
             self.b.path().join("receive-mj").to_str().unwrap(),
         ]);
-        cmd.arg("--dest-data-dir").arg(self.b.path().join("data"));
-        cmd.arg("--dest-config-dir")
-            .arg(self.b.path().join("config"));
+        cmd.arg("--dest-data-dir").arg(data_dir);
+        cmd.arg("--dest-config-dir").arg(config_dir);
         for arg in [
             "-i".to_owned(),
             self.sshd.key.display().to_string(),
@@ -679,6 +699,7 @@ fn wait_child(child: &mut Child) -> std::process::ExitStatus {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn empty_destination_resumes_only_matching_migration_fence() {
     let Some(world) = World::new() else { return };
@@ -704,19 +725,95 @@ fn empty_destination_resumes_only_matching_migration_fence() {
         assert!(after.matches_snapshot(&fence));
         assert!(!world.b.path().join("data/mj.sqlite3").exists());
     }
-    success(&run(world.command(false).args([
-        "daemon",
-        "fence",
-        "--to",
-        "127.0.0.1",
-        "--note",
-        "mj migrate",
-    ])));
+    success(&run(world.command(false).args(["daemon", "unfence"])));
+    success(&world.endpoint(false));
+    let hooks = world.a.path().join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let log = world.a.path().join("fenced-migration.log");
+    let mut cmd = world.migration_command(&[], None);
+    cmd.env("MJ_CHAOS_ISOLATED", "1")
+        .env("MJ_TEST_HOOK", "migrate_after_fence")
+        .env("MJ_TEST_HOOK_DIR", &hooks)
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&log).unwrap())
+        .process_group(0);
+    let mut migration = RunningChild(mj_core::subprocess::spawn_child(&mut cmd).unwrap());
+    let marker = hooks.join("migrate_after_fence.reached");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !marker.exists() {
+        if let Some(status) = migration.0.try_wait().unwrap() {
+            panic!(
+                "migration exited before fencing: {status}: {}",
+                fs::read_to_string(&log).unwrap_or_default()
+            );
+        }
+        assert!(Instant::now() < deadline, "migration did not fence source");
+        thread::sleep(Duration::from_millis(20));
+    }
+    mj_core::subprocess::terminate_process_group(migration.0.id() as i32, libc::SIGKILL);
+    assert!(!wait_child(&mut migration.0).success());
+    let stage = world.b.path().join("data/.mj-migrate-stage");
+    let id = fs::read_to_string(stage.join("stage-id")).unwrap();
+    assert_eq!(id.len(), 32);
+    let fence = mj_controller::database::read_store_fence_file(&source_db)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fence.note.as_deref(),
+        Some(format!("mj migrate stage={id}").as_str())
+    );
+    assert!(!stage.join("publication.json").exists());
+
+    let other_data = world.b.path().join("other-data");
+    let other_config = world.b.path().join("other-config");
+    let other_migration = || {
+        world.migration_with_paths(
+            "127.0.0.1",
+            &[],
+            None,
+            true,
+            "migration-other",
+            &other_data,
+            &other_config,
+        )
+    };
+    let refusal = run(&mut other_migration());
+    assert!(
+        !refusal.status.success(),
+        "empty second destination must be refused"
+    );
+    assert!(!other_data.exists());
+    assert!(!other_config.exists());
+    let other_id = other_data.join(".mj-migrate-stage/stage-id");
+    fs::create_dir_all(other_id.parent().unwrap()).unwrap();
+    fs::write(&other_id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+    assert_ne!(fs::read_to_string(&other_id).unwrap(), id);
+    let refusal = run(&mut other_migration());
+    assert!(
+        !refusal.status.success(),
+        "different staging identity must be refused"
+    );
+    assert_eq!(
+        fs::read_to_string(other_id).unwrap(),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert!(!other_data.join("mj.sqlite3").exists());
+    let after = mj_controller::database::read_store_fence_file(&source_db)
+        .unwrap()
+        .unwrap();
+    assert!(after.matches_snapshot(&fence));
+
     let result = world.migrate(&[]);
     success(&result);
     assert!(String::from_utf8_lossy(&result.stderr).contains("resuming cutover"));
     success(&world.endpoint(true));
     assert!(!world.endpoint(false).status.success());
+    let refusal = run(&mut other_migration());
+    assert!(
+        !refusal.status.success(),
+        "the activated source must not be migrated to a second destination"
+    );
+    assert!(!other_data.join("mj.sqlite3").exists());
 }
 
 #[cfg(feature = "test-hooks")]

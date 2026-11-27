@@ -279,6 +279,29 @@ impl Stage {
     fn publication(&self) -> PathBuf {
         self.root.join(PUBLICATION_FILE)
     }
+    fn stage_id_file(&self) -> PathBuf {
+        self.root.join("stage-id")
+    }
+    fn read_stage_id(&self) -> Result<Option<String>> {
+        match std::fs::read_to_string(self.stage_id_file()) {
+            Ok(id) => Ok(Some(id.trim().to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("read migration stage identity"),
+        }
+    }
+    fn ensure_stage_id(&self) -> Result<String> {
+        if let Some(id) = self.read_stage_id()?.filter(|id| !id.is_empty()) {
+            return Ok(id);
+        }
+        let id = mj_core::state::new_session_id()?;
+        let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
+        file.write_all(id.as_bytes())?;
+        file.as_file().sync_all()?;
+        file.persist(self.stage_id_file())
+            .context("persist migration stage identity")?;
+        sync_directory(&self.root)?;
+        Ok(id)
+    }
     fn create(&self) -> Result<()> {
         mj_core::config::create_owner_only_directory(&self.rewritten())?;
         for scope in [
@@ -289,6 +312,7 @@ impl Stage {
         ] {
             mj_core::config::create_owner_only_directory(&self.raw(scope))?;
         }
+        self.ensure_stage_id()?;
         Ok(())
     }
     fn dir_modes_file(&self) -> PathBuf {
@@ -731,18 +755,19 @@ impl Receiver {
     async fn hello(&mut self, hello: Hello) -> Result<Reply> {
         let config = self.config.clone();
         let stage = self.stage.clone();
-        let (status, wiki, staged) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
-            let status = destination_status(&config, &stage)?;
-            let wiki = if exists(&config.sessionwiki_db)? {
-                SessionWikiStatus::Existing
-            } else {
-                SessionWikiStatus::Absent
-            };
-            let staged = staged_sizes(&config, &stage)?;
-            Ok((status, wiki, staged))
-        })
-        .await
-        .context("join destination inspection")??;
+        let (status, wiki, staged, stage_id) =
+            mj_core::runtime::spawn_blocking(move || -> Result<_> {
+                let status = destination_status(&config, &stage)?;
+                let wiki = if exists(&config.sessionwiki_db)? {
+                    SessionWikiStatus::Existing
+                } else {
+                    SessionWikiStatus::Absent
+                };
+                let staged = staged_sizes(&config, &stage)?;
+                Ok((status, wiki, staged, stage.read_stage_id()?))
+            })
+            .await
+            .context("join destination inspection")??;
         let mut refusal = match &status {
             DestinationStatus::Empty | DestinationStatus::ResumablePublication { .. } => None,
             DestinationStatus::ExistingStore { .. } => Some(
@@ -772,6 +797,7 @@ impl Receiver {
         // Nothing is created here: Hello, probes and dry runs leave no staging.
         let config = &self.config;
         let ack = HelloAck {
+            stage_id,
             mj_version: env!("CARGO_PKG_VERSION").to_owned(),
             schema_version: mj_store::database::STORE_SCHEMA_VERSION,
             protocol_version: PROTOCOL_VERSION,
@@ -1090,6 +1116,7 @@ fn stage_manifest(
         for chunk in staged_entries(stage, hash_files)?.chunks(MANIFEST_PAGE_ITEMS) {
             pages.push((
                 ManifestPage {
+                    stage_id: None,
                     entries: chunk.to_vec(),
                     blocks: None,
                     last: false,
@@ -1109,6 +1136,7 @@ fn stage_manifest(
         if digests.is_empty() {
             pages.push((
                 ManifestPage {
+                    stage_id: None,
                     entries: Vec::new(),
                     blocks: Some(BlockPage {
                         target: *target,
@@ -1123,6 +1151,7 @@ fn stage_manifest(
         for (page, chunk) in digests.chunks(32 * MANIFEST_PAGE_ITEMS).enumerate() {
             pages.push((
                 ManifestPage {
+                    stage_id: None,
                     entries: Vec::new(),
                     blocks: Some(BlockPage {
                         target: *target,
@@ -1138,6 +1167,7 @@ fn stage_manifest(
     if pages.is_empty() {
         pages.push((
             ManifestPage {
+                stage_id: None,
                 entries: Vec::new(),
                 blocks: None,
                 last: false,
@@ -1147,6 +1177,7 @@ fn stage_manifest(
     }
     if let Some((page, _)) = pages.last_mut() {
         page.last = true;
+        page.stage_id = stage.read_stage_id()?;
     }
     Ok(pages
         .into_iter()

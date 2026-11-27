@@ -443,6 +443,10 @@ mod unix {
 
     type ProbeRequest = (PathBuf, tokio::sync::oneshot::Sender<Result<bool>>);
 
+    fn migration_fence_note(stage_id: &str) -> String {
+        format!("mj migrate stage={stage_id}")
+    }
+
     async fn run_stream<R, W>(
         args: &MigrateArgs,
         config: Config,
@@ -466,10 +470,13 @@ mod unix {
                 Some(f.clone())
             }
             (Some(f), DestinationStatus::Empty)
-                if f.destination == args.destination && f.note.as_deref() == Some("mj migrate") =>
+                if f.destination == args.destination
+                    && hello.stage_id.as_deref().is_some_and(|id| {
+                        f.note.as_deref() == Some(migration_fence_note(id).as_str())
+                    }) =>
             {
                 eprintln!(
-                    "Source is already fenced for migration to {}; resuming cutover.",
+                    "Source is already fenced for this migration staging {}; resuming cutover.",
                     args.destination
                 );
                 Some(f.clone())
@@ -982,7 +989,7 @@ mod unix {
             );
             Ok(())
         }
-        async fn fence(&mut self) -> Result<StoreFenceRecord> {
+        async fn fence(&mut self, stage_id: Option<&str>) -> Result<StoreFenceRecord> {
             if let Some(expected) = &self.resuming {
                 let actual =
                     database::read_configured_store_fence()?.context("source fence disappeared")?;
@@ -990,16 +997,39 @@ mod unix {
                     actual.matches_snapshot(expected),
                     "source fence changed during migration"
                 );
+                if actual
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.starts_with("mj migrate stage="))
+                {
+                    ensure!(
+                        stage_id
+                            .is_some_and(|id| actual.note.as_deref()
+                                == Some(migration_fence_note(id).as_str())),
+                        "destination staging identity changed during migration"
+                    );
+                }
                 return Ok(actual);
             }
             ensure!(
                 database::read_configured_store_fence()?.is_none(),
                 "source became fenced during cutover"
             );
-            let (fence, previous) =
-                database::fence_configured_store(&self.destination_label, Some("mj migrate"))?;
+            let stage_id = stage_id.context("destination did not provide a staging identity")?;
+            let (fence, previous) = database::fence_configured_store(
+                &self.destination_label,
+                Some(&migration_fence_note(stage_id)),
+            )?;
             self.wrote_fence = true;
             ensure!(previous.is_none(), "source became fenced during cutover");
+            #[cfg(feature = "test-hooks")]
+            if mj_core::test_hooks::test_hooks_enabled() {
+                mj_core::runtime::spawn_blocking(|| {
+                    mj_core::test_hooks::reach_test_hook("migrate_after_fence")
+                })
+                .await
+                .context("join migration test hook")??;
+            }
             Ok(fence)
         }
         async fn clear_fence(&mut self) -> Result<()> {

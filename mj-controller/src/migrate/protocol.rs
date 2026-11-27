@@ -98,6 +98,8 @@ pub enum SessionWikiStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloAck {
+    #[serde(default)]
+    pub stage_id: Option<String>,
     pub mj_version: String,
     pub schema_version: i64,
     pub protocol_version: u32,
@@ -160,6 +162,8 @@ pub struct StagedEntry {
 /// concatenated in the frame payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestPage {
+    #[serde(default)]
+    pub stage_id: Option<String>,
     pub entries: Vec<StagedEntry>,
     pub blocks: Option<BlockPage>,
     pub last: bool,

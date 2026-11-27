@@ -316,7 +316,7 @@ impl CutoverHooks for Hooks {
         self.log.push("recheck");
         Ok(())
     }
-    async fn fence(&mut self) -> Result<StoreFenceRecord> {
+    async fn fence(&mut self, _stage_id: Option<&str>) -> Result<StoreFenceRecord> {
         self.log.push("fence");
         set_store_fence_file(&self.a_db, &self.fence)?;
         Ok(self.fence.clone())
@@ -973,19 +973,48 @@ async fn one_receiver_owns_a_destinations_staging_and_hello_alone_creates_none()
     )
     .await;
     outcome.unwrap();
+    let Response::HelloAck(hello_ack) = &responses[0] else {
+        panic!("missing hello acknowledgement")
+    };
+    assert!(hello_ack.stage_id.is_none());
+    let mut legacy = serde_json::to_value(hello_ack).unwrap();
+    legacy.as_object_mut().unwrap().remove("stage_id");
+    assert!(
+        serde_json::from_value::<HelloAck>(legacy)
+            .unwrap()
+            .stage_id
+            .is_none()
+    );
     assert!(matches!(responses.last(), Some(Response::DoneAck)));
     assert!(!stage.exists() && !world.b_data.exists());
 
     // The first receiver to stage holds the lock until it ends.
     let mut first = Live::open(world.receiver(None));
     assert!(matches!(first.send(hello().0).await, Response::HelloAck(_)));
-    assert!(matches!(
-        first.send(manifest_request().0).await,
-        Response::StageManifestAck(_)
-    ));
+    let Response::StageManifestAck(page) = first.send(manifest_request().0).await else {
+        panic!("missing staging manifest")
+    };
+    let id = page.stage_id.as_ref().unwrap();
+    assert!(page.last && id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        std::fs::read_to_string(stage.join("stage-id")).unwrap(),
+        *id
+    );
+    let mut legacy = serde_json::to_value(&page).unwrap();
+    legacy.as_object_mut().unwrap().remove("stage_id");
+    assert!(
+        serde_json::from_value::<ManifestPage>(legacy)
+            .unwrap()
+            .stage_id
+            .is_none()
+    );
     assert!(stage.join("receiver.lock").exists());
     let (responses, outcome) =
         exchange(world.receiver(None), vec![hello(), manifest_request()]).await;
+    let Response::HelloAck(hello_ack) = &responses[0] else {
+        panic!("missing hello acknowledgement")
+    };
+    assert_eq!(hello_ack.stage_id.as_ref(), Some(id));
     let Some(Response::Error { message }) = responses.last() else {
         panic!("{responses:?}")
     };

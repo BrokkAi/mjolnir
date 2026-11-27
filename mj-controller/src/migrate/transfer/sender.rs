@@ -54,7 +54,7 @@ pub trait CutoverHooks {
     /// `pinned_user_version` is the schema revision the pins saw.
     async fn recheck(&mut self, pinned_user_version: i64) -> Result<()>;
     /// Write the fence on A's store and return it.
-    async fn fence(&mut self) -> Result<StoreFenceRecord>;
+    async fn fence(&mut self, stage_id: Option<&str>) -> Result<StoreFenceRecord>;
     /// Remove the fence this migration wrote.
     async fn clear_fence(&mut self) -> Result<()>;
     /// Capture the authoritative metadata from the fenced store and build the
@@ -262,10 +262,17 @@ async fn hello<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 /// The state Phase 1 leaves for Phase 2.
 pub struct Phase1 {
     destination: HelloAck,
+    stage_id: Option<String>,
     home_targets: Vec<HomeTarget>,
     sent: BTreeMap<ScanKey, FileKind>,
     pins: Vec<Pin>,
 }
+
+type StagedManifest = (
+    Vec<StagedEntry>,
+    BTreeMap<DbTarget, Vec<[u8; 32]>>,
+    Option<String>,
+);
 
 pub struct Sender<R, W> {
     link: Link<R, W>,
@@ -303,7 +310,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
 
         // Everything that is not a database first, so no pin is held while the
         // bulk of sessions/ and tool-details/ moves.
-        let (manifest, _) = self.manifest(true, &[]).await?;
+        let (manifest, _, stage_id) = self.manifest(true, &[]).await?;
         let mut sent: BTreeMap<ScanKey, FileKind> = manifest
             .into_iter()
             .map(|entry| ((entry.scope, entry.rel_path), entry.kind))
@@ -316,7 +323,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
         }
 
         if self.plan.warm_base_pass {
-            let (_, blocks) = self.manifest(false, &targets).await?;
+            let (_, blocks, _) = self.manifest(false, &targets).await?;
             for target in &targets {
                 if !blocks.contains_key(target) {
                     self.patch_pass(*target, None).await?;
@@ -340,7 +347,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
             });
         }
         // Under the pins: always hash the live source against what B holds now.
-        let (_, blocks) = self.manifest(false, &targets).await?;
+        let (_, blocks, _) = self.manifest(false, &targets).await?;
         for (target, pin) in targets.iter().zip(&pins) {
             self.patch_pass(*target, blocks.get(target)).await?;
             pin.handle.ensure_alive()?;
@@ -348,6 +355,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
         self.link.drain().await?;
         Ok(Phase1 {
             destination,
+            stage_id,
             home_targets,
             sent,
             pins,
@@ -424,7 +432,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
             .map(|pin| pin.handle.user_version())
             .context("no database is pinned")?;
         hooks.recheck(user_version).await?;
-        let fence = hooks.fence().await?;
+        let fence = hooks.fence(phase1.stage_id.as_deref()).await?;
         state.fenced = true;
         for pin in &phase1.pins {
             pin.handle.ensure_alive()?;
@@ -495,11 +503,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
             .collect()
     }
 
-    async fn manifest(
-        &mut self,
-        files: bool,
-        blocks: &[DbTarget],
-    ) -> Result<(Vec<StagedEntry>, BTreeMap<DbTarget, Vec<[u8; 32]>>)> {
+    async fn manifest(&mut self, files: bool, blocks: &[DbTarget]) -> Result<StagedManifest> {
         self.link.drain().await?;
         self.link
             .send(
@@ -528,7 +532,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
                 target.extend(payload.as_chunks::<32>().0.iter().copied());
             }
             if page.last {
-                return Ok((entries, digests));
+                return Ok((entries, digests, page.stage_id));
             }
         }
     }
