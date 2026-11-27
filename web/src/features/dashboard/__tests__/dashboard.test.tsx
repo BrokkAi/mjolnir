@@ -80,7 +80,7 @@ describe('Workspaces dashboard', () => {
       liveRow('idle', { title: 'Idle parent', subagent_session_ids: ['child', 'review'], reviewer_session_ids: ['review'], verdict: { ...base.verdict, working_descendants: 0, working_children: 0 } }),
       liveRow('child', { subagent_parent_id: 'idle', active: false }),
       liveRow('review', { subagent_parent_id: 'idle', active: true, verdict: { ...base.verdict, working: false } }),
-      liveRow('busy', { title: 'Busy parent', verdict: { ...base.verdict, working_descendants: 3, working_children: 2 } }),
+      liveRow('busy', { title: 'Busy parent', subagent_session_ids: ['managed'], verdict: { ...base.verdict, working_descendants: 3, working_children: 2 } }),
     ]);
     mockFetch({});
     render(<DashboardView />);
@@ -94,6 +94,15 @@ describe('Workspaces dashboard', () => {
     expect(useUiStore.getState().route).toEqual({ name: 'workspace', subagentParentId: 'idle', childKind: 'reviewer' });
     fireEvent.click(within(screen.getByTestId('session-card-busy')).getByRole('button', { name: /2 sub-agents/ }));
     expect(useUiStore.getState().route).toEqual({ name: 'workspace', subagentParentId: 'busy' });
+  });
+
+  it('opens the conversation for a native-only sub-agent count', () => {
+    const base = liveRow('native');
+    hydrate([liveRow('native', { title: 'Native parent', verdict: { ...base.verdict, working_children: 2 } })]);
+    mockFetch({});
+    render(<DashboardView />);
+    fireEvent.click(within(screen.getByTestId('session-card-native')).getByRole('button', { name: '2 sub-agents' }));
+    expect(useUiStore.getState().route).toEqual({ name: 'conversation', sessionId: 'native' });
   });
 
   it('counts working reviewers without inflating the worker pill or counting parked reviewers', () => {

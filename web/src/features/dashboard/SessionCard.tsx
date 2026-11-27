@@ -407,7 +407,7 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
           {workers > 0 && (
             <button
               type="button"
-              onClick={() => navigate({ name: 'workspace', subagentParentId: session.id })}
+              onClick={() => hasWorkers ? navigate({ name: 'workspace', subagentParentId: session.id }) : open()}
               className="inline-flex min-h-11 items-center gap-1 rounded-full border border-line bg-raised px-2.5 text-[12px] font-medium text-fg hover:border-accent"
             >
               <Bot className="size-3.5" aria-hidden />

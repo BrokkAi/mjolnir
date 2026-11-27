@@ -115,6 +115,23 @@ describe('Notifications inbox', () => {
       .toEqual(['notification-stack', 'notification-older']);
   });
 
+  it('renders stack entries newest-first and breaks timestamp ties by ordinal', () => {
+    const entries: NotificationCard['entries'] = [
+      { completed_ordinal: 1, completed_at_ms: NOW - 120_000, kind: 'needs_input', message: 'none' },
+      { completed_ordinal: 2, completed_at_ms: NOW - 60_000, kind: 'important', message: 'none' },
+      { completed_ordinal: 3, completed_at_ms: NOW - 1_000, kind: 'needs_input', message: 'none' },
+      { completed_ordinal: 4, completed_at_ms: NOW - 1_000, kind: 'important', message: 'none' },
+    ];
+    hydrate([liveRow('stack', { notification_card: card({ entries }) })]);
+    mockFetch({});
+    render(<NotificationsView />);
+    const item = screen.getByTestId('notification-stack');
+    const rows = within(item).getAllByRole('button', { name: 'Show full message' }).map(button => button.parentElement?.textContent);
+    expect(rows.map(row => row?.includes('Important update') ? 'important' : 'needs_input'))
+      .toEqual(['important', 'needs_input', 'important', 'needs_input']);
+    expect(entries.map(entry => entry.completed_ordinal)).toEqual([1, 2, 3, 4]);
+  });
+
   it('dismisses the notification identity it showed and removes it optimistically', async () => {
     hydrate([
       liveRow('s1', {

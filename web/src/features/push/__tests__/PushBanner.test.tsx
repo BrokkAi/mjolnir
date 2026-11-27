@@ -5,7 +5,7 @@ import { PushBanner } from '../PushBanner';
 
 function browser(permission: NotificationPermission, enabled: boolean, subscribed = false, dismissed = false, error: string | null = null) {
   vi.stubGlobal('isSecureContext', true);
-  vi.stubGlobal('Notification', { permission });
+  vi.stubGlobal('Notification', { permission, requestPermission: vi.fn(async () => permission) });
   vi.stubGlobal('PushManager', class {});
   const api = {
     state: vi.fn(async () => ({ enabled, endpoints: [], dismissed })),
@@ -68,6 +68,13 @@ describe('push banner', () => {
       await waitFor(() => expect(screen.queryByLabelText('Push notifications')).not.toBeInTheDocument());
     },
   );
+
+  it.each(['banner', 'settings'] as const)('retries an enabled device without a subscription in %s', async variant => {
+    const api = browser('granted', true, false);
+    render(<PushBanner variant={variant} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(api.setEnabled).toHaveBeenCalledWith(true, expect.anything()));
+  });
 
   it('dismisses delivery errors permanently while retaining them in settings', async () => {
     const api = browser('granted', true, true, false, 'Delivery failed');

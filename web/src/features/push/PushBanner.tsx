@@ -28,14 +28,14 @@ export function PushBanner({ className = '', variant = 'banner' }: PushBannerPro
           {push.loading ? 'Checking notifications…' : push.statusText}
         </span>
         <div className="flex flex-wrap items-center gap-1.5">
-          {push.supported && !push.enabled && push.permission !== 'denied' && (
+          {push.supported && !healthy && push.permission !== 'denied' && (
             <button
               type="button"
               onClick={() => void push.enable()}
               disabled={push.busy}
               className="min-h-9 rounded-lg bg-accent px-3 text-xs font-semibold text-accent-fg disabled:opacity-50"
             >
-              Enable
+              {push.enabled ? 'Retry' : 'Enable'}
             </button>
           )}
           {variant === 'settings' && push.supported && push.enabled && (
