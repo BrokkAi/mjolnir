@@ -62,8 +62,47 @@ pub struct ReviewModelSettings {
     pub fast_mode: bool,
 }
 
+/// A pending selection reservation follows all clones of the resolved choice.
+pub trait ReviewReservationCommit: Send + Sync {
+    fn commit(self: Box<Self>, child_session_id: String);
+}
+
+#[derive(Clone, Default)]
+pub struct ReviewReservation(
+    std::sync::Arc<std::sync::Mutex<Option<Box<dyn ReviewReservationCommit>>>>,
+);
+
+impl std::fmt::Debug for ReviewReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReviewReservation")
+    }
+}
+impl PartialEq for ReviewReservation {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for ReviewReservation {}
+impl ReviewReservation {
+    pub fn new(reservation: impl ReviewReservationCommit + 'static) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(Box::new(
+            reservation,
+        )))))
+    }
+    pub fn release(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+    pub fn commit(&self, child_session_id: String) {
+        if let Some(reservation) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            reservation.commit(child_session_id);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedReviewSettings {
+    #[serde(skip)]
+    pub reservation: ReviewReservation,
     pub profile: String,
     pub main: ReviewModelSettings,
     #[serde(default)]

@@ -9010,6 +9010,7 @@ async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
                         fast_mode: false,
                     },
                     autoconfigured: false,
+                    reservation: Default::default(),
                 }],
                 registrations: vec![mj_core::storage::ReviewerRegistration {
                     role: "reviewer-1".into(),

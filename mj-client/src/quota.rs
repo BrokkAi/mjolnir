@@ -90,6 +90,8 @@ impl QuotaWindow {
 /// asks a provider for quota; every surface reads this instead.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuotaSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_projections: Vec<mj_core::usage::ProfileQuotaProjection>,
     /// The latest report for each enabled profile.
     pub reports: BTreeMap<String, ProfileQuota>,
     /// Profiles the daemon is asking a provider about right now.

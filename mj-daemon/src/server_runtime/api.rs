@@ -4984,9 +4984,22 @@ impl SubagentBackend for ApiBackend {
                     .collect()
             };
             let models = mj_controller::profile_config::advertised_models();
+            let projections: Vec<_> = self
+                .exports
+                .quota_telemetry()
+                .projections
+                .into_iter()
+                .filter(|p| {
+                    query
+                        .profile
+                        .as_deref()
+                        .is_none_or(|wanted| wanted == p.profile_id)
+                })
+                .collect();
             mj_core::runtime::spawn_blocking(move || {
                 let mut report =
                     mj_controller::database::load_session_usage_report(&query, models)?;
+                report.quota_projections = projections;
                 // The store clipped the last selected interval to its snapshot time.
                 report.quota_usage = mj_controller::quota_telemetry::weekly_quota_usage(
                     profiles,

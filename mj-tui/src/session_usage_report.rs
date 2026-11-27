@@ -495,6 +495,48 @@ pub(crate) fn render(
         Some(Ok(report)) => provider_totals(dashboard, report, inner.width),
         _ => Vec::new(),
     };
+    if let Some(Ok(report)) = &dialog.report {
+        let now = mj_core::clock::epoch_seconds() as i64;
+        let forecasts: Vec<_> = report
+            .quota_projections
+            .iter()
+            .filter(|p| p.pace_ratio.is_some_and(|pace| pace > 1.0))
+            .collect();
+        if !forecasts.is_empty() {
+            provider_lines.push("Quota Pace & Forecast".into());
+            for p in forecasts {
+                let duration = |end: i64| {
+                    let secs = end.saturating_sub(now);
+                    let hours = secs / 3600;
+                    if hours >= 24 {
+                        format!("{}d {}h", hours / 24, hours % 24)
+                    } else if hours >= 1 {
+                        format!("{hours}h")
+                    } else {
+                        let mins = (secs / 60).max(1);
+                        format!("{mins}m")
+                    }
+                };
+                let exhaustion = p
+                    .projected_exhaustion_epoch_seconds
+                    .map(duration)
+                    .unwrap_or_else(|| "unknown".into());
+                let reset = p
+                    .resets_at_epoch_seconds
+                    .map(duration)
+                    .unwrap_or_else(|| "unknown".into());
+                provider_lines.push(format!(
+                    "{}  {}  {}% left  {:.1}× pace  exhausts in {} (resets in {})",
+                    p.profile_id,
+                    p.window_label,
+                    p.remaining_percent,
+                    p.pace_ratio.unwrap_or_default(),
+                    exhaustion,
+                    reset
+                ));
+            }
+        }
+    }
     // Keep the chart and at least one selectable detail row on short screens.
     let provider_height = provider_lines.len().min(
         inner

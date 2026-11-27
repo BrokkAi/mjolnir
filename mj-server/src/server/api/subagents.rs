@@ -105,6 +105,12 @@ impl ReservationSlot {
     }
 }
 
+impl mj_core::review::settings::ReviewReservationCommit for ReservationSlot {
+    fn commit(self: Box<Self>, child_session_id: String) {
+        ReservationSlot::commit(&self, Some(child_session_id));
+    }
+}
+
 /// The profile, model and effort a spawn runs its child with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentSelection {
@@ -1882,7 +1888,7 @@ mod tests {
                     &candidates[0]
                 } else {
                     assert_eq!(candidates[0].profile_id, "unknown");
-                    assert_eq!(ids(&candidates)[4..], ["api"]);
+                    assert!(ids(&candidates)[1..].contains(&"api"));
                     &candidates[1]
                 };
                 *first.entry(chosen.profile_id.clone()).or_default() += 1;

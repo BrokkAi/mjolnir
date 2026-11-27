@@ -283,6 +283,34 @@ pub struct ProfileQuotaUsage {
     pub monthly_price_usd: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileQuotaProjection {
+    pub profile_id: String,
+    pub window_label: String,
+    pub remaining_percent: u8,
+    pub resets_at_epoch_seconds: Option<i64>,
+    pub observed_pct_per_hour: Option<f64>,
+    pub sustainable_pct_per_hour: Option<f64>,
+    pub pace_ratio: Option<f64>,
+    pub projected_exhaustion_epoch_seconds: Option<i64>,
+}
+
+impl PartialEq for ProfileQuotaProjection {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile_id == other.profile_id
+            && self.window_label == other.window_label
+            && self.remaining_percent == other.remaining_percent
+            && self.resets_at_epoch_seconds == other.resets_at_epoch_seconds
+            && self.observed_pct_per_hour.map(f64::to_bits)
+                == other.observed_pct_per_hour.map(f64::to_bits)
+            && self.sustainable_pct_per_hour.map(f64::to_bits)
+                == other.sustainable_pct_per_hour.map(f64::to_bits)
+            && self.pace_ratio.map(f64::to_bits) == other.pace_ratio.map(f64::to_bits)
+            && self.projected_exhaustion_epoch_seconds == other.projected_exhaustion_epoch_seconds
+    }
+}
+impl Eq for ProfileQuotaProjection {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageReport {
     /// Enclosing bounds of the selected hours; gaps do not contribute usage.
@@ -307,6 +335,8 @@ pub struct SessionUsageReport {
     /// Weekly quota consumed in the selected intervals, filled by the daemon.
     #[serde(default)]
     pub quota_usage: Vec<ProfileQuotaUsage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_projections: Vec<ProfileQuotaProjection>,
     /// Sum of `sessions`; unknown when any session's cost is unknown.
     pub cost_usd_ticks: CostUsdTicks,
 }
@@ -322,6 +352,7 @@ impl Default for SessionUsageReport {
             agent_usage: Vec::new(),
             profile_usage: Vec::new(),
             quota_usage: Vec::new(),
+            quota_projections: Vec::new(),
             cost_usd_ticks: Ok(0),
         }
     }

@@ -179,56 +179,66 @@ impl ReviewEnvironment for ControllerEnvironment {
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
     ) -> Result<String, String> {
-        let borrower_gate = self
-            .runtime
-            .get()
-            .and_then(std::sync::Weak::upgrade)
-            .and_then(|runtime| runtime.borrower_registration_gate(session_id));
-        let _borrower_guard = match borrower_gate.as_ref() {
+        let result = (|| {
+            let borrower_gate = self
+                .runtime
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|runtime| runtime.borrower_registration_gate(session_id));
+            let _borrower_guard = match borrower_gate.as_ref() {
             Some(gate) => Some(gate.try_read().map_err(|_| {
                 "Cannot start a reviewer while suspend blockers are being repaired on its workspace."
                     .to_owned()
             })?),
             None => None,
         };
-        let mut controller =
-            mj_controller::controller::Controller::load().map_err(|e| format!("{e:#}"))?;
-        let mut launch = controller
-            .reviewer_launch_config(session_id, &reviewer.profile, 0, &[])
-            .map_err(|e| format!("{e:#}"))?;
-        launch.role = role;
-        launch.model = reviewer.main.model.clone();
-        launch.effort = reviewer.main.effort.clone();
-        launch.fast_mode = reviewer.main.fast_mode.then_some(true);
-        controller
-            .register_subagent_with_manager(
-                mj_controller::controller::RegisterSubagentRequest {
-                    no_github_credentials: false,
-                    kind: mj_core::subagent::SubagentKind::Reviewer,
-                    orchestrator: false,
-                    reviewer_launch: Some(launch),
-                    parent_session_id: session_id.to_owned(),
-                    task_name: "review".to_owned(),
-                    profile_id: reviewer.profile.clone(),
-                    model: reviewer.main.model.clone(),
-                    effort: reviewer.main.effort.clone(),
-                    fast_mode: reviewer.main.fast_mode,
-                    working_directory: working_directory.unwrap_or_default(),
-                    initial_prompt: prompt,
-                    request_key,
-                    report_root: None,
-                    category: match role {
-                        mj_core::worker_launch::ReviewChildRole::Reviewer => "reviewer",
-                        mj_core::worker_launch::ReviewChildRole::BriefWriter => "brief_writer",
-                    }
-                    .to_owned(),
-                },
-                self.manager
-                    .as_ref()
-                    .ok_or("review session manager is unavailable")?,
-            )
-            .map(|child| child.child_session_id)
-            .map_err(|e| format!("{e:#}"))
+            let mut controller =
+                mj_controller::controller::Controller::load().map_err(|e| format!("{e:#}"))?;
+            let mut launch = controller
+                .reviewer_launch_config(session_id, &reviewer.profile, 0, &[])
+                .map_err(|e| format!("{e:#}"))?;
+            launch.role = role;
+            launch.model = reviewer.main.model.clone();
+            launch.effort = reviewer.main.effort.clone();
+            launch.fast_mode = reviewer.main.fast_mode.then_some(true);
+            controller
+                .register_subagent_with_manager(
+                    mj_controller::controller::RegisterSubagentRequest {
+                        no_github_credentials: false,
+                        kind: mj_core::subagent::SubagentKind::Reviewer,
+                        orchestrator: false,
+                        reviewer_launch: Some(launch),
+                        parent_session_id: session_id.to_owned(),
+                        task_name: "review".to_owned(),
+                        profile_id: reviewer.profile.clone(),
+                        model: reviewer.main.model.clone(),
+                        effort: reviewer.main.effort.clone(),
+                        fast_mode: reviewer.main.fast_mode,
+                        working_directory: working_directory.unwrap_or_default(),
+                        initial_prompt: prompt,
+                        request_key,
+                        report_root: None,
+                        category: match role {
+                            mj_core::worker_launch::ReviewChildRole::Reviewer => "reviewer",
+                            mj_core::worker_launch::ReviewChildRole::BriefWriter => "brief_writer",
+                        }
+                        .to_owned(),
+                    },
+                    self.manager
+                        .as_ref()
+                        .ok_or("review session manager is unavailable")?,
+                )
+                .map(|child| {
+                    let id = child.child_session_id;
+                    reviewer.reservation.commit(id.clone());
+                    id
+                })
+                .map_err(|e| format!("{e:#}"))
+        })();
+        if result.is_err() {
+            reviewer.reservation.release();
+        }
+        result
     }
 
     fn start_child<'a>(

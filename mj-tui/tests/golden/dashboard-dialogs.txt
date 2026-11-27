@@ -985,6 +985,44 @@ Ent
 
 
 
+=== Usage quota forecast (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile All ▾                                                                                               │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
+│    │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                                                               │    │
+│    │Weekly quota consumed in window · all account use                                                           │    │
+│    │Quota Pace & Forecast                                                                                       │    │
+│    │codex4  Week  38% left  1.6× pace  exhausts in 1d 4h (resets in 2d 6h)                                      │    │
+│    │$50                                                                             ░░░                         │  ──╯
+│    │                                                                                ░░░ ▄▄▄                     │  ──╮
+│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
+│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
+│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │  ──╯
+│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │  ▄ ╮
+│    │                                                                                                            │    │
+│    │Primary agents  $7.200+                                                                                     │  ──╯
+│    │  claude-opus-5-5  $6.200+                                                                                  │  ▄ ╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
+│    │                                                                                                            │    │
+│    │Orchestrators  $2.000+                                                                                      │    │
+│    │  gpt-6.1-sol  $2.000+                                                                                      │    │
+│    │                                                                                                            │  ──╯
+│    │Subtle subagents  $1.500+                                                                                   │  ▄ ╮
+│    │  gpt-6.1-sol  $1.500+                                                                                      │    │
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │    │
+│    │                                                                                                            │    │
+│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent
+
 === Usage by session All with model costs (120x36) ===
 ╭ W                                                                                                                  ──╮
 │ d                                                                                                                    │

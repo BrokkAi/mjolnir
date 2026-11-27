@@ -248,22 +248,21 @@ fn spawn_quota_telemetry_refresh(
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 _ = poll_tick.tick() => {
-                    let profiles: Vec<(String, String)> = reports
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .iter()
-                        .map(|(profile_id, pub_record)| {
-                            (profile_id.clone(), pub_record.cache_identity.clone())
-                        })
-                        .collect();
+                    let (profiles, projection_reports): (Vec<_>, Vec<_>) = {
+                        let reports = reports.lock().unwrap_or_else(|e| e.into_inner());
+                        let profiles = reports.iter().map(|(id, p)| (id.clone(), p.cache_identity.clone())).collect();
+                        let projections = reports.iter().filter_map(|(id, p)| p.report.as_ref().filter(|r| r.error.is_none()).or(p.last_good.as_ref()).map(|r| (id.clone(), p.cache_identity.clone(), r.clone()))).collect();
+                        (profiles, projections)
+                    };
                     let telemetry = state.quota_telemetry.clone();
                     let now = mj_core::clock::epoch_seconds() as i64;
-                    if let Ok(Err(error)) = mj_core::runtime::spawn_blocking(move || {
-                        telemetry.refresh_from_store(&profiles, now)
-                    })
-                    .await
-                    {
-                        tracing::warn!(%error, "quota telemetry refresh failed");
+                    match mj_core::runtime::spawn_blocking(move || {
+                        telemetry.refresh_from_store(&profiles, now)?;
+                        telemetry.refresh_projections(&projection_reports, now)
+                    }).await {
+                        Ok(Ok(())) => state.publish_quota_projections(),
+                        Ok(Err(error)) => tracing::warn!(%error, "quota telemetry refresh failed"),
+                        Err(error) => tracing::warn!(%error, "quota telemetry refresh task failed"),
                     }
                 }
                 _ = category_tick.tick() => {

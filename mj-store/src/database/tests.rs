@@ -5577,6 +5577,7 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
                 fast_mode: false,
             },
             autoconfigured: false,
+            reservation: Default::default(),
         },
         mj_core::review::settings::ResolvedReviewSettings {
             profile: "claude".into(),
@@ -5586,6 +5587,7 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
                 fast_mode: false,
             },
             autoconfigured: true,
+            reservation: Default::default(),
         },
     ];
     let state = TurnReviewState {

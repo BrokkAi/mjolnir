@@ -851,6 +851,19 @@ impl RuntimeState {
         self.publish_revision();
     }
 
+    pub(crate) fn publish_quota_projections(&self) {
+        let projections = self.quota_telemetry.snapshot().projections;
+        let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+        if quota.snapshot.quota_projections == projections {
+            return;
+        }
+        let mut snapshot = (*quota.snapshot).clone();
+        snapshot.quota_projections = projections;
+        quota.snapshot = snapshot.into();
+        drop(quota);
+        self.publish_revision();
+    }
+
     pub(super) fn reserve_move_destination(&self, session_id: &str, operation_id: &str) {
         let mut owner = self.owner();
         if let Some(active) = owner.lifecycle.get_mut(session_id)

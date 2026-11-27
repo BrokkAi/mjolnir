@@ -1474,6 +1474,26 @@ fn golden_dashboard_dialogs() {
         &drawn(&mut usage, 70, 17),
     );
     usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
+    let now = mj_core::clock::epoch_seconds() as i64;
+    let mut forecast_report = report.clone();
+    forecast_report.quota_projections = vec![mj_core::usage::ProfileQuotaProjection {
+        profile_id: "codex4".into(),
+        window_label: "Week".into(),
+        remaining_percent: 38,
+        resets_at_epoch_seconds: Some(now + 54 * 3600 + 30),
+        observed_pct_per_hour: Some(1.0),
+        sustainable_pct_per_hour: Some(0.625),
+        pace_ratio: Some(1.6),
+        projected_exhaustion_epoch_seconds: Some(now + 28 * 3600 + 30),
+    }];
+    usage.apply_session_usage_result(first, Ok(forecast_report));
+    append_dialog_render(
+        &mut output,
+        "Usage quota forecast",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,

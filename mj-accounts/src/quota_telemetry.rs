@@ -72,6 +72,7 @@ pub struct WindowTelemetry {
     pub trailing_60m_pct_per_hour: f64,
     pub second_to_last_clean_ts: Option<i64>,
     pub five_hour_to_weekly_ratio: Option<f64>,
+    pub has_trailing_interval: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,8 +185,22 @@ pub fn mean_burn_for_window_pct(
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaidSpillCounters {
+    pub total_draws: u64,
+    pub empty_draws: u64,
+    pub empty_draws_by_category: BTreeMap<String, u64>,
+    pub unsafe_sub_fallback: u64,
+    pub unsafe_sub_fallback_by_category: BTreeMap<String, u64>,
+    pub paid_spill_5h_unsafe: u64,
+    pub paid_spill_weekly_unsafe: u64,
+    pub paid_spill_exhausted_or_absent: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QuotaTelemetrySnapshot {
+    pub projections: Vec<mj_core::usage::ProfileQuotaProjection>,
+    pub paid_spill_counters: PaidSpillCounters,
     pub windows: BTreeMap<WindowKey, WindowTelemetry>,
     pub recent_placements: BTreeMap<String, Vec<RecentPlacement>>,
     pub category_stats: BTreeMap<String, CategoryBurnStats>,
@@ -273,14 +288,22 @@ impl QuotaTelemetrySnapshot {
         &self,
         profile_id: &str,
         second_to_last_clean_ts: Option<i64>,
+        min_inclusive_ts: Option<i64>,
+        now_seconds: i64,
     ) -> impl Iterator<Item = &RecentPlacement> + use<'_> {
         self.recent_placements
             .get(profile_id)
             .into_iter()
             .flatten()
             .filter(move |placement| {
-                second_to_last_clean_ts
-                    .is_none_or(|cutoff| placement.created_at_epoch_seconds > cutoff)
+                second_to_last_clean_ts.map_or_else(
+                    || {
+                        placement.created_at_epoch_seconds
+                            >= now_seconds.saturating_sub(HISTORY_LOOKBACK_SECONDS as i64)
+                    },
+                    |cutoff| placement.created_at_epoch_seconds > cutoff,
+                ) && min_inclusive_ts
+                    .is_none_or(|floor| placement.created_at_epoch_seconds >= floor)
             })
     }
 
@@ -297,8 +320,9 @@ impl QuotaTelemetrySnapshot {
         p_eff: f64,
         plan_usd_per_month: Option<f64>,
         five_hour_to_weekly_ratio: Option<f64>,
+        now_seconds: i64,
     ) -> f64 {
-        self.qualifying_placements(profile_id, second_to_last_clean_ts)
+        self.qualifying_placements(profile_id, second_to_last_clean_ts, None, now_seconds)
             .map(|placement| {
                 let stats = self.category_stats(&placement.category);
                 mean_burn_for_window_pct(
@@ -425,6 +449,7 @@ pub fn compute_window_telemetry(
             },
             WindowTelemetry {
                 trailing_60m_pct_per_hour,
+                has_trailing_interval: sum_delta_hours > 0.0,
                 second_to_last_clean_ts,
                 five_hour_to_weekly_ratio,
             },
@@ -645,6 +670,13 @@ fn weekly_reading(probe: &ProfileQuota) -> Option<SamplePoint> {
         .windows
         .iter()
         .find(|window| window.is_weekly_period())?;
+    sample_for_window(probe, window)
+}
+
+fn sample_for_window(probe: &ProfileQuota, window: &QuotaWindow) -> Option<SamplePoint> {
+    if probe.error.is_some() {
+        return None;
+    }
     let ts = i64::try_from(probe.refreshed_at_epoch_seconds).unwrap_or(i64::MAX);
     if window
         .resets_at_epoch_seconds
@@ -708,6 +740,21 @@ fn weekly_consumption_in_spans(
     history: &[ProfileQuota],
     spans: &[(i64, i64)],
 ) -> Option<WeeklyConsumption> {
+    weekly_consumption_with_coverage(history, spans).map(|(c, _)| c)
+}
+
+fn weekly_consumption_with_coverage(
+    history: &[ProfileQuota],
+    spans: &[(i64, i64)],
+) -> Option<(WeeklyConsumption, i64)> {
+    consumption_with_coverage(history, spans, weekly_reading)
+}
+
+fn consumption_with_coverage(
+    history: &[ProfileQuota],
+    spans: &[(i64, i64)],
+    reading: impl Fn(&ProfileQuota) -> Option<SamplePoint>,
+) -> Option<(WeeklyConsumption, i64)> {
     let duration: i64 = spans
         .iter()
         .map(|&(since, until)| until.saturating_sub(since).max(0))
@@ -715,7 +762,7 @@ fn weekly_consumption_in_spans(
     if duration == 0 {
         return None;
     }
-    let mut readings: Vec<SamplePoint> = history.iter().filter_map(weekly_reading).collect();
+    let mut readings: Vec<SamplePoint> = history.iter().filter_map(reading).collect();
     readings.sort_by_key(|reading| reading.ts);
     // Seconds of `from..to` inside the span.
     let inside = |from: i64, to: i64| {
@@ -751,9 +798,14 @@ fn weekly_consumption_in_spans(
         covered += overlap;
         consumed_pct += used * overlap as f64 / (cur.ts - from) as f64;
     }
-    (covered > 0).then(|| WeeklyConsumption {
-        basis_points: (consumed_pct * 100.0).round() as u64,
-        partial: covered < duration,
+    (covered > 0).then(|| {
+        (
+            WeeklyConsumption {
+                basis_points: (consumed_pct * 100.0).round() as u64,
+                partial: covered < duration,
+            },
+            covered,
+        )
     })
 }
 
@@ -781,6 +833,8 @@ impl RatioLedger {
 
 #[derive(Default)]
 struct QuotaTelemetryStoreInner {
+    projections: Vec<mj_core::usage::ProfileQuotaProjection>,
+    paid_spill_counters: PaidSpillCounters,
     windows: BTreeMap<WindowKey, WindowTelemetry>,
     ratio_ledgers: BTreeMap<(String, String), RatioLedger>,
     durable_placements: BTreeMap<String, Vec<RecentPlacement>>,
@@ -807,6 +861,8 @@ impl QuotaTelemetryStoreInner {
                 .push(placement.clone());
         }
         QuotaTelemetrySnapshot {
+            projections: self.projections.clone(),
+            paid_spill_counters: self.paid_spill_counters.clone(),
             windows: self.windows.clone(),
             recent_placements,
             category_stats: self.category_stats.clone(),
@@ -915,7 +971,79 @@ impl QuotaTelemetryStore {
             power_ranking,
             now_seconds,
         };
-        crate::profile_scheduler::draw_scheduled_candidates(candidates, &ctx)?;
+        let decision =
+            crate::profile_scheduler::draw_scheduled_candidates_with_decision(candidates, &ctx)?;
+        let cat_key = category.unwrap_or("primary");
+        guard.paid_spill_counters.total_draws += 1;
+        if let Some(decision) = decision {
+            use crate::profile_scheduler::PlacementDecisionReason;
+            match &decision.reason {
+                PlacementDecisionReason::PaidSpill {
+                    sub_5h_unsafe,
+                    sub_weekly_unsafe,
+                    sub_exhausted_or_absent,
+                } => {
+                    guard.paid_spill_counters.paid_spill_5h_unsafe += u64::from(*sub_5h_unsafe > 0);
+                    guard.paid_spill_counters.paid_spill_weekly_unsafe +=
+                        u64::from(*sub_weekly_unsafe > 0);
+                    guard.paid_spill_counters.paid_spill_exhausted_or_absent += u64::from(
+                        *sub_exhausted_or_absent > 0
+                            || (*sub_5h_unsafe == 0 && *sub_weekly_unsafe == 0),
+                    );
+                    tracing::info!(
+                        category = cat_key,
+                        chosen_profile = %decision.chosen_profile,
+                        chosen_tier = decision.chosen_tier,
+                        reason = ?decision.reason,
+                        estimated_cost_usd = ?decision.estimated_cost_usd,
+                        binding_profile = ?decision.binding_profile,
+                        binding_remaining_pct = ?decision.binding_remaining_pct,
+                        "quota placement decision"
+                    );
+                }
+                PlacementDecisionReason::UnsafeSubscriptionFallback => {
+                    guard.paid_spill_counters.unsafe_sub_fallback += 1;
+                    *guard
+                        .paid_spill_counters
+                        .unsafe_sub_fallback_by_category
+                        .entry(cat_key.to_owned())
+                        .or_default() += 1;
+                    tracing::info!(
+                        category = cat_key,
+                        chosen_profile = %decision.chosen_profile,
+                        chosen_tier = decision.chosen_tier,
+                        reason = ?decision.reason,
+                        estimated_cost_usd = ?decision.estimated_cost_usd,
+                        binding_profile = ?decision.binding_profile,
+                        binding_remaining_pct = ?decision.binding_remaining_pct,
+                        "quota placement decision"
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        category = cat_key,
+                        chosen_profile = %decision.chosen_profile,
+                        chosen_tier = decision.chosen_tier,
+                        reason = ?decision.reason,
+                        estimated_cost_usd = ?decision.estimated_cost_usd,
+                        binding_profile = ?decision.binding_profile,
+                        binding_remaining_pct = ?decision.binding_remaining_pct,
+                        "quota placement decision"
+                    );
+                }
+            }
+        } else {
+            guard.paid_spill_counters.empty_draws += 1;
+            *guard
+                .paid_spill_counters
+                .empty_draws_by_category
+                .entry(cat_key.to_owned())
+                .or_default() += 1;
+            tracing::info!(
+                category = cat_key,
+                "quota placement decision: no eligible candidate"
+            );
+        }
         let Some(first) = candidates.first() else {
             return Ok(None);
         };
@@ -1030,6 +1158,108 @@ impl QuotaTelemetryStore {
     /// Deduplicates `committed_pending` by `(session_id, profile_id)` against the loaded
     /// SQLite rows so a placement committed concurrently with a refresh is
     /// never double-counted.
+    pub fn refresh_projections(
+        &self,
+        reports: &[(String, String, ProfileQuota)],
+        now: i64,
+    ) -> anyhow::Result<()> {
+        self.refresh_projections_with_loader(
+            reports,
+            now,
+            crate::database::load_quota_history_since,
+        )
+    }
+
+    fn refresh_projections_with_loader(
+        &self,
+        reports: &[(String, String, ProfileQuota)],
+        now: i64,
+        mut load_history: impl FnMut(&str, &str, u64) -> anyhow::Result<Vec<ProfileQuota>>,
+    ) -> anyhow::Result<()> {
+        let snapshot = self.snapshot();
+        let mut projections = Vec::new();
+        for (profile_id, identity, report) in reports {
+            let history = load_history(
+                identity,
+                profile_id,
+                u64::try_from(now)
+                    .unwrap_or(0)
+                    .saturating_sub(RATIO_LOOKBACK_SECONDS),
+            )?;
+            for window in &report.windows {
+                let Some(remaining_percent) =
+                    window_used_pct(window).map(|used| (100.0 - used).round() as u8)
+                else {
+                    continue;
+                };
+                let kind = WindowKind::from_window(window);
+                let observed = match kind {
+                    WindowKind::Short5h => snapshot
+                        .window_telemetry(
+                            profile_id,
+                            Some(identity),
+                            kind,
+                            window.model_scope.as_deref(),
+                        )
+                        .filter(|w| w.has_trailing_interval)
+                        .map(|w| w.trailing_60m_pct_per_hour),
+                    WindowKind::Long => {
+                        let rate = |seconds, min_coverage| {
+                            consumption_with_coverage(
+                                &history,
+                                &[(now.saturating_sub(seconds), now)],
+                                |report| {
+                                    let matching = report.windows.iter().find(|w| {
+                                        WindowKind::from_window(w) == WindowKind::Long
+                                            && w.model_scope == window.model_scope
+                                            && w.label == window.label
+                                    })?;
+                                    sample_for_window(report, matching)
+                                },
+                            )
+                            .filter(|(_, covered)| *covered >= min_coverage)
+                            .map(|(value, covered)| {
+                                value.basis_points as f64 / 100.0 / (covered as f64 / 3600.0)
+                            })
+                        };
+                        match (rate(24 * 3600, 6 * 3600), rate(7 * 86400, 12 * 3600)) {
+                            (Some(a), Some(b)) => Some(a.max(b)),
+                            (a, b) => a.or(b),
+                        }
+                    }
+                };
+                let sustainable = window
+                    .resets_at_epoch_seconds
+                    .filter(|reset| *reset > now)
+                    .map(|reset| remaining_percent as f64 / ((reset - now) as f64 / 3600.0));
+                let pace = observed
+                    .zip(sustainable)
+                    .filter(|(_, s)| *s > 0.0)
+                    .map(|(o, s)| o / s);
+                let exhaustion = observed
+                    .filter(|o| *o > 0.0 && pace.is_some_and(|p| p > 1.0))
+                    .map(|o| {
+                        now.saturating_add((remaining_percent as f64 / o * 3600.0).round() as i64)
+                    });
+                projections.push(mj_core::usage::ProfileQuotaProjection {
+                    profile_id: profile_id.clone(),
+                    window_label: window.label.clone(),
+                    remaining_percent,
+                    resets_at_epoch_seconds: window.resets_at_epoch_seconds,
+                    observed_pct_per_hour: observed,
+                    sustainable_pct_per_hour: sustainable,
+                    pace_ratio: pace,
+                    projected_exhaustion_epoch_seconds: exhaustion,
+                });
+            }
+        }
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .projections = projections;
+        Ok(())
+    }
+
     pub fn refresh_from_store(
         &self,
         profiles: &[(String, String)],
@@ -1344,6 +1574,50 @@ mod tests {
             rate_limited_until_epoch_seconds: None,
             next_check_at_epoch_seconds: None,
         }
+    }
+
+    #[test]
+    fn weekly_projection_requires_measured_coverage_and_uses_seven_day_rate() {
+        const NOW: i64 = 1_000_000;
+        let row = |time: i64, remaining: u8| {
+            sample_report("p", time as u64, None, Some((remaining, Some(NOW + 86400))))
+        };
+        let current = row(NOW, 20);
+        let store = QuotaTelemetryStore::new();
+        let reports = vec![("p".to_string(), "id".to_string(), current)];
+        // Two readings over one hour cannot establish either weekly rate.
+        let sparse = vec![row(NOW - 3600, 30), row(NOW, 20)];
+        store
+            .refresh_projections_with_loader(&reports, NOW, |_, _, _| Ok(sparse.clone()))
+            .unwrap();
+        assert_eq!(store.snapshot().projections[0].observed_pct_per_hour, None);
+        // A high final-hour rate must not be extrapolated across the week.
+        let covered = vec![row(NOW - 24 * 3600, 44), row(NOW - 3600, 30), row(NOW, 20)];
+        store
+            .refresh_projections_with_loader(&reports, NOW, |_, _, _| Ok(covered.clone()))
+            .unwrap();
+        let projection = &store.snapshot().projections[0];
+        assert!((projection.observed_pct_per_hour.unwrap() - 1.0).abs() < 1e-9);
+        assert!((projection.pace_ratio.unwrap() - 1.2).abs() < 1e-9);
+
+        // A scoped window must use its own rate, not the shared week's rate.
+        let scoped_row = |at, shared, scoped| {
+            let mut report = row(at, shared);
+            let mut window = report.windows[0].clone();
+            window.label = "Week (scoped)".into();
+            window.model_scope = Some("opus".into());
+            window.remaining_percent = Some(scoped);
+            report.windows.push(window);
+            report
+        };
+        let history = vec![scoped_row(NOW - 24 * 3600, 44, 80), scoped_row(NOW, 20, 68)];
+        let reports = vec![("p".to_owned(), "id".to_owned(), history[1].clone())];
+        store
+            .refresh_projections_with_loader(&reports, NOW, |_, _, _| Ok(history.clone()))
+            .unwrap();
+        let projections = store.snapshot().projections;
+        assert!((projections[0].observed_pct_per_hour.unwrap() - 1.0).abs() < 1e-9);
+        assert!((projections[1].observed_pct_per_hour.unwrap() - 0.5).abs() < 1e-9);
     }
 
     #[test]
