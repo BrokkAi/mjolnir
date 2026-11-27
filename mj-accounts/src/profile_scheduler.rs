@@ -310,7 +310,6 @@ pub struct SchedulingContext<'a> {
     pub placement: Placement,
     pub category: Option<&'a str>,
     pub ranking_anchor: Option<&'a str>,
-    pub prefer: &'a [String],
     pub telemetry: &'a crate::quota_telemetry::QuotaTelemetrySnapshot,
     pub power_ranking: &'a crate::power_ranking::PowerRankingSnapshot,
     pub now_seconds: i64,
@@ -320,7 +319,7 @@ pub struct SchedulingContext<'a> {
 /// `candidates`. Filters out exhausted and disallowed paid-credit
 /// candidates, deduplicates to one entry per quota pool
 /// `(profile_id, binding_window_scope)`, and orders the surviving pools by
-/// tier, `[quota] prefer`, Efraimidis–Spirakis weighted sample, `ranking_anchor`,
+/// tier, Efraimidis–Spirakis weighted sample, `ranking_anchor`,
 /// and `profile_id`.
 pub fn draw_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     candidates: &mut Vec<T>,
@@ -365,7 +364,6 @@ pub fn order_scheduled_candidates_by_draw<T: AsRef<ScheduledCandidate>>(
         left.1
             .tier
             .cmp(&right.1.tier)
-            .then_with(|| left.1.prefer_pos.cmp(&right.1.prefer_pos))
             .then_with(|| right.0.total_cmp(&left.0))
             .then_with(|| right.1.is_anchor.cmp(&left.1.is_anchor))
             .then_with(|| {
@@ -380,7 +378,7 @@ pub fn order_scheduled_candidates_by_draw<T: AsRef<ScheduledCandidate>>(
 }
 
 /// Deterministic ranking (no random draw): orders surviving pools by tier,
-/// `[quota] prefer`, descending weight, `ranking_anchor`, and `profile_id`.
+/// descending weight, `ranking_anchor`, and `profile_id`.
 pub fn rank_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     candidates: &mut Vec<T>,
     ctx: &SchedulingContext<'_>,
@@ -389,7 +387,6 @@ pub fn rank_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     scored.sort_by(|left, right| {
         left.tier
             .cmp(&right.tier)
-            .then_with(|| left.prefer_pos.cmp(&right.prefer_pos))
             .then_with(|| right.weight.total_cmp(&left.weight))
             .then_with(|| right.is_anchor.cmp(&left.is_anchor))
             .then_with(|| {
@@ -406,7 +403,6 @@ struct ScoredPool<T> {
     item: T,
     tier: u8,
     weight: f64,
-    prefer_pos: usize,
     is_anchor: bool,
 }
 
@@ -724,11 +720,6 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     let mut scored = Vec::with_capacity(pool_items.len());
     for (item, lookup, cand_est_usd, subscription) in pool_items {
         let cand = item.as_ref();
-        let prefer_pos = ctx
-            .prefer
-            .iter()
-            .position(|id| id == &cand.profile_id)
-            .unwrap_or(usize::MAX);
         let is_anchor = ctx.ranking_anchor == Some(cand.profile_id.as_str());
 
         let (tier, weight) = match &cand.quota {
@@ -901,7 +892,6 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
             item,
             tier,
             weight,
-            prefer_pos,
             is_anchor,
         });
     }
@@ -910,7 +900,6 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     scored.sort_by(|left, right| {
         left.tier
             .cmp(&right.tier)
-            .then_with(|| left.prefer_pos.cmp(&right.prefer_pos))
             .then_with(|| right.weight.total_cmp(&left.weight))
             .then_with(|| right.is_anchor.cmp(&left.is_anchor))
             .then_with(|| {
@@ -1238,7 +1227,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("subtle"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &QuotaTelemetrySnapshot::default(),
             power_ranking: ranking,
             now_seconds: now,
@@ -1390,7 +1378,6 @@ mod tests {
                     placement: Placement::Child,
                     category: Some("subtle"),
                     ranking_anchor: None,
-                    prefer: &[],
                     telemetry,
                     power_ranking,
                     now_seconds: now,
@@ -1535,7 +1522,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("straightforward"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: ranking,
             now_seconds: now,
@@ -1627,7 +1613,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("subtle"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: ranking,
             now_seconds: now,
@@ -1701,7 +1686,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("straightforward"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: &ranking,
             now_seconds: now,
@@ -1765,7 +1749,6 @@ mod tests {
             placement: Placement::Orchestrator,
             category: Some("orchestrator"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: ranking,
             now_seconds: now,

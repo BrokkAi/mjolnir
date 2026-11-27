@@ -26,9 +26,9 @@ mod github;
 mod harness;
 mod keys;
 mod layout;
-pub mod migration_paths;
 mod loading;
 mod machines;
+pub mod migration_paths;
 mod secrets;
 mod targets;
 mod ui;
@@ -1063,10 +1063,10 @@ pub struct QuotaConfig {
     #[doc(hidden)]
     #[serde(skip_serializing, deserialize_with = "discard_legacy_setting")]
     pub runtime: (),
-    /// Profiles chosen in the dashboard to win load balancing when their
-    /// quota allows, most preferred first. `[quota] prefer = [...]`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub prefer: Vec<String>,
+    /// Retired preference order, accepted and ignored.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "discard_legacy_setting")]
+    pub prefer: (),
 }
 
 impl QuotaConfig {
@@ -1497,6 +1497,7 @@ const RETIRED_KEYS: &[&[&str]] = &[
     &["subagents", "use_same_on_all_targets"],
     &["subagents", "yolo"],
     &["quota", "runtime"],
+    &["quota", "prefer"],
     &["profiles", "*", "muse_auto_review"],
     &["profiles", "*", "subagents"],
 ];

@@ -1005,7 +1005,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
                 Placement::TopLevel,
                 Some("primary"),
                 None,
-                &[],
                 mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
                 now,
             )
@@ -1024,7 +1023,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
                 Placement::TopLevel,
                 Some("primary"),
                 None,
-                &[],
                 mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
                 now,
             )
@@ -1152,7 +1150,6 @@ async fn automatic_move_settles_before_any_wait_and_releases_failed_placement() 
                     Placement::TopLevel,
                     Some("primary"),
                     None,
-                    &[],
                     mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
                     now,
                 )

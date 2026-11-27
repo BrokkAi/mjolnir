@@ -206,11 +206,6 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
     }
 
-    /// The dashboard's load-balancing preference order, from `[quota] prefer`.
-    fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
     /// Current trailing-60-minute velocity and durable placement reservations.
     fn quota_telemetry(
         &self,

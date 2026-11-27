@@ -7,6 +7,30 @@ use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
 #[tokio::test]
+async fn retired_quota_preferences_endpoint_accepts_old_and_empty_requests() {
+    let mut options = detached_options();
+    options.set_loopback_token("terminal-test-token".into());
+    let app = router(options);
+    for body in [r#"{"prefer":["codex"]}"#, "{}"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/terminal/quota/preferences")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        "Bearer terminal-test-token",
+                    )
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
 async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
     let gate = Arc::new(mj_store::upgrade::Gate::default());
     let entered = Arc::new(tokio::sync::Notify::new());

@@ -893,14 +893,12 @@ impl QuotaTelemetryStore {
 
     /// Atomically snapshot telemetry, draw/order `candidates`, and reserve
     /// `candidates[0]` in-flight under a single short synchronous lock.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_and_reserve<T: AsRef<crate::profile_scheduler::ScheduledCandidate>>(
         &self,
         candidates: &mut Vec<T>,
         placement: crate::profile_scheduler::Placement,
         category: Option<&str>,
         ranking_anchor: Option<&str>,
-        prefer: &[String],
         power_ranking: &crate::power_ranking::PowerRankingSnapshot,
         now_seconds: i64,
     ) -> anyhow::Result<Option<PlacementReservation>> {
@@ -913,7 +911,6 @@ impl QuotaTelemetryStore {
             placement,
             category,
             ranking_anchor,
-            prefer,
             telemetry: &snapshot,
             power_ranking,
             now_seconds,
@@ -1724,7 +1721,6 @@ mod tests {
                     Placement::Child,
                     Some("subtle"),
                     None,
-                    &[],
                     ranking,
                     now,
                 )
@@ -1757,7 +1753,6 @@ mod tests {
                         Placement::Child,
                         Some("subtle"),
                         None,
-                        &[],
                         PowerRankingSnapshot::baseline(),
                         now,
                     )
@@ -1803,7 +1798,6 @@ mod tests {
                 Placement::Child,
                 Some("primary"),
                 None,
-                &[],
                 ranking,
                 now,
             )

@@ -1853,7 +1853,7 @@ impl DaemonClient {
             .await
     }
 
-    /// Write the load-balancing preference order, most preferred first.
+    /// Compatibility no-op for older servers and clients.
     pub async fn set_quota_preferences(&mut self, prefer: Vec<String>) -> Result<()> {
         self.http().await?.set_quota_preferences(prefer).await
     }

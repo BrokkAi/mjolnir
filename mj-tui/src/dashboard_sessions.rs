@@ -1322,7 +1322,7 @@ impl DashboardState {
     }
 
     /// Best-effort preview of which offered profile in `candidates` would be
-    /// selected by quota load balancing, using the same preference and
+    /// selected by quota load balancing, using the same quota and
     /// remaining-headroom signals already cached on the dashboard.
     pub(crate) fn predicted_profile_for_candidates(&self, candidates: &[&str]) -> Option<String> {
         candidates
@@ -1403,25 +1403,18 @@ impl DashboardState {
         self.predicted_profile_for_candidates(&candidates)
     }
 
-    fn profile_prediction_key<'a>(&self, id: &'a str) -> Option<(u8, usize, u8, u8, &'a str)> {
-        let prefer_rank = self
-            .config
-            .quota
-            .prefer
-            .iter()
-            .position(|preferred| preferred == id)
-            .unwrap_or(usize::MAX);
+    fn profile_prediction_key<'a>(&self, id: &'a str) -> Option<(u8, u8, u8, &'a str)> {
         if self.quota_refreshing.contains(id) {
-            return Some((1, prefer_rank, u8::MAX, u8::MAX, id));
+            return Some((1, u8::MAX, u8::MAX, id));
         }
         let Some(quota) = self.quotas.get(id) else {
-            return Some((1, prefer_rank, u8::MAX, u8::MAX, id));
+            return Some((1, u8::MAX, u8::MAX, id));
         };
         if quota.error.is_some() {
-            return Some((4, prefer_rank, u8::MAX, u8::MAX, id));
+            return Some((4, u8::MAX, u8::MAX, id));
         }
         if quota.is_usage_priced() {
-            return Some((3, prefer_rank, u8::MAX, u8::MAX, id));
+            return Some((3, u8::MAX, u8::MAX, id));
         }
         let primary = quota.summary_window().and_then(quota_remaining_percent);
         let five_hour = quota.five_hour_window().and_then(quota_remaining_percent);
@@ -1433,19 +1426,17 @@ impl DashboardState {
             // matching `profile_scheduler`'s reserve-floor tiering.
             Some(primary) if primary <= 1 || five_hour.is_some_and(|v| v <= 1) => (
                 2,
-                prefer_rank,
                 100u8.saturating_sub(primary),
                 100u8.saturating_sub(five_hour.unwrap_or(100)),
                 id,
             ),
             Some(primary) => (
                 0,
-                prefer_rank,
                 100u8.saturating_sub(primary),
                 100u8.saturating_sub(five_hour.unwrap_or(100)),
                 id,
             ),
-            None => (1, prefer_rank, u8::MAX, u8::MAX, id),
+            None => (1, u8::MAX, u8::MAX, id),
         })
     }
 

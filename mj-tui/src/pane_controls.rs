@@ -28,10 +28,6 @@ enum PaneOperation {
     /// An informational row in the read-only capacity dropdown.
     Information,
     Workspace(String),
-    /// Move a profile to the front of `[quota] prefer`.
-    PreferProfile(String),
-    /// Empty `[quota] prefer`.
-    ClearLoadBalancing,
     /// Probe this profile's quota now.
     RefreshProfile(String),
     /// Open Usage by session filtered to this profile.
@@ -219,7 +215,7 @@ impl DashboardState {
     }
 
     /// The right-click menu on a Quota profile row: refresh and usage for
-    /// that profile, then the load-balancing preference.
+    /// that profile.
     pub(crate) fn begin_quota_row_menu(&mut self, profile_id: &str, at: (u16, u16)) {
         let entries = vec![
             (
@@ -229,14 +225,6 @@ impl DashboardState {
             (
                 "Usage…".to_owned(),
                 PaneOperation::ProfileUsage(profile_id.to_owned()),
-            ),
-            (
-                format!("Prefer {profile_id} in load balancing"),
-                PaneOperation::PreferProfile(profile_id.to_owned()),
-            ),
-            (
-                "Clear load balancing preferences".to_owned(),
-                PaneOperation::ClearLoadBalancing,
             ),
         ];
         self.show_pane_menu(profile_id, entries, false);
@@ -314,9 +302,6 @@ impl DashboardState {
     /// the keyboard, a digit or the mouse.
     fn pane_operation_enabled(&self, operation: &PaneOperation) -> bool {
         match operation {
-            // Clearing an empty preference list does nothing, so the row says
-            // so by being disabled.
-            PaneOperation::ClearLoadBalancing => !self.config.quota.prefer.is_empty(),
             PaneOperation::SessionCommand(session_id, CommandId::DismissNotification) => {
                 crate::actions::dismiss_notification_available_for(self, session_id)
                     == Availability::Ready
@@ -550,16 +535,6 @@ impl DashboardState {
             PaneOperation::Close(pane) => DashboardAction::ClosePane { pane },
             PaneOperation::Command(id) => self.run_available_command(id),
             PaneOperation::Information => DashboardAction::None,
-            PaneOperation::PreferProfile(profile_id) => {
-                DashboardAction::PreferLoadBalancingProfile { profile_id }
-            }
-            PaneOperation::ClearLoadBalancing => {
-                if self.config.quota.prefer.is_empty() {
-                    DashboardAction::None
-                } else {
-                    DashboardAction::ClearLoadBalancingPreferences
-                }
-            }
             PaneOperation::RefreshProfile(profile_id) => {
                 DashboardAction::ProbeQuotaProfile { profile_id }
             }
@@ -982,10 +957,9 @@ mod tests {
         assert_eq!(d.pin_id("session-1"), Some(0));
     }
 
-    /// Right-clicking a Quota profile row offers Refresh, Usage…, Prefer and
-    /// Clear; Clear is disabled while no preference is set.
+    /// Right-clicking a Quota profile row offers Refresh and Usage….
     #[test]
-    fn quota_row_right_click_offers_load_balancing_preference_and_clear() {
+    fn quota_row_right_click_offers_refresh_and_usage() {
         let mut d = dashboard_with_session(running_session());
         let openai = d
             .quota_rows()
@@ -1022,15 +996,7 @@ mod tests {
                 .iter()
                 .map(|(label, _)| label.as_str())
                 .collect();
-            assert_eq!(
-                labels,
-                [
-                    "Refresh",
-                    "Usage…",
-                    "Prefer codex-1 in load balancing",
-                    "Clear load balancing preferences"
-                ]
-            );
+            assert_eq!(labels, ["Refresh", "Usage…"]);
         }
         // Refresh probes just this profile.
         assert_eq!(
@@ -1053,56 +1019,6 @@ mod tests {
             other => panic!("Usage… did not open the usage dialog: {other:?}"),
         }
         d.cancel_modal();
-        // Prefer runs from the row's menu.
-        d.begin_quota_row_menu(&profile, at);
-        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
-        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
-        assert_eq!(
-            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
-            DashboardAction::PreferLoadBalancingProfile {
-                profile_id: "codex-1".into()
-            }
-        );
-        // With nothing preferred, Clear is disabled: clicking it keeps the menu.
-        d.begin_quota_row_menu(&profile, at);
-        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-        terminal
-            .draw(|frame| render_pane_menu(frame, frame.area(), &d))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows: Vec<String> = (0..40)
-            .map(|y| {
-                (0..140)
-                    .map(|x| buffer[(x, y)].symbol().to_owned())
-                    .collect()
-            })
-            .collect();
-        let clear_y = rows
-            .iter()
-            .position(|row| row.contains("Clear load balancing preferences"))
-            .expect("Clear row") as u16;
-        let clear_x = rows[usize::from(clear_y)].find("Clear").unwrap() as u16;
-        for kind in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-        ] {
-            assert_eq!(
-                d.handle_pane_menu_event(Event::Mouse(mouse_at(kind, (clear_x, clear_y)))),
-                DashboardAction::None,
-                "Clear with no preference set"
-            );
-        }
-        assert!(d.pane_menu.is_some(), "the menu stayed open");
-        // With a preference set, Clear empties it.
-        d.config.quota.prefer = vec!["codex-1".into()];
-        d.begin_quota_row_menu(&profile, at);
-        for _ in 0..3 {
-            d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
-        }
-        assert_eq!(
-            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
-            DashboardAction::ClearLoadBalancingPreferences
-        );
     }
 
     /// Launch campaign finding D-10: the empty-pane chooser opens in the

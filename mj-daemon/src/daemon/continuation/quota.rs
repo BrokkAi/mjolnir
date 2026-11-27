@@ -52,7 +52,6 @@ pub(super) fn destinations(
         placement,
         category,
         ranking_anchor: None,
-        prefer: &config.quota.prefer,
         telemetry,
         power_ranking,
         now_seconds: now,
@@ -454,7 +453,6 @@ pub(super) async fn prepare(
                         placement,
                         Some(category),
                         None,
-                        &config.quota.prefer,
                         &power_ranking,
                         now_ms / 1000,
                     )?;

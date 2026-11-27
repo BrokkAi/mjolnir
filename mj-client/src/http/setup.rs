@@ -29,6 +29,7 @@ pub struct SaveSpinnerStyleRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SetQuotaPreferencesRequest {
+    #[serde(default)]
     pub prefer: Vec<String>,
 }
 

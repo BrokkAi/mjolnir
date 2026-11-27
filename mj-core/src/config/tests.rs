@@ -768,7 +768,7 @@ fn a_save_keeps_settings_written_at_their_default_and_removes_retired_keys() {
     fs::write(
         &path,
         format!(
-            "{kept}\n[subagents]\nmax_concurrent = 6\nenabled = true\n\n[sessionwiki]\nenabled = true\n"
+            "{kept}\n[subagents]\nmax_concurrent = 6\nenabled = true\n\n[quota]\nprefer = [\"codex\"]\n\n[sessionwiki]\nenabled = true\n"
         ),
     )
     .unwrap();

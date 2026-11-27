@@ -209,11 +209,6 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
-    /// The load-balancing preference order from `[quota] prefer`.
-    fn quota_preferences(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
         Default::default()
     }
@@ -651,10 +646,6 @@ impl ExportRuntime for RuntimeState {
 
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         self.with_config(|config| config.subagents.clone())
-    }
-
-    fn quota_preferences(&self) -> Vec<String> {
-        self.with_config(|config| config.quota.prefer.clone())
     }
 
     fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
@@ -5521,10 +5512,6 @@ impl SubagentBackend for ApiBackend {
 
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
-    }
-
-    fn quota_preferences(&self) -> BoxFuture<'_, Result<Vec<String>>> {
-        Box::pin(async move { Ok(self.exports.quota_preferences()) })
     }
 
     fn quota_telemetry(
