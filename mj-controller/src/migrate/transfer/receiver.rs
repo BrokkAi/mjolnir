@@ -105,9 +105,20 @@ struct PublicationRecord {
     /// Top-level entries created in the configuration directory.
     #[serde(default)]
     owned_config_entries: Vec<OwnedEntry>,
-    /// Set immediately before the SessionWiki index is placed or replaced.
+    /// Set once the SessionWiki index has been placed or replaced, never
+    /// before: until then the destination's own index is not ours to delete.
     #[serde(default)]
     sessionwiki_published: bool,
+    /// The inode of the SessionWiki index this publication placed.
+    #[serde(default)]
+    sessionwiki_identity: Option<FileIdentity>,
+    /// Set once the fenced store is in its final place.
+    #[serde(default)]
+    final_db_placed: bool,
+    /// The inode of the store this publication placed. An unfenced
+    /// `mj.sqlite3` is "already activated" only if it is this one.
+    #[serde(default)]
+    final_db_identity: Option<FileIdentity>,
 }
 
 #[derive(Clone, Copy)]
@@ -1173,7 +1184,20 @@ fn publish(
                 "the destination store carries a different fence than this migration"
             ),
             None => {
-                // The earlier run reached its commit; only its reply was lost.
+                // Unfenced: either the earlier run reached its commit and only
+                // its reply was lost, or a client made a store of its own.
+                // Only the inode this publication placed counts as ours.
+                let current = symlink_metadata_opt(&final_db)?
+                    .as_ref()
+                    .and_then(FileIdentity::of);
+                let placed = loaded.as_ref().is_some_and(|record| {
+                    record.final_db_placed && record.final_db_identity == current
+                });
+                ensure!(
+                    placed,
+                    "the destination already has an unrelated active mj.sqlite3; clean it \
+                     manually or choose --dest-instance"
+                );
                 remove_path(&stage.root)?;
                 summary
                     .warnings
@@ -1238,6 +1262,9 @@ fn publish(
                 owned_data_entries: Vec::new(),
                 owned_config_entries: Vec::new(),
                 sessionwiki_published: false,
+                sessionwiki_identity: None,
+                final_db_placed: false,
+                final_db_identity: None,
             };
             stage.write_publication(&record)?;
             record
@@ -1365,7 +1392,11 @@ fn publish(
         remove_path(&data.database_wal())?;
         remove_path(&data.database_shm())?;
         publish_entry_no_replace(&rewritten_store, &final_db, PublishMode::Move, &mut || {
-            Ok(())
+            record.final_db_identity = symlink_metadata_opt(&final_db)?
+                .as_ref()
+                .and_then(FileIdentity::of);
+            record.final_db_placed = true;
+            stage.write_publication(&record)
         })?;
         sync_directory(&config.data_dir)?;
     }
@@ -1436,15 +1467,25 @@ fn discard_unfinished_publication(
             }
         }
     }
-    for path in doomed {
-        remove_path(&path)?;
-    }
-    if old.sessionwiki_published {
+    if old.sessionwiki_published
+        && let Some(found) = symlink_metadata_opt(&config.sessionwiki_db)?
+    {
+        verify_owned(
+            &config.sessionwiki_db,
+            &OwnedEntry {
+                path: config.sessionwiki_db.clone(),
+                identity: old.sessionwiki_identity,
+            },
+            &found,
+        )?;
         for suffix in ["", "-wal", "-shm"] {
             let mut name = config.sessionwiki_db.as_os_str().to_owned();
             name.push(suffix);
-            remove_path(Path::new(&name))?;
+            doomed.push(PathBuf::from(name));
         }
+    }
+    for path in doomed {
+        remove_path(&path)?;
     }
     remove_path(&stage.rewritten())?;
     std::fs::create_dir_all(stage.rewritten())?;
@@ -1509,10 +1550,18 @@ fn publish_sessionwiki(
         } else {
             None
         };
-        // Recorded first, so a crash mid-replace is cleaned up by a retry.
-        if !record.sessionwiki_published {
-            record.sessionwiki_published = true;
-            stage.write_publication(record)?;
+        // An index this publication placed earlier must still be that one.
+        if record.sessionwiki_published
+            && let Some(found) = symlink_metadata_opt(&config.sessionwiki_db)?
+        {
+            verify_owned(
+                &config.sessionwiki_db,
+                &OwnedEntry {
+                    path: config.sessionwiki_db.clone(),
+                    identity: record.sessionwiki_identity,
+                },
+                &found,
+            )?;
         }
         for suffix in ["-wal", "-shm"] {
             let mut name = config.sessionwiki_db.as_os_str().to_owned();
@@ -1522,6 +1571,13 @@ fn publish_sessionwiki(
         // One rename: the index is never missing, and a reader that raced the
         // lock sees the old file or the new one.
         replace_file_atomically(&staged, &config.sessionwiki_db)?;
+        // Recorded only now: until the replacement succeeded, the index there
+        // is the destination's own, and a rolled-back attempt must not delete it.
+        record.sessionwiki_published = true;
+        record.sessionwiki_identity = symlink_metadata_opt(&config.sessionwiki_db)?
+            .as_ref()
+            .and_then(FileIdentity::of);
+        stage.write_publication(record)?;
         drop(in_use);
         Ok(())
     } else {
@@ -1531,6 +1587,9 @@ fn publish_sessionwiki(
             PublishMode::Move,
             &mut || {
                 record.sessionwiki_published = true;
+                record.sessionwiki_identity = symlink_metadata_opt(&config.sessionwiki_db)?
+                    .as_ref()
+                    .and_then(FileIdentity::of);
                 stage.write_publication(record)
             },
         )

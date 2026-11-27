@@ -1186,3 +1186,106 @@ async fn a_read_only_directory_in_a_copied_profile_home_arrives_with_its_files()
         "the source's mode is restored once the directory is filled"
     );
 }
+
+#[tokio::test]
+async fn a_replaced_or_unreplaced_sessionwiki_index_is_never_deleted_by_a_retry() {
+    let world = World::new();
+    // The destination's own index, held open: replacing it fails before any
+    // replacement, so a retry's cleanup must leave it alone.
+    let held = wal_database(&world.b_wiki, 5);
+    held.execute_batch("BEGIN; SELECT count(*) FROM scratch")
+        .unwrap();
+    for fence in ["t1", "t2"] {
+        let (result, _) = attempt_with(&world, fence, None, true).await;
+        assert!(result.is_err());
+        assert_eq!(count_rows(&world.b_wiki), 5, "{fence}");
+    }
+    held.execute_batch("COMMIT").unwrap();
+    drop(held);
+
+    // Replaced by this publication, then replaced again by someone else: the
+    // retry's cleanup refuses to delete what is no longer ours.
+    let (result, _) = attempt_with(
+        &world,
+        "t3",
+        Some(failing_at(PublicationStep::BeforeStorePlacement)),
+        true,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    let kept = world._root.path().join("old-index.db");
+    std::fs::hard_link(&world.b_wiki, &kept).unwrap();
+    std::fs::remove_file(&world.b_wiki).unwrap();
+    drop(wal_database(&world.b_wiki, 7));
+    let (result, _) = attempt_with(&world, "t4", None, true).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("replaced externally"), "{error}");
+    assert_eq!(count_rows(&world.b_wiki), 7);
+}
+
+#[tokio::test]
+async fn an_unfenced_store_counts_as_activated_only_if_this_publication_placed_it() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+
+    // Failed before the store was placed; a client then makes a store of its own.
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeStorePlacement)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!b_db.exists());
+    let mut theirs = session();
+    theirs.id = "theirs".into();
+    save_session_to(&b_db, &theirs).unwrap();
+    let (result, _) = attempt(&world, "t1", None).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("unrelated active mj.sqlite3"), "{error}");
+    assert!(stage.exists(), "staging is kept");
+    assert!(
+        Connection::open(&b_db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE session_id='theirs'",
+                [],
+                |r| { r.get::<_, i64>(0) }
+            )
+            .unwrap()
+            == 1
+    );
+    std::fs::remove_file(&b_db).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(b_db.with_file_name(format!("mj.sqlite3{suffix}")));
+    }
+
+    // Placed and then unfenced, with the reply lost: the retry recognizes it.
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeUnfence)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(
+        read_store_fence_file(&b_db).unwrap(),
+        Some(world.fence("t1"))
+    );
+    clear_store_fence_file(&b_db, &world.fence("t1")).unwrap();
+    let (result, _) = attempt(&world, "t1", None).await;
+    let outcome = result.unwrap();
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("already activated"))
+    );
+    assert!(!stage.exists());
+    let mut two = session();
+    two.id = "two".into();
+    save_session_to(&b_db, &two).unwrap();
+}
