@@ -54,7 +54,7 @@ fn schedule_memory_sync(
         if cancel.is_cancelled() {
             tracing::debug!(%session_id, "project-memory turn sync preempted");
         } else if let Err(error) = result {
-            tracing::warn!(%session_id, error = format!("{error:#}"), "project-memory turn sync failed");
+            tracing::warn!(%session_id, project = %memory.canonical_root.display(), error = format!("{error:#}"), "project-memory turn sync failed");
         }
     }));
 }

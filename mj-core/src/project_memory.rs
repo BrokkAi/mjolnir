@@ -640,6 +640,7 @@ fn load_canonical_locked(root: &Path) -> Result<CanonicalMemory> {
 }
 
 fn write_canonical_locked(root: &Path, state: &CanonicalMemory) -> Result<()> {
+    validate_renderable_tree(&state.tree)?;
     write_canonical_before_rename(root, state, || Ok(()))
 }
 
@@ -704,7 +705,7 @@ pub fn commit_canonical(
     tree: &ProjectMemorySnapshot,
     absorbed: Option<&str>,
 ) -> Result<SwapOutcome> {
-    validate_tree(tree)?;
+    validate_renderable_tree(tree)?;
     loop {
         let root = resolve_canonical_root(canonical_root)?;
         let _lock = lock_canonical(&root)?;
@@ -993,7 +994,7 @@ impl ProjectMemoryStore {
     /// Make the directory hold exactly `tree`: write changed documents and
     /// delete documents that `tree` omits. Returns whether anything changed.
     pub fn replace_tree(&self, tree: &ProjectMemorySnapshot) -> Result<bool> {
-        validate_tree(tree)?;
+        validate_renderable_tree(tree)?;
         let desired = tree
             .files
             .iter()
@@ -1054,7 +1055,7 @@ impl ProjectMemoryStore {
     }
 }
 
-fn validate_tree(tree: &ProjectMemorySnapshot) -> Result<()> {
+fn validate_renderable_tree(tree: &ProjectMemorySnapshot) -> Result<()> {
     let mut relative_paths = BTreeSet::new();
     for path in tree.files.keys() {
         let relative = validate_virtual_path(path)?;
@@ -1276,7 +1277,7 @@ pub fn render_memory_tree(
     tree: &ProjectMemorySnapshot,
     read_only: bool,
 ) -> Result<()> {
-    validate_tree(tree)?;
+    validate_renderable_tree(tree)?;
     let directory = match ConfinedDir::open_root(root)? {
         Some(directory) => directory,
         None => ConfinedDir::create_root(root)?,
@@ -1481,6 +1482,9 @@ fn validate_virtual_path(path: &str) -> Result<PathBuf> {
     }
     if path == "/" {
         bail!("memory document path cannot be the root");
+    }
+    if path.ends_with('/') {
+        bail!("memory document path cannot end with a slash");
     }
     let mut relative = PathBuf::new();
     for component in Path::new(path).components() {
@@ -1877,6 +1881,70 @@ mod tests {
             "changed later"
         );
         assert!(!root.join("replacement.md").exists());
+    }
+
+    // Hard-won: 518a785f0: a project merge committed an unrenderable tree before rendering.
+    #[test]
+    fn project_merge_rejects_unrenderable_tree_before_writing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("old/memory");
+        let destination = directory.path().join("new/memory");
+        let source_state = read_canonical_state(&source).unwrap();
+        let source_tree = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes/topic.md".into(), "source".into())]),
+        };
+        assert_eq!(
+            commit_canonical(&source, &source_state, "source", &source_tree, None).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let destination_state = read_canonical_state(&destination).unwrap();
+        let destination_file = canonical_file(&destination).unwrap();
+        let before_invalid_commit = fs::read(&destination_file).unwrap();
+        for tree in [
+            ProjectMemorySnapshot {
+                files: BTreeMap::from([("/notes/".into(), "old alias".into())]),
+            },
+            ProjectMemorySnapshot {
+                files: BTreeMap::from([
+                    ("/notes".into(), "parent".into()),
+                    ("/notes/topic.md".into(), "child".into()),
+                ]),
+            },
+        ] {
+            assert!(
+                commit_canonical(&destination, &destination_state, "destination", &tree, None)
+                    .is_err()
+            );
+            assert!(render_memory_tree(&directory.path().join("rejected"), &tree, false).is_err());
+            assert_eq!(fs::read(&destination_file).unwrap(), before_invalid_commit);
+        }
+
+        // A previously accepted on-disk canonical tree can contain this alias.
+        // Merge used to miss its collision with /notes/topic.md and commit it.
+        let mut legacy = destination_state;
+        legacy
+            .tree
+            .files
+            .insert("/notes/".into(), "old alias".into());
+        legacy.version = legacy.tree.version();
+        fs::write(&destination_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let before_merge = fs::read(&destination_file).unwrap();
+        let merged = merge_trees(
+            &ProjectMemorySnapshot::default(),
+            &legacy.tree,
+            &source_tree,
+        );
+        assert!(merged.tree.files.contains_key("/notes/"));
+        assert!(merged.tree.files.contains_key("/notes/topic.md"));
+        assert!(merge_canonical_stores(&source, &destination).is_err());
+        assert_eq!(fs::read(&destination_file).unwrap(), before_merge);
+        assert!(
+            !source
+                .parent()
+                .unwrap()
+                .join("memory-redirect.json")
+                .exists()
+        );
     }
 
     #[test]
