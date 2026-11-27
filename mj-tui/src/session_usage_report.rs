@@ -562,24 +562,41 @@ pub(crate) fn render(
             row_keys.clear();
             if !report.sessions.is_empty() {
                 for agents in &report.agent_usage {
+                    let role_partial =
+                        partial || agents.models.iter().any(|model| model.unreported_turns > 0);
                     lines.push(Line::styled(
                         format!(
                             "{}  {}",
                             agents.role.label(),
-                            dollars(agents.cost_usd_ticks, partial)
+                            dollars(agents.cost_usd_ticks, role_partial)
                         ),
                         theme::title(false),
                     ));
                     row_map.push(Some(row_keys.len()));
                     row_keys.push(UsageRow::Role(agents.role));
                     for model in &agents.models {
-                        let cost = dollars(model.cost_usd_ticks, partial);
+                        let cost =
+                            dollars(model.cost_usd_ticks, partial || model.unreported_turns > 0);
+                        let detail = if model.unreported_turns > 0 {
+                            format!(
+                                "{cost} · {} {} unreported",
+                                model.unreported_turns,
+                                if model.unreported_turns == 1 {
+                                    "turn"
+                                } else {
+                                    "turns"
+                                }
+                            )
+                        } else {
+                            cost
+                        };
                         let name = truncate_to_cells(
                             model.model.as_deref().unwrap_or("Unknown model"),
-                            usize::from(inner.width).saturating_sub(cost.len() + 4),
+                            usize::from(inner.width)
+                                .saturating_sub(Line::raw(detail.as_str()).width() + 4),
                             Truncate::PLAIN,
                         );
-                        lines.push(Line::raw(format!("  {name}  {cost}")));
+                        lines.push(Line::raw(format!("  {name}  {detail}")));
                         row_map.push(Some(row_keys.len()));
                         row_keys.push(UsageRow::ModelTotal(agents.role, model.model.clone()));
                     }
@@ -610,14 +627,27 @@ pub(crate) fn render(
                 row_map.push(Some(row_keys.len()));
                 row_keys.push(UsageRow::Session(session.session_id.clone()));
                 for model in &session.models {
-                    let tokens = model.totals.get("total_tokens").map_or_else(
-                        || "tokens unknown".to_owned(),
-                        |v| format!("{} tokens", v.tokens),
+                    let unreported = model.unreported_turns;
+                    let tokens = match (model.totals.get("total_tokens"), unreported) {
+                        (Some(v), 0) => format!("{} tokens", v.tokens),
+                        (Some(v), n) => format!(
+                            "{} tokens · {n} {} unreported",
+                            v.tokens,
+                            if n == 1 { "turn" } else { "turns" }
+                        ),
+                        (None, 0) => "tokens unknown".to_owned(),
+                        (None, n) => {
+                            format!("{n} {} unreported", if n == 1 { "turn" } else { "turns" })
+                        }
+                    };
+                    let detail = format!(
+                        "{}  {tokens}",
+                        dollars(model.cost_usd_ticks, unreported > 0)
                     );
-                    let detail = format!("{}  {tokens}", dollars(model.cost_usd_ticks, false));
                     let name = truncate_to_cells(
                         model.model.as_deref().unwrap_or("Unknown model"),
-                        usize::from(inner.width).saturating_sub(detail.len() + 6),
+                        usize::from(inner.width)
+                            .saturating_sub(Line::raw(detail.as_str()).width() + 6),
                         Truncate::PLAIN,
                     );
                     lines.push(Line::raw(format!("    {name}  {detail}",)));

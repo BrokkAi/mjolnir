@@ -235,6 +235,7 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
             role: mj_core::usage::UsageAgentRole::Primary,
             models: vec![mj_core::usage::ModelUsageEstimate {
                 model: Some("gpt-6.1-terra".into()),
+                unreported_turns: 2,
                 cost_usd_ticks: Ok(10_000_000_000),
                 ..Default::default()
             }],
@@ -288,8 +289,17 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let report: mj_core::usage::SessionUsageReport = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(report, expected);
-        // Responses from older daemons lack the additive role summary.
+        // Responses from older daemons lack the additive role summary and the
+        // additive unreported count on each model estimate.
         let mut legacy = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        let mut legacy_model = legacy["agent_usage"][0]["models"][0].clone();
+        legacy_model
+            .as_object_mut()
+            .unwrap()
+            .remove("unreported_turns");
+        let legacy_model: mj_core::usage::ModelUsageEstimate =
+            serde_json::from_value(legacy_model).unwrap();
+        assert_eq!(legacy_model.unreported_turns, 0);
         legacy.as_object_mut().unwrap().remove("agent_usage");
         legacy.as_object_mut().unwrap().remove("profile_usage");
         legacy.as_object_mut().unwrap().remove("quota_usage");

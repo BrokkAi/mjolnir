@@ -150,6 +150,12 @@ pub fn descending_cost(a: &CostUsdTicks, b: &CostUsdTicks) -> std::cmp::Ordering
 pub struct ModelUsageEstimate {
     pub model: Option<String>,
     pub totals: BTreeMap<String, crate::storage::UsageCounterTotal>,
+    /// Completed turns on this model whose usage was missing, unspecified, or
+    /// last-request-only. Their cost is unknown, so `cost_usd_ticks` is a lower
+    /// bound: the known sum of full-turn reports, never poisoned to
+    /// `Err(UnknownCost)` by them.
+    #[serde(default)]
+    pub unreported_turns: u64,
     pub cost_usd_ticks: CostUsdTicks,
 }
 
@@ -158,6 +164,7 @@ impl Default for ModelUsageEstimate {
         Self {
             model: None,
             totals: BTreeMap::new(),
+            unreported_turns: 0,
             cost_usd_ticks: Ok(0),
         }
     }

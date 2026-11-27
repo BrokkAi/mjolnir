@@ -1227,6 +1227,12 @@ fn golden_dashboard_dialogs() {
     );
     let (first, query) = usage.session_usage_request().unwrap();
     assert_eq!(query, mj_core::usage::SessionUsageQuery::default());
+    let deepseek_flash = ModelUsageEstimate {
+        model: Some("deepseek-flash".into()),
+        unreported_turns: 2,
+        cost_usd_ticks: Ok(0),
+        ..Default::default()
+    };
     let mut report = SessionUsageReport {
         profiles: vec!["claude".into(), "codex".into()],
         cost_usd_ticks: Err(UnknownCost),
@@ -1244,8 +1250,15 @@ fn golden_dashboard_dialogs() {
                     },
                     ModelUsageEstimate {
                         model: Some("gpt-6.1-sol".into()),
+                        totals: std::collections::BTreeMap::from([(
+                            "total_tokens".into(),
+                            mj_core::storage::UsageCounterTotal {
+                                tokens: 1_100_000,
+                                reported_turns: 1,
+                            },
+                        )]),
+                        unreported_turns: 1,
                         cost_usd_ticks: Ok(20_000_000_000),
-                        ..Default::default()
                     },
                 ],
                 coverage: mj_core::storage::UsageCoverage {
@@ -1288,10 +1301,12 @@ fn golden_dashboard_dialogs() {
                         cost_usd_ticks: Err(UnknownCost),
                         ..Default::default()
                     },
+                    deepseek_flash.clone(),
                 ],
                 coverage: mj_core::storage::UsageCoverage {
-                    recorded_turns: 4,
+                    recorded_turns: 6,
                     full_turn_reports: 4,
+                    missing_reports: 2,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1319,7 +1334,11 @@ fn golden_dashboard_dialogs() {
             cost_usd_ticks: Ok(72_000_000_000),
         },
         role_model(UsageAgentRole::Orchestrator, split_sol(20_000_000_000)),
-        role_model(UsageAgentRole::Subtle, split_sol(15_000_000_000)),
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subtle,
+            models: vec![split_sol(15_000_000_000), deepseek_flash.clone()],
+            cost_usd_ticks: Ok(15_000_000_000),
+        },
         role_model(UsageAgentRole::Straightforward, split_sol(10_000_000_000)),
         role_model(UsageAgentRole::Oracle, split_sol(5_000_000_000)),
         role_model(UsageAgentRole::Reviewer, codex_models[2].clone()),
@@ -1468,7 +1487,7 @@ fn golden_dashboard_dialogs() {
         usage.handle_key(key(KeyCode::Tab));
     }
     usage.handle_key(key(KeyCode::Home));
-    for _ in 0..15 {
+    for _ in 0..16 {
         usage.handle_key(key(KeyCode::Down));
     }
     append_dialog_render(
@@ -1533,7 +1552,11 @@ fn golden_dashboard_dialogs() {
     codex_report.agent_usage = vec![
         role_model(UsageAgentRole::Primary, codex_models[1].clone()),
         role_model(UsageAgentRole::Orchestrator, split_sol(10_000_000_000)),
-        role_model(UsageAgentRole::Subtle, split_sol(10_000_000_000)),
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subtle,
+            models: vec![split_sol(10_000_000_000), deepseek_flash.clone()],
+            cost_usd_ticks: Ok(10_000_000_000),
+        },
         role_model(UsageAgentRole::Straightforward, split_sol(5_000_000_000)),
         role_model(UsageAgentRole::Oracle, split_sol(5_000_000_000)),
         AgentUsageEstimate {

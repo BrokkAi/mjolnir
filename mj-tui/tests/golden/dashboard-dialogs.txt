@@ -842,10 +842,10 @@ Ent
 │    │                                                                                                            │    │
 │    │Subtle subagents  $1.500+                                                                                   │    │
 │    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
-│    │                                                                                                            │  ▄ ╮
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │  ▄ ╮
+│    │                                                                                                            │    │
 │    │Straightforward subagents  $1.000+                                                                          │    │
 │    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │                                                                                                            │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -956,9 +956,9 @@ E
 │    │                                                                                                            │    │
 │    │Subtle subagents  $1.500+                                                                                   │  ──╯
 │    │  gpt-6.1-sol  $1.500+                                                                                      │  ▄ ╮
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │    │
 │    │                                                                                                            │    │
 │    │Straightforward subagents  $1.000+                                                                          │    │
-│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -1012,10 +1012,10 @@ Ent
 │    │                                                                                                            │    │
 │    │Subtle subagents  $1.500+                                                                                   │    │
 │    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
-│    │                                                                                                            │  ▄ ╮
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │  ▄ ╮
+│    │                                                                                                            │    │
 │    │Straightforward subagents  $1.000+                                                                          │    │
 │    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │                                                                                                            │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -1052,7 +1052,7 @@ Ent
 │    │                                                                                                            │  ──╯
 │    │Write release notes [claude]  $8.200+                                                                       │  ▄ ╮
 │    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
-│    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-sol  $2.000+  1100000 tokens · 1 turn unreported                                                │    │
 │    │    0 sub-agents · 3/5 turns reported                                                                       │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
@@ -1100,8 +1100,8 @@ Ent
    │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │                                                              │
-   │    custom-model  ?  tokens unknown                           │
-   │    2 sub-agents · 4/4 turns reported                         │
+   │    deepseek-flash  $0.000+  2 turns unreported               │
+   │    2 sub-agents · 4/6 turns reported                         │
    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│
    │Sub-agents included · profile filters turns · + partial · ░ un│
    │  Refresh     Close                                           │
@@ -1136,10 +1136,10 @@ Ent
 │    │                                                                                                            │    │
 │    │Subtle subagents  $1.500+                                                                                   │    │
 │    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
-│    │                                                                                                            │  ▄ ╮
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │  ▄ ╮
+│    │                                                                                                            │    │
 │    │Straightforward subagents  $1.000+                                                                          │    │
 │    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │                                                                                                            │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -1165,19 +1165,19 @@ Ent
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
+│    │Primary agents  $1.000+                                                                                     │  ▄ ╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
 │    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │Orchestrators  $1.000+                                                                                      │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
+│    │Subtle subagents  $1.000+                                                                                   │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Straightforward subagents  $0.500+                                                                          │    │
+│    │  gpt-6.1-sol  $0.500+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -1203,19 +1203,19 @@ Ent
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
+│    │Primary agents  $1.000+                                                                                     │  ▄ ╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
 │    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │Orchestrators  $1.000+                                                                                      │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
+│    │Subtle subagents  $1.000+                                                                                   │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Straightforward subagents  $0.500+                                                                          │    │
+│    │  gpt-6.1-sol  $0.500+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -1241,19 +1241,19 @@ Ent
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
+│    │Primary agents  $1.000+                                                                                     │  ▄ ╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
 │    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │Orchestrators  $1.000+                                                                                      │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
+│    │Subtle subagents  $1.000+                                                                                   │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Straightforward subagents  $0.500+                                                                          │    │
+│    │  gpt-6.1-sol  $0.500+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -1279,19 +1279,19 @@ Ent
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
+│    │Primary agents  $1.000+                                                                                     │  ▄ ╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
 │    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
+│    │Orchestrators  $1.000+                                                                                      │  ▄ ╮
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
+│    │Subtle subagents  $1.000+                                                                                   │    │
+│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
+│    │  deepseek-flash  $0.000+ · 2 turns unreported                                                              │  ──╯
+│    │                                                                                                            │  ▄ ╮
+│    │Straightforward subagents  $0.500+                                                                          │    │
+│    │  gpt-6.1-sol  $0.500+                                                                                      │    │
 │    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -1355,8 +1355,8 @@ Ent
 │    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
 │    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
 │    │                                                                                                            │  ──╯
-│    │Other subagents  $0.105                                                                                     │  ▄ ╮
-│    │  gpt-6-luna  $0.105                                                                                        │    │
+│    │Other subagents  $0.105+                                                                                    │  ▄ ╮
+│    │  gpt-6-luna  $0.105+                                                                                       │    │
 │    │                                                                                                            │  ──╯
 │    │Unclassified subagents  ?                                                                                   │  ▄ ╮
 │    │  custom-model  ?                                                                                           │    │
@@ -1366,8 +1366,8 @@ Ent
 │    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
 │    │    gpt-6-luna  $0.105  tokens unknown                                                                      │  ▄ ╮
 │    │    custom-model  ?  tokens unknown                                                                         │    │
-│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
-│    │                                                                                                            │    │
+│    │    deepseek-flash  $0.000+  2 turns unreported                                                             │    │
+│    │    2 sub-agents · 4/6 turns reported                                                                       │    │
 │    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
 │    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
 │    │  Refresh     Close                                                                                         │    │
