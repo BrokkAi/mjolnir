@@ -133,6 +133,19 @@ pub(super) fn publish_entry(src: &Path, dst: &Path, mode: PublishMode) -> Result
     }
 }
 
+/// Create one directory that only its owner can enter, so a private directory
+/// is never visible with the default mode while its contents are placed. The
+/// real mode is applied once it is filled. Fails with `AlreadyExists` atomically.
+fn create_dir_owner_only(dst: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dst)
+}
+
 fn collision(dst: &Path, error: std::io::Error) -> anyhow::Error {
     if error.kind() == std::io::ErrorKind::AlreadyExists {
         anyhow::anyhow!(
@@ -174,7 +187,7 @@ pub(super) fn publish_entry_no_replace(
             std::fs::remove_file(src)?;
         }
     } else if source.is_dir() {
-        std::fs::create_dir(dst).map_err(|error| collision(dst, error))?;
+        create_dir_owner_only(dst).map_err(|error| collision(dst, error))?;
         on_created()?;
         for child in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
             let child = child?;
@@ -262,7 +275,7 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         #[cfg(not(unix))]
         bail!("cannot publish symlink {} on this platform", src.display());
     } else if metadata.is_dir() {
-        std::fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))?;
+        create_dir_owner_only(dst).with_context(|| format!("create {}", dst.display()))?;
         for child in std::fs::read_dir(src)? {
             let child = child?;
             copy_tree(&child.path(), &dst.join(child.file_name()))?;

@@ -880,7 +880,10 @@ async fn publication_failures_leave_the_destination_fenced_and_a_retry_completes
         format!("{refused:#}").to_lowercase().contains("fence"),
         "a normal open must refuse the fenced store: {refused:#}"
     );
-    assert!(world.b_wiki.exists());
+    assert!(
+        !world.b_wiki.exists(),
+        "the migrated SessionWiki index appears only at activation"
+    );
 
     // Retry under the same fence resumes and activates.
     let (result, log) = attempt(&world, "t2", None).await;
@@ -894,6 +897,12 @@ async fn publication_failures_leave_the_destination_fenced_and_a_retry_completes
     assert!(!DataLayout::at(&world.b_data).migrate_stage().exists());
     assert_eq!(count_rows(&world.b_wiki), 600);
     assert_eq!(count_rows(&b_db), 3000);
+    assert!(
+        !world
+            .b_wiki
+            .with_file_name("index.db.mj-migrate-pending")
+            .exists()
+    );
     assert!(!world.b_data.join("unknown-user-file").exists());
 }
 
@@ -1188,10 +1197,11 @@ async fn a_read_only_directory_in_a_copied_profile_home_arrives_with_its_files()
 }
 
 #[tokio::test]
-async fn a_sessionwiki_index_placed_then_replaced_by_someone_else_is_never_deleted() {
+async fn a_fresh_sessionwiki_index_appears_only_at_activation_and_stale_files_are_refused() {
     let world = World::new();
     let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
-    // The destination's own index, held open: replacing it fails before
+    let wal = world.b_wiki.with_file_name("index.db-wal");
+    // The destination's own index, held open: overwriting it fails before
     // anything is placed, so a retry's cleanup must leave it alone.
     let held = wal_database(&world.b_wiki, 5);
     held.execute_batch("BEGIN; SELECT count(*) FROM scratch")
@@ -1205,8 +1215,8 @@ async fn a_sessionwiki_index_placed_then_replaced_by_someone_else_is_never_delet
     drop(held);
     assert!(!pending.exists());
 
-    // A destination with no index gets the migrated one directly. If someone
-    // replaces it before the retry, the retry refuses to delete theirs.
+    // A fresh destination stays without an index until activation, so no other
+    // process can open it and write what a rollback would then lose.
     std::fs::remove_file(&world.b_wiki).unwrap();
     let (result, _) = attempt_with(
         &world,
@@ -1216,15 +1226,61 @@ async fn a_sessionwiki_index_placed_then_replaced_by_someone_else_is_never_delet
     )
     .await;
     assert!(result.is_err());
-    assert_eq!(count_rows(&world.b_wiki), 600);
-    let kept = world._root.path().join("old-index.db");
-    std::fs::hard_link(&world.b_wiki, &kept).unwrap();
-    std::fs::remove_file(&world.b_wiki).unwrap();
+    assert!(!world.b_wiki.exists());
+    assert!(pending.exists());
+    // Someone creates an index of their own before the retry: it is refused
+    // and kept, and the failed attempt's pending file is cleaned up.
     drop(wal_database(&world.b_wiki, 7));
     let (result, _) = attempt_with(&world, "t4", None, false).await;
     let error = format!("{:#}", result.unwrap_err());
-    assert!(error.contains("replaced externally"), "{error}");
+    assert!(error.contains("already has SessionWiki files"), "{error}");
     assert_eq!(count_rows(&world.b_wiki), 7);
+    assert!(!pending.exists());
+
+    // A stale journal file without an index is refused as well, and kept.
+    std::fs::remove_file(&world.b_wiki).unwrap();
+    write(&wal, b"stale");
+    let (result, _) = attempt_with(&world, "t5", None, false).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("already has SessionWiki files"), "{error}");
+    assert_eq!(std::fs::read(&wal).unwrap(), b"stale");
+
+    // Once the destination is clean the migration completes.
+    std::fs::remove_file(&wal).unwrap();
+    let (result, _) = attempt_with(&world, "t6", None, false).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert!(!pending.exists());
+}
+
+#[test]
+fn a_private_directory_is_never_visible_with_wider_access_while_it_is_filled() {
+    use super::fsops::{PublishMode, publish_entry_no_replace};
+    let root = tempfile::tempdir().unwrap();
+    for (mode, expected_during) in [(0o700, 0o700), (0o755, 0o700)] {
+        let src = root.path().join(format!("src-{mode:o}"));
+        write(&src.join("secret.txt"), b"secret");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(mode)).unwrap();
+        // Copy first: a move consumes the source.
+        for publish_mode in [PublishMode::Copy, PublishMode::Move] {
+            let dst = root
+                .path()
+                .join(format!("dst-{mode:o}-{}", publish_mode as u8));
+            let mut seen = None;
+            publish_entry_no_replace(&src, &dst, publish_mode, &mut || {
+                seen = Some(std::fs::metadata(&dst)?.permissions().mode() & 0o777);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(seen, Some(expected_during), "{mode:o}");
+            assert_eq!(
+                std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+                mode,
+                "the real mode is restored once filled"
+            );
+            assert_eq!(std::fs::read(dst.join("secret.txt")).unwrap(), b"secret");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1367,4 +1423,47 @@ async fn an_unfenced_store_counts_as_activated_only_if_this_publication_placed_i
     let mut two = session();
     two.id = "two".into();
     save_session_to(&b_db, &two).unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_sessionwiki_install_after_activation_keeps_staging_for_a_retry() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    // Just before the commit, an index of someone else's appears at the path.
+    let racing: PublicationHook = {
+        let wiki = world.b_wiki.clone();
+        Arc::new(move |step| {
+            if step == PublicationStep::BeforeUnfence && !wiki.exists() {
+                drop(wal_database(&wiki, 7));
+            }
+            Ok(())
+        })
+    };
+    let (result, _) = attempt(&world, "t1", Some(racing)).await;
+    let outcome = result.unwrap();
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("waiting at"))
+    );
+    assert_eq!(read_store_fence_file(&b_db).unwrap(), None);
+    assert_eq!(count_rows(&world.b_wiki), 7, "their index is untouched");
+    assert!(pending.exists() && stage.exists());
+
+    // Once the way is clear, a retry finishes the install from the kept staging.
+    for path in [
+        world.b_wiki.clone(),
+        world.b_wiki.with_file_name("index.db-wal"),
+        world.b_wiki.with_file_name("index.db-shm"),
+    ] {
+        let _ = std::fs::remove_file(path);
+    }
+    let (result, _) = attempt(&world, "t1", None).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert!(!pending.exists() && !stage.exists());
 }

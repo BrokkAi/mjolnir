@@ -105,15 +105,9 @@ struct PublicationRecord {
     /// Top-level entries created in the configuration directory.
     #[serde(default)]
     owned_config_entries: Vec<OwnedEntry>,
-    /// Set once the SessionWiki index has been placed or replaced, never
-    /// before: until then the destination's own index is not ours to delete.
-    #[serde(default)]
-    sessionwiki_published: bool,
-    /// The inode of the SessionWiki index this publication placed.
-    #[serde(default)]
-    sessionwiki_identity: Option<FileIdentity>,
-    /// An overwriting SessionWiki index is installed beside the destination's
-    /// own and renamed over it only after the activation commit.
+    /// The migrated SessionWiki index is installed beside the destination's
+    /// index path and renamed into place only after the activation commit, so
+    /// nothing can open it, and nothing of the destination's is touched, before.
     #[serde(default)]
     sessionwiki_pending: bool,
     #[serde(default)]
@@ -1242,12 +1236,18 @@ fn publish(
                             &found,
                         )?;
                         let finished = (|| -> Result<()> {
-                            let _in_use = if exists(&config.sessionwiki_db)? {
+                            let _in_use = if request.overwrite_sessionwiki
+                                && exists(&config.sessionwiki_db)?
+                            {
                                 Some(lock_existing_sessionwiki(&config.sessionwiki_db)?)
                             } else {
                                 None
                             };
-                            install_pending_sessionwiki(config, &pending)
+                            install_pending_sessionwiki(
+                                config,
+                                &pending,
+                                request.overwrite_sessionwiki,
+                            )
                         })();
                         if let Err(error) = finished {
                             // Keep the staging record and the pending file.
@@ -1305,10 +1305,7 @@ fn publish(
             );
         }
         if request.migrate_sessionwiki && !request.overwrite_sessionwiki {
-            ensure!(
-                !exists(&config.sessionwiki_db)?,
-                "the destination already has a SessionWiki index; pass --overwrite-sessionwiki to replace it"
-            );
+            ensure_no_sessionwiki(&config.sessionwiki_db)?;
         }
     }
 
@@ -1325,8 +1322,6 @@ fn publish(
                 owned_home_targets: Vec::new(),
                 owned_data_entries: Vec::new(),
                 owned_config_entries: Vec::new(),
-                sessionwiki_published: false,
-                sessionwiki_identity: None,
                 sessionwiki_pending: false,
                 sessionwiki_pending_identity: None,
                 final_db_placed: false,
@@ -1489,20 +1484,24 @@ fn publish(
     clear_store_fence_file(&final_db, &spec.expected_fence)
         .context("clear the destination store fence")?;
 
-    // The destination's own SessionWiki index is replaced only now. The store
-    // is active, so a failure is reported, not returned.
+    // The SessionWiki index is put in place only now. The store is active, so
+    // a failure is reported, and staging is kept so a retry can finish it.
+    let mut keep_stage = false;
     if let Some(pending) = pending_wiki {
-        if let Err(error) = install_pending_sessionwiki(config, &pending.pending_path) {
+        if let Err(error) =
+            install_pending_sessionwiki(config, &pending.pending_path, pending.overwrite)
+        {
             summary.warnings.push(format!(
                 "the migrated SessionWiki index is waiting at {}: {error:#}",
                 pending.pending_path.display()
             ));
+            keep_stage = true;
         }
         drop(pending);
     }
 
     // 9. Cleanup is best effort: the destination is already activated.
-    if let Err(error) = remove_path(&stage.root) {
+    if !keep_stage && let Err(error) = remove_path(&stage.root) {
         summary
             .warnings
             .push(format!("could not remove the staging directory: {error:#}"));
@@ -1562,23 +1561,6 @@ fn discard_unfinished_publication(
             }
         }
     }
-    if old.sessionwiki_published
-        && let Some(found) = symlink_metadata_opt(&config.sessionwiki_db)?
-    {
-        verify_owned(
-            &config.sessionwiki_db,
-            &OwnedEntry {
-                path: config.sessionwiki_db.clone(),
-                identity: old.sessionwiki_identity,
-            },
-            &found,
-        )?;
-        for suffix in ["", "-wal", "-shm"] {
-            let mut name = config.sessionwiki_db.as_os_str().to_owned();
-            name.push(suffix);
-            doomed.push(PathBuf::from(name));
-        }
-    }
     if old.sessionwiki_pending {
         let pending = sessionwiki_pending_path(&config.sessionwiki_db);
         if let Some(found) = symlink_metadata_opt(&pending)? {
@@ -1629,19 +1611,42 @@ fn remove_empty_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The migrated index waiting beside the destination's own, and the exclusive
-/// hold on the destination's own that keeps anyone from opening it until the
-/// rename.
+/// The migrated index waiting beside the destination's index path, and the
+/// exclusive hold on an existing destination index that keeps anyone from
+/// opening it until the rename.
 struct PendingSessionWiki {
     pending_path: PathBuf,
-    _in_use: rusqlite::Connection,
+    overwrite: bool,
+    _in_use: Option<rusqlite::Connection>,
 }
 
-/// Where an overwriting index waits until the activation commit.
+/// Where the migrated index waits until the activation commit.
 fn sessionwiki_pending_path(db: &Path) -> PathBuf {
     let mut name = db.file_name().unwrap_or_default().to_owned();
     name.push(".mj-migrate-pending");
     db.with_file_name(name)
+}
+
+fn sessionwiki_sidecar_paths(db: &Path) -> [PathBuf; 2] {
+    ["-wal", "-shm"].map(|suffix| {
+        let mut name = db.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    })
+}
+
+/// A fresh destination must have no index and no journal files of one: a
+/// stale `-wal` would be replayed into the index placed next to it.
+fn ensure_no_sessionwiki(db: &Path) -> Result<()> {
+    for path in std::iter::once(db.to_path_buf()).chain(sessionwiki_sidecar_paths(db)) {
+        ensure!(
+            !exists(&path)?,
+            "the destination already has SessionWiki files ({}); remove them or pass \
+             --overwrite-sessionwiki to replace the index",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Fold the staged index's WAL into it so the index moves as one file. The
@@ -1667,10 +1672,12 @@ fn fold_staged_sessionwiki(raw: &Path, staged: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Place the staged SessionWiki index. A destination with no index of its own
-/// gets it directly. One the user asked to overwrite is not touched: the new
-/// index is installed beside it and returned as pending, to be renamed over it
-/// after the activation commit, so a failure before the commit loses nothing.
+/// Stage the migrated SessionWiki index beside its destination path, to be
+/// renamed into place after the activation commit. Until then the destination
+/// path is untouched: an index the user asked to overwrite stays as it is,
+/// exclusively locked, and a fresh destination stays empty, so nothing can
+/// open the migrated index and write to it only to lose those writes when a
+/// failed attempt is rolled back.
 fn publish_sessionwiki(
     config: &ReceiverConfig,
     stage: &Stage,
@@ -1680,84 +1687,82 @@ fn publish_sessionwiki(
     let raw = stage.raw(TransferScope::SessionWiki);
     let staged = raw.join(WIKI_DB);
     let db = &config.sessionwiki_db;
-    if record.sessionwiki_published
-        && let Some(found) = symlink_metadata_opt(db)?
-    {
-        // Placed by an earlier run of this publication; it must still be that one.
-        verify_owned(
-            db,
-            &OwnedEntry {
-                path: db.clone(),
-                identity: record.sessionwiki_identity,
-            },
-            &found,
-        )?;
-        return Ok(None);
-    }
     let parent = db
         .parent()
         .context("the SessionWiki index has no directory")?;
-    if request.overwrite_sessionwiki && exists(db)? {
-        let in_use = lock_existing_sessionwiki(db)?;
-        let pending = sessionwiki_pending_path(db);
-        let mut installed = false;
-        if record.sessionwiki_pending {
-            if let Some(found) = symlink_metadata_opt(&pending)? {
-                verify_owned(
-                    &pending,
-                    &OwnedEntry {
-                        path: pending.clone(),
-                        identity: record.sessionwiki_pending_identity,
-                    },
-                    &found,
-                )?;
-                installed = true;
-            } else {
-                record.sessionwiki_pending = false;
-            }
+    let in_use = if request.overwrite_sessionwiki {
+        if exists(db)? {
+            Some(lock_existing_sessionwiki(db)?)
+        } else {
+            None
         }
-        if !installed {
-            ensure!(exists(&staged)?, "the staged SessionWiki index is missing");
-            fold_staged_sessionwiki(&raw, &staged)?;
-            std::fs::create_dir_all(parent)?;
-            publish_entry_no_replace(&staged, &pending, PublishMode::Move, &mut || {
-                record.sessionwiki_pending = true;
-                record.sessionwiki_pending_identity = symlink_metadata_opt(&pending)?
-                    .as_ref()
-                    .and_then(FileIdentity::of);
-                stage.write_publication(record)
-            })?;
-            sync_directory(parent)?;
+    } else {
+        ensure_no_sessionwiki(db)?;
+        None
+    };
+    let pending = sessionwiki_pending_path(db);
+    let mut installed = false;
+    if record.sessionwiki_pending {
+        if let Some(found) = symlink_metadata_opt(&pending)? {
+            verify_owned(
+                &pending,
+                &OwnedEntry {
+                    path: pending.clone(),
+                    identity: record.sessionwiki_pending_identity,
+                },
+                &found,
+            )?;
+            installed = true;
+        } else {
+            record.sessionwiki_pending = false;
         }
-        return Ok(Some(PendingSessionWiki {
-            pending_path: pending,
-            _in_use: in_use,
-        }));
     }
-    ensure!(exists(&staged)?, "the staged SessionWiki index is missing");
-    fold_staged_sessionwiki(&raw, &staged)?;
-    std::fs::create_dir_all(parent)?;
-    publish_entry_no_replace(&staged, db, PublishMode::Move, &mut || {
-        record.sessionwiki_published = true;
-        record.sessionwiki_identity = symlink_metadata_opt(db)?
-            .as_ref()
-            .and_then(FileIdentity::of);
-        stage.write_publication(record)
-    })?;
-    Ok(None)
+    if !installed {
+        ensure!(exists(&staged)?, "the staged SessionWiki index is missing");
+        fold_staged_sessionwiki(&raw, &staged)?;
+        std::fs::create_dir_all(parent)?;
+        publish_entry_no_replace(&staged, &pending, PublishMode::Move, &mut || {
+            record.sessionwiki_pending = true;
+            record.sessionwiki_pending_identity = symlink_metadata_opt(&pending)?
+                .as_ref()
+                .and_then(FileIdentity::of);
+            stage.write_publication(record)
+        })?;
+        sync_directory(parent)?;
+    }
+    Ok(Some(PendingSessionWiki {
+        pending_path: pending,
+        overwrite: request.overwrite_sessionwiki,
+        _in_use: in_use,
+    }))
 }
 
-/// Rename the migrated index over the destination's, dropping the old index's
-/// leftover journal files first. The caller holds the old index exclusively.
-fn install_pending_sessionwiki(config: &ReceiverConfig, pending: &Path) -> Result<()> {
-    for suffix in ["-wal", "-shm"] {
-        let mut name = config.sessionwiki_db.as_os_str().to_owned();
-        name.push(suffix);
-        remove_path(Path::new(&name))?;
+/// Put the migrated index at its destination path. Replacing an index the user
+/// asked to overwrite drops its leftover journal files first and renames over
+/// it (the caller holds it exclusively). Otherwise nothing may be there:
+/// the install is atomic and refuses an index that appeared meanwhile.
+fn install_pending_sessionwiki(
+    config: &ReceiverConfig,
+    pending: &Path,
+    overwrite: bool,
+) -> Result<()> {
+    let db = &config.sessionwiki_db;
+    if overwrite {
+        for path in sessionwiki_sidecar_paths(db) {
+            remove_path(&path)?;
+        }
+        std::fs::rename(pending, db).with_context(|| format!("replace {}", db.display()))?;
+    } else {
+        for path in sessionwiki_sidecar_paths(db) {
+            ensure!(
+                !exists(&path)?,
+                "stale SessionWiki file at the destination: {}",
+                path.display()
+            );
+        }
+        publish_entry_no_replace(pending, db, PublishMode::Move, &mut || Ok(()))?;
     }
-    std::fs::rename(pending, &config.sessionwiki_db)
-        .with_context(|| format!("replace {}", config.sessionwiki_db.display()))?;
-    if let Some(parent) = config.sessionwiki_db.parent() {
+    if let Some(parent) = db.parent() {
         sync_directory(parent)?;
     }
     Ok(())
