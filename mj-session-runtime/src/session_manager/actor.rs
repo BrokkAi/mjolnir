@@ -97,13 +97,35 @@ async fn capture_harness_failure(
     .context("capture harness failure lifecycle revision")?
 }
 
-pub async fn run_session_actor(
+pub fn run_session_actor(
     target: RelaySessionTarget,
-    mut commands: mpsc::Receiver<ActorCommand>,
+    commands: mpsc::Receiver<ActorCommand>,
+    releases: mpsc::UnboundedReceiver<ReturnedConnection>,
+    retirement: watch::Receiver<bool>,
+    view_tx: watch::Sender<ManagedSessionView>,
+    updates: CoalescedUpdateSender,
+    worker_recovery: watch::Receiver<Option<WorkerRecoveryPlan>>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let commands = ActorCommandQueue::new(commands, target.session_id.clone());
+    run_session_actor_inner(
+        target,
+        commands,
+        releases,
+        retirement,
+        view_tx,
+        updates,
+        worker_recovery,
+    )
+}
+
+async fn run_session_actor_inner(
+    mut target: RelaySessionTarget,
+    mut commands: ActorCommandQueue,
     mut releases: mpsc::UnboundedReceiver<ReturnedConnection>,
     mut retirement: watch::Receiver<bool>,
     view_tx: watch::Sender<ManagedSessionView>,
     updates: CoalescedUpdateSender,
+    mut worker_recovery: watch::Receiver<Option<WorkerRecoveryPlan>>,
 ) {
     let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
@@ -130,6 +152,7 @@ pub async fn run_session_actor(
     // resumes when the storage owner changes its mind, not on a backoff.
     let mut storage_wait: Option<String> = None;
     let mut storage = crate::target_storage::subscribe();
+    let mut recovery_watch_open = true;
     let mut owner_changes = updates.session_gate.subscribe();
     let mut recovery_waiting = None;
     enum Event {
@@ -142,8 +165,15 @@ pub async fn run_session_actor(
         Command(Option<Box<ActorCommand>>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
         Storage(std::result::Result<(), watch::error::RecvError>),
+        RecoveryChanged(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
+        if storage_wait.is_some() && worker_recovery.has_changed().unwrap_or(false) {
+            storage_wait = None;
+            last_recovery_probe = None;
+            schedule.after(Duration::ZERO);
+        }
+        target.worker_recovery = worker_recovery.borrow_and_update().clone();
         let usable = connection.is_some() && !lifecycle.is_leased();
         if usable != profile_connection_usable {
             updates
@@ -203,6 +233,7 @@ pub async fn run_session_actor(
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
+                    changed = worker_recovery.changed(), if storage_wait.is_some() && recovery_watch_open => Event::RecoveryChanged(changed),
                 }
             } => event,
         };
@@ -256,7 +287,17 @@ pub async fn run_session_actor(
                 }
             }
 
+            Event::RecoveryChanged(changed) => {
+                if changed.is_err() {
+                    recovery_watch_open = false;
+                } else {
+                    storage_wait = None;
+                    last_recovery_probe = None;
+                    schedule.after(Duration::ZERO);
+                }
+            }
             Event::Storage(changed) => {
+                target.worker_recovery = worker_recovery.borrow_and_update().clone();
                 storage.borrow_and_update();
                 let Some(host) = storage_wait.as_deref() else {
                     continue;
@@ -470,6 +511,7 @@ pub async fn run_session_actor(
                         schedule.after(RECONNECT_INTERVAL);
                     }
                     Err(error) => {
+                        target.worker_recovery = worker_recovery.borrow_and_update().clone();
                         harness_readiness.lost_contact();
                         connection = None;
                         updates.publish_cpu(&target.session_id, None);
@@ -504,7 +546,6 @@ pub async fn run_session_actor(
                             .as_ref()
                             .filter(|_| !integrity && failures >= UNREACHABLE_FAILURE_THRESHOLD)
                             .and_then(|plan| restart_storage_problem(plan, &target.session_id));
-                        let recovery_due = recovery_due && storage_problem.is_none();
                         if integrity || failures >= UNREACHABLE_FAILURE_THRESHOLD {
                             // Bind the clone first: borrowing inside the call
                             // would hold the watch read guard while
@@ -572,6 +613,14 @@ pub async fn run_session_actor(
                             );
                             break;
                         }
+                        // The durable outcome lookup above can yield while the
+                        // manager publishes a newer recovery plan.
+                        target.worker_recovery = worker_recovery.borrow_and_update().clone();
+                        let storage_problem = target
+                            .worker_recovery
+                            .as_ref()
+                            .filter(|_| !integrity && failures >= UNREACHABLE_FAILURE_THRESHOLD)
+                            .and_then(|plan| restart_storage_problem(plan, &target.session_id));
                         if let Some((host, _)) = storage_problem {
                             tracing::warn!(
                                 session_id = target.session_id,
@@ -811,7 +860,16 @@ pub async fn run_session_actor(
                         operation = command.operation_name(),
                         "rejecting relay operation while session target changes"
                     );
-                    command.reject(&target.session_id, "session target is changing");
+                    match command {
+                        ActorCommand::RelayJob { job } => {
+                            credentials_owed |= job.wake_when_usable();
+                            job.refuse(
+                                RelayJobDeferred(crate::session_manager::RELAY_JOB_TARGET_CHANGING)
+                                    .into(),
+                            );
+                        }
+                        command => command.reject(&target.session_id, "session target is changing"),
+                    }
                     continue;
                 }
                 if let Some(ViewError::TargetMissing(detail)) = view_tx.borrow().error.as_ref()
@@ -1327,6 +1385,11 @@ pub async fn run_session_actor(
             }
         }
     }
+    // A submission still in the command queue never reached the relay. Say
+    // so, instead of dropping its reply, which its caller would have to read
+    // as possibly delivered: a sub-agent's `send_message` resends a prompt only
+    // when it knows the first one was not delivered.
+    commands.close_and_drain();
     updates
         .credential_wakes
         .invalidate_profile(&target.session_id);
@@ -1361,22 +1424,6 @@ pub async fn run_session_actor(
                 session_id = %target.session_id,
                 operation = "submit",
                 "deferred submit shutdown receiver was already closed"
-            );
-        }
-    }
-    // A submission still in the command queue never reached the relay. Say
-    // so, instead of dropping its reply, which its caller would have to read
-    // as possibly delivered: a sub-agent's `send_message` resends a prompt only
-    // when it knows the first one was not delivered.
-    commands.close();
-    while let Ok(command) = commands.try_recv() {
-        if let ActorCommand::Submit { reply, .. } = command
-            && reply.send(Err("session manager stopped".into())).is_err()
-        {
-            tracing::debug!(
-                session_id = %target.session_id,
-                operation = "submit",
-                "queued submit shutdown receiver was already closed"
             );
         }
     }
