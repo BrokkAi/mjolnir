@@ -4164,6 +4164,42 @@ fn live_recovery_prefers_a_selectable_provider_model_over_the_previous_selection
         let restored = materialized_session_from_canonical("model-recovery", &canonical).unwrap();
         assert_eq!(restored.configuration.values["model"], json!(expected));
     }
+
+    // Non-select options carrying a canonical category (such as a boolean
+    // thought_level toggle) keep their raw provider value during live recovery.
+    let replay = MaterializedSession::empty("boolean-effort-recovery");
+    let mut worker = RelaySnapshot::new("boolean-effort-recovery".into());
+    let next = event(
+        &replay,
+        RelayObservation::SessionUpdate {
+            update: Box::new(
+                serde_json::from_value(json!({
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [{
+                        "id": "thinking",
+                        "name": "Thinking",
+                        "category": "thought_level",
+                        "type": "boolean",
+                        "currentValue": true
+                    }]
+                }))
+                .unwrap(),
+            ),
+        },
+    );
+    apply_relay_event(&mut worker, &next).unwrap();
+    let baseline = LiveSessionBaseline {
+        state: worker.operational_state(),
+        queue: vec![],
+        questions: vec![],
+        unavailable_questions: 0,
+        native_agent_replay: None,
+        native_use_evidence: None,
+        delivered_initial_prompts: vec![],
+    };
+    let recovered = materialized_session_from_live_baseline(&baseline).unwrap();
+    assert_eq!(recovered.configuration.values["thinking"], json!(true));
+    assert_eq!(recovered.configuration.values["effort"], json!(true));
 }
 
 // Hard-won: e06c07a69: mailbox wakes have an active owner but no user row to mark their interruption.

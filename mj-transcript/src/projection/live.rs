@@ -29,22 +29,37 @@ pub fn materialized_session_from_live_baseline(
         if let Some(option) =
             mj_core::acp::find_session_config_option(&state.config_options, canonical)
         {
-            if let Some(value) = effective_value {
-                let value = Value::String(value);
-                projection
-                    .configuration
-                    .values
-                    .insert(option.id.to_string(), value.clone());
+            if matches!(
+                option.kind,
+                agent_client_protocol::v1::schema::SessionConfigKind::Select(_)
+            ) {
+                if let Some(value) = effective_value {
+                    let value = Value::String(value);
+                    projection
+                        .configuration
+                        .values
+                        .insert(option.id.to_string(), value.clone());
+                    projection
+                        .configuration
+                        .values
+                        .insert(canonical.into(), value);
+                } else {
+                    projection
+                        .configuration
+                        .values
+                        .remove(&option.id.to_string());
+                    projection.configuration.values.remove(canonical);
+                }
+            } else if let Some(value) = projection
+                .configuration
+                .values
+                .get(&option.id.to_string())
+                .cloned()
+            {
                 projection
                     .configuration
                     .values
                     .insert(canonical.into(), value);
-            } else {
-                projection
-                    .configuration
-                    .values
-                    .remove(&option.id.to_string());
-                projection.configuration.values.remove(canonical);
             }
         }
     }
