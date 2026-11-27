@@ -471,8 +471,8 @@ pub fn roll_forward_pending_reload_if_any(root: &Path) -> Result<Option<String>>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    retire_abandoned_candidates(root)?;
-    spawn_abandoned_candidate_cleanup(root)?;
+    retire_abandoned_candidates(root);
+    spawn_abandoned_candidate_cleanup(root);
     Ok(operation)
 }
 
@@ -482,70 +482,129 @@ const ABANDONED_CANDIDATES_DIR: &str = "abandoned-reload-candidates";
 /// worker serves reload requests. The renames are O(1); deletion happens later
 /// on a detached thread. A candidate that appears after this snapshot stays
 /// live and is never touched by the abandoned cleanup.
-fn retire_abandoned_candidates(root: &Path) -> Result<()> {
+fn retire_abandoned_candidates(root: &Path) {
     let live = root.join(RELOAD_CANDIDATES_DIR);
     match std::fs::symlink_metadata(&live) {
-        Ok(metadata) => ensure!(
-            metadata.is_dir() && !metadata.file_type().is_symlink(),
-            "reload candidates root is not a directory"
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            tracing::warn!(
+                path = %live.display(),
+                "reload candidates root is not a directory; leaving abandoned candidates in place"
+            );
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                path = %live.display(),
+                %error,
+                "could not inspect reload candidates root; leaving abandoned candidates in place"
+            );
+            return;
+        }
     }
     let abandoned = root.join(ABANDONED_CANDIDATES_DIR);
     match std::fs::symlink_metadata(&abandoned) {
-        Ok(metadata) => ensure!(
-            metadata.is_dir() && !metadata.file_type().is_symlink(),
-            "abandoned reload candidates root is not a directory"
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(&abandoned)?;
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            tracing::warn!(
+                path = %abandoned.display(),
+                "abandoned reload candidates root is not a directory; leaving abandoned candidates in place"
+            );
+            return;
         }
-        Err(error) => return Err(error.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(error) = std::fs::create_dir(&abandoned) {
+                tracing::warn!(
+                    path = %abandoned.display(),
+                    %error,
+                    "could not create abandoned reload candidates root; leaving abandoned candidates in place"
+                );
+                return;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %abandoned.display(),
+                %error,
+                "could not inspect abandoned reload candidates root; leaving abandoned candidates in place"
+            );
+            return;
+        }
     }
-    let entries = std::fs::read_dir(&live)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    let entries = match std::fs::read_dir(&live)
+        .and_then(|entries| entries.collect::<std::result::Result<Vec<_>, _>>())
+    {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                path = %live.display(),
+                %error,
+                "could not scan reload candidates; leaving abandoned candidates in place"
+            );
+            return;
+        }
+    };
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    // The destination deliberately omits the entry name: a long candidate name
+    // may not fit in one component. The sequence keeps destinations unique
+    // across entries.
+    let mut sequence = 0_u64;
     for entry in entries {
-        let name = entry.file_name();
-        let mut attempt = 0_u64;
         loop {
             let destination = abandoned.join(format!(
-                "{}.abandoned-{}-{nonce}-{attempt}",
-                name.to_string_lossy(),
+                "abandoned-{}-{nonce}-{sequence}",
                 std::process::id()
             ));
             match std::fs::rename(entry.path(), &destination) {
-                Ok(()) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Ok(()) => {
+                    sequence = sequence.wrapping_add(1);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    sequence = sequence.wrapping_add(1);
+                    break;
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
                         std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
                     ) =>
                 {
-                    attempt = attempt.wrapping_add(1);
-                    continue;
+                    // Retry only when the destination really exists; any other
+                    // error with this shape is this entry's failure.
+                    if destination.exists() {
+                        sequence = sequence.wrapping_add(1);
+                        continue;
+                    }
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "could not retire an abandoned reload candidate; leaving it in place"
+                    );
+                    sequence = sequence.wrapping_add(1);
+                    break;
                 }
                 Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "retire abandoned reload candidate {}",
-                            entry.path().display()
-                        )
-                    });
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "could not retire an abandoned reload candidate; leaving it in place"
+                    );
+                    sequence = sequence.wrapping_add(1);
+                    break;
                 }
             }
         }
     }
-    Ok(())
 }
 
 /// Delete the worker-owned abandoned trees after the renames are complete.
 /// Startup only schedules this; a large tree cannot delay opening the bridge.
-fn spawn_abandoned_candidate_cleanup(root: &Path) -> Result<()> {
+fn spawn_abandoned_candidate_cleanup(root: &Path) {
     let abandoned = root.join(ABANDONED_CANDIDATES_DIR);
     if let Err(error) = std::thread::Builder::new()
         .name("abandoned-candidate-gc".into())
@@ -558,7 +617,6 @@ fn spawn_abandoned_candidate_cleanup(root: &Path) -> Result<()> {
             "could not start abandoned reload candidate cleanup; the next worker start will retry"
         );
     }
-    Ok(())
 }
 
 /// Best-effort deletion of the entries in an abandoned directory. The caller
@@ -607,7 +665,13 @@ fn remove_abandoned_entry(path: &Path) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        remove_tree::remove_dir_all(path)?;
+        match remove_tree::remove_dir_all(path)? {
+            RemoveOutcome::Removed => {}
+            RemoveOutcome::Leftovers { path } => tracing::warn!(
+                path = %path.display(),
+                "could not empty an abandoned reload candidate; the next worker start will retry"
+            ),
+        }
         return Ok(());
     }
     match std::fs::remove_file(path) {
@@ -1677,9 +1741,9 @@ mod tests {
         std::fs::create_dir_all(&candidates).unwrap();
         let stray = candidates.join("stray");
         std::fs::write(&stray, b"x").unwrap();
-        retire_abandoned_candidates(root.path()).unwrap();
+        retire_abandoned_candidates(root.path());
         assert!(!stray.exists(), "the stray stayed in the live namespace");
-        spawn_abandoned_candidate_cleanup(root.path()).unwrap();
+        spawn_abandoned_candidate_cleanup(root.path());
         wait_for_dir_empty(&root.path().join(ABANDONED_CANDIDATES_DIR));
     }
 
@@ -1724,6 +1788,28 @@ mod tests {
         assert!(!abandoned.join("sweepable").exists());
     }
 
+    // Hard-won: b15961b: abandoned-candidate retirement failure blocked worker startup
+    #[test]
+    fn abandoned_candidate_retirement_failure_does_not_block_startup() {
+        let root = tempfile::tempdir().unwrap();
+        let candidates = root.path().join(RELOAD_CANDIDATES_DIR);
+        std::fs::create_dir_all(candidates.join("leftover")).unwrap();
+        std::fs::write(candidates.join("leftover/launch.json"), b"x").unwrap();
+        std::fs::write(
+            root.path().join(ABANDONED_CANDIDATES_DIR),
+            b"not a directory",
+        )
+        .unwrap();
+        assert_eq!(
+            roll_forward_pending_reload_if_any(root.path()).unwrap(),
+            None
+        );
+        assert!(
+            candidates.join("leftover").exists(),
+            "the leftover candidate must still be reported"
+        );
+    }
+
     #[test]
     fn abandoned_candidates_leave_the_live_namespace_before_cleanup() {
         let root = tempfile::tempdir().unwrap();
@@ -1731,7 +1817,7 @@ mod tests {
         std::fs::create_dir_all(candidates.join("candidate")).unwrap();
         std::fs::write(candidates.join("candidate/launch.json"), b"x").unwrap();
         std::fs::write(candidates.join("stray"), b"x").unwrap();
-        retire_abandoned_candidates(root.path()).unwrap();
+        retire_abandoned_candidates(root.path());
         assert!(
             std::fs::read_dir(&candidates).unwrap().next().is_none(),
             "no live candidate may remain when the worker starts serving"
@@ -2049,7 +2135,9 @@ fn reload_commit_orphan_sweep_refuses_a_linked_candidates_root() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("keep"), "outside data").unwrap();
     std::os::unix::fs::symlink(outside.path(), root.path().join(RELOAD_CANDIDATES_DIR)).unwrap();
-    assert!(roll_forward_pending_reload_if_any(root.path()).is_err());
+    // The sweep is garbage collection; refusing to follow the link must warn
+    // and let startup continue.
+    assert!(roll_forward_pending_reload_if_any(root.path()).is_ok());
     assert_eq!(
         std::fs::read(outside.path().join("keep")).unwrap(),
         b"outside data"
