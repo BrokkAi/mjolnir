@@ -1574,11 +1574,6 @@ async fn run_session_actor_inner(
             }
         }
     }
-    // A submission still in the command queue never reached the relay. Say
-    // so, instead of dropping its reply, which its caller would have to read
-    // as possibly delivered: a sub-agent's `send_message` resends a prompt only
-    // when it knows the first one was not delivered.
-    commands.close_and_drain();
     updates
         .credential_wakes
         .invalidate_profile(&target.session_id);
@@ -1616,6 +1611,11 @@ async fn run_session_actor_inner(
             );
         }
     }
+    // Close and drain only after relay cleanup finishes so `reconcile_actors`
+    // does not see a closed queue and spawn a replacement before detach ends.
+    // A submission or relay job still queued never reached the relay; Drop on
+    // `ActorCommandQueue` also runs this if the actor is cancelled mid-cleanup.
+    commands.close_and_drain();
 }
 
 /// Submit one relay command and publish the resulting snapshot. Live and
