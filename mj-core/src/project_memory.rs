@@ -572,7 +572,17 @@ fn lock_canonical(root: &Path) -> Result<crate::file_lock::FileLock> {
 // while the file is absent. Redirect metadata is beside the directory.
 fn load_canonical_locked(root: &Path) -> Result<CanonicalMemory> {
     let path = canonical_file(root)?;
-    match fs::read(&path) {
+    let parent = path.parent().context("canonical file has no parent")?;
+    // A fixed intermediate name makes the rename recoverable if the daemon
+    // stops before writing the canonical file or naming the final backup.
+    let pending = parent.join(".memory-migration-pending");
+    if pending.try_exists()? && root.try_exists()? {
+        anyhow::bail!(
+            "both project memory and a pending migration exist in {}",
+            parent.display()
+        );
+    }
+    let (state, migrated) = match fs::read(&path) {
         Ok(bytes) => {
             let state: CanonicalMemory = serde_json::from_slice(&bytes)
                 .with_context(|| format!("decode {}", path.display()))?;
@@ -581,15 +591,45 @@ fn load_canonical_locked(root: &Path) -> Result<CanonicalMemory> {
                 "project memory version does not match tree in {}",
                 path.display()
             );
-            Ok(state)
+            (state, false)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let state = CanonicalMemory::new(ProjectMemoryStore::new(root).snapshot()?);
+            let source = if pending.try_exists()? {
+                &pending
+            } else {
+                root
+            };
+            let state = CanonicalMemory::new(ProjectMemoryStore::new(source).snapshot()?);
+            if source == root && root.try_exists()? {
+                fs::rename(root, &pending).context("preserve legacy project memory")?;
+            }
             write_canonical_locked(root, &state)?;
-            Ok(state)
+            (state, true)
         }
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let preserved_legacy = pending.try_exists()?;
+    if preserved_legacy {
+        let mut backup = parent.join("memory.pre-migration");
+        let mut suffix = 1_u64;
+        loop {
+            match fs::symlink_metadata(&backup) {
+                Ok(_) => {
+                    backup = parent.join(format!("memory.pre-migration.{suffix}"));
+                    suffix += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error).context("inspect project memory backup path"),
+            }
+        }
+        fs::rename(&pending, &backup).context("finish legacy project memory backup")?;
     }
+    if (migrated || preserved_legacy)
+        && let Err(error) = render_memory_tree(root, &state.tree, true)
+    {
+        tracing::warn!(project = %project_key(root), %error, "project memory render failed after migration");
+    }
+    Ok(state)
 }
 
 fn write_canonical_locked(root: &Path, state: &CanonicalMemory) -> Result<()> {
@@ -1291,6 +1331,7 @@ fn initialize_one_canonical_memory(project: &Path) -> Result<()> {
     let original = project.join("memory");
     if !original.try_exists()?
         && !project.join("memory.json").try_exists()?
+        && !project.join(".memory-migration-pending").try_exists()?
         && !project.join("memory-redirect.json").try_exists()?
     {
         return Ok(());
@@ -1793,16 +1834,22 @@ mod tests {
         store
             .replace_tree(&ProjectMemorySnapshot::default())
             .unwrap();
-        // Writing a document under the link is refused instead of followed.
+        // Store writes refuse the link; rendering unlinks it and creates a
+        // real directory without following it.
         let write = ProjectMemorySnapshot {
             files: BTreeMap::from([("/notes/a.md".into(), "sync content".into())]),
         };
         assert!(store.replace_tree(&write).is_err());
         assert!(store.install_snapshot(&write).is_err());
-        assert!(render_memory_tree(&root, &write, false).is_err());
+        render_memory_tree(&root, &write, false).unwrap();
 
         assert_eq!(fs::read_to_string(outside.join("a.md")).unwrap(), "victim");
-        assert!(root.join("notes").is_symlink());
+        assert!(root.join("notes").is_dir());
+        assert!(!root.join("notes").is_symlink());
+        assert_eq!(
+            fs::read_to_string(root.join("notes/a.md")).unwrap(),
+            "sync content"
+        );
     }
 
     // Hard-won: a5d320817: memory trees above one MiB prevented Move, Suspend and recovery checkpoints.
@@ -2017,9 +2064,35 @@ mod tests {
         // that takes its name. The render owns everything inside it.
         fs::create_dir_all(root.join("topic")).unwrap();
         fs::write(root.join("topic/.secret"), "secret").unwrap();
+        fs::create_dir_all(root.parent().unwrap().join("memory.pre-migration")).unwrap();
         let bad = projects.join("bad-utf8/memory");
         fs::create_dir_all(&bad).unwrap();
         fs::write(bad.join("note.md"), [0xff, 0xfe]).unwrap();
+        // Resume after a crash between preserving the old directory and the
+        // canonical file commit.
+        let recovering = projects.join("recovering");
+        let pending = recovering.join(".memory-migration-pending");
+        fs::create_dir_all(pending.join("notes")).unwrap();
+        fs::write(pending.join("notes/a.md"), "recover me").unwrap();
+        fs::write(pending.join("notes/.hidden"), "keep me").unwrap();
+        let lazy = projects.join("lazy/memory");
+        fs::create_dir_all(lazy.join("notes")).unwrap();
+        fs::write(lazy.join("notes/a.md"), "lazy migration").unwrap();
+        fs::write(lazy.join("notes/.hidden"), "preserved").unwrap();
+        read_canonical(&lazy).unwrap();
+        assert_eq!(
+            fs::read_to_string(lazy.join("notes/a.md")).unwrap(),
+            "lazy migration"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                lazy.parent()
+                    .unwrap()
+                    .join("memory.pre-migration/notes/.hidden")
+            )
+            .unwrap(),
+            "preserved"
+        );
         let alias = projects.join("alias/memory");
         fs::create_dir_all(alias.parent().unwrap()).unwrap();
         fs::write(
@@ -2029,8 +2102,29 @@ mod tests {
         .unwrap();
         let expected = ProjectMemoryStore::new(&root).snapshot().unwrap();
         initialize_canonical_memories(&projects).unwrap();
+        assert_eq!(
+            fs::read_to_string(recovering.join("memory/notes/a.md")).unwrap(),
+            "recover me"
+        );
+        assert_eq!(
+            fs::read_to_string(recovering.join("memory.pre-migration/notes/.hidden")).unwrap(),
+            "keep me"
+        );
         assert_eq!(read_canonical(&root).unwrap(), expected);
-        assert_eq!(fs::read_to_string(root.join(".hidden")).unwrap(), "hidden");
+        let backup = root.parent().unwrap().join("memory.pre-migration.1");
+        assert_eq!(
+            fs::read_to_string(backup.join(".hidden")).unwrap(),
+            "hidden"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("sub/.hidden")).unwrap(),
+            "nested hidden"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("topic/.secret")).unwrap(),
+            "secret"
+        );
+        assert!(!root.join(".hidden").exists());
         assert!(!root.join("topic").exists());
         assert!(
             read_canonical(&bad).is_err(),

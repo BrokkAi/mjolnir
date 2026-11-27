@@ -1898,7 +1898,7 @@ mod staged_in_place_tests {
             fixture.controller.apply_in_place_destination(&operation).unwrap();
             let backend = mj_core::targets::TargetLocator::LocalBare { worker_root: fixture.worker_root.to_string_lossy().into_owned() };
             let candidate = mj_core::relay::new_command_id("cancel-candidate").unwrap();
-            owner.scope_blocking(|| fixture.controller.prepare_worker_files_for(LATCH_RELAY_SESSION, &backend, fixture.worker_root.to_str().unwrap(), &executor, mj_worker_staging::worker_binary::WorkerFilePreparation::StageCandidate { operation_id: operation.operation_id.clone(), expected_store_id: store.clone(), candidate_id: candidate.clone() }, mj_worker_staging::worker_binary::LaunchHistory::Stored)).unwrap();
+            owner.scope_blocking(|| fixture.controller.prepare_worker_files_for(LATCH_RELAY_SESSION, &backend, fixture.worker_root.to_str().unwrap(), &executor, mj_worker_staging::worker_binary::WorkerFilePreparation::StageCandidate { operation_id: operation.operation_id.clone(), expected_store_id: store.clone(), candidate_id: candidate.clone(), worker_protocol: mj_core::relay::RELAY_PROTOCOL_VERSION }, mj_worker_staging::worker_binary::LaunchHistory::Stored)).unwrap();
             let launch = fixture.controller.current_worker_launch_config(LATCH_RELAY_SESSION, &backend).unwrap();
             let conn = relay.0.as_mut().unwrap().connection_mut();
             conn.client.restart_harness_in_place(&operation.operation_id, &store, Box::new(launch), Some(candidate)).await.unwrap();

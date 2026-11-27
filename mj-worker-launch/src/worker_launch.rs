@@ -364,7 +364,22 @@ pub fn stage_worker_files_for(
     if profile.kind == mj_core::config::HarnessKind::Claude {
         configure_claude_mailbox_hook(&profile_stage, worker_root)?;
     }
-    let shared_paths: Vec<&Path> = shared_profile_paths(profile.kind);
+    let mut shared_paths: Vec<&Path> = shared_profile_paths(profile.kind);
+    if let (
+        WorkerFilePreparation::StageCandidate {
+            worker_protocol, ..
+        },
+        Some(memory),
+    ) = (&preparation, &project_memory)
+        && *worker_protocol < mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL
+    {
+        shared_paths.extend(stage_legacy_candidate_memory(
+            memory,
+            Path::new(&target_profile_home),
+            &profile_stage,
+            &seed_stage,
+        )?);
+    }
     // A session without project memory gets no replica, no baseline and
     // no history server: nothing of the workspace's memory reaches it.
     if let Some(project_memory) = &project_memory
@@ -408,6 +423,7 @@ pub fn stage_worker_files_for(
         operation_id,
         expected_store_id,
         candidate_id,
+        worker_protocol,
     } = &preparation
     {
         use mj_core::worker_launch::{ReloadCandidateManifest, ReloadSharedLogin};
@@ -445,7 +461,9 @@ pub fn stage_worker_files_for(
                 shared_paths: &shared_paths,
             },
         )?;
-        if let Some(memory) = &project_memory {
+        if *worker_protocol >= mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL
+            && let Some(memory) = &project_memory
+        {
             install_memory_seed(
                 executor,
                 backend,
@@ -543,6 +561,20 @@ pub fn stage_worker_files_for(
             .context("install shared machine build cache configuration")?;
     }
     Ok((Some(launch), staged_profile))
+}
+
+// Remove this compatibility path once workers older than seed installation are gone.
+fn stage_legacy_candidate_memory<'a>(
+    memory: &'a ProjectMemoryLaunchConfig,
+    target_profile_home: &Path,
+    profile_stage: &Path,
+    seed: &Path,
+) -> Result<[&'a Path; 2]> {
+    let replica = memory.root.strip_prefix(target_profile_home)?;
+    let baseline = memory.baseline_root.strip_prefix(target_profile_home)?;
+    copy_profile_entry(seed, &profile_stage.join(replica))?;
+    copy_profile_entry(seed, &profile_stage.join(baseline))?;
+    Ok([replica, baseline])
 }
 
 /// Stage and verify the session's mbx, then install marked launchers in
@@ -1423,7 +1455,7 @@ mod tests {
             let no_host_mbx = dir.path().join("no-host-mbx");
             std::fs::create_dir(&no_host_mbx).unwrap();
             for utility in [
-                "mkdir", "cp", "chmod", "sh", "rm", "ln", "find", "dirname", "cat",
+                "mkdir", "cp", "chmod", "sh", "rm", "ln", "find", "dirname", "cat", "tar",
             ] {
                 let executable = ["/usr/bin", "/bin"]
                     .into_iter()
@@ -1448,6 +1480,7 @@ mod tests {
                     operation_id: "move".into(),
                     expected_store_id: "store".into(),
                     candidate_id: "candidate".into(),
+                    worker_protocol: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 },
                 LaunchHistory::Stored,
             )
@@ -1461,6 +1494,56 @@ mod tests {
         }
         let candidate = root.join("reload-candidates/candidate");
         let launch = WorkerLaunchConfig::read(&candidate.join("launch.json")).unwrap();
+        let memory = launch.project_memory.as_ref().unwrap();
+        let canonical = canonical_memory_root(&memory.project_key);
+        let current = mj_core::project_memory::read_canonical_state(&canonical).unwrap();
+        let tree = mj_core::project_memory::ProjectMemorySnapshot {
+            files: [("/MEMORY.md".into(), "staged memory".into())].into(),
+        };
+        mj_core::project_memory::commit_canonical(&canonical, &current, id, &tree, None).unwrap();
+        // Seed installation was introduced at this protocol boundary.
+        for (candidate_id, protocol, legacy) in [
+            (
+                "old-worker",
+                mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL - 1,
+                true,
+            ),
+            ("new-worker", mj_core::relay::RELAY_PROTOCOL_VERSION, false),
+        ] {
+            crate::database::test_fixtures::worker_test_scope(id, || {
+                prepare_worker_files_for(
+                    &config,
+                    &state,
+                    id,
+                    &backend,
+                    root.to_str().unwrap(),
+                    &mj_core::targets::ProcessExecutor,
+                    WorkerFilePreparation::StageCandidate {
+                        operation_id: "move".into(),
+                        expected_store_id: "store".into(),
+                        candidate_id: candidate_id.into(),
+                        worker_protocol: protocol,
+                    },
+                    LaunchHistory::Stored,
+                )
+                .unwrap();
+            });
+            let overlay = root
+                .join("reload-candidates")
+                .join(candidate_id)
+                .join("profile");
+            for path in [&memory.root, &memory.baseline_root] {
+                let staged_tree = overlay.join(path.strip_prefix(&home).unwrap());
+                if legacy {
+                    assert_eq!(
+                        std::fs::read_to_string(staged_tree.join("MEMORY.md")).unwrap(),
+                        "staged memory"
+                    );
+                } else {
+                    assert!(!staged_tree.exists());
+                }
+            }
+        }
         assert_eq!(launch.accepted_reload_operation_id.as_deref(), Some("move"));
         for name in [
             "launch.json",
