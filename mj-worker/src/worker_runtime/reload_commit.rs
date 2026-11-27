@@ -203,6 +203,22 @@ pub fn apply_committed_reload(
     root: &Path,
     pending: &PendingInPlaceReload,
 ) -> Result<ReloadCandidateManifest> {
+    apply_committed_reload_with(root, pending, remove_applied_candidate)
+}
+
+/// Apply an already-committed reload, then hand the consumed candidate to
+/// `remove_candidate`.
+///
+/// The candidate is garbage by the time `remove_candidate` runs: the overlay is
+/// in the live home, `ownership.json` and `launch.json` are published, and
+/// `pending-reload.json` is gone. Its removal therefore cannot decide whether
+/// the reload succeeded; startup sweeps whatever a failed removal leaves.
+/// `remove_candidate` is a parameter so tests can exercise that boundary.
+fn apply_committed_reload_with(
+    root: &Path,
+    pending: &PendingInPlaceReload,
+    remove_candidate: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<ReloadCandidateManifest> {
     let manifest = validate_candidate(
         root,
         &pending.candidate_id,
@@ -314,8 +330,28 @@ pub fn apply_committed_reload(
     mj_core::config::sync_directory(root)?;
     std::fs::remove_file(root.join(PENDING_RELOAD_FILE))?;
     mj_core::config::sync_directory(root)?;
-    std::fs::remove_dir_all(candidate)?;
+    // The reload is committed and `pending-reload.json` is gone. The candidate
+    // is garbage now, so failing to delete it must not turn a completed profile
+    // switch into a failed Move: a process that recreates an entry while this
+    // walk runs makes `remove_dir_all` return ENOTEMPTY, and that failure used
+    // to put a live session in Error with no recovery path (#1712). Worker
+    // startup sweeps whatever is left.
+    if let Err(error) = remove_candidate(&candidate) {
+        tracing::warn!(
+            candidate = %candidate.display(),
+            %error,
+            "could not remove the applied reload candidate; the next worker start will sweep it"
+        );
+    }
     Ok(manifest)
+}
+
+fn remove_applied_candidate(candidate: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(candidate) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn roll_forward_pending_reload_if_any(root: &Path) -> Result<Option<String>> {
@@ -328,6 +364,27 @@ pub fn roll_forward_pending_reload_if_any(root: &Path) -> Result<Option<String>>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    sweep_abandoned_candidates(root)?;
+    Ok(operation)
+}
+
+/// Remove every leftover candidate after there is no `pending-reload.json`.
+///
+/// These are garbage from an applied reload whose cleanup failed, or from a
+/// pre-commit attempt that was abandoned. An entry that will not delete must
+/// not fail worker startup: a recursive delete can return `ENOTEMPTY` when
+/// another process recreates an entry while it walks the tree, and failing here
+/// stranded the session instead of letting it serve on its already-committed
+/// launch. Removal is retried on the next worker start and when the worker root
+/// goes. A candidates root that is not a real directory is still refused.
+fn sweep_abandoned_candidates(root: &Path) -> Result<()> {
+    sweep_abandoned_candidates_with(root, remove)
+}
+
+fn sweep_abandoned_candidates_with(
+    root: &Path,
+    remove_entry: impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
     let candidates = root.join(RELOAD_CANDIDATES_DIR);
     match std::fs::symlink_metadata(&candidates) {
         Ok(metadata) => {
@@ -336,13 +393,20 @@ pub fn roll_forward_pending_reload_if_any(root: &Path) -> Result<Option<String>>
                 "reload candidates root is not a directory"
             );
             for entry in std::fs::read_dir(candidates)? {
-                remove(&entry?.path())?;
+                let entry = entry?;
+                if let Err(error) = remove_entry(&entry.path()) {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "could not remove an abandoned reload candidate; the next worker start will retry"
+                    );
+                }
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
-    Ok(operation)
+    Ok(())
 }
 
 const RETIRED_LOGINS: &str = "retired-logins";
@@ -1283,6 +1347,65 @@ mod tests {
             candidate_id: "candidate".into(),
             git_setup_name: Some("harness-git-candidate".into()),
         }
+    }
+
+    // Hard-won: #1712: a committed in-place Move was reported failed, and its
+    // session put in Error, because removing the consumed candidate returned
+    // ENOTEMPTY after the destination profile and launch were already published.
+    #[test]
+    fn committed_reload_survives_a_candidate_that_cannot_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pending = fixture(root);
+        commit_pending_reload(root, &pending).unwrap();
+        let candidate = root.join(RELOAD_CANDIDATES_DIR).join(&pending.candidate_id);
+        let removed = apply_committed_reload_with(root, &pending, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty))
+        })
+        .expect("a garbage candidate must not unsettle the committed reload");
+        assert_eq!(removed.candidate_id, pending.candidate_id);
+        assert!(
+            candidate.is_dir(),
+            "a failed cleanup leaves the candidate for the next worker start"
+        );
+        assert!(!root.join(PENDING_RELOAD_FILE).exists());
+        assert_eq!(
+            std::fs::read(root.join("launch.json")).unwrap(),
+            b"destination launch"
+        );
+        assert_eq!(
+            std::fs::read(root.join("home/config.toml")).unwrap(),
+            b"destination"
+        );
+        // The next worker start sweeps the leftover and serves the committed
+        // launch instead of failing startup.
+        assert_eq!(roll_forward_pending_reload_if_any(root).unwrap(), None);
+        assert!(!candidate.exists());
+    }
+
+    // Hard-won: #1712: a leftover reload candidate that would not delete made
+    // worker startup report "recover committed harness reload: Directory not
+    // empty", so a session whose profile switch had committed could not start.
+    #[test]
+    fn an_abandoned_candidate_that_will_not_delete_does_not_fail_worker_start() {
+        let root = tempfile::tempdir().unwrap();
+        let candidates = root.path().join(RELOAD_CANDIDATES_DIR);
+        std::fs::create_dir_all(candidates.join("stuck")).unwrap();
+        std::fs::write(candidates.join("stuck/keep"), b"keep").unwrap();
+        std::fs::create_dir_all(candidates.join("sweepable")).unwrap();
+        std::fs::write(candidates.join("sweepable/old"), b"old").unwrap();
+        sweep_abandoned_candidates_with(root.path(), |path| {
+            if path.ends_with("stuck") {
+                Err(anyhow::Error::new(std::io::Error::from(
+                    std::io::ErrorKind::DirectoryNotEmpty,
+                )))
+            } else {
+                remove(path)
+            }
+        })
+        .unwrap();
+        assert!(candidates.join("stuck").exists());
+        assert!(!candidates.join("sweepable").exists());
     }
 
     #[test]
