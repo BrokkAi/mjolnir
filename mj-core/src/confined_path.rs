@@ -475,7 +475,7 @@ impl ConfinedDir {
 
     /// Make a rename or new entry in this directory durable. Directory fsync
     /// is only available on Unix, as in `config::sync_directory`.
-    fn sync(&self) -> Result<()> {
+    pub(crate) fn sync(&self) -> Result<()> {
         // The handle itself may be an `O_PATH` descriptor, which cannot be
         // synced, so sync a readable handle on the same directory.
         #[cfg(unix)]

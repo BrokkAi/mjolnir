@@ -1001,6 +1001,19 @@ impl ProjectMemoryStore {
         incoming: &PreparedMemoryTree<'_>,
         mode: MemoryApplyMode,
     ) -> Result<MemoryApplyResult> {
+        self.apply_delivery_with_sync(handout, incoming, mode, |path, directory| match directory {
+            Some(directory) => directory.sync(),
+            None => crate::config::sync_directory(path),
+        })
+    }
+
+    fn apply_delivery_with_sync(
+        &self,
+        handout: &PreparedMemoryTree<'_>,
+        incoming: &PreparedMemoryTree<'_>,
+        mode: MemoryApplyMode,
+        mut sync: impl FnMut(&Path, Option<&ConfinedDir>) -> Result<()>,
+    ) -> Result<MemoryApplyResult> {
         let mut root = ConfinedDir::open_root(&self.root)?;
         let mut base = handout.tree.clone();
         let mut preserved_edits = BTreeSet::new();
@@ -1132,6 +1145,34 @@ impl ProjectMemoryStore {
             } else if current.as_deref() != Some(*content) {
                 preserved_edits.insert(incoming.paths[relative].to_owned());
             }
+        }
+        if let Some(root) = &root {
+            // A prior interrupted apply may have changed paths that already
+            // match now. Sync every potentially affected ancestor on recovery
+            // too, including parents of created or removed directories.
+            let mut directories = BTreeSet::new();
+            for path in handout.files.keys().chain(incoming.files.keys()) {
+                let mut parent = path.parent();
+                while let Some(relative) = parent {
+                    directories.insert(relative.to_path_buf());
+                    parent = relative.parent();
+                }
+            }
+            let mut directories: Vec<_> = directories.into_iter().collect();
+            directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+            for relative in directories {
+                if let Some(directory) = open_memory_directory(root, &relative)? {
+                    sync(directory.path(), Some(&directory))?;
+                }
+            }
+            // The replica root itself may have been created by this apply or
+            // by an interrupted earlier attempt.
+            let parent = self
+                .root
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            sync(parent, None)?;
         }
         Ok(MemoryApplyResult {
             base,
@@ -2060,6 +2101,62 @@ mod tests {
         );
     }
 
+    // Hard-won: e0573215d: interrupted delivery could advance its record before directory changes were durable.
+    #[test]
+    fn delivery_retries_sync_of_all_potentially_changed_directories_deepest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        fs::create_dir_all(root.join("notes/old")).unwrap();
+        fs::write(root.join("notes/old/remove.md"), "old").unwrap();
+        let handout = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes/old/remove.md".into(), "old".into())]),
+        };
+        let incoming = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes/new/deep/note.md".into(), "new".into())]),
+        };
+        let prepared_handout = prepare_memory_tree(&handout).unwrap();
+        let prepared_incoming = prepare_memory_tree(&incoming).unwrap();
+        let store = ProjectMemoryStore::new(&root);
+        let failed = store.apply_delivery_with_sync(
+            &prepared_handout,
+            &prepared_incoming,
+            MemoryApplyMode::Delivery,
+            |_, _| anyhow::bail!("injected directory sync failure"),
+        );
+        assert!(failed.is_err());
+        assert!(!root.join("notes/old/remove.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("notes/new/deep/note.md")).unwrap(),
+            "new"
+        );
+        let mut synced = Vec::new();
+        store
+            .apply_delivery_with_sync(
+                &prepared_handout,
+                &prepared_incoming,
+                MemoryApplyMode::PreserveEdits,
+                |path, directory| {
+                    synced.push(path.to_path_buf());
+                    match directory {
+                        Some(directory) => directory.sync(),
+                        None => crate::config::sync_directory(path),
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            synced,
+            vec![
+                root.join("notes/new/deep"),
+                root.join("notes/new"),
+                root.join("notes/old"),
+                root.join("notes"),
+                root.clone(),
+                temp.path().to_path_buf()
+            ]
+        );
+    }
+
     // Hard-won: #1419: a link planted in the memory tree redirected sync deletes and writes outside it.
     #[cfg(unix)]
     #[test]
@@ -2359,6 +2456,7 @@ mod tests {
     }
 
     // Hard-won: 1e7e59c0d: non-UTF-8 legacy documents blocked canonical migration.
+    // Hard-won: e0573215d: unsupported names blocked canonical migration.
     #[test]
     fn canonical_migration_and_render_never_read_stale_directory() {
         let log = crate::test_log::CapturedLog::default();
@@ -2369,6 +2467,7 @@ mod tests {
         fs::create_dir_all(root.join("sub")).unwrap();
         fs::write(root.join("MEMORY.md"), "legacy").unwrap();
         fs::write(root.join("sub/note.md"), "note").unwrap();
+        fs::write(root.join("skills"), "unsupported name kept in backup").unwrap();
         fs::write(root.join("empty.md"), "").unwrap();
         fs::write(root.join("whitespace.md"), " \n\t").unwrap();
         fs::write(root.join(".hidden"), "hidden").unwrap();
@@ -2451,6 +2550,16 @@ mod tests {
         );
         assert_eq!(read_canonical(&root).unwrap(), expected);
         let backup = root.parent().unwrap().join("memory.pre-migration.1");
+        assert_eq!(
+            fs::read_to_string(backup.join("skills")).unwrap(),
+            "unsupported name kept in backup"
+        );
+        assert!(
+            warnings.iter().any(|line| line.contains("project")
+                && line.contains("/skills")
+                && line.contains("name memory cannot hold")),
+            "{warnings:?}"
+        );
         assert_eq!(
             fs::read_to_string(backup.join(".hidden")).unwrap(),
             "hidden"
