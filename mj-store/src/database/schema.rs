@@ -3916,14 +3916,13 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
     if version < 165 {
         let transaction =
             Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        // The existing ledger rows name the environment that was bound when
+        // each report directory was written. Re-deriving them from today's
+        // bindings would move an old path into a new environment whose
+        // target never held it.
         transaction.execute_batch(
             "DROP TRIGGER IF EXISTS environment_report_registered;
              DROP TRIGGER IF EXISTS environment_report_updated;
-             INSERT OR IGNORE INTO environment_reports
-                 SELECT b.environment_id,h.child_session_id,h.report_dir
-                   FROM subagent_handbacks h
-                   JOIN environment_bindings b ON b.session_id=h.child_session_id
-                  WHERE h.report_dir IS NOT NULL;
              UPDATE schema_compatibility SET minimum_compatible_version = 165 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (165, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
