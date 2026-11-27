@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use mj_core::remove_tree;
 
 use super::super::protocol::validate_relative_path;
 
@@ -26,11 +27,12 @@ pub(super) fn remove_path(path: &Path) -> Result<()> {
         return Ok(());
     };
     if metadata.is_dir() {
-        match std::fs::remove_dir_all(path) {
+        match remove_tree::remove_dir_all_checked(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 make_tree_owner_writable(path)?;
-                std::fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))
+                remove_tree::remove_dir_all_checked(path)
+                    .with_context(|| format!("remove {}", path.display()))
             }
             Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
         }

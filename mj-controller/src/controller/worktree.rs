@@ -10,6 +10,7 @@ use mj_core::config::ProjectRepository;
 use mj_core::config::{Config, TargetTemplate};
 use mj_core::local_git::canonical_repository;
 use mj_core::remote_git::{GITHUB_SSH_REWRITE_PREFIXES, Shorthand, uses_github_ssh_rewrite_prefix};
+use mj_core::remove_tree;
 use mj_core::repository::{ProjectBundleSnapshot, RepositoryIdentity};
 use mj_core::state::{
     ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeOptions, ManagedWorktreeTarget,
@@ -3713,7 +3714,7 @@ fn remove_missing_linked_worktree_admin(
                         );
                         return Ok(());
                     }
-                    std::fs::remove_dir_all(&admin_dir).with_context(|| {
+                    remove_tree::remove_dir_all_checked(&admin_dir).with_context(|| {
                         format!(
                             "remove managed worktree admin directory {}",
                             admin_dir.display()

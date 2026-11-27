@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::hex::lower_hex;
+use mj_core::remove_tree;
 use mj_core::session_keep::{MoveKeep, normalize_keep_path};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -242,7 +243,7 @@ impl StagedKeepCommit {
     fn commit(mut self) {
         self.committed = true;
         if let Some(backup_path) = self.backup.take() {
-            let _ = fs::remove_dir_all(&backup_path);
+            let _ = remove_tree::remove_dir_all(&backup_path);
         }
     }
 }
@@ -252,7 +253,7 @@ impl Drop for StagedKeepCommit {
         if self.committed {
             return;
         }
-        let _ = fs::remove_dir_all(&self.dest);
+        let _ = remove_tree::remove_dir_all(&self.dest);
         if let Some(backup_path) = self.backup.take() {
             let _ = fs::rename(&backup_path, &self.dest);
         }
@@ -286,7 +287,7 @@ fn swap_staged_keep_dir(stage_dir: tempfile::TempDir, dest: &Path) -> Result<Sta
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => {
-            let _ = fs::remove_dir_all(&stage_path);
+            let _ = remove_tree::remove_dir_all(&stage_path);
             return Err(err).with_context(|| format!("lstat keep dest {}", dest.display()));
         }
     };
@@ -295,7 +296,7 @@ fn swap_staged_keep_dir(stage_dir: tempfile::TempDir, dest: &Path) -> Result<Sta
         if let Some(backup_path) = backup {
             let _ = fs::rename(&backup_path, dest);
         }
-        let _ = fs::remove_dir_all(&stage_path);
+        let _ = remove_tree::remove_dir_all(&stage_path);
         return Err(err).with_context(|| format!("commit staged keep dir to {}", dest.display()));
     }
 

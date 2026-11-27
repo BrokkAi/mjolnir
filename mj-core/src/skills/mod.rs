@@ -620,14 +620,17 @@ fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry], kept: &[&str])
         );
     }
     for path in [&incoming, &retired] {
-        if let Err(error) = std::fs::remove_dir_all(path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
+        match crate::remove_tree::remove_dir_all(path) {
+            Ok(crate::remove_tree::RemoveOutcome::Removed) => {}
+            Ok(crate::remove_tree::RemoveOutcome::Leftovers { path }) => tracing::warn!(
+                path = %path.display(),
+                "could not empty stale skills staging tree; the next sync will retry"
+            ),
+            Err(error) => tracing::warn!(
                 path = %path.display(),
                 %error,
                 "could not remove stale skills staging tree"
-            );
+            ),
         }
     }
     let kept = kept
@@ -653,14 +656,17 @@ fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry], kept: &[&str])
         std::fs::rename(&destination, &retired)?;
     }
     if entries.is_empty() && kept.is_empty() {
-        if let Err(error) = std::fs::remove_dir_all(&retired)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
+        match crate::remove_tree::remove_dir_all(&retired) {
+            Ok(crate::remove_tree::RemoveOutcome::Removed) => {}
+            Ok(crate::remove_tree::RemoveOutcome::Leftovers { path }) => tracing::warn!(
+                path = %path.display(),
+                "could not empty retired skills tree; the next sync will retry"
+            ),
+            Err(error) => tracing::warn!(
                 path = %retired.display(),
                 %error,
                 "could not remove retired skills tree"
-            );
+            ),
         }
         return Ok(());
     }
@@ -691,14 +697,17 @@ fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry], kept: &[&str])
         }
         return Err(error).context("swap refreshed skills tree into place");
     }
-    if let Err(error) = std::fs::remove_dir_all(&retired)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(
+    match crate::remove_tree::remove_dir_all(&retired) {
+        Ok(crate::remove_tree::RemoveOutcome::Removed) => {}
+        Ok(crate::remove_tree::RemoveOutcome::Leftovers { path }) => tracing::warn!(
+            path = %path.display(),
+            "could not empty retired skills tree after a successful swap; the next sync will retry"
+        ),
+        Err(error) => tracing::warn!(
             path = %retired.display(),
             %error,
             "could not remove retired skills tree after a successful swap"
-        );
+        ),
     }
     Ok(())
 }
