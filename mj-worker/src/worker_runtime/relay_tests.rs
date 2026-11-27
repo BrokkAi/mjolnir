@@ -12653,3 +12653,84 @@ async fn turn_memory_protocol_gates_old_peers_reports_busy_and_pages_delivery() 
     drop(lines);
     server.await.unwrap().unwrap();
 }
+
+// Hard-won: 844612f9f: Busy was returned before the uploaded tree was decoded.
+#[tokio::test]
+async fn deliver_decodes_uploaded_tree_before_busy_check() {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    std::fs::create_dir_all(&memory.root).unwrap();
+    std::fs::create_dir_all(&memory.baseline_root).unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(directory.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let tools = relay.lock().unwrap().tools_in_flight();
+    let call: SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+    tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory));
+    let (client, server) = project_memory_socket(relay, endpoint);
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0;
+    let bytes = serde_json::to_vec(&mj_core::relay::ProjectMemoryWireTree::Gzip {
+        gzip: "invalid base64".into(),
+    })
+    .unwrap();
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginUpload {
+            kind: UploadKind::Deliver {
+                id: "unused".into(),
+                version: mj_core::project_memory::ProjectMemorySnapshot::default().version(),
+            },
+            total_bytes: bytes.len() as u64,
+        },
+    )
+    .await;
+    let transfer_id = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        other => panic!("unexpected upload response: {other:?}"),
+    };
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id,
+            offset: 0,
+            chunk: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        },
+    )
+    .await;
+    assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::CommitUpload { transfer_id },
+    )
+    .await;
+    assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+    drop(writer);
+    drop(lines);
+    server.await.unwrap().unwrap();
+}

@@ -799,16 +799,10 @@ fn apply_project_memory_transfer_request(
                 serde_json::from_slice(&bytes).context("parse uploaded project-memory tree")?;
             match kind {
                 UploadKind::Deliver { id, version } => {
-                    let outcome = if tools.is_empty() {
-                        crate::worker_runtime::project_memory::deliver(
-                            memory,
-                            &id,
-                            tree.decode()?,
-                            version,
-                        )?
-                    } else {
-                        mj_core::relay::ProjectMemoryDeliveryOutcome::Busy
-                    };
+                    let tree = tree.decode()?;
+                    let outcome = crate::worker_runtime::project_memory::deliver(
+                        memory, &id, tree, version, tools,
+                    )?;
                     Ok(RelayResponsePayload::ProjectMemoryTransfer {
                         result: ResultKind::Delivered { outcome },
                     })

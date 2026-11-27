@@ -62,20 +62,26 @@ impl Record {
         }
     }
 
-    fn save(&self, memory: &ProjectMemoryLaunchConfig) -> Result<()> {
+    fn prepare_save(&self, memory: &ProjectMemoryLaunchConfig) -> Result<tempfile::NamedTempFile> {
         std::fs::create_dir_all(&memory.baseline_root)?;
         let mut temporary = tempfile::NamedTempFile::new_in(&memory.baseline_root)?;
         serde_json::to_writer(&mut temporary, self)?;
         temporary.flush()?;
-        temporary
-            .persist(memory.baseline_root.join(RECORD_FILE))
-            .map_err(|error| error.error)?;
-        Ok(())
+        Ok(temporary)
+    }
+
+    fn save(&self, memory: &ProjectMemoryLaunchConfig) -> Result<()> {
+        persist_record(self.prepare_save(memory)?, memory)
     }
 
     fn finish_incoming(&mut self, memory: &ProjectMemoryLaunchConfig) -> Result<()> {
         if let Some(tree) = self.incoming.clone() {
-            mj_core::project_memory::render_memory_tree(&memory.root, &tree, false)?;
+            let handout = self
+                .handout
+                .as_ref()
+                .context("pending project-memory delivery has no handout")?;
+            ProjectMemoryStore::new(&memory.root)
+                .finish_interrupted_delivery(&handout.tree, &tree)?;
             self.base = tree;
             self.base_version = None;
             self.handout = None;
@@ -84,6 +90,16 @@ impl Record {
         }
         Ok(())
     }
+}
+
+fn persist_record(
+    temporary: tempfile::NamedTempFile,
+    memory: &ProjectMemoryLaunchConfig,
+) -> Result<()> {
+    temporary
+        .persist(memory.baseline_root.join(RECORD_FILE))
+        .map_err(|error| error.error)?;
+    Ok(())
 }
 
 pub(super) fn snapshot(
@@ -132,23 +148,44 @@ pub(super) fn deliver(
     id: &str,
     tree: ProjectMemorySnapshot,
     version: TreeVersion,
+    tools: &mj_core::activity::ToolsInFlight,
+) -> Result<mj_core::relay::ProjectMemoryDeliveryOutcome> {
+    deliver_with_render(memory, id, tree, version, tools, |root, prepared| {
+        prepared.render(root, false)
+    })
+}
+
+fn deliver_with_render(
+    memory: &ProjectMemoryLaunchConfig,
+    id: &str,
+    tree: ProjectMemorySnapshot,
+    version: TreeVersion,
+    tools: &mj_core::activity::ToolsInFlight,
+    render: impl FnOnce(&std::path::Path, mj_core::project_memory::PreparedMemoryTree<'_>) -> Result<()>,
 ) -> Result<mj_core::relay::ProjectMemoryDeliveryOutcome> {
     use mj_core::relay::ProjectMemoryDeliveryOutcome;
+    let prepared = mj_core::project_memory::prepare_memory_tree(&tree)?;
     let mut record = Record::load(memory)?;
     record.finish_incoming(memory)?;
     let Some(handout) = record.handout.as_ref().filter(|handout| handout.id == id) else {
         return Ok(ProjectMemoryDeliveryOutcome::Stale);
     };
-    if snapshot_documents(&memory.root)? != handout.tree {
-        record.base = handout.tree.clone();
+    let handout_tree = handout.tree.clone();
+    record.incoming = Some(tree.clone());
+    let pending = record.prepare_save(memory)?;
+    if !tools.is_empty() {
+        return Ok(ProjectMemoryDeliveryOutcome::Busy);
+    }
+    if snapshot_documents(&memory.root)? != handout_tree {
+        record.base = handout_tree;
         record.base_version = None;
         record.handout = None;
+        record.incoming = None;
         record.save(memory)?;
         return Ok(ProjectMemoryDeliveryOutcome::Dirty);
     }
-    record.incoming = Some(tree.clone());
-    record.save(memory)?;
-    mj_core::project_memory::render_memory_tree(&memory.root, &tree, false)?;
+    persist_record(pending, memory)?;
+    render(&memory.root, prepared)?;
     record.base = tree;
     record.base_version = Some(version);
     record.handout = None;
@@ -265,7 +302,7 @@ mod tests {
         tree: ProjectMemorySnapshot,
     ) -> ProjectMemoryDeliveryOutcome {
         let version = tree.version();
-        deliver(memory, id, tree, version).unwrap()
+        deliver(memory, id, tree, version, &Default::default()).unwrap()
     }
 
     #[test]
@@ -415,6 +452,149 @@ mod tests {
         let (base, _, replica) = handout(&memory, &canonical);
         assert_eq!(base, tree);
         assert_eq!(replica, tree);
+        assert!(Record::load(&memory).unwrap().incoming.is_none());
+    }
+
+    // Hard-won: 844612f9f: retrying a failed delivery overwrote subsequent agent edits.
+    #[test]
+    fn failed_delivery_recovery_preserves_later_agent_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        std::fs::write(memory.root.join("remaining.md"), "local old").unwrap();
+        std::fs::write(memory.root.join("remove.md"), "remove old").unwrap();
+        std::fs::write(memory.root.join("to-directory"), "old file").unwrap();
+        std::fs::create_dir(memory.root.join("to-file")).unwrap();
+        std::fs::write(memory.root.join("to-file/note.md"), "old child").unwrap();
+        let (base, id, replica) = handout(&memory, &canonical);
+        let mut incoming = replica.clone();
+        incoming
+            .files
+            .insert("/note.md".into(), "remote note".into());
+        incoming
+            .files
+            .insert("/remaining.md".into(), "remote remaining".into());
+        incoming
+            .files
+            .insert("/foreign.md".into(), "foreign addition".into());
+        incoming.files.remove("/remove.md");
+        incoming.files.remove("/to-directory");
+        incoming
+            .files
+            .insert("/to-directory/note.md".into(), "new child".into());
+        incoming.files.remove("/to-file/note.md");
+        incoming.files.insert("/to-file".into(), "new file".into());
+        let state = read_canonical_state(&canonical).unwrap();
+        assert_eq!(
+            commit_canonical(&canonical, &state, "session", &incoming, Some(&id)).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let tools = Default::default();
+        let failed = deliver_with_render(
+            &memory,
+            &id,
+            incoming.clone(),
+            incoming.version(),
+            &tools,
+            |root, _prepared| {
+                std::fs::write(root.join("note.md"), "remote note")?;
+                std::fs::remove_file(root.join("remaining.md"))?;
+                std::fs::remove_file(root.join("remove.md"))?;
+                std::fs::remove_file(root.join("to-directory"))?;
+                std::fs::remove_file(root.join("to-file/note.md"))?;
+                anyhow::bail!("render failed after partial application")
+            },
+        );
+        assert!(failed.is_err());
+        let pending = Record::load(&memory).unwrap();
+        assert_eq!(pending.incoming.as_ref(), Some(&incoming));
+        assert_eq!(pending.handout.as_ref().unwrap().id, id);
+        std::fs::write(memory.root.join("note.md"), "agent edit after failure").unwrap();
+        std::fs::write(memory.root.join("agent-added.md"), "agent addition").unwrap();
+
+        let state = read_canonical_state(&canonical).unwrap();
+        let (recovered_base, _, recovered_replica) = snapshot(
+            &memory,
+            state.absorbed.get("session").map(String::as_str),
+            &state.version,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered_base, incoming);
+        assert_eq!(
+            recovered_replica.files["/note.md"],
+            "agent edit after failure"
+        );
+        assert_eq!(recovered_replica.files["/agent-added.md"], "agent addition");
+        assert_eq!(recovered_replica.files["/remaining.md"], "remote remaining");
+        assert_eq!(recovered_replica.files["/foreign.md"], "foreign addition");
+        assert_eq!(
+            recovered_replica.files["/to-directory/note.md"],
+            "new child"
+        );
+        assert_eq!(recovered_replica.files["/to-file"], "new file");
+        assert!(!recovered_replica.files.contains_key("/remove.md"));
+        let record = Record::load(&memory).unwrap();
+        assert!(record.incoming.is_none());
+        assert_eq!(record.base, incoming);
+        assert_eq!(record.handout.unwrap().tree, recovered_replica);
+        assert_eq!(base.files["/note.md"], "initial\n");
+    }
+
+    // Hard-won: 844612f9f: a failed final record save caused recovery to overwrite later edits.
+    #[test]
+    fn recovery_after_record_save_failure_preserves_later_agent_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let (_, id, mut incoming) = handout(&memory, &canonical);
+        incoming.files.insert("/note.md".into(), "delivered".into());
+        incoming
+            .files
+            .insert("/foreign.md".into(), "foreign".into());
+        let mut record = Record::load(&memory).unwrap();
+        record.incoming = Some(incoming.clone());
+        record.save(&memory).unwrap();
+        mj_core::project_memory::render_memory_tree(&memory.root, &incoming, false).unwrap();
+        // The final record save fails: the persisted record still has the
+        // handout and incoming, although rendering completed.
+        std::fs::write(memory.root.join("note.md"), "later edit").unwrap();
+        std::fs::write(memory.root.join("new.md"), "later addition").unwrap();
+        let state = read_canonical_state(&canonical).unwrap();
+        let (base, _, replica) = snapshot(&memory, Some(&id), &state.version)
+            .unwrap()
+            .unwrap();
+        assert_eq!(base, incoming);
+        assert_eq!(replica.files["/note.md"], "later edit");
+        assert_eq!(replica.files["/new.md"], "later addition");
+        assert_eq!(replica.files["/foreign.md"], "foreign");
+        assert!(Record::load(&memory).unwrap().incoming.is_none());
+    }
+
+    // Hard-won: 844612f9f: Busy was checked before delivery validation and record preparation.
+    #[test]
+    fn delivery_validates_before_reporting_a_busy_tool() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let (_, id, replica) = handout(&memory, &canonical);
+        let tools = mj_core::activity::ToolsInFlight::default();
+        let call: agent_client_protocol::v1::schema::SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+        tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+        let invalid = ProjectMemorySnapshot {
+            files: [("/invalid/".into(), "content".into())].into(),
+        };
+        assert!(deliver(&memory, &id, invalid.clone(), invalid.version(), &tools).is_err());
+        let record_path = memory.baseline_root.join(RECORD_FILE);
+        let record_bytes = std::fs::read(&record_path).unwrap();
+        std::fs::write(&record_path, "invalid record").unwrap();
+        assert!(deliver(&memory, &id, replica.clone(), replica.version(), &tools).is_err());
+        std::fs::write(&record_path, record_bytes).unwrap();
+        assert_eq!(
+            deliver(&memory, &id, replica.clone(), replica.version(), &tools).unwrap(),
+            ProjectMemoryDeliveryOutcome::Busy
+        );
+        assert_eq!(
+            ProjectMemoryStore::new(&memory.root).snapshot().unwrap(),
+            replica
+        );
         assert!(Record::load(&memory).unwrap().incoming.is_none());
     }
 

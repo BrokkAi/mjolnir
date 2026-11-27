@@ -991,6 +991,62 @@ impl ProjectMemoryStore {
         Ok(changed)
     }
 
+    /// Finish a partially applied delivery without overwriting later edits.
+    pub fn finish_interrupted_delivery(
+        &self,
+        handout: &ProjectMemorySnapshot,
+        incoming: &ProjectMemorySnapshot,
+    ) -> Result<()> {
+        validate_renderable_tree(handout)?;
+        validate_renderable_tree(incoming)?;
+        let mut root = ConfinedDir::open_root(&self.root)?;
+        let mut removed = false;
+
+        // Replica-only documents differ from both absent inputs and are kept.
+        for (path, previous) in &handout.files {
+            if incoming.files.contains_key(path) {
+                continue;
+            }
+            let relative = validate_virtual_path(path)?;
+            let current = read_document(root.as_ref(), &relative)?;
+            if current.as_ref() != Some(previous) {
+                continue;
+            }
+            let (parent, name) = document_location(&relative);
+            let Some(directory) = root
+                .as_ref()
+                .expect("an existing document has a root")
+                .open_dir(parent)?
+            else {
+                continue;
+            };
+            match directory.remove_file(name) {
+                Ok(()) => removed = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("delete recovered memory document {path}"));
+                }
+            }
+        }
+        if let Some(root) = &root {
+            prune_empty_memory_directories(root, &mut removed)?;
+        }
+
+        for (path, content) in &incoming.files {
+            let relative = validate_virtual_path(path)?;
+            let current = read_document(root.as_ref(), &relative)?;
+            if current.as_ref() == Some(content) {
+                continue;
+            }
+            if current.is_none() || current.as_ref() == handout.files.get(path) {
+                write_document(&self.root, &mut root, &relative, content)
+                    .with_context(|| format!("write recovered memory document {path}"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Make the directory hold exactly `tree`: write changed documents and
     /// delete documents that `tree` omits. Returns whether anything changed.
     pub fn replace_tree(&self, tree: &ProjectMemorySnapshot) -> Result<bool> {
@@ -1086,6 +1142,17 @@ fn document_location(relative: &Path) -> (&Path, &OsStr) {
             .file_name()
             .expect("a validated memory path ends in a document name"),
     )
+}
+
+fn read_document(root: Option<&ConfinedDir>, relative: &Path) -> Result<Option<String>> {
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let (parent, name) = document_location(relative);
+    match root.open_dir(parent)? {
+        Some(directory) => directory.read_to_string(name),
+        None => Ok(None),
+    }
 }
 
 /// Write one document below `root`, creating the memory root on first use.
@@ -1270,6 +1337,41 @@ fn finish_render_directory(directory: &ConfinedDir) -> Result<()> {
     Ok(())
 }
 
+/// A tree whose paths have been validated before a rendering decision.
+pub struct PreparedMemoryTree<'a> {
+    files: Vec<(PathBuf, &'a str)>,
+}
+
+/// Validate and resolve every document path before beginning a render.
+pub fn prepare_memory_tree(tree: &ProjectMemorySnapshot) -> Result<PreparedMemoryTree<'_>> {
+    validate_renderable_tree(tree)?;
+    let files = tree
+        .files
+        .iter()
+        .map(|(path, content)| Ok((validate_virtual_path(path)?, content.as_str())))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PreparedMemoryTree { files })
+}
+
+impl PreparedMemoryTree<'_> {
+    /// Materialize the prepared tree without rereading the destination.
+    pub fn render(self, root: &Path, read_only: bool) -> Result<()> {
+        let directory = match ConfinedDir::open_root(root)? {
+            Some(directory) => directory,
+            None => ConfinedDir::create_root(root)?,
+        };
+        clear_render(&directory)?;
+        let mut handle = Some(directory);
+        for (path, content) in self.files {
+            write_document(root, &mut handle, &path, content)?;
+        }
+        if read_only {
+            finish_render_directory(handle.as_ref().expect("render handle exists"))?;
+        }
+        Ok(())
+    }
+}
+
 /// Materialize a tree without reading documents from the destination. Existing
 /// hidden entries are left alone. Set `read_only` for the canonical view.
 pub fn render_memory_tree(
@@ -1277,20 +1379,7 @@ pub fn render_memory_tree(
     tree: &ProjectMemorySnapshot,
     read_only: bool,
 ) -> Result<()> {
-    validate_renderable_tree(tree)?;
-    let directory = match ConfinedDir::open_root(root)? {
-        Some(directory) => directory,
-        None => ConfinedDir::create_root(root)?,
-    };
-    clear_render(&directory)?;
-    let mut handle = Some(directory);
-    for (path, content) in &tree.files {
-        write_document(root, &mut handle, &validate_virtual_path(path)?, content)?;
-    }
-    if read_only {
-        finish_render_directory(handle.as_ref().expect("render handle exists"))?;
-    }
-    Ok(())
+    prepare_memory_tree(tree)?.render(root, read_only)
 }
 
 fn project_key(root: &Path) -> std::borrow::Cow<'_, str> {

@@ -135,7 +135,7 @@ Acceptance in an isolated instance (`--instance memsync`, with MJ_CONFIG_DIR and
 
 Legacy SSH host-bare sessions whose whole profile home is a symlink have a pre-existing gap: `stage_worker_files_for` calls `unlink_host_bare_profile_home` on `RefreshProfileOnly`, leaving the old replica and baseline under the symlink target and seeding the new home from canonical. No migration is included in Slice 1.
 
-A background writer landing within milliseconds of a delivery's replica write can be overwritten. Restoring a checkpoint captured while a handout was pending, after the original timeline moved on, re-merges that handout against newer canonical and can bring back a note deleted since; checkpoints sync before capture, so this needs a failed pre-capture sync first. Older workers keep checkpoint-only synchronization until their next worker restart.
+A background writer landing within milliseconds of a delivery's replica write can be overwritten. An agent deletion during a failed-delivery window is indistinguishable from a partial render and the file is restored. Restoring a checkpoint captured while a handout was pending, after the original timeline moved on, re-merges that handout against newer canonical and can bring back a note deleted since; checkpoints sync before capture, so this needs a failed pre-capture sync first. Older workers keep checkpoint-only synchronization until their next worker restart.
 
 
 ## Interfaces and Dependencies
