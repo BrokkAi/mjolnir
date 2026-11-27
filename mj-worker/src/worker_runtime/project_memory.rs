@@ -82,12 +82,12 @@ impl Record {
                 .context("pending project-memory delivery has no handout")?;
             let handout = mj_core::project_memory::prepare_memory_tree(&handout.tree)?;
             let incoming = mj_core::project_memory::prepare_memory_tree(&tree)?;
-            ProjectMemoryStore::new(&memory.root).apply_delivery(
+            let base = ProjectMemoryStore::new(&memory.root).apply_delivery(
                 &handout,
                 &incoming,
                 mj_core::project_memory::MemoryApplyMode::PreserveEdits,
             )?;
-            self.base = tree;
+            self.base = base;
             self.base_version = None;
             self.handout = None;
             self.incoming = None;
@@ -181,7 +181,7 @@ fn deliver_with_apply(
         &std::path::Path,
         &mj_core::project_memory::PreparedMemoryTree<'_>,
         &mj_core::project_memory::PreparedMemoryTree<'_>,
-    ) -> Result<()>,
+    ) -> Result<ProjectMemorySnapshot>,
 ) -> Result<mj_core::relay::ProjectMemoryDeliveryOutcome> {
     use mj_core::relay::ProjectMemoryDeliveryOutcome;
     let prepared = mj_core::project_memory::prepare_memory_tree(&tree)?;
@@ -206,9 +206,9 @@ fn deliver_with_apply(
         return Ok(ProjectMemoryDeliveryOutcome::Dirty);
     }
     persist_record(pending, memory)?;
-    apply(&memory.root, &prepared_handout, &prepared)?;
-    record.base = tree;
-    record.base_version = Some(version);
+    let base = apply(&memory.root, &prepared_handout, &prepared)?;
+    record.base_version = (base == tree).then_some(version);
+    record.base = base;
     record.handout = None;
     record.incoming = None;
     record.save(memory)?;
@@ -251,6 +251,24 @@ pub(super) fn ensure_project_memory_replica(memory: &ProjectMemoryLaunchConfig) 
     if seed.exists() {
         std::fs::remove_dir_all(&seed)?;
     }
+    Ok(())
+}
+
+/// Prepare the replica for startup; a failed recovery is retried by Snapshot.
+pub(super) fn prepare_project_memory(
+    memory: &ProjectMemoryLaunchConfig,
+    session_id: &str,
+) -> Result<()> {
+    ensure_project_memory_replica(memory)?;
+    let span = tracing::info_span!("project_memory_recovery", %session_id);
+    span.in_scope(|| {
+        if let Err(error) = recover_project_memory(memory) {
+            tracing::error!(
+                error = format!("{error:#}"),
+                "project-memory recovery failed; will retry on snapshot"
+            );
+        }
+    });
     Ok(())
 }
 
@@ -453,9 +471,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside data");
     }
 
-    // Hard-won: 56bbaa82d: delivery overwrote a blank file omitted from the snapshot.
+    // Hard-won: 052101acf: a blank file blocked a canonical note indefinitely.
     #[test]
-    fn delivery_does_not_overwrite_a_blank_untracked_file() {
+    fn delivery_overwrites_blank_untracked_file_without_recording_a_deletion() {
         let temp = tempfile::tempdir().unwrap();
         let (memory, canonical) = setup(temp.path());
         std::fs::write(memory.root.join("blank.md"), " \n").unwrap();
@@ -463,28 +481,132 @@ mod tests {
         incoming
             .files
             .insert("/blank.md".into(), "canonical note".into());
-        assert!(
-            deliver(
-                &memory,
-                &id,
-                incoming.clone(),
-                incoming.version(),
-                &Default::default()
-            )
-            .is_err()
+        assert_eq!(
+            apply(&memory, &id, incoming.clone()),
+            ProjectMemoryDeliveryOutcome::Delivered
         );
         assert_eq!(
             std::fs::read_to_string(memory.root.join("blank.md")).unwrap(),
-            " \n"
+            "canonical note"
         );
         let state = read_canonical_state(&canonical).unwrap();
         let (base, _, replica) = snapshot(&memory, None, &state.version).unwrap().unwrap();
         assert_eq!(base, incoming);
-        assert!(!replica.files.contains_key("/blank.md"));
+        assert_eq!(replica, incoming);
+        assert_eq!(merge_trees(&base, &incoming, &replica).tree, incoming);
+    }
+
+    // Hard-won: 052101acf: a symlink at an incoming path stopped recovery or deleted canonical memory.
+    #[test]
+    fn blocked_delivery_keeps_canonical_note_and_startup_recovers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let target = temp.path().join("outside");
+        std::fs::write(&target, "outside").unwrap();
+        std::os::unix::fs::symlink(&target, memory.root.join("blocked.md")).unwrap();
+        let (_, id, _) = handout(&memory, &canonical);
+        let state = read_canonical_state(&canonical).unwrap();
+        let mut incoming = state.tree.clone();
+        incoming
+            .files
+            .insert("/blocked.md".into(), "canonical note".into());
         assert_eq!(
-            std::fs::read_to_string(memory.root.join("blank.md")).unwrap(),
-            " \n"
+            commit_canonical(&canonical, &state, "other", &incoming, None).unwrap(),
+            SwapOutcome::Swapped
         );
+        assert_eq!(
+            apply(&memory, &id, incoming.clone()),
+            ProjectMemoryDeliveryOutcome::Delivered
+        );
+        let record = Record::load(&memory).unwrap();
+        assert!(!record.base.files.contains_key("/blocked.md"));
+        assert!(record.base_version.is_none());
+        for _ in 0..2 {
+            let (base, next_id, replica) = handout(&memory, &canonical);
+            assert!(!base.files.contains_key("/blocked.md"));
+            assert!(!replica.files.contains_key("/blocked.md"));
+            let merged = commit(&canonical, &base, &next_id, &replica);
+            assert_eq!(merged, incoming);
+            assert_eq!(
+                apply(&memory, &next_id, merged),
+                ProjectMemoryDeliveryOutcome::Delivered
+            );
+        }
+        let (_, _, replica) = handout(&memory, &canonical);
+        let mut record = Record::load(&memory).unwrap();
+        record.incoming = Some(incoming.clone());
+        record.save(&memory).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
+        let record = Record::load(&memory).unwrap();
+        assert!(record.incoming.is_none());
+        assert_eq!(record.base, replica);
+        assert_eq!(
+            std::fs::read_link(memory.root.join("blocked.md")).unwrap(),
+            target
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "outside");
+        assert_eq!(read_canonical_state(&canonical).unwrap().tree, incoming);
+    }
+
+    // Hard-won: 052101acf: replacing a tracked note with a link during recovery deleted canonical memory.
+    #[test]
+    fn recovery_of_tracked_note_obstructed_by_link_does_not_delete_canonical() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let (_, id, _) = handout(&memory, &canonical);
+        let state = read_canonical_state(&canonical).unwrap();
+        let mut incoming = state.tree.clone();
+        incoming
+            .files
+            .insert("/note.md".into(), "canonical update".into());
+        assert_eq!(
+            commit_canonical(&canonical, &state, "other", &incoming, None).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let mut record = Record::load(&memory).unwrap();
+        record.incoming = Some(incoming.clone());
+        record.save(&memory).unwrap();
+        let target = temp.path().join("outside");
+        std::fs::write(&target, "outside").unwrap();
+        std::fs::remove_file(memory.root.join("note.md")).unwrap();
+        std::os::unix::fs::symlink(&target, memory.root.join("note.md")).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
+        let (base, next_id, replica) = handout(&memory, &canonical);
+        assert_ne!(next_id, id);
+        assert!(!base.files.contains_key("/note.md"));
+        assert!(!replica.files.contains_key("/note.md"));
+        assert_eq!(commit(&canonical, &base, &next_id, &replica), incoming);
+        assert_eq!(read_canonical_state(&canonical).unwrap().tree, incoming);
+        assert_eq!(
+            std::fs::read_link(memory.root.join("note.md")).unwrap(),
+            target
+        );
+    }
+
+    // Hard-won: 052101acf: an I/O failure during pending delivery prevented worker startup.
+    #[test]
+    fn startup_continues_after_recovery_io_error_and_snapshot_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let (_, _, mut incoming) = handout(&memory, &canonical);
+        incoming
+            .files
+            .insert("/foreign.md".into(), "foreign".into());
+        let mut record = Record::load(&memory).unwrap();
+        record.incoming = Some(incoming.clone());
+        record.save(&memory).unwrap();
+        std::fs::remove_dir_all(&memory.root).unwrap();
+        std::fs::write(&memory.root, "not a directory").unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
+        assert_eq!(
+            Record::load(&memory).unwrap().incoming,
+            Some(incoming.clone())
+        );
+        std::fs::remove_file(&memory.root).unwrap();
+        let (base, _, replica) = handout(&memory, &canonical);
+        assert_eq!(base, incoming);
+        assert_eq!(replica, incoming);
+        assert!(Record::load(&memory).unwrap().incoming.is_none());
     }
 
     #[test]
@@ -705,7 +827,11 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(recovered_base, incoming);
+        let mut expected_base = incoming.clone();
+        expected_base
+            .files
+            .insert("/note.md".into(), "initial\n".into());
+        assert_eq!(recovered_base, expected_base);
         assert_eq!(
             recovered_replica.files["/note.md"],
             "agent edit after failure"
@@ -721,7 +847,7 @@ mod tests {
         assert!(!recovered_replica.files.contains_key("/remove.md"));
         let record = Record::load(&memory).unwrap();
         assert!(record.incoming.is_none());
-        assert_eq!(record.base, incoming);
+        assert_eq!(record.base, expected_base);
         assert_eq!(record.handout.unwrap().tree, recovered_replica);
         assert_eq!(base.files["/note.md"], "initial\n");
     }
@@ -769,7 +895,11 @@ mod tests {
         let (base, _, replica) = snapshot(&memory, Some(&id), &state.version)
             .unwrap()
             .unwrap();
-        assert_eq!(base, incoming);
+        let mut expected_base = incoming.clone();
+        expected_base
+            .files
+            .insert("/note.md".into(), "initial\n".into());
+        assert_eq!(base, expected_base);
         assert_eq!(replica.files["/note.md"], "later edit");
         assert_eq!(replica.files["/new.md"], "later addition");
         assert_eq!(replica.files["/foreign.md"], "foreign");

@@ -997,8 +997,9 @@ impl ProjectMemoryStore {
         handout: &PreparedMemoryTree<'_>,
         incoming: &PreparedMemoryTree<'_>,
         mode: MemoryApplyMode,
-    ) -> Result<()> {
+    ) -> Result<ProjectMemorySnapshot> {
         let mut root = ConfinedDir::open_root(&self.root)?;
+        let mut base = handout.tree.clone();
 
         // Replica-only entries, including hidden files and symlinks, are not
         // in either prepared tree and are never removed.
@@ -1006,20 +1007,17 @@ impl ProjectMemoryStore {
             if incoming.files.contains_key(relative) {
                 continue;
             }
-            let current = read_document(root.as_ref(), relative)?;
-            if mode == MemoryApplyMode::Delivery
-                && current
-                    .as_deref()
-                    .is_some_and(|content| !is_memory_document(content))
-            {
-                bail!(
-                    "untracked blank file occupies memory path {}",
-                    relative.display()
-                );
+            let current = delivery_destination(root.as_ref(), relative)?;
+            let Destination::File(current) = current else {
+                // Missing or untracked entries are already absent from the snapshot.
+                base.files.remove(handout.paths[relative]);
+                continue;
+            };
+            if !is_memory_document(&current) {
+                base.files.remove(handout.paths[relative]);
+                continue;
             }
-            if current.is_none()
-                || (mode == MemoryApplyMode::PreserveEdits && current.as_deref() != Some(*previous))
-            {
+            if mode == MemoryApplyMode::PreserveEdits && current != *previous {
                 continue;
             }
             let (parent, name) = document_location(relative);
@@ -1038,6 +1036,7 @@ impl ProjectMemoryStore {
                         .with_context(|| format!("delete memory document {}", relative.display()));
                 }
             }
+            base.files.remove(handout.paths[relative]);
         }
 
         // Only directories that held tracked handout files and now block an
@@ -1106,29 +1105,40 @@ impl ProjectMemoryStore {
         }
 
         for (relative, content) in &incoming.files {
-            let current = read_document(root.as_ref(), relative)?;
-            if mode == MemoryApplyMode::Delivery
-                && current
-                    .as_deref()
-                    .is_some_and(|content| !is_memory_document(content))
-            {
-                bail!(
-                    "untracked blank file occupies memory path {}",
-                    relative.display()
-                );
-            }
-            if current.as_deref() == Some(*content) {
-                continue;
-            }
-            if mode == MemoryApplyMode::Delivery
-                || current.is_none()
-                || current.as_deref() == handout.files.get(relative).copied()
-            {
+            let current = match delivery_destination(root.as_ref(), relative)? {
+                Destination::Obstructed => {
+                    tracing::warn!(path = %relative.display(), "untracked entry blocks project-memory delivery");
+                    // The base for an obstruction is what the replica's snapshot
+                    // sees: absent. Base and replica agree, so canonical wins.
+                    if let Some(path) = handout.paths.get(relative) {
+                        base.files.remove(*path);
+                    }
+                    continue;
+                }
+                Destination::Missing => None,
+                Destination::File(content) => Some(content),
+            };
+            let should_write = current.as_deref() != Some(*content)
+                && (mode == MemoryApplyMode::Delivery
+                    || current
+                        .as_deref()
+                        .is_none_or(|value| !is_memory_document(value))
+                    || current.as_deref() == handout.files.get(relative).copied());
+            if should_write {
                 write_document(&self.root, &mut root, relative, content)
                     .with_context(|| format!("write memory document {}", relative.display()))?;
+            } else if current.as_deref() != Some(*content) {
+                // An agent edit may be based on either handout or incoming. The
+                // handout is the common three-way base for merging both changes.
+                continue;
             }
+            if let Some(path) = handout.paths.get(relative) {
+                base.files.remove(*path);
+            }
+            base.files
+                .insert(incoming.paths[relative].to_owned(), (*content).to_owned());
         }
-        Ok(())
+        Ok(base)
     }
 
     /// Make the directory hold exactly `tree`: write changed documents and
@@ -1241,23 +1251,50 @@ fn open_memory_directory(root: &ConfinedDir, relative: &Path) -> Result<Option<C
     }
 }
 
-fn read_document(root: Option<&ConfinedDir>, relative: &Path) -> Result<Option<String>> {
+enum Destination {
+    Missing,
+    File(String),
+    Obstructed,
+}
+
+// Inspect every component without following links. A directory at the final
+// name, a link, or a non-directory ancestor is not part of the snapshot.
+fn delivery_destination(root: Option<&ConfinedDir>, relative: &Path) -> Result<Destination> {
     let Some(root) = root else {
-        return Ok(None);
+        return Ok(Destination::Missing);
     };
+    let mut directory = root.open_dir(Path::new(""))?.expect("open root handle");
     let (parent, name) = document_location(relative);
-    match open_memory_directory(root, parent)? {
-        Some(directory) => {
-            if directory
-                .entries()?
-                .iter()
-                .any(|(entry, kind)| entry == name && *kind == EntryKind::Directory)
-            {
-                return Ok(None);
+    for component in parent.components() {
+        let Component::Normal(part) = component else {
+            unreachable!("validated path")
+        };
+        match directory
+            .entries()?
+            .into_iter()
+            .find(|(entry, _)| entry == part)
+        {
+            None => return Ok(Destination::Missing),
+            Some((_, EntryKind::Directory)) => {
+                let Some(child) = directory.open_dir(Path::new(part))? else {
+                    return Ok(Destination::Missing);
+                };
+                directory = child;
             }
-            directory.read_to_string(name)
+            Some(_) => return Ok(Destination::Obstructed),
         }
-        None => Ok(None),
+    }
+    match directory
+        .entries()?
+        .into_iter()
+        .find(|(entry, _)| entry == name)
+    {
+        None => Ok(Destination::Missing),
+        Some((_, EntryKind::File)) => Ok(match directory.read_to_string(name)? {
+            Some(content) => Destination::File(content),
+            None => Destination::Missing,
+        }),
+        Some(_) => Ok(Destination::Obstructed),
     }
 }
 
@@ -1453,6 +1490,8 @@ pub enum MemoryApplyMode {
 /// A tree whose paths have been validated before a rendering decision.
 pub struct PreparedMemoryTree<'a> {
     files: BTreeMap<PathBuf, &'a str>,
+    paths: BTreeMap<PathBuf, &'a str>,
+    tree: &'a ProjectMemorySnapshot,
 }
 
 /// Validate and resolve every document path before beginning a render.
@@ -1463,7 +1502,12 @@ pub fn prepare_memory_tree(tree: &ProjectMemorySnapshot) -> Result<PreparedMemor
         .iter()
         .map(|(path, content)| Ok((validate_virtual_path(path)?, content.as_str())))
         .collect::<Result<BTreeMap<_, _>>>()?;
-    Ok(PreparedMemoryTree { files })
+    let paths = tree
+        .files
+        .keys()
+        .map(|path| Ok((validate_virtual_path(path)?, path.as_str())))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    Ok(PreparedMemoryTree { files, paths, tree })
 }
 
 impl PreparedMemoryTree<'_> {

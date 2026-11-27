@@ -439,6 +439,7 @@ pub(super) async fn project_memory_response(
     envelope: RelayRequestEnvelope,
     endpoint: &ProjectMemoryEndpoint,
     transfer: &mut ConnectionProjectMemoryTransfer,
+    session_id: &str,
     tools: mj_core::activity::ToolsInFlight,
     cancel: CancellationToken,
 ) -> Option<RelayResponseEnvelope> {
@@ -472,7 +473,7 @@ pub(super) async fn project_memory_response(
             endpoint.io_requested.notify_one();
             #[cfg(test)]
             let io_block = endpoint.io_block.clone();
-            let io_span = tracing::info_span!("project_memory_io", project_key = %memory.project_key, operation = request.method_name());
+            let io_span = tracing::info_span!("project_memory_io", %session_id, project_key = %memory.project_key, operation = request.method_name());
             let result = run_serialized_project_memory_io(
                 &endpoint.io,
                 &cancel,
