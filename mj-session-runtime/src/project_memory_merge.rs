@@ -173,11 +173,9 @@ impl ConflictResolutionSession {
         replica: &ProjectMemorySnapshot,
         resolver: &R,
         cancel: &CancellationToken,
-    ) -> Result<ProjectMemorySnapshot> {
-        Ok(self
-            .resolve_merge(base, canonical, replica, resolver, cancel)
-            .await?
-            .0)
+    ) -> Result<(ProjectMemorySnapshot, Vec<ConflictResolutionRecord>)> {
+        self.resolve_merge(base, canonical, replica, resolver, cancel)
+            .await
     }
 
     async fn resolve_merge<R: ConflictResolver>(
@@ -459,80 +457,83 @@ impl CanonicalSync {
         replica: &ProjectMemorySnapshot,
         install: WorkerInstallOutcome,
     ) -> Option<ReplicaChangeNotice> {
-        let Self {
-            mut tree,
-            resolutions,
-            ..
-        } = self;
-        match install {
-            WorkerInstallOutcome::ReplicaChanged => return None,
-            WorkerInstallOutcome::Replaced => {}
-            WorkerInstallOutcome::Additive => {
-                // The legacy ACK reports only success. Relative to the
-                // worker's snapshot, paths omitted by the upload stay put.
-                for (path, content) in &replica.files {
-                    if !tree.files.contains_key(path) {
-                        tree.files.insert(path.clone(), content.clone());
-                    }
-                }
-            }
-        }
-        if &tree == replica {
-            return None;
-        }
-
-        let mut added = Vec::new();
-        let mut updated = Vec::new();
-        let mut removed = Vec::new();
-        for (path, content) in &tree.files {
-            match replica.files.get(path) {
-                None => added.push(path),
-                Some(old) if old != content => updated.push(path),
-                Some(_) => {}
-            }
-        }
-        for path in replica.files.keys() {
-            if !tree.files.contains_key(path) {
-                removed.push(path);
-            }
-        }
-
-        const PATHS_PER_CATEGORY: usize = 10;
-        let mut text =
-            String::from("Project memory changed. Reread MEMORY.md and the affected notes.");
-        for (label, paths) in [("Added", added), ("Updated", updated), ("Removed", removed)] {
-            if paths.is_empty() {
-                continue;
-            }
-            write!(text, " {label} ").unwrap();
-            for (index, path) in paths.iter().take(PATHS_PER_CATEGORY).enumerate() {
-                if index != 0 {
-                    text.push_str(", ");
-                }
-                write!(text, "{}", path.trim_start_matches('/').escape_debug()).unwrap();
-                if let Some(resolution) = resolutions.iter().find(|r| r.conflict.path == **path) {
-                    let installed = tree.files.get(*path);
-                    let label = if installed == Some(&resolution.conflict.canonical) {
-                        "updated from canonical on conflict"
-                    } else if resolution.method == ConflictResolutionMethod::ReplicaWins {
-                        "kept local version on conflict"
-                    } else {
-                        "overlapping edits merged"
-                    };
-                    write!(text, " ({label})").unwrap();
-                }
-            }
-            if paths.len() > PATHS_PER_CATEGORY {
-                write!(text, " and {} more", paths.len() - PATHS_PER_CATEGORY).unwrap();
-            }
-            text.push('.');
-        }
-        Some(ReplicaChangeNotice {
-            before: replica.version(),
-            after: tree.version(),
-            text,
-        })
+        replica_change_notice(self.tree, self.resolutions, replica, install)
     }
+}
+
+pub(crate) fn replica_change_notice(
+    mut tree: ProjectMemorySnapshot,
+    resolutions: Vec<ConflictResolutionRecord>,
+    replica: &ProjectMemorySnapshot,
+    install: WorkerInstallOutcome,
+) -> Option<ReplicaChangeNotice> {
+    match install {
+        WorkerInstallOutcome::ReplicaChanged => return None,
+        WorkerInstallOutcome::Replaced => {}
+        WorkerInstallOutcome::Additive => {
+            // The legacy ACK reports only success. Relative to the
+            // worker's snapshot, paths omitted by the upload stay put.
+            for (path, content) in &replica.files {
+                if !tree.files.contains_key(path) {
+                    tree.files.insert(path.clone(), content.clone());
+                }
+            }
+        }
+    }
+    if &tree == replica {
+        return None;
+    }
+
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+    for (path, content) in &tree.files {
+        match replica.files.get(path) {
+            None => added.push(path),
+            Some(old) if old != content => updated.push(path),
+            Some(_) => {}
+        }
+    }
+    for path in replica.files.keys() {
+        if !tree.files.contains_key(path) {
+            removed.push(path);
+        }
+    }
+
+    const PATHS_PER_CATEGORY: usize = 10;
+    let mut text = String::from("Project memory changed. Reread MEMORY.md and the affected notes.");
+    for (label, paths) in [("Added", added), ("Updated", updated), ("Removed", removed)] {
+        if paths.is_empty() {
+            continue;
+        }
+        write!(text, " {label} ").unwrap();
+        for (index, path) in paths.iter().take(PATHS_PER_CATEGORY).enumerate() {
+            if index != 0 {
+                text.push_str(", ");
+            }
+            write!(text, "{}", path.trim_start_matches('/').escape_debug()).unwrap();
+            if let Some(resolution) = resolutions.iter().find(|r| r.conflict.path == **path) {
+                let installed = tree.files.get(*path);
+                let label = if installed == Some(&resolution.conflict.canonical) {
+                    "updated from canonical on conflict"
+                } else if resolution.method == ConflictResolutionMethod::ReplicaWins {
+                    "kept local version on conflict"
+                } else {
+                    "overlapping edits merged"
+                };
+                write!(text, " ({label})").unwrap();
+            }
+        }
+        if paths.len() > PATHS_PER_CATEGORY {
+            write!(text, " and {} more", paths.len() - PATHS_PER_CATEGORY).unwrap();
+        }
+        text.push('.');
+    }
+    Some(ReplicaChangeNotice {
+        before: replica.version(),
+        after: tree.version(),
+        text,
+    })
 }
 
 #[cfg(test)]
@@ -680,7 +681,8 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(turn_tree.files["/MEMORY.md"], "replica\n");
 
         let outcome = merge_and_swap_canonical(
@@ -715,7 +717,8 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(!turn_tree.files.contains_key("/MEMORY.md"));
         let outcome = merge_and_swap_canonical(
             &empty_root,
@@ -844,7 +847,8 @@ mod tests {
         let merged = resolutions
             .merge_turn_tree(&base, &first.tree, &replica, &resolver, &cancel)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(
             mj_core::project_memory::commit_canonical(
                 &path,
@@ -860,7 +864,8 @@ mod tests {
         let merged = resolutions
             .merge_turn_tree(&base, &second.tree, &replica, &resolver, &cancel)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(
             mj_core::project_memory::commit_canonical(
                 &path,
@@ -902,13 +907,15 @@ mod tests {
         let first = resolutions
             .merge_turn_tree(&base, &canonical, &replica, &resolver, &cancel)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(first.files["/MEMORY.md"], "model\n");
         let changed = snapshot(&[("/MEMORY.md", "new canonical\n")]);
         let second = resolutions
             .merge_turn_tree(&base, &changed, &replica, &resolver, &cancel)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(second.files["/MEMORY.md"], "replica\n");
         assert_eq!(resolver.0.load(Ordering::Relaxed), 2);
         assert_eq!(Instant::now() - start, CONFLICT_RESOLUTION_TIMEOUT);

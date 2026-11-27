@@ -1568,7 +1568,7 @@ pub async fn sync_turn_project_memory(
             if cancel.is_cancelled() {
                 return Ok(false);
             }
-            let merged = resolutions
+            let (merged, conflict_resolutions) = resolutions
                 .merge_turn_tree(&base, &canonical.tree, &replica, &resolver, &cancel)
                 .await?;
             if cancel.is_cancelled() {
@@ -1611,15 +1611,25 @@ pub async fn sync_turn_project_memory(
             // Every delivery, including a pull-only round, follows a commit
             // recording this handout as absorbed. A later Snapshot can fence it.
             match client
-                .deliver_project_memory(id, merged, version, &cancel)
+                .deliver_project_memory(id, merged.clone(), version, &cancel)
                 .await?
             {
                 ProjectMemoryDeliveryOutcome::Dirty if !dirty_round => {
                     dirty_round = true;
                     continue 'snapshot;
                 }
-                ProjectMemoryDeliveryOutcome::Delivered
-                | ProjectMemoryDeliveryOutcome::Dirty
+                ProjectMemoryDeliveryOutcome::Delivered => {
+                    if let Some(notice) = crate::project_memory_merge::replica_change_notice(
+                        merged,
+                        conflict_resolutions,
+                        &replica,
+                        WorkerInstallOutcome::Replaced,
+                    ) {
+                        enqueue_project_memory_notice(session_id, notice).await?;
+                    }
+                    return Ok(true);
+                }
+                ProjectMemoryDeliveryOutcome::Dirty
                 | ProjectMemoryDeliveryOutcome::Stale
                 | ProjectMemoryDeliveryOutcome::Busy => return Ok(true),
             }
@@ -1651,6 +1661,13 @@ pub(super) async fn install_project_memory_and_notify<W: ProjectMemoryWorker>(
         return Ok(());
     };
 
+    enqueue_project_memory_notice(session_id, notice).await
+}
+
+async fn enqueue_project_memory_notice(
+    session_id: &str,
+    notice: crate::project_memory_merge::ReplicaChangeNotice,
+) -> Result<()> {
     // Give each successful installation its own occurrence key so recurring
     // A -> B -> A -> B transitions are never suppressed by prior accepted rows;
     // mailbox delivery reuses this persisted key across all worker retries.
