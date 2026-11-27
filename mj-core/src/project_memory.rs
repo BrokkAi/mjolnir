@@ -1346,7 +1346,18 @@ fn collect_documents(
             }
             EntryKind::File => {
                 let path = format!("/{}", child.to_string_lossy().replace('\\', "/"));
-                validate_virtual_path(&path)?;
+                // A name the tree cannot hold (a reserved component, for
+                // example) is untracked, like a hidden file: a legacy one stays
+                // in the migration backup, and a replica one stays on disk.
+                if let Err(error) = validate_virtual_path(&path) {
+                    tracing::warn!(
+                        project = migration_project.map(tracing::field::display),
+                        %path,
+                        error = format!("{error:#}"),
+                        "skipping a project memory file whose name memory cannot hold"
+                    );
+                    continue;
+                }
                 let bytes = directory
                     .read_bytes(&name)
                     .and_then(|content| content.context("the document disappeared"))
