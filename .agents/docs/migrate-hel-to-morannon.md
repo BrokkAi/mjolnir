@@ -76,6 +76,8 @@ Both hosts must run the **same** build (commit including the `mj migrate` fixes,
 
 The live store contains ~487 `ssh-podman` targets bound to `[machines.morannon]`, which remain SSH-managed after migration. `morannon` currently lacks an `~/.ssh/id_ed25519` key and cannot SSH to itself.
 
+Read `morannon`'s own `/etc/ssh/ssh_host_*_key.pub` files locally on `morannon` (rather than using unauthenticated `ssh-keyscan`) before verifying self-SSH:
+
 ```bash
 ssh morannon '
   set -euo pipefail
@@ -86,7 +88,12 @@ ssh morannon '
   grep -qxFf ~/.ssh/id_ed25519.pub ~/.ssh/authorized_keys 2>/dev/null \
     || cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
   chmod 600 ~/.ssh/authorized_keys
-  ssh-keyscan -H morannon >> ~/.ssh/known_hosts 2>/dev/null
+  for pub in /etc/ssh/ssh_host_*_key.pub; do
+    read -r keytype key _ < "$pub"
+    entry="morannon $keytype $key"
+    grep -qxF "$entry" ~/.ssh/known_hosts 2>/dev/null || printf "%s\n" "$entry" >> ~/.ssh/known_hosts
+  done
+  chmod 600 ~/.ssh/known_hosts
   ssh -o BatchMode=yes morannon true
 '
 ```
@@ -101,13 +108,28 @@ ssh morannon '
 2. Authorize `morannon`'s public key (`ssh morannon 'cat ~/.ssh/id_ed25519.pub'`) in:
    - `hel:~/.ssh/authorized_keys`
    - `jonathans-macbook-air:~/.ssh/authorized_keys`
-3. Record both host keys in `morannon:~/.ssh/known_hosts` and verify non-interactive SSH from `morannon`:
+3. Populate `morannon:~/.ssh/known_hosts` from authenticated host public keys (do **not** append unauthenticated `ssh-keyscan` output without verifying each fingerprint via `ssh-keygen -lf` against the host's `/etc/ssh/ssh_host_*_key.pub`), then verify non-interactive SSH from `morannon`:
 
    ```bash
-   ssh morannon '
+   # On hel: read hel's local host keys and macbook's host keys over hel's
+   # already-trusted SSH connection, and write them into morannon:~/.ssh/known_hosts.
+   {
+     for pub in /etc/ssh/ssh_host_*_key.pub; do
+       read -r keytype key _ < "$pub"
+       printf "minasmorgul-wsl.tail5caf7.ts.net %s %s\n" "$keytype" "$key"
+     done
+     ssh -o BatchMode=yes jonathans-macbook-air '
+       for pub in /etc/ssh/ssh_host_*_key.pub; do
+         read -r keytype key _ < "$pub"
+         printf "jonathans-macbook-air %s %s\n" "$keytype" "$key"
+       done
+     '
+   } | ssh morannon '
      set -euo pipefail
-     ssh-keyscan -H minasmorgul-wsl.tail5caf7.ts.net >> ~/.ssh/known_hosts 2>/dev/null
-     ssh-keyscan -H jonathans-macbook-air >> ~/.ssh/known_hosts 2>/dev/null
+     touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+     while IFS= read -r entry; do
+       grep -qxF "$entry" ~/.ssh/known_hosts 2>/dev/null || printf "%s\n" "$entry" >> ~/.ssh/known_hosts
+     done
      ssh -o BatchMode=yes minasmorgul-wsl.tail5caf7.ts.net true
      ssh -o BatchMode=yes jonathans-macbook-air true
    '
@@ -117,9 +139,12 @@ ssh morannon '
 
 #### Path B: Retire `hel` (no reverse SSH / no Tailscale on `morannon`)
 
-1. Suspend or move all active `local-bare` sessions on `hel` before migrating.
-2. Remove `[machines.macbook]` from `hel:~/.config/mjolnir/config.toml` if `morannon` cannot reach `jonathans-macbook-air` (otherwise the preflight third-host SSH probe will refuse).
-3. Use `--disconnect-local --source-machine-id hel` in Steps 4–5.
+`--disconnect-local` only skips the `morannon -> hel` SSH probe; `mj migrate` still rewrites `hel`'s `local-bare` session targets to `ssh-host-bare` pointing at `hel`, and their worker directories remain on `hel`.
+
+1. **Move** (`mj move`) every `local-bare` session you intend to keep using or resuming after retiring `hel` onto `morannon` (or another reachable target) *before* migrating.
+2. Any remaining `local-bare` sessions left on `hel` (whether suspended or parked) will retain their transcripts and history in the migrated store, but their migrated placements will point at an unreachable `hel` host and their worker directories will remain on `hel` — they cannot be resumed or run until `hel` is reachable again (or they are destroyed). Suspend or destroy any unneeded `local-bare` sessions before cutover.
+3. Remove `[machines.macbook]` from `hel:~/.config/mjolnir/config.toml` if `morannon` cannot reach `jonathans-macbook-air` (otherwise the preflight third-host SSH probe will refuse).
+4. Use `--disconnect-local --source-machine-id hel` in Steps 4–5.
 
 *(EC2 hosts `ec2-m8id16-b/c/d` and `ec2-p4-meas` need no manual SSH key setup: `mj migrate` copies `~/.config/mjolnir/ec2/*` keys and known-hosts files automatically, and `morannon` shares `hel`'s public IPv4 `70.113.48.129`.)*
 
@@ -196,7 +221,7 @@ mj migrate morannon \
 
 What happens:
 1. **Phase 1 (zero downtime, ~15–30 min over 1 Gbps LAN)**: Streams `mj.sqlite3`, `sessions/`, `tool-details/`, `projects/`, SessionWiki `index.db`, profile homes, and config into a temporary staging directory on `morannon` while `hel` stays live.
-2. **Phase 2 (seconds-long cutover)**: Stops and fences `hel`'s daemon (`migrated.json`), streams pinned SQLite WAL deltas and changed files, rewrites `mj.sqlite3` and `config.toml` for `morannon`, atomically publishes data/config/SessionWiki, starts `morannon`'s daemon, and detaches Codex `auth.json` symlinks on `hel` so existing Codex workers on `hel` do not mutate shared login files.
+2. **Phase 2 (seconds-long cutover)**: Stops and fences `hel`'s store (writes the `store_fence` row in `mj.sqlite3`), streams pinned SQLite WAL deltas and changed files, rewrites `mj.sqlite3` and `config.toml` for `morannon`, atomically publishes data/config/SessionWiki, unfences `morannon`'s store, starts `morannon`'s daemon, and detaches Codex `auth.json` symlinks on `hel` so existing Codex workers on `hel` do not mutate shared login files.
 
 Add `--include-logs` only if you also want `backups/`, `logs/`, and `moves/` (~13.5 GB) copied.
 
@@ -238,11 +263,13 @@ Add `--include-logs` only if you also want `backups/`, `logs/`, and `moves/` (~1
 
 - **Failure before Phase 2 cutover**: `hel` is never fenced and its daemon is left running (or automatically restarted). Fix the reported error and re-run the same command.
 - **Interrupted Phase 1 or Phase 2 (dropped SSH, Ctrl-C, reboot)**: Re-run the **exact same** `mj migrate` command. The staging `stage_id` and receiver `publication.json` bind recovery to the original destination instance and resume cleanly without split-brain.
-- **Uncertain disconnect right at the end of Phase 2**: **Never** delete `hel`'s fence (`~/.local/share/mjolnir/migrated.json`) before checking `morannon`:
+- **Uncertain disconnect right at the end of Phase 2**: **Never** clear `hel`'s `store_fence` row before checking whether `morannon` finished **unfencing and activating**:
 
   ```bash
   ssh morannon '~/.cargo/bin/mj daemon status'
+  ssh morannon 'python3 -c "import os, sqlite3; p = os.path.expanduser(\"~/.local/share/mjolnir/mj.sqlite3\"); print(\"no-db\" if not os.path.exists(p) else sqlite3.connect(f\"file:{p}?mode=ro\", uri=True).execute(\"SELECT COUNT(*) FROM store_fence\").fetchone()[0])"'
   ```
 
-  - If `morannon`'s daemon is running (or `mj.sqlite3` is published at `~/.local/share/mjolnir/mj.sqlite3`), the cutover **succeeded** — do **not** unfence or start `hel`.
-  - If `morannon` has not published yet, simply re-run the exact same `mj migrate` command to complete recovery.
+  - Do **not** treat the mere existence of `~/.local/share/mjolnir/mj.sqlite3` on `morannon` as success: if SSH dropped after the receiver placed `mj.sqlite3` but before it cleared the destination fence, `mj.sqlite3` exists while **both** hosts are still fenced (`store_fence` count is `1` and `mj daemon status` refuses).
+  - If `morannon`'s store is **unfenced** (`store_fence` count is `0` and `mj daemon status` does not report a migration fence — if `--no-start` was not passed, the daemon is running), cutover **succeeded** — do **not** unfence or start `hel`.
+  - If `morannon` has no `mj.sqlite3` yet **or** its `store_fence` count is still non-zero (still fenced), re-run the **exact same** `mj migrate` command from `hel` so recovery finishes unfencing `morannon`, cleans up staging, and starts `morannon`'s daemon.
