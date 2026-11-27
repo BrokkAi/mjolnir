@@ -617,7 +617,18 @@ fn write_canonical_before_rename(
     temporary.as_file().sync_all()?;
     before_rename()?;
     temporary.persist(&path).map_err(|error| error.error)?;
-    crate::config::sync_directory(parent)
+    // The rename has made the new state visible to every reader, so the
+    // commit has happened. A failed directory sync only weakens durability
+    // across power loss; reporting it as a failed commit would make callers
+    // skip the worker step for a tree canonical already holds.
+    if let Err(error) = crate::config::sync_directory(parent) {
+        tracing::warn!(
+            path = %path.display(),
+            error = format!("{error:#}"),
+            "could not sync the canonical project-memory directory after commit"
+        );
+    }
+    Ok(())
 }
 
 /// Read the durable state, following project-merge redirects.
