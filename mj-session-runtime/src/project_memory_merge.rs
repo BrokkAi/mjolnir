@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use mj_core::config::Config;
 use mj_core::project_memory::{
     ConflictedFile, ProjectMemorySnapshot, ReplicaReplaceOutcome, SwapOutcome, TreeVersion,
+    is_memory_document,
 };
 use tokio::sync::OnceCell;
 use tokio::time::{Instant, timeout_at};
@@ -269,11 +270,15 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
 }
 
 fn set_file_content(tree: &mut ProjectMemorySnapshot, path: &str, content: &str) {
-    tree.files.insert(path.to_owned(), content.to_owned());
+    if is_memory_document(content) {
+        tree.files.insert(path.to_owned(), content.to_owned());
+    } else {
+        tree.files.remove(path);
+    }
 }
 
 fn validate_model_output(content: &str) -> Result<()> {
-    if content.trim().is_empty() {
+    if !is_memory_document(content) {
         bail!("model returned an empty file");
     }
     if content.lines().any(is_conflict_marker_line) {
@@ -615,8 +620,10 @@ mod tests {
         }
     }
 
+    // Hard-won: P1 blank-document review: replica-wins fallback reinserted blank
+    // content after merge filtering.
     #[tokio::test]
-    async fn unavailable_utility_model_stores_replica_wins_text() {
+    async fn unavailable_utility_model_applies_replica_wins_and_drops_blank_files() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
         install_initial(&root.path().join("memory"), &canonical);
@@ -657,9 +664,10 @@ mod tests {
         let CanonicalSyncOutcome::Swapped(result) = outcome else {
             panic!("canonical sync unexpectedly exhausted retries");
         };
+        assert!(!result.tree.files.contains_key("/MEMORY.md"));
         assert_eq!(
-            result.tree.files.get("/MEMORY.md").map(String::as_str),
-            Some("")
+            mj_core::project_memory::read_canonical(&empty_root).unwrap(),
+            result.tree
         );
     }
 

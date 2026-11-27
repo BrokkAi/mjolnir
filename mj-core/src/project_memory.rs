@@ -75,6 +75,11 @@ pub struct TreeMerge {
     pub conflicts: Vec<ConflictedFile>,
 }
 
+/// Whether file content qualifies as a project-memory document.
+pub fn is_memory_document(content: &str) -> bool {
+    !content.trim().is_empty()
+}
+
 /// Merge a session replica into the canonical tree relative to the baseline
 /// the replica was seeded from, line by line within each file.
 pub fn merge_trees(
@@ -138,7 +143,7 @@ pub fn merge_trees(
             }
         };
 
-        if let Some(content) = merged {
+        if let Some(content) = merged.filter(|content| is_memory_document(content)) {
             tree.files.insert(path, content);
         }
     }
@@ -599,7 +604,9 @@ fn load_canonical_locked(root: &Path) -> Result<CanonicalMemory> {
             } else {
                 root
             };
-            let state = CanonicalMemory::new(ProjectMemoryStore::new(source).snapshot()?);
+            let mut tree = ProjectMemoryStore::new(source).snapshot()?;
+            tree.files.retain(|_, content| is_memory_document(content));
+            let state = CanonicalMemory::new(tree);
             if source == root && root.try_exists()? {
                 fs::rename(root, &pending).context("preserve legacy project memory")?;
             }
@@ -719,7 +726,7 @@ pub fn commit_canonical(
         }
         write_canonical_locked(&root, &current)?;
         // The rename is the commit. A later render failure leaves the new
-        // tree in place; the next commit or daemon start renders it again.
+        // tree in place; the next commit renders it again.
         if let Err(error) = render_memory_tree(&root, tree, true) {
             tracing::warn!(
                 project = %project_key(&root),
@@ -1285,69 +1292,6 @@ pub fn render_memory_tree(
     Ok(())
 }
 
-/// Migrate each existing project once and repair rendered views at daemon start.
-/// One project's failure is logged and skipped. The next canonical access, or
-/// the next daemon start, tries that project again. A failed migration writes
-/// nothing, so a later read reports the error instead of an empty tree.
-pub fn initialize_canonical_memories(projects: &Path) -> Result<()> {
-    let entries = match fs::read_dir(projects) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!(%error, "could not read a project directory entry");
-                continue;
-            }
-        };
-        let project = entry.path();
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => {}
-            Ok(_) => continue,
-            Err(error) => {
-                tracing::warn!(
-                    project = %project_key(&project.join("memory")),
-                    %error,
-                    "could not inspect a project directory"
-                );
-                continue;
-            }
-        }
-        if let Err(error) = initialize_one_canonical_memory(&project) {
-            tracing::warn!(
-                project = %project_key(&project.join("memory")),
-                %error,
-                "project memory initialization failed; it will be retried"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn initialize_one_canonical_memory(project: &Path) -> Result<()> {
-    let original = project.join("memory");
-    if !original.try_exists()?
-        && !project.join("memory.json").try_exists()?
-        && !project.join(".memory-migration-pending").try_exists()?
-        && !project.join("memory-redirect.json").try_exists()?
-    {
-        return Ok(());
-    }
-    loop {
-        let root = resolve_canonical_root(&original)?;
-        let _lock = lock_canonical(&root)?;
-        if resolve_canonical_root(&original)? != root {
-            continue;
-        }
-        let state = load_canonical_locked(&root)?;
-        render_memory_tree(&root, &state.tree, true)?;
-        return Ok(());
-    }
-}
-
 fn project_key(root: &Path) -> std::borrow::Cow<'_, str> {
     root.parent()
         .and_then(|parent| parent.file_name())
@@ -1604,6 +1548,15 @@ mod tests {
             &file_snapshot(canonical),
             &file_snapshot(replica),
         )
+    }
+
+    #[test]
+    fn merge_trees_drop_empty_and_whitespace_documents() {
+        for content in ["", " \n\t"] {
+            let merged = merge_file(None, None, Some(content));
+            assert!(merged.tree.files.is_empty(), "content: {content:?}");
+            assert!(merged.conflicts.is_empty(), "content: {content:?}");
+        }
     }
 
     fn seed_file(store: &ProjectMemoryStore, path: &str, content: &str) {
@@ -2058,6 +2011,7 @@ mod tests {
         fs::write(root.join("MEMORY.md"), "legacy").unwrap();
         fs::write(root.join("sub/note.md"), "note").unwrap();
         fs::write(root.join("empty.md"), "").unwrap();
+        fs::write(root.join("whitespace.md"), " \n\t").unwrap();
         fs::write(root.join(".hidden"), "hidden").unwrap();
         fs::write(root.join("sub/.hidden"), "nested hidden").unwrap();
         // A directory whose only leftover is hidden must not block a document
@@ -2100,8 +2054,18 @@ mod tests {
             serde_json::to_vec(&root).unwrap(),
         )
         .unwrap();
-        let expected = ProjectMemoryStore::new(&root).snapshot().unwrap();
-        initialize_canonical_memories(&projects).unwrap();
+        let expected = ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "legacy".into()),
+                ("/sub/note.md".into(), "note".into()),
+            ]),
+        };
+        assert_eq!(
+            read_canonical(&recovering.join("memory")).unwrap().files["/notes/a.md"],
+            "recover me"
+        );
+        assert_eq!(read_canonical(&root).unwrap(), expected);
+        assert!(read_canonical(&bad).is_err());
         assert_eq!(
             fs::read_to_string(recovering.join("memory/notes/a.md")).unwrap(),
             "recover me"
@@ -2126,10 +2090,8 @@ mod tests {
         );
         assert!(!root.join(".hidden").exists());
         assert!(!root.join("topic").exists());
-        assert!(
-            read_canonical(&bad).is_err(),
-            "invalid UTF-8 is an error, not an empty tree"
-        );
+        assert!(!root.join("empty.md").exists());
+        assert!(!root.join("whitespace.md").exists());
         assert!(
             !bad.parent().unwrap().join("memory.json").exists(),
             "a failed migration writes no canonical file"
@@ -2148,13 +2110,20 @@ mod tests {
         fs::remove_file(root.join("MEMORY.md")).unwrap();
         fs::write(root.join("MEMORY.md"), "stale edit").unwrap();
         assert_eq!(read_canonical(&root).unwrap(), expected);
-        initialize_canonical_memories(&projects).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("MEMORY.md")).unwrap(),
+            "stale edit"
+        );
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(
+            commit_canonical(&root, &state, "", &state.tree, None).unwrap(),
+            SwapOutcome::Swapped
+        );
         assert_eq!(
             fs::read_to_string(root.join("MEMORY.md")).unwrap(),
             "legacy"
         );
         assert_eq!(read_canonical(&root).unwrap(), expected);
-        assert!(read_canonical(&bad).is_err());
     }
 
     #[test]

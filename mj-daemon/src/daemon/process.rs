@@ -181,13 +181,6 @@ pub(super) async fn run_daemon_runtime(
     // than this belongs to a checkpoint that no longer runs.
     let started = SystemTime::now();
     let startup_work = mj_controller::upgrade::startup_recovery()?;
-    mj_core::runtime::spawn_blocking(|| {
-        mj_core::project_memory::initialize_canonical_memories(
-            &mj_core::config::DataLayout::current().projects_dir(),
-        )
-    })
-    .await
-    .context("project-memory initialization task failed")??;
     // Freeze worker sources before any session can be created or upgraded.
     // Copying binaries belongs on a blocking task, never the runtime event loop.
     mj_core::runtime::spawn_blocking(mj_controller::controller::pin_worker_binary_sources)
