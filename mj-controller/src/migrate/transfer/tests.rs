@@ -1009,6 +1009,79 @@ async fn one_receiver_owns_a_destinations_staging_and_hello_alone_creates_none()
 }
 
 #[tokio::test]
+async fn hello_reports_staged_bytes_without_following_symlinks() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let (responses, outcome) = exchange(
+        world.receiver(None),
+        vec![hello(), (Request::Done, Vec::new())],
+    )
+    .await;
+    outcome.unwrap();
+    let Response::HelloAck(empty) = &responses[0] else {
+        panic!("{responses:?}")
+    };
+    assert_eq!(
+        (
+            empty.staged_bytes_data,
+            empty.staged_bytes_config,
+            empty.staged_bytes_sessionwiki
+        ),
+        (0, 0, 0)
+    );
+    assert!(!stage.exists());
+    let mut old_ack = serde_json::to_value(empty).unwrap();
+    let object = old_ack.as_object_mut().unwrap();
+    object.remove("staged_bytes_data");
+    object.remove("staged_bytes_config");
+    object.remove("staged_bytes_sessionwiki");
+    let old_ack: HelloAck = serde_json::from_value(old_ack).unwrap();
+    assert_eq!(
+        (
+            old_ack.staged_bytes_data,
+            old_ack.staged_bytes_config,
+            old_ack.staged_bytes_sessionwiki
+        ),
+        (0, 0, 0)
+    );
+
+    let data = big(7, 1024 * 1024 + 17);
+    let home = vec![1; 123];
+    let config = vec![2; 211];
+    let wiki = vec![3; 333];
+    let mut requests = vec![hello()];
+    requests.extend(put(TransferScope::Data, "nested/data", &data));
+    requests.extend(put(TransferScope::Home, "profile/token", &home));
+    requests.extend(put(TransferScope::Config, "keys/key", &config));
+    requests.extend(put(TransferScope::SessionWiki, "index.db", &wiki));
+    requests.push((Request::Done, Vec::new()));
+    let (_, outcome) = exchange(world.receiver(None), requests).await;
+    outcome.unwrap();
+    write(&stage.join("rewritten/store"), &[4; 77]);
+    write(
+        &world.b_wiki.with_file_name("index.db.mj-migrate-pending"),
+        &[5; 444],
+    );
+    let outside = world._root.path().join("outside");
+    write(&outside.join("large"), &[9; 2048]);
+    symlink(outside.join("large"), stage.join("raw/data/link-to-file")).unwrap();
+    symlink(&outside, stage.join("raw/config/link-to-directory")).unwrap();
+
+    let (responses, outcome) = exchange(
+        world.receiver(None),
+        vec![hello(), (Request::Done, Vec::new())],
+    )
+    .await;
+    outcome.unwrap();
+    let Response::HelloAck(ack) = &responses[0] else {
+        panic!("{responses:?}")
+    };
+    assert_eq!(ack.staged_bytes_data, (data.len() + home.len() + 77) as u64);
+    assert_eq!(ack.staged_bytes_config, config.len() as u64);
+    assert_eq!(ack.staged_bytes_sessionwiki, (wiki.len() + 444) as u64);
+}
+
+#[tokio::test]
 async fn destination_entries_that_already_exist_are_refused_and_never_touched() {
     let world = World::new();
     let b_db = DataLayout::at(&world.b_data).database();

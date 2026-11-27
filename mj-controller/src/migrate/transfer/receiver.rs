@@ -449,6 +449,62 @@ fn ack() -> Reply {
     vec![(Response::Ack, Vec::new())]
 }
 
+/// Size of regular files only, without following symlinks.
+fn staged_file_bytes(path: &Path) -> Result<u64> {
+    let Some(metadata) = symlink_metadata_opt(path)? else {
+        return Ok(0);
+    };
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let mut total = 0_u64;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read {}", path.display()))?;
+        total = total
+            .checked_add(staged_file_bytes(&entry.path())?)
+            .context("staged file sizes exceed u64")?;
+    }
+    Ok(total)
+}
+
+fn staged_sizes(config: &ReceiverConfig, stage: &Stage) -> Result<(u64, u64, u64)> {
+    let Some(root) = symlink_metadata_opt(&stage.root)? else {
+        return Ok((0, 0, 0));
+    };
+    if !root.is_dir() {
+        return Ok((0, 0, 0));
+    }
+    let raw = stage.root.join("raw");
+    let raw_is_dir = symlink_metadata_opt(&raw)?.is_some_and(|metadata| metadata.is_dir());
+    let size = |scope| {
+        if raw_is_dir {
+            staged_file_bytes(&stage.raw(scope))
+        } else {
+            Ok(0)
+        }
+    };
+    let rewritten = staged_file_bytes(&stage.rewritten())?;
+    let data = size(TransferScope::Data)?
+        .checked_add(size(TransferScope::Home)?)
+        .and_then(|total| total.checked_add(rewritten))
+        .context("staged data sizes exceed u64")?;
+    let config_bytes = size(TransferScope::Config)?;
+    let wiki = size(TransferScope::SessionWiki)?
+        .checked_add(staged_file_bytes(&sessionwiki_pending_path(
+            &config.sessionwiki_db,
+        ))?)
+        .context("staged SessionWiki sizes exceed u64")?;
+    Ok((data, config_bytes, wiki))
+}
+
 impl Receiver {
     fn require_ready(&self) -> Result<()> {
         match &self.ready {
@@ -675,14 +731,15 @@ impl Receiver {
     async fn hello(&mut self, hello: Hello) -> Result<Reply> {
         let config = self.config.clone();
         let stage = self.stage.clone();
-        let (status, wiki) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
+        let (status, wiki, staged) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
             let status = destination_status(&config, &stage)?;
             let wiki = if exists(&config.sessionwiki_db)? {
                 SessionWikiStatus::Existing
             } else {
                 SessionWikiStatus::Absent
             };
-            Ok((status, wiki))
+            let staged = staged_sizes(&config, &stage)?;
+            Ok((status, wiki, staged))
         })
         .await
         .context("join destination inspection")??;
@@ -728,6 +785,9 @@ impl Receiver {
             available_bytes_data: available_bytes(&config.data_dir),
             available_bytes_config: available_bytes(&config.config_dir),
             available_bytes_sessionwiki: available_bytes(&config.sessionwiki_db),
+            staged_bytes_data: staged.0,
+            staged_bytes_config: staged.1,
+            staged_bytes_sessionwiki: staged.2,
         };
         self.ready = Some(match refusal {
             None => Ok(()),

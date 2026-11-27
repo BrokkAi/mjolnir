@@ -259,6 +259,62 @@ mod unix {
         (local, remote)
     }
 
+    fn local_placement_requirements(
+        inventory: &database::StoreMigrationInventory,
+    ) -> (bool, BTreeSet<String>) {
+        let has_local = inventory
+            .session_targets_by_kind
+            .iter()
+            .any(|(kind, count)| {
+                (kind.starts_with("local-") || kind == "apple-container") && *count > 0
+            })
+            || inventory.environment_workers_by_kind_and_phase.iter().any(
+                |((kind, _, _), count)| {
+                    (kind.starts_with("local-") || kind == "apple-container") && *count > 0
+                },
+            );
+        let engines = [("local-podman", "podman"), ("local-docker", "docker")]
+            .into_iter()
+            .filter(|(kind, _)| {
+                inventory
+                    .session_targets_by_kind
+                    .get(*kind)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+                    || inventory
+                        .environment_workers_by_kind_and_phase
+                        .iter()
+                        .any(|((k, _, _), count)| k == kind && *count > 0)
+            })
+            .map(|(_, engine)| engine.to_owned())
+            .collect();
+        (has_local, engines)
+    }
+
+    fn check_migration_space(
+        label: &str,
+        available: Option<u64>,
+        staged: u64,
+        required: u64,
+        resuming: bool,
+    ) -> Result<()> {
+        if let Some(available) = available
+            && available.saturating_add(staged) < required
+        {
+            if resuming {
+                eprintln!(
+                    "Warning: destination {label} disk has {available} bytes available and {staged} bytes staged, below the {required}-byte estimate; continuing recovery"
+                );
+            } else {
+                bail!(
+                    "destination {label} disk has {available} bytes available and {staged} bytes staged, estimated {required} required"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn default_machine_id() -> Result<MachineId> {
         let host = mj_core::storage::local_host_name();
         let id: String = host
@@ -490,17 +546,7 @@ mod unix {
         );
         let (local_templates, remote_templates) = template_sets(&config);
         let inventory = &preflight.inventory;
-        let local_placements = inventory
-            .session_targets_by_kind
-            .iter()
-            .any(|(kind, count)| {
-                (kind.starts_with("local-") || kind == "apple-container") && *count > 0
-            })
-            || inventory.environment_workers_by_kind_and_phase.iter().any(
-                |((kind, _, _), count)| {
-                    (kind.starts_with("local-") || kind == "apple-container") && *count > 0
-                },
-            );
+        let (local_placements, needed_engines) = local_placement_requirements(inventory);
         let configured_local_templates = !local_templates.is_empty();
         ensure!(
             args.disconnect_local
@@ -564,22 +610,6 @@ mod unix {
                 .any(|machine| matches!(machine, Machine::Ssh { ssh, .. } if ssh == &source_ssh)),
             "the source SSH connection is already configured"
         );
-        let mut engines = Vec::new();
-        for (kind, engine) in [("local-podman", "podman"), ("local-docker", "docker")] {
-            if inventory
-                .session_targets_by_kind
-                .get(kind)
-                .copied()
-                .unwrap_or(0)
-                > 0
-                || inventory
-                    .environment_workers_by_kind_and_phase
-                    .iter()
-                    .any(|((k, _, _), n)| k == kind && *n > 0)
-            {
-                engines.push(engine.to_owned());
-            }
-        }
         let source = if !args.disconnect_local && (local_placements || args.source_host.is_some()) {
             Some(SourceProbe {
                 ssh: ssh_target(&source_ssh),
@@ -587,10 +617,16 @@ mod unix {
                 expected_identity: std::fs::read_to_string(data.instance_identity())?
                     .trim()
                     .to_owned(),
-                engines,
+                engines: needed_engines.iter().cloned().collect(),
             })
         } else {
             None
+        };
+        let probed_source = source.is_some();
+        let probed_engines = if probed_source {
+            needed_engines
+        } else {
+            BTreeSet::new()
         };
         let mut third_hosts = Vec::new();
         for (id, machine) in &config.machines {
@@ -607,18 +643,6 @@ mod unix {
                 }
             }
         }
-        let probe = stream
-            .probe_ssh(ProbeSshRequest {
-                read_only: args.dry_run,
-                source,
-                third_hosts,
-            })
-            .await?;
-        ensure!(
-            probe.failures.is_empty(),
-            "destination SSH probes failed:\n{}",
-            probe.failures.join("\n")
-        );
         let destination_ip = destination_ssh
             .rsplit('@')
             .next()
@@ -689,6 +713,18 @@ mod unix {
                 );
             }
         }
+        let probe = stream
+            .probe_ssh(ProbeSshRequest {
+                read_only: args.dry_run,
+                source,
+                third_hosts,
+            })
+            .await?;
+        ensure!(
+            probe.failures.is_empty(),
+            "destination SSH probes failed:\n{}",
+            probe.failures.join("\n")
+        );
         let data_size: u64 = preflight
             .data_entries
             .iter()
@@ -716,24 +752,29 @@ mod unix {
             })
             .map(|entry| entry.size_bytes)
             .sum();
-        if let Some(available) = hello.available_bytes_data {
-            ensure!(
-                available >= data_size,
-                "destination data disk has {available} bytes available, estimated {data_size} required"
-            );
-        }
-        if let Some(available) = hello.available_bytes_config {
-            ensure!(
-                available >= config_size,
-                "destination config disk has {available} bytes available, estimated {config_size} required"
-            );
-        }
-        if migrate_wiki && let Some(available) = hello.available_bytes_sessionwiki {
+        check_migration_space(
+            "data",
+            hello.available_bytes_data,
+            hello.staged_bytes_data,
+            data_size,
+            resuming.is_some(),
+        )?;
+        check_migration_space(
+            "config",
+            hello.available_bytes_config,
+            hello.staged_bytes_config,
+            config_size,
+            resuming.is_some(),
+        )?;
+        if migrate_wiki {
             let size = std::fs::metadata(&preflight.sessionwiki_db)?.len();
-            ensure!(
-                available >= size,
-                "destination SessionWiki disk has {available} bytes available, estimated {size} required"
-            );
+            check_migration_space(
+                "SessionWiki",
+                hello.available_bytes_sessionwiki,
+                hello.staged_bytes_sessionwiki,
+                size,
+                resuming.is_some(),
+            )?;
         }
         eprintln!(
             "Destination data: {}\nDestination config: {}\nDestination home: {}\nSessionWiki: {}",
@@ -789,6 +830,9 @@ mod unix {
             migrate_wiki,
             overwrite_wiki: args.overwrite_sessionwiki,
             no_start: args.no_start,
+            disconnect_local: args.disconnect_local,
+            probed_source,
+            probed_engines,
             resuming,
             wrote_fence: false,
             stopped_daemon: false,
@@ -847,6 +891,9 @@ mod unix {
         migrate_wiki: bool,
         overwrite_wiki: bool,
         no_start: bool,
+        disconnect_local: bool,
+        probed_source: bool,
+        probed_engines: BTreeSet<String>,
         resuming: Option<StoreFenceRecord>,
         wrote_fence: bool,
         stopped_daemon: bool,
@@ -888,6 +935,20 @@ mod unix {
                 "source store schema changed during migration"
             );
             let inventory = database::inspect_migration_inventory(&connection)?;
+            let (local_placements_now, needed_engines_now) =
+                local_placement_requirements(&inventory);
+            if !self.disconnect_local {
+                ensure!(
+                    !(local_placements_now && !self.probed_source),
+                    "a local session or environment appeared during Phase 1 pre-sync; re-run mj migrate with --source-host so destination connectivity is verified"
+                );
+                for engine in needed_engines_now {
+                    ensure!(
+                        self.probed_engines.contains(&engine),
+                        "a local {engine} session or environment appeared during Phase 1 pre-sync; re-run mj migrate so destination connectivity and {engine} availability are verified"
+                    );
+                }
+            }
             let remote_templates = self
                 .remote_templates
                 .union(&inventory.remote_template_ids)
@@ -1029,6 +1090,19 @@ mod unix {
             self.store_guard.take();
             self.start_guard.take();
             Ok(())
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::check_migration_space;
+
+        #[test]
+        fn staged_bytes_count_toward_space_and_recovery_is_not_blocked() {
+            assert!(check_migration_space("data", Some(40), 60, 100, false).is_ok());
+            assert!(check_migration_space("data", Some(40), 59, 100, false).is_err());
+            assert!(check_migration_space("data", Some(0), 0, 100, true).is_ok());
+            assert!(check_migration_space("data", Some(u64::MAX - 1), 2, u64::MAX, false).is_ok());
+            assert!(check_migration_space("data", None, 0, u64::MAX, false).is_ok());
         }
     }
 }

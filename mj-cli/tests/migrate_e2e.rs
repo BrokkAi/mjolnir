@@ -175,13 +175,25 @@ impl World {
         self.migration_to("127.0.0.1", extra, hook)
     }
     fn migration_to(&self, destination: &str, extra: &[&str], hook: Option<&str>) -> Command {
+        self.migration_with_source(destination, extra, hook, true)
+    }
+    fn migration_with_source(
+        &self,
+        destination: &str,
+        extra: &[&str],
+        hook: Option<&str>,
+        disconnected: bool,
+    ) -> Command {
         let mut cmd = self.command(false);
+        cmd.args(["migrate", destination]);
+        if disconnected {
+            cmd.args([
+                "--disconnect-local",
+                "--source-host",
+                "mj-migration-source.invalid",
+            ]);
+        }
         cmd.args([
-            "migrate",
-            destination,
-            "--disconnect-local",
-            "--source-host",
-            "mj-migration-source.invalid",
             "--source-machine-id",
             "migration-source",
             "--dest-instance",
@@ -1058,6 +1070,164 @@ fn config_change_during_presync_rolls_back_source() {
     success(&world.endpoint(false));
 }
 
+#[cfg(feature = "test-hooks")]
+#[test]
+fn local_session_appearing_during_presync_requires_source_probe() {
+    use mj_core::{
+        config::TargetTemplate,
+        state::{TargetLocator, TargetRuntimeSettings},
+    };
+    use std::sync::Arc;
+    let Some(world) = World::new() else { return };
+    let key = world.a.path().join("config/remote-key");
+    fs::write(&key, "fixture key").unwrap();
+    let key = serde_json::to_string(&key.to_string_lossy()).unwrap();
+    let mut config = format!(
+        "version = {}\n[phone]\nenabled = false\n[machines.remote]\nkind = 'ssh'\nhost = 'remote.invalid'\nidentity_file = {key}\n",
+        mj_core::config::CONFIG_VERSION
+    );
+    for name in ["localhost", "podman", "docker", "apple-container"] {
+        config.push_str(&format!(
+            "[targets.{name}]\nkind = 'bare'\nmachine = 'remote'\n"
+        ));
+    }
+    fs::write(world.a.path().join("config/config.toml"), config).unwrap();
+    success(&world.endpoint(false));
+    let hooks = world.a.path().join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let log_path = world.a.path().join("new-placement.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let mut cmd = world.migration_with_source("127.0.0.1", &[], None, false);
+    cmd.env("MJ_CHAOS_ISOLATED", "1")
+        .env("MJ_TEST_HOOK", "migrate_after_phase1")
+        .env("MJ_TEST_HOOK_DIR", &hooks)
+        .stdout(Stdio::null())
+        .stderr(log)
+        .process_group(0);
+    let mut migration = RunningChild(mj_core::subprocess::spawn_child(&mut cmd).unwrap());
+    let reached = hooks.join("migrate_after_phase1.reached");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !reached.exists() {
+        if let Some(status) = migration.0.try_wait().unwrap() {
+            panic!(
+                "migration exited before phase 1 hook: {status}: {}",
+                fs::read_to_string(&log_path).unwrap_or_default()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "migration did not reach phase 1 hook"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let data = world.a.path().join("data");
+    let mut session = mj_controller::database::test_session("appeared-local", "bundle");
+    session.checkpoint = None;
+    session.target_template_id = "appeared-local".into();
+    session.target_runtime = Some(Arc::new(TargetRuntimeSettings::from(
+        &TargetTemplate::LocalBare,
+    )));
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: data.join("workers/appeared-local"),
+    }));
+    mj_controller::database::save_session_to(&data.join("mj.sqlite3"), &session).unwrap();
+    fs::write(hooks.join("migrate_after_phase1.continue"), "continue").unwrap();
+    assert!(!wait_child(&mut migration.0).success());
+    let log = fs::read_to_string(log_path).unwrap();
+    assert!(
+        log.contains("a local session or environment appeared during Phase 1 pre-sync"),
+        "{log}"
+    );
+    assert!(!world.b.path().join("data/mj.sqlite3").exists());
+    success(&world.endpoint(false));
+    let db = rusqlite::Connection::open(data.join("mj.sqlite3")).unwrap();
+    let count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM sessions WHERE session_id='appeared-local'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert!(
+        mj_controller::database::read_store_fence(&db)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn local_engine_appearing_during_presync_requires_engine_probe() {
+    let Some(world) = World::new() else { return };
+    success(&world.endpoint(false));
+    let hooks = world.a.path().join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let log_path = world.a.path().join("new-engine.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let mut cmd = world.migration_with_source("127.0.0.1", &[], None, false);
+    cmd.args(["--source-host", "127.0.0.1"]);
+    for arg in [
+        "-i".to_owned(),
+        world.sshd.key.display().to_string(),
+        "-p".to_owned(),
+        world.sshd.port.to_string(),
+        "-o".to_owned(),
+        format!("UserKnownHostsFile={}", world.sshd.known_hosts.display()),
+    ] {
+        cmd.arg("--source-ssh-arg").arg(arg);
+    }
+    cmd.env("MJ_CHAOS_ISOLATED", "1")
+        .env("MJ_TEST_HOOK", "migrate_after_phase1")
+        .env("MJ_TEST_HOOK_DIR", &hooks)
+        .stdout(Stdio::null())
+        .stderr(log)
+        .process_group(0);
+    let mut migration = RunningChild(mj_core::subprocess::spawn_child(&mut cmd).unwrap());
+    let reached = hooks.join("migrate_after_phase1.reached");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !reached.exists() {
+        if let Some(status) = migration.0.try_wait().unwrap() {
+            panic!(
+                "migration exited before phase 1 hook: {status}: {}",
+                fs::read_to_string(&log_path).unwrap_or_default()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "migration did not reach phase 1 hook"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let data = world.a.path().join("data");
+    let mut owner = mj_controller::database::test_session("fixture-owner", "bundle");
+    owner.target = None;
+    owner.target_runtime = None;
+    owner.checkpoint = None;
+    owner.target_template_id = "fixture-remote".into();
+    mj_controller::database::save_session_to(&data.join("mj.sqlite3"), &owner).unwrap();
+    let db = rusqlite::Connection::open(data.join("mj.sqlite3")).unwrap();
+    let placement = mj_controller::database::EnvironmentPlacement::from_session(&owner);
+    db.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('fixture-env','fixture-owner','reclaimed',?1)", [serde_json::to_string(&placement).unwrap()]).unwrap();
+    db.execute("INSERT INTO environment_workers(lease_id,environment_id,worker_session_id,kind,resource_id,target_template_id) VALUES ('fixture-lease','fixture-env','fixture-worker','local-podman','fixture-container','podman')", []).unwrap();
+    drop(db);
+    fs::write(hooks.join("migrate_after_phase1.continue"), "continue").unwrap();
+    assert!(!wait_child(&mut migration.0).success());
+    let log = fs::read_to_string(log_path).unwrap();
+    assert!(
+        log.contains("a local podman session or environment appeared during Phase 1 pre-sync"),
+        "{log}"
+    );
+    assert!(!world.b.path().join("data/mj.sqlite3").exists());
+    success(&world.endpoint(false));
+    let db = rusqlite::Connection::open(data.join("mj.sqlite3")).unwrap();
+    assert!(
+        mj_controller::database::read_store_fence(&db)
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn unavailable_aws_ingress_check_warns_and_continues() {
     let Some(world) = World::new() else { return };
@@ -1095,6 +1265,31 @@ fn unavailable_aws_ingress_check_warns_and_continues() {
     assert!(stderr.contains("203.0.113.10/32"), "{stderr}");
     assert!(!world.b.path().join("data").exists());
     success(&world.endpoint(false));
+
+    let config = world.a.path().join("config/config.toml");
+    let mut contents = fs::read_to_string(&config).unwrap();
+    contents.push_str("\n[machines.blocked]\nkind = 'ssh'\nhost = 'blocked.invalid'\n");
+    fs::write(config, contents).unwrap();
+    let mut cmd = world.migration_to("203.0.113.10", &["--dry-run", "--no-aws-modify"], None);
+    cmd.arg("--ssh-arg")
+        .arg("-o")
+        .arg("--ssh-arg")
+        .arg("HostName=127.0.0.1");
+    cmd.env(
+        "PATH",
+        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools_dir.display()),
+    );
+    let output = run(&mut cmd);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let ingress = stderr
+        .find("could not check EC2 SSH ingress")
+        .expect("missing ingress warning");
+    let probe = stderr
+        .find("destination SSH probes failed")
+        .expect("missing SSH probe failure");
+    assert!(ingress < probe, "{stderr}");
+    assert!(stderr.contains("blocked.invalid"), "{stderr}");
 }
 
 #[test]

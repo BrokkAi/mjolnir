@@ -111,6 +111,12 @@ pub struct HelloAck {
     pub available_bytes_data: Option<u64>,
     pub available_bytes_config: Option<u64>,
     pub available_bytes_sessionwiki: Option<u64>,
+    #[serde(default)]
+    pub staged_bytes_data: u64,
+    #[serde(default)]
+    pub staged_bytes_config: u64,
+    #[serde(default)]
+    pub staged_bytes_sessionwiki: u64,
 }
 
 /// Probe SSH from the destination, using the OpenSSH configuration and keys
