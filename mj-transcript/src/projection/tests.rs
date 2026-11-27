@@ -4129,6 +4129,10 @@ fn live_recovery_prefers_a_selectable_provider_model_over_the_previous_selection
                 "sessionUpdate":"config_option_update", "configOptions":[{
                     "id":"model", "name":"Model", "type":"select", "currentValue":current,
                     "options":offered.iter().map(|value| json!({"value":value,"name":value})).collect::<Vec<_>>()
+                }, {
+                    "id":"reasoning_effort", "name":"Effort", "category":"thought_level",
+                    "type":"select", "currentValue":"high",
+                    "options":[{"value":"high","name":"High"}]
                 }]
             })).unwrap()),
         });
@@ -4145,6 +4149,11 @@ fn live_recovery_prefers_a_selectable_provider_model_over_the_previous_selection
         };
         let recovered = materialized_session_from_live_baseline(&baseline).unwrap();
         assert_eq!(recovered.configuration.values["model"], json!(expected));
+        assert_eq!(
+            recovered.configuration.values["reasoning_effort"],
+            json!("high")
+        );
+        assert_eq!(recovered.configuration.values["effort"], json!("high"));
         if current == "replacement" {
             assert_eq!(
                 recovered.configuration.values["model"],

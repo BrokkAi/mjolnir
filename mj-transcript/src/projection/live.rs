@@ -21,40 +21,31 @@ pub fn materialized_session_from_live_baseline(
         .configuration
         .values
         .extend(configuration_values(&state.config_options)?);
-    for canonical in ["model", "effort"] {
+    let effective = mj_core::acp::EffectiveSessionConfig::from_operational(
+        &state.config,
+        &state.config_options,
+    );
+    for (canonical, effective_value) in [("model", effective.model), ("effort", effective.effort)] {
         if let Some(option) =
             mj_core::acp::find_session_config_option(&state.config_options, canonical)
-            && let Some(value) = projection
-                .configuration
-                .values
-                .get(&option.id.to_string())
-                .cloned()
         {
-            // A provider restart may select a replacement for a withdrawn
-            // model. Only an unselectable transcript ID needs the previously
-            // accepted picker value instead of the catalogue's current value.
-            let selectable = value
-                .as_str()
-                .is_some_and(|current| mj_core::acp::select_contains(&option.kind, current));
-            let value = if canonical == "model" && !selectable {
-                mj_core::acp::AcceptedSessionConfig::from_configuration(
-                    &state.config,
-                    &state.config_options,
-                )
-                .model
-                .map(Value::String)
-                .unwrap_or(value)
+            if let Some(value) = effective_value {
+                let value = Value::String(value);
+                projection
+                    .configuration
+                    .values
+                    .insert(option.id.to_string(), value.clone());
+                projection
+                    .configuration
+                    .values
+                    .insert(canonical.into(), value);
             } else {
-                value
-            };
-            projection
-                .configuration
-                .values
-                .insert(option.id.to_string(), value.clone());
-            projection
-                .configuration
-                .values
-                .insert(canonical.into(), value);
+                projection
+                    .configuration
+                    .values
+                    .remove(&option.id.to_string());
+                projection.configuration.values.remove(canonical);
+            }
         }
     }
     // CurrentModeUpdate changes the legacy mode without reissuing the option
