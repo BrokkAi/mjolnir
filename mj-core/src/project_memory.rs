@@ -548,12 +548,20 @@ fn lock_canonical(root: &Path) -> Result<crate::file_lock::FileLock> {
         .parent()
         .context("memory store has no project directory")?;
     fs::create_dir_all(parent)?;
+    let path = parent.join(".memory.lock");
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(parent.join(".memory.lock"))?;
+        .open(&path)?;
+    // The lock is created with the process umask. Restrict it to the owner.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict {}", path.display()))?;
+    }
     Ok(crate::file_lock::FileLock::acquire_cancellable(
         file,
         &|| false,
@@ -597,6 +605,15 @@ fn write_canonical_before_rename(
     let parent = path.parent().context("canonical file has no parent")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(&serde_json::to_vec(state)?)?;
+    // NamedTempFile follows the process umask. The canonical file must stay
+    // owner-only after the rename, which keeps this inode's mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
     temporary.as_file().sync_all()?;
     before_rename()?;
     temporary.persist(&path).map_err(|error| error.error)?;
@@ -650,7 +667,15 @@ pub fn commit_canonical(
                 .insert(session_id.to_owned(), snapshot.to_owned());
         }
         write_canonical_locked(&root, &current)?;
-        render_memory_tree(&root, tree, true)?;
+        // The rename is the commit. A later render failure leaves the new
+        // tree in place; the next commit or daemon start renders it again.
+        if let Err(error) = render_memory_tree(&root, tree, true) {
+            tracing::warn!(
+                project = %project_key(&root),
+                %error,
+                "project memory render failed after the commit"
+            );
+        }
         return Ok(SwapOutcome::Swapped);
     }
 }
@@ -1091,12 +1116,21 @@ fn prune_empty_memory_directories(directory: &ConfinedDir, changed: &mut bool) -
     Ok(())
 }
 
-// Remove visible entries using handles that never follow a planted link. Hidden
-// legacy material is retained but never read into canonical after migration.
+// Remove rendered entries through confined handles, which never follow a
+// planted link. A hidden name at the render root stays (redirect metadata
+// lives beside this directory, and a root-level dotfile is not a document).
+// Anything inside a directory the render owns is removed, hidden names
+// included, so a leftover dotfile cannot keep a directory that a document
+// now needs to replace.
 fn clear_render(directory: &ConfinedDir) -> Result<()> {
+    clear_render_entries(directory, false)
+}
+
+fn clear_render_entries(directory: &ConfinedDir, remove_hidden: bool) -> Result<()> {
     set_render_directory_writable(directory)?;
     for (name, kind) in directory.entries()? {
-        if name.to_string_lossy().starts_with('.') {
+        let hidden = name.to_string_lossy().starts_with('.');
+        if hidden && !remove_hidden {
             continue;
         }
         match kind {
@@ -1104,19 +1138,17 @@ fn clear_render(directory: &ConfinedDir) -> Result<()> {
                 let Some(child) = directory.open_dir(Path::new(&name))? else {
                     continue;
                 };
-                clear_render(&child)?;
-                let empty = child.entries()?.is_empty();
+                clear_render_entries(&child, true)?;
                 drop(child);
-                if empty {
-                    directory.remove_dir(&name)?;
-                }
+                directory.remove_dir(&name)?;
             }
-            EntryKind::File => {
+            EntryKind::File | EntryKind::Other => {
                 #[cfg(windows)]
-                set_render_file_writable(directory, &name)?;
+                if kind == EntryKind::File {
+                    set_render_file_writable(directory, &name)?;
+                }
                 directory.remove_file(&name)?;
             }
-            EntryKind::Other => {}
         }
     }
     Ok(())
@@ -1152,12 +1184,12 @@ fn finish_render_directory(directory: &ConfinedDir) -> Result<()> {
                 }
             }
             EntryKind::File => {
-                directory.set_file_permissions(&name, fs::Permissions::from_mode(0o444))?
+                directory.set_file_permissions(&name, fs::Permissions::from_mode(0o400))?
             }
             EntryKind::Other => {}
         }
     }
-    directory.set_directory_permissions(fs::Permissions::from_mode(0o555))
+    directory.set_directory_permissions(fs::Permissions::from_mode(0o500))
 }
 
 #[cfg(not(unix))]
@@ -1203,6 +1235,9 @@ pub fn render_memory_tree(
 }
 
 /// Migrate each existing project once and repair rendered views at daemon start.
+/// One project's failure is logged and skipped. The next canonical access, or
+/// the next daemon start, tries that project again. A failed migration writes
+/// nothing, so a later read reports the error instead of an empty tree.
 pub fn initialize_canonical_memories(projects: &Path) -> Result<()> {
     let entries = match fs::read_dir(projects) {
         Ok(entries) => entries,
@@ -1210,30 +1245,62 @@ pub fn initialize_canonical_memories(projects: &Path) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let project = entry.path();
-        let original = project.join("memory");
-        if !original.try_exists()?
-            && !project.join("memory.json").try_exists()?
-            && !project.join("memory-redirect.json").try_exists()?
-        {
-            continue;
-        }
-        loop {
-            let root = resolve_canonical_root(&original)?;
-            let _lock = lock_canonical(&root)?;
-            if resolve_canonical_root(&original)? != root {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(%error, "could not read a project directory entry");
                 continue;
             }
-            let state = load_canonical_locked(&root)?;
-            render_memory_tree(&root, &state.tree, true)?;
-            break;
+        };
+        let project = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    project = %project_key(&project.join("memory")),
+                    %error,
+                    "could not inspect a project directory"
+                );
+                continue;
+            }
+        }
+        if let Err(error) = initialize_one_canonical_memory(&project) {
+            tracing::warn!(
+                project = %project_key(&project.join("memory")),
+                %error,
+                "project memory initialization failed; it will be retried"
+            );
         }
     }
     Ok(())
+}
+
+fn initialize_one_canonical_memory(project: &Path) -> Result<()> {
+    let original = project.join("memory");
+    if !original.try_exists()?
+        && !project.join("memory.json").try_exists()?
+        && !project.join("memory-redirect.json").try_exists()?
+    {
+        return Ok(());
+    }
+    loop {
+        let root = resolve_canonical_root(&original)?;
+        let _lock = lock_canonical(&root)?;
+        if resolve_canonical_root(&original)? != root {
+            continue;
+        }
+        let state = load_canonical_locked(&root)?;
+        render_memory_tree(&root, &state.tree, true)?;
+        return Ok(());
+    }
+}
+
+fn project_key(root: &Path) -> std::borrow::Cow<'_, str> {
+    root.parent()
+        .and_then(|parent| parent.file_name())
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| root.to_string_lossy())
 }
 
 /// Follow the existing project redirect metadata.
@@ -1935,6 +2002,13 @@ mod tests {
         fs::write(root.join("empty.md"), "").unwrap();
         fs::write(root.join(".hidden"), "hidden").unwrap();
         fs::write(root.join("sub/.hidden"), "nested hidden").unwrap();
+        // A directory whose only leftover is hidden must not block a document
+        // that takes its name. The render owns everything inside it.
+        fs::create_dir_all(root.join("topic")).unwrap();
+        fs::write(root.join("topic/.secret"), "secret").unwrap();
+        let bad = projects.join("bad-utf8/memory");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("note.md"), [0xff, 0xfe]).unwrap();
         let alias = projects.join("alias/memory");
         fs::create_dir_all(alias.parent().unwrap()).unwrap();
         fs::write(
@@ -1946,21 +2020,24 @@ mod tests {
         initialize_canonical_memories(&projects).unwrap();
         assert_eq!(read_canonical(&root).unwrap(), expected);
         assert_eq!(fs::read_to_string(root.join(".hidden")).unwrap(), "hidden");
+        assert!(!root.join("topic").exists());
+        assert!(
+            read_canonical(&bad).is_err(),
+            "invalid UTF-8 is an error, not an empty tree"
+        );
+        assert!(
+            !bad.parent().unwrap().join("memory.json").exists(),
+            "a failed migration writes no canonical file"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(root.join("MEMORY.md"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o444
-            );
-            assert_eq!(
-                fs::metadata(&root).unwrap().permissions().mode() & 0o777,
-                0o555
-            );
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&root.join("MEMORY.md")), 0o400);
+            assert_eq!(mode(&root.join("sub")), 0o500);
+            assert_eq!(mode(&root), 0o500);
+            assert_eq!(mode(&root.parent().unwrap().join("memory.json")), 0o600);
+            assert_eq!(mode(&root.parent().unwrap().join(".memory.lock")), 0o600);
         }
         set_render_directory_writable(&ConfinedDir::open_root(&root).unwrap().unwrap()).unwrap();
         fs::remove_file(root.join("MEMORY.md")).unwrap();
@@ -1972,5 +2049,34 @@ mod tests {
             "legacy"
         );
         assert_eq!(read_canonical(&root).unwrap(), expected);
+        assert!(read_canonical(&bad).is_err());
+    }
+
+    #[test]
+    fn commit_reports_success_when_render_fails_after_rename() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project/memory");
+        let old = read_canonical_state(&root).unwrap();
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::write(&root, b"not a directory").unwrap();
+        let mut tree = old.tree.clone();
+        tree.files.insert("/note.md".to_owned(), "kept".to_owned());
+        assert_eq!(
+            commit_canonical(&root, &old, "session", &tree, Some("snap")).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(state.tree.files.get("/note.md").unwrap(), "kept");
+        assert_eq!(state.absorbed.get("session").unwrap(), "snap");
+        let warnings = log.at(tracing::Level::WARN);
+        assert!(
+            warnings.iter().any(|line| line.contains("project")
+                && line.contains("project memory render failed after the commit")),
+            "{warnings:?}"
+        );
     }
 }
