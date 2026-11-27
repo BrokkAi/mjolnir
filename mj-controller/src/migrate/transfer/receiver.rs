@@ -55,22 +55,56 @@ const WIKI_WAL: &str = "index.db-wal";
 const WIKI_SHM: &str = "index.db-shm";
 const PUBLICATION_FILE: &str = "publication.json";
 
+/// The device and inode of a path this publication created. A path that now
+/// names a different inode was replaced by someone else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileIdentity {
+    fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(Self {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct OwnedEntry {
+    path: PathBuf,
+    #[serde(default)]
+    identity: Option<FileIdentity>,
+}
+
 /// What this publication has proven it created on the destination. A
-/// rolled-back attempt removes exactly these entries and nothing else, so a
-/// file or directory that was already there is never deleted. An entry is
-/// recorded right after its atomic creation, never before.
+/// rolled-back attempt removes exactly these entries, and only while each
+/// still is the inode that was created, so a file or directory that was already
+/// there, or that replaced ours, is never deleted. An entry is recorded right
+/// after its atomic creation, never before.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PublicationRecord {
     expected_fence: StoreFenceRecord,
     /// Entries created under the home directory, relative to it.
     #[serde(default)]
-    owned_home_targets: Vec<PathBuf>,
+    owned_home_targets: Vec<OwnedEntry>,
     /// Top-level entries created in the data directory.
     #[serde(default)]
-    owned_data_entries: Vec<PathBuf>,
+    owned_data_entries: Vec<OwnedEntry>,
     /// Top-level entries created in the configuration directory.
     #[serde(default)]
-    owned_config_entries: Vec<PathBuf>,
+    owned_config_entries: Vec<OwnedEntry>,
     /// Set immediately before the SessionWiki index is placed or replaced.
     #[serde(default)]
     sessionwiki_published: bool,
@@ -84,18 +118,43 @@ enum Owned {
 }
 
 impl PublicationRecord {
-    fn list(&mut self, which: Owned) -> &mut Vec<PathBuf> {
+    fn list(&mut self, which: Owned) -> &mut Vec<OwnedEntry> {
         match which {
             Owned::Home => &mut self.owned_home_targets,
             Owned::Data => &mut self.owned_data_entries,
             Owned::Config => &mut self.owned_config_entries,
         }
     }
+
+    fn owns(&self, which: Owned, name: &Path) -> bool {
+        match which {
+            Owned::Home => &self.owned_home_targets,
+            Owned::Data => &self.owned_data_entries,
+            Owned::Config => &self.owned_config_entries,
+        }
+        .iter()
+        .any(|entry| entry.path == name)
+    }
 }
 
-/// Install one entry. One this publication already created is finished with
-/// `publish_entry`, which may merge into it. Anything else must not exist: it
-/// is created atomically and recorded as ours before more is placed.
+/// Refuse a path that no longer is what this publication created.
+fn verify_owned(dst: &Path, entry: &OwnedEntry, found: &std::fs::Metadata) -> Result<()> {
+    if let Some(expected) = entry.identity
+        && FileIdentity::of(found).is_some_and(|actual| actual != expected)
+    {
+        bail!(
+            "destination path {} was replaced externally since the interrupted migration; \
+             clean it manually or choose --dest-instance",
+            dst.display()
+        );
+    }
+    Ok(())
+}
+
+/// Install one entry. One this publication already created is finished
+/// (merged into if a directory), after checking it is still the one created.
+/// Anything else must not exist: it is created atomically and recorded as
+/// ours, with its identity, before more is placed.
 fn install_entry(
     stage: &Stage,
     record: &mut PublicationRecord,
@@ -105,11 +164,39 @@ fn install_entry(
     dst: &Path,
     mode: PublishMode,
 ) -> Result<()> {
-    if record.list(which).iter().any(|owned| owned == name) {
-        return publish_entry(src, dst, mode);
+    if let Some(position) = record
+        .list(which)
+        .iter()
+        .position(|owned| owned.path == name)
+    {
+        let entry = record.list(which)[position].clone();
+        match symlink_metadata_opt(dst)? {
+            Some(found) => {
+                verify_owned(dst, &entry, &found)?;
+                if found.is_dir() {
+                    return publish_entry(src, dst, mode);
+                }
+                // A file or link is complete when it is recorded; only the
+                // staged source of a move can be left over.
+                if mode == PublishMode::Move {
+                    remove_path(src)?;
+                }
+                return Ok(());
+            }
+            None => {
+                // Removed since; install it afresh under a new identity.
+                record.list(which).remove(position);
+            }
+        }
     }
     publish_entry_no_replace(src, dst, mode, &mut || {
-        record.list(which).push(name.to_path_buf());
+        let identity = symlink_metadata_opt(dst)?
+            .as_ref()
+            .and_then(FileIdentity::of);
+        record.list(which).push(OwnedEntry {
+            path: name.to_path_buf(),
+            identity,
+        });
         stage.write_publication(record)
     })
 }
@@ -142,6 +229,14 @@ fn single_normal_name(path: &Path) -> Result<()> {
         path.display()
     );
     Ok(())
+}
+
+/// A source directory whose mode lacks owner access, and so could not be filled.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DirectoryMode {
+    scope: TransferScope,
+    rel_path: PathBuf,
+    mode: u32,
 }
 
 #[derive(Clone)]
@@ -179,6 +274,45 @@ impl Stage {
         ] {
             mj_core::config::create_owner_only_directory(&self.raw(scope))?;
         }
+        Ok(())
+    }
+    fn dir_modes_file(&self) -> PathBuf {
+        self.root.join("dir-modes.json")
+    }
+    fn read_directory_modes(&self) -> Result<Vec<DirectoryMode>> {
+        match std::fs::read(self.dir_modes_file()) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("parse dir-modes.json"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error).context("read dir-modes.json"),
+        }
+    }
+    /// Remember the mode a source directory really has when it is not owner
+    /// read-write-search, so publication can restore it after filling the directory.
+    fn record_directory_mode(
+        &self,
+        scope: TransferScope,
+        rel_path: &Path,
+        mode: u32,
+    ) -> Result<()> {
+        let mut modes = self.read_directory_modes()?;
+        let before = modes.len();
+        modes.retain(|entry| !(entry.scope == scope && entry.rel_path == rel_path));
+        let restricted = mode & 0o700 != 0o700;
+        if !restricted && modes.len() == before {
+            return Ok(());
+        }
+        if restricted {
+            modes.push(DirectoryMode {
+                scope,
+                rel_path: rel_path.to_path_buf(),
+                mode,
+            });
+        }
+        let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
+        file.write_all(&serde_json::to_vec(&modes)?)?;
+        file.as_file().sync_all()?;
+        file.persist(self.dir_modes_file())
+            .context("persist dir-modes.json")?;
         Ok(())
     }
     fn read_publication(&self) -> Result<Option<PublicationRecord>> {
@@ -557,7 +691,10 @@ impl Receiver {
                     }
                     None => std::fs::create_dir(&destination)?,
                 }
-                set_unix_mode(&destination, mode)?;
+                // Staged directories stay owner-writable so their children can
+                // be placed; the source's mode is applied when publishing.
+                set_unix_mode(&destination, mode | 0o700)?;
+                self.stage.record_directory_mode(scope, rel_path, mode)?;
                 Ok(ack())
             }
             FileKind::Symlink { target } => {
@@ -1150,7 +1287,7 @@ fn publish(
             );
         } else {
             ensure!(
-                exists(&src)? || record.owned_home_targets.contains(&target.rel_path),
+                exists(&src)? || record.owns(Owned::Home, &target.rel_path),
                 "staged home entry is missing: {}",
                 target.rel_path.display()
             );
@@ -1206,6 +1343,22 @@ fn publish(
         &layout.config_toml(),
         PublishMode::Copy,
     )?;
+    // Directories whose real mode is restrictive were kept writable while
+    // they were filled; restore them now, deepest first.
+    let mut modes = stage.read_directory_modes()?;
+    modes.sort_by_key(|entry| std::cmp::Reverse(entry.rel_path.components().count()));
+    for entry in modes {
+        let base = match entry.scope {
+            TransferScope::Home => &config.home_dir,
+            TransferScope::Data => &config.data_dir,
+            TransferScope::Config => &config.config_dir,
+            TransferScope::SessionWiki => continue,
+        };
+        let path = base.join(&entry.rel_path);
+        if symlink_metadata_opt(&path)?.is_some_and(|metadata| metadata.is_dir()) {
+            set_unix_mode(&path, entry.mode)?;
+        }
+    }
     hook(PublicationStep::BeforeStorePlacement)?;
     if !exists(&final_db)? {
         // A stale WAL beside a database that is not ours would be replayed into it.
@@ -1255,22 +1408,36 @@ fn discard_unfinished_publication(
         remove_path(&data.database_wal())?;
         remove_path(&data.database_shm())?;
     }
-    for rel_path in &old.owned_home_targets {
-        validate_relative_path(rel_path)?;
-        remove_path(&config.home_dir.join(rel_path))?;
+    // Check every recorded entry before removing any, so a path someone else
+    // replaced stops the cleanup with the rest still in place.
+    let mut doomed = Vec::new();
+    for (entries, base) in [
+        (&old.owned_home_targets, &config.home_dir),
+        (&old.owned_data_entries, &config.data_dir),
+        (&old.owned_config_entries, &config.config_dir),
+    ] {
+        for entry in entries {
+            if base == &config.home_dir {
+                validate_relative_path(&entry.path)?;
+            } else {
+                single_normal_name(&entry.path)?;
+            }
+            if base == &config.data_dir {
+                ensure!(
+                    !skipped_data_name(&entry.path.to_string_lossy()),
+                    "recorded data entry is reserved: {}",
+                    entry.path.display()
+                );
+            }
+            let path = base.join(&entry.path);
+            if let Some(found) = symlink_metadata_opt(&path)? {
+                verify_owned(&path, entry, &found)?;
+                doomed.push(path);
+            }
+        }
     }
-    for name in &old.owned_data_entries {
-        single_normal_name(name)?;
-        ensure!(
-            !skipped_data_name(&name.to_string_lossy()),
-            "recorded data entry is reserved: {}",
-            name.display()
-        );
-        remove_path(&config.data_dir.join(name))?;
-    }
-    for name in &old.owned_config_entries {
-        single_normal_name(name)?;
-        remove_path(&config.config_dir.join(name))?;
+    for path in doomed {
+        remove_path(&path)?;
     }
     if old.sessionwiki_published {
         for suffix in ["", "-wal", "-shm"] {
@@ -1331,18 +1498,32 @@ fn publish_sessionwiki(
         std::fs::create_dir_all(parent)?;
     }
     if request.overwrite_sessionwiki || record.sessionwiki_published {
-        // Replacing: an index of ours from an earlier run, or one the user asked
-        // to overwrite. Recorded first, so a crash mid-replace is cleaned up.
+        // Replacing the destination's own index: first make sure nobody has it
+        // open, and keep that exclusion until the replacement is in place. An
+        // index of ours from an earlier run needs no check.
+        let in_use = if request.overwrite_sessionwiki
+            && !record.sessionwiki_published
+            && exists(&config.sessionwiki_db)?
+        {
+            Some(lock_existing_sessionwiki(&config.sessionwiki_db)?)
+        } else {
+            None
+        };
+        // Recorded first, so a crash mid-replace is cleaned up by a retry.
         if !record.sessionwiki_published {
             record.sessionwiki_published = true;
             stage.write_publication(record)?;
         }
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["-wal", "-shm"] {
             let mut name = config.sessionwiki_db.as_os_str().to_owned();
             name.push(suffix);
             remove_path(Path::new(&name))?;
         }
-        publish_entry(&staged, &config.sessionwiki_db, PublishMode::Move)
+        // One rename: the index is never missing, and a reader that raced the
+        // lock sees the old file or the new one.
+        replace_file_atomically(&staged, &config.sessionwiki_db)?;
+        drop(in_use);
+        Ok(())
     } else {
         publish_entry_no_replace(
             &staged,
@@ -1354,4 +1535,48 @@ fn publish_sessionwiki(
             },
         )
     }
+}
+
+/// Take the destination's SessionWiki index exclusively, or fail because
+/// another process has it open. Switching a WAL database to rollback-journal
+/// mode needs the lock that every other WAL connection prevents, so success
+/// means no other connection exists.
+fn lock_existing_sessionwiki(path: &Path) -> Result<rusqlite::Connection> {
+    let in_use = |error: &dyn std::fmt::Display| {
+        anyhow::anyhow!(
+            "destination SessionWiki index is currently in use by another process; stop \
+             standalone sessionwiki or retry ({error})"
+        )
+    };
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| in_use(&error))?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(200))
+        .map_err(|error| in_use(&error))?;
+    connection
+        .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+        .map_err(|error| in_use(&error))?;
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(|error| in_use(&error))?;
+    if mode.eq_ignore_ascii_case("wal") {
+        connection
+            .execute_batch("ROLLBACK;")
+            .map_err(|error| in_use(&error))?;
+        let next: String = connection
+            .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+            .map_err(|error| in_use(&error))?;
+        ensure!(
+            !next.eq_ignore_ascii_case("wal"),
+            "destination SessionWiki index is currently in use by another process; stop \
+             standalone sessionwiki or retry"
+        );
+        connection
+            .execute_batch("BEGIN EXCLUSIVE;")
+            .map_err(|error| in_use(&error))?;
+    }
+    Ok(connection)
 }

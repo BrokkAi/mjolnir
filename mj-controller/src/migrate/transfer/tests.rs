@@ -1103,3 +1103,86 @@ async fn an_existing_sessionwiki_survives_failures_before_it_is_replaced() {
     result.unwrap();
     assert_eq!(count_rows(&world.b_wiki), 600);
 }
+
+#[tokio::test]
+async fn an_entry_replaced_by_someone_else_is_never_deleted_by_a_retry() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let config_toml = world.b_config.join("config.toml");
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeStorePlacement)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(config_toml.exists());
+
+    // Someone removes the half-published config and puts their own at its
+    // path. The old inode stays allocated, so the new file cannot reuse it.
+    let kept = world._root.path().join("old-config.toml");
+    std::fs::hard_link(&config_toml, &kept).unwrap();
+    std::fs::remove_file(&config_toml).unwrap();
+    write(&config_toml, b"mine");
+
+    let (result, _) = attempt(&world, "t2", None).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("replaced externally"), "{error}");
+    assert_eq!(std::fs::read(&config_toml).unwrap(), b"mine");
+    assert!(
+        world.b_data.join("sessions").exists(),
+        "a refused cleanup removes nothing"
+    );
+    assert!(!b_db.exists());
+}
+
+#[tokio::test]
+async fn a_sessionwiki_index_in_use_is_not_replaced() {
+    let world = World::new();
+    // Another connection holds a read transaction on the destination's index.
+    let held = wal_database(&world.b_wiki, 5);
+    held.execute_batch("BEGIN; SELECT count(*) FROM scratch")
+        .unwrap();
+    let (result, _) = attempt_with(&world, "t1", None, true).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("currently in use"), "{error}");
+    assert_eq!(count_rows(&world.b_wiki), 5);
+
+    held.execute_batch("COMMIT").unwrap();
+    drop(held);
+    let (result, _) = attempt_with(&world, "t2", None, true).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+}
+
+/// Restores owner access to read-only test directories so cleanup can run.
+struct Writable(Vec<PathBuf>);
+
+impl Drop for Writable {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_read_only_directory_in_a_copied_profile_home_arrives_with_its_files() {
+    let world = World::new();
+    let source = world.a_home.join(".codex-personal/readonly-dir");
+    write(&source.join("file.txt"), b"inside");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let _restore = Writable(vec![
+        source.clone(),
+        world.b_home.join(".codex-personal/readonly-dir"),
+    ]);
+    let (result, _) = attempt(&world, "t1", None).await;
+    result.unwrap();
+    let copied = world.b_home.join(".codex-personal/readonly-dir");
+    assert_eq!(std::fs::read(copied.join("file.txt")).unwrap(), b"inside");
+    assert_eq!(
+        std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+        0o555,
+        "the source's mode is restored once the directory is filled"
+    );
+}

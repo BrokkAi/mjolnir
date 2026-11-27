@@ -18,17 +18,60 @@ pub(super) fn exists(path: &Path) -> Result<bool> {
     Ok(symlink_metadata_opt(path)?.is_some())
 }
 
-/// Remove a file, symlink or directory tree. A missing path is already removed.
+/// Remove a file, symlink or directory tree. A missing path is already
+/// removed. A read-only directory inside the tree (mode 0555, say) is made
+/// owner-writable first, so a tree this program made can always be removed.
 pub(super) fn remove_path(path: &Path) -> Result<()> {
     let Some(metadata) = symlink_metadata_opt(path)? else {
         return Ok(());
     };
     if metadata.is_dir() {
-        std::fs::remove_dir_all(path)
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                make_tree_owner_writable(path)?;
+                std::fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))
+            }
+            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        }
     } else {
-        std::fs::remove_file(path)
+        std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))
     }
-    .with_context(|| format!("remove {}", path.display()))
+}
+
+fn make_tree_owner_writable(path: &Path) -> Result<()> {
+    let Some(metadata) = symlink_metadata_opt(path)? else {
+        return Ok(());
+    };
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode() & 0o7777;
+        set_unix_mode(path, mode | 0o700)?;
+    }
+    for child in std::fs::read_dir(path)? {
+        make_tree_owner_writable(&child?.path())?;
+    }
+    Ok(())
+}
+
+/// Atomically replace the file at `dst` (if any) with `src`. A rename is
+/// atomic; across filesystems the copy lands beside `dst` first, so `dst` is
+/// never missing or partial.
+pub(super) fn replace_file_atomically(src: &Path, dst: &Path) -> Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            copy_tree_into_place(src, dst)?;
+            remove_path(src)
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("replace {} with {}", dst.display(), src.display()))
+        }
+    }
 }
 
 /// `root/rel`, with every ancestor below `root` a real directory. An incoming
