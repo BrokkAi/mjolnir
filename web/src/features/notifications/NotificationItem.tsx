@@ -235,7 +235,9 @@ export function NotificationItem({ item, workspaceName, now, onDismiss, onMute }
       </div>
 
       <div className="mt-3 min-w-0 space-y-2">
-        {card && card.entries.map(entry => (
+        {card && [...card.entries].sort((a, b) =>
+          (b.completed_at_ms ?? 0) - (a.completed_at_ms ?? 0) || b.completed_ordinal - a.completed_ordinal,
+        ).map(entry => (
           <StackEntryRow
             key={entry.completed_ordinal}
             row={row}

@@ -372,50 +372,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
     mpsc::channel(1)
 }
 
-pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
-    WorkerLaunchConfig {
-        accepted_reload_operation_id: None,
-        parked_move: None,
-        cpu_accounting: Default::default(),
-        no_github_credentials: false,
-        oracle: false,
-        initial_commands: Vec::new(),
-        reviewer_launch: None,
-        subagents: mj_core::subagent::SubagentPolicy::Native,
-        handback_tool: false,
-        subagent_kind: None,
-        orchestrator: false,
-        orchestrators_enabled: false,
-        agent_mailboxes_enabled: true,
-        subtle_subagents: true,
-        initial_model: None,
-        review_trigger: Default::default(),
-        review_capture: false,
-        goal_resume_request: Default::default(),
-        target_environment: Default::default(),
-        seed_image_environment: false,
-        run_mode: Default::default(),
-        suspend_capture: None,
-        session_id: SESSION_ID.into(),
-        harness: HarnessKind::Codex,
-        harness_home: profile_home.into(),
-        authentication_marker: None,
-        bridge_command: "/usr/bin/false".into(),
-        bridge_args: Vec::new(),
-        harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
-        environment: BTreeMap::from([("CODEX_HOME".into(), profile_home.into())]),
-        excluded_environment: Vec::new(),
-        cwd: ".local/share/hel/workspaces/session/repo".into(),
-        additional_directories: Vec::new(),
-        writable_directories: Vec::new(),
-        native_session_id: None,
-        project_memory: None,
-        execution_policy: ExecutionPolicy::Unconstrained,
-        claude_permission_mode: Default::default(),
-        mjolnir_guardian: true,
-        observe_policy: None,
-    }
-}
+pub(crate) use crate::test_support::launch_config;
 
 async fn expect_daemon_launch_failure(root: &Path, config: WorkerLaunchConfig) {
     let daemon = mj_core::runtime::spawn(unix::run_daemon(root.to_owned(), config));
@@ -12531,4 +12488,682 @@ fn prompt_context_arriving_after_start_waits_for_next_turn_and_replays() {
             .count(),
         1
     );
+}
+
+// Hard-won: 0d930fcd3: checkpoint capture raced a delivery after its reply was lost.
+#[tokio::test]
+async fn checkpoint_snapshot_fence_waits_for_disconnected_delivery_apply() {
+    use base64::Engine as _;
+    use mj_core::project_memory::{
+        ProjectMemorySnapshot, SwapOutcome, commit_canonical, read_canonical_state,
+    };
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as Reply,
+        ProjectMemoryUploadKind as Upload,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let relay_root = temp.path().join("relay");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("app")).unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        project_key: "project".into(),
+        root: home.join("projects/replica/memory"),
+        baseline_root: home.join("projects/replica/.hel-memory-baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        history_socket: None,
+    };
+    let initial = ProjectMemorySnapshot {
+        files: BTreeMap::from([("/note.md".into(), "old".into())]),
+    };
+    mj_core::project_memory::render_memory_tree(&memory.root, &initial, false).unwrap();
+    mj_core::project_memory::render_memory_tree(&memory.baseline_root, &initial, false).unwrap();
+    let canonical = temp.path().join("canonical/memory");
+    let state = read_canonical_state(&canonical).unwrap();
+    assert_eq!(
+        commit_canonical(&canonical, &state, "other", &initial, None).unwrap(),
+        SwapOutcome::Swapped
+    );
+    let (_, id, _) = super::project_memory::snapshot(&memory, None, &initial.version())
+        .unwrap()
+        .unwrap();
+    let incoming = ProjectMemorySnapshot {
+        files: BTreeMap::from([("/note.md".into(), "after apply".into())]),
+    };
+    let state = read_canonical_state(&canonical).unwrap();
+    assert_eq!(
+        commit_canonical(&canonical, &state, SESSION_ID, &incoming, Some(&id)).unwrap(),
+        SwapOutcome::Swapped
+    );
+    let bytes = serde_json::to_vec(
+        &mj_core::relay::ProjectMemoryWireTree::encode(incoming.clone(), RELAY_PROTOCOL_VERSION)
+            .unwrap(),
+    )
+    .unwrap();
+
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(&relay_root, SESSION_ID, "test").unwrap(),
+    ));
+    let mut launch = launch_config(&home.to_string_lossy());
+    launch.project_memory = Some(memory.clone());
+    launch.write(&relay_root.join("launch.json")).unwrap();
+    let capture = mj_checkpoint::checkpoint::CheckpointCaptureSpec {
+        protocol_version: mj_checkpoint::checkpoint::CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        session: mj_core::archive::SessionManifest {
+            id: SESSION_ID.into(),
+            title: "test".into(),
+            harness_kind: mj_core::config::HarnessKind::Codex,
+            profile_id: "test".into(),
+            native_session_id: "native-session".into(),
+            created_at: "2026-11-27T00:00:00Z".into(),
+            checkpointed_at: "2026-11-27T00:00:00Z".into(),
+            hel_version: "test".into(),
+            relay_version: "test".into(),
+            adapter_version: "test".into(),
+        },
+        target: mj_core::archive::TargetManifest {
+            template_id: "local".into(),
+            target_kind: "local".into(),
+            details: Default::default(),
+        },
+        bundle: mj_core::archive::BundleManifest {
+            id: "bundle".into(),
+            primary_repository: "app".into(),
+        },
+        relay_root: relay_root.clone(),
+        harness_home: home,
+        workspace_root: workspace,
+        repositories: vec![mj_checkpoint::checkpoint::CheckpointRepositorySpec {
+            id: "app".into(),
+            relative_destination: "app".into(),
+            capture: mj_checkpoint::checkpoint::CheckpointRepositoryCapture::PlainDirectory,
+            origin_override: None,
+        }],
+        report_directories: Some(Vec::new()),
+        allow_empty_native: true,
+        stage_path: relay_root.join("checkpoint-stage"),
+        refresh_existing: false,
+    };
+    let mut endpoint = unix::ProjectMemoryEndpoint::new(Some(memory.clone()));
+    let (release, blocked) = std::sync::mpsc::channel();
+    let block = Arc::new(unix::ProjectMemoryIoBlock {
+        started: Default::default(),
+        release: std::sync::Mutex::new(blocked),
+        panic_after_release: false,
+    });
+    endpoint.io_block = Some(block.clone());
+    let (client, server) = project_memory_socket(relay.clone(), endpoint.clone());
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0;
+    release.send(Ok(())).unwrap();
+    let begin = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginUpload {
+            kind: Upload::Deliver {
+                id: id.clone(),
+                version: incoming.version(),
+            },
+            total_bytes: bytes.len() as u64,
+        },
+    )
+    .await;
+    block.started.notified().await;
+    let transfer_id = match begin.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: Reply::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        body => panic!("unexpected begin: {body:?}"),
+    };
+    release.send(Ok(())).unwrap();
+    let append = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id,
+            offset: 0,
+            chunk: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        },
+    )
+    .await;
+    block.started.notified().await;
+    assert!(matches!(append.body, RelayResponseBody::Ok { .. }));
+    let request = RelayRequestEnvelope {
+        request_id: "lost-delivery".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::ProjectMemoryTransfer {
+            action: Action::CommitUpload { transfer_id },
+        },
+    };
+    let mut frame = serde_json::to_vec(&request).unwrap();
+    frame.push(b'\n');
+    writer.write_all(&frame).await.unwrap();
+    block.started.notified().await;
+    writer.shutdown().await.unwrap();
+    drop(writer);
+    drop(lines);
+    endpoint.io_disconnected.notified().await;
+
+    // The lost reply came from an earlier turn. This checkpoint's own sync
+    // fails before Snapshot, so it must still fence that earlier delivery.
+    let mut checkpoint_endpoint = endpoint.clone();
+    checkpoint_endpoint.io_block = None;
+    let (failed_client, failed_server) =
+        project_memory_socket(relay.clone(), checkpoint_endpoint.clone());
+    let (failed_reader, mut failed_writer) = failed_client.into_split();
+    let mut failed_lines = BufReader::new(failed_reader).lines();
+    let rejected = project_memory_transfer_exchange_at(
+        &mut failed_lines,
+        &mut failed_writer,
+        "failed-checkpoint-sync",
+        98,
+        Action::BeginTurnSnapshot {
+            absorbed: None,
+            head_version: incoming.version(),
+        },
+    )
+    .await;
+    assert!(matches!(rejected.body, RelayResponseBody::Error { .. }));
+    drop(failed_writer);
+    drop(failed_lines);
+    failed_server.await.unwrap().unwrap();
+
+    let (fence_client, fence_server) = project_memory_socket(relay, checkpoint_endpoint);
+    let (reader, mut writer) = fence_client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let state = read_canonical_state(&canonical).unwrap();
+    // Clear notifications from the earlier upload before observing the fence.
+    endpoint.io_requested.notified().await;
+    let (replica, record) = {
+        let fence = async {
+            let response = project_memory_transfer_exchange(
+                &mut lines,
+                &mut writer,
+                "fence",
+                Action::BeginTurnSnapshot {
+                    absorbed: state.absorbed.get(SESSION_ID).cloned(),
+                    head_version: state.version,
+                },
+            )
+            .await;
+            assert!(matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::ProjectMemoryTransfer {
+                        result: Reply::SnapshotStarted { .. } | Reply::InSync
+                    }
+                }
+            ));
+            let stage = mj_core::runtime::spawn_blocking(move || {
+                mj_checkpoint::checkpoint::capture_checkpoint(
+                    &capture,
+                    &mj_checkpoint::archive::SystemGit,
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .stage_path;
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(stage.join("stage.json")).unwrap()).unwrap();
+            let artifacts = manifest["native_artifacts"].as_array().unwrap();
+            let captured = |name: &str| {
+                let artifact = artifacts
+                    .iter()
+                    .find(|artifact| artifact["relative_path"] == name)
+                    .unwrap();
+                std::fs::read(stage.join(artifact["body_path"].as_str().unwrap())).unwrap()
+            };
+            let replica = captured("projects/replica/memory/note.md");
+            let record: serde_json::Value = serde_json::from_slice(&captured(
+                "projects/replica/.hel-memory-baseline/.hel-memory-record.json",
+            ))
+            .unwrap();
+            (replica, record)
+        };
+        tokio::pin!(fence);
+        tokio::select! {
+            () = endpoint.io_requested.notified() => {},
+            result = &mut fence => panic!("fence completed before queueing: {result:?}"),
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut fence)
+                .await
+                .is_err(),
+            "capture must wait for the admitted delivery"
+        );
+        release.send(Ok(())).unwrap();
+        fence.await
+    };
+    assert_eq!(replica, b"after apply");
+    assert_eq!(record["base"]["files"]["/note.md"], "after apply");
+    assert!(record["incoming"].is_null());
+    drop(writer);
+    drop(lines);
+    fence_server.await.unwrap().unwrap();
+    server.await.unwrap().unwrap();
+}
+
+// Hard-won: 0d930fcd3: an ABA head could leave a late pull-only delivery valid after a fence.
+#[tokio::test]
+async fn checkpoint_snapshot_fence_makes_buffered_delivery_stale_after_aba() {
+    use base64::Engine as _;
+    use mj_core::project_memory::{
+        ProjectMemorySnapshot, ProjectMemoryStore, SwapOutcome, commit_canonical,
+        read_canonical_state,
+    };
+    use mj_core::relay::{
+        ProjectMemoryDeliveryOutcome, ProjectMemoryTransferAction as Action,
+        ProjectMemoryTransferResult as Reply, ProjectMemoryUploadKind as Upload,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        project_key: "project".into(),
+        root: temp.path().join("replica"),
+        baseline_root: temp.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        history_socket: None,
+    };
+    let initial = ProjectMemorySnapshot {
+        files: BTreeMap::from([("/note.md".into(), "initial".into())]),
+    };
+    mj_core::project_memory::render_memory_tree(&memory.root, &initial, false).unwrap();
+    mj_core::project_memory::render_memory_tree(&memory.baseline_root, &initial, false).unwrap();
+    let canonical = temp.path().join("canonical/memory");
+    let state = read_canonical_state(&canonical).unwrap();
+    assert_eq!(
+        commit_canonical(&canonical, &state, "other", &initial, None).unwrap(),
+        SwapOutcome::Swapped
+    );
+    let (_, first_id, _) = super::project_memory::snapshot(&memory, None, &initial.version())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        super::project_memory::deliver(
+            &memory,
+            &first_id,
+            initial.clone(),
+            initial.version(),
+            &Default::default()
+        )
+        .unwrap(),
+        ProjectMemoryDeliveryOutcome::Delivered
+    );
+    let foreign = ProjectMemorySnapshot {
+        files: BTreeMap::from([("/note.md".into(), "foreign".into())]),
+    };
+    let state = read_canonical_state(&canonical).unwrap();
+    assert_eq!(
+        commit_canonical(&canonical, &state, "other", &foreign, None).unwrap(),
+        SwapOutcome::Swapped
+    );
+    let (base, id, replica) = super::project_memory::snapshot(&memory, None, &foreign.version())
+        .unwrap()
+        .unwrap();
+    assert_eq!(base, replica);
+    let state = read_canonical_state(&canonical).unwrap();
+    assert_eq!(
+        commit_canonical(&canonical, &state, SESSION_ID, &foreign, Some(&id)).unwrap(),
+        SwapOutcome::Swapped
+    );
+    let state = read_canonical_state(&canonical).unwrap();
+    assert_eq!(
+        commit_canonical(&canonical, &state, "other", &initial, None).unwrap(),
+        SwapOutcome::Swapped
+    );
+    let state = read_canonical_state(&canonical).unwrap();
+    assert_eq!(state.version, initial.version());
+    assert_eq!(state.absorbed.get(SESSION_ID), Some(&id));
+
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory.clone()));
+    let (client, server) = project_memory_socket(relay.clone(), endpoint.clone());
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0;
+    let bytes = serde_json::to_vec(
+        &mj_core::relay::ProjectMemoryWireTree::encode(foreign.clone(), RELAY_PROTOCOL_VERSION)
+            .unwrap(),
+    )
+    .unwrap();
+    let begin = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginUpload {
+            kind: Upload::Deliver {
+                id: id.clone(),
+                version: foreign.version(),
+            },
+            total_bytes: bytes.len() as u64,
+        },
+    )
+    .await;
+    let transfer_id = match begin.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: Reply::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        body => panic!("unexpected begin: {body:?}"),
+    };
+    let append = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id,
+            offset: 0,
+            chunk: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        },
+    )
+    .await;
+    assert!(matches!(append.body, RelayResponseBody::Ok { .. }));
+
+    let (fence_client, fence_server) = project_memory_socket(relay, endpoint);
+    let (fence_reader, mut fence_writer) = fence_client.into_split();
+    let mut fence_lines = BufReader::new(fence_reader).lines();
+    let fence = project_memory_transfer_exchange(
+        &mut fence_lines,
+        &mut fence_writer,
+        "fence",
+        Action::BeginTurnSnapshot {
+            absorbed: state.absorbed.get(SESSION_ID).cloned(),
+            head_version: state.version,
+        },
+    )
+    .await;
+    assert!(matches!(
+        fence.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: Reply::SnapshotStarted { .. }
+            }
+        }
+    ));
+    let late = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::CommitUpload { transfer_id },
+    )
+    .await;
+    assert!(matches!(
+        late.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: Reply::Delivered {
+                    outcome: ProjectMemoryDeliveryOutcome::Stale
+                }
+            }
+        }
+    ));
+    assert_eq!(
+        ProjectMemoryStore::new(&memory.root).snapshot().unwrap(),
+        initial
+    );
+    drop(writer);
+    drop(lines);
+    drop(fence_writer);
+    drop(fence_lines);
+    server.await.unwrap().unwrap();
+    fence_server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn turn_memory_protocol_gates_old_peers_reports_busy_and_pages_delivery() {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([(
+            "/large.md".into(),
+            incompressible_memory_text(10 * 1024 * 1024),
+        )]),
+    };
+    mj_core::project_memory::render_memory_tree(&memory.baseline_root, &tree, false).unwrap();
+    mj_core::project_memory::render_memory_tree(&memory.root, &tree, false).unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(directory.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let tools = relay.lock().unwrap().tools_in_flight();
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory.clone()));
+    let (client, server) = project_memory_socket(relay, endpoint);
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0;
+    let action = Action::BeginTurnSnapshot {
+        absorbed: None,
+        head_version: tree.version(),
+    };
+    let old =
+        project_memory_transfer_exchange_at(&mut lines, &mut writer, "old", 98, action.clone())
+            .await;
+    assert!(matches!(old.body, RelayResponseBody::Error { .. }));
+    let call: SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+    tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+    let busy = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        action.clone(),
+    )
+    .await;
+    assert!(matches!(
+        busy.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::Busy
+            }
+        }
+    ));
+    tools.retire_owner(&mj_core::activity::ForegroundOwner::Unowned);
+    let response =
+        next_project_memory_transfer_exchange(&mut lines, &mut writer, &mut sequence, action).await;
+    let (transfer_id, total_bytes) = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result:
+                        ResultKind::SnapshotStarted {
+                            transfer_id,
+                            total_bytes,
+                        },
+                },
+        } => (transfer_id, total_bytes),
+        other => panic!("unexpected snapshot: {other:?}"),
+    };
+    assert!(total_bytes > mj_core::relay::MAX_FRAME_BYTES as u64);
+    let mut bytes = Vec::new();
+    let mut offset = 0;
+    loop {
+        let response = next_project_memory_transfer_exchange(
+            &mut lines,
+            &mut writer,
+            &mut sequence,
+            Action::ReadSnapshotPage {
+                transfer_id,
+                offset,
+            },
+        )
+        .await;
+        let (next, complete, chunk) = match response.body {
+            RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::ProjectMemoryTransfer {
+                        result:
+                            ResultKind::SnapshotPage {
+                                next_offset,
+                                complete,
+                                chunk,
+                                ..
+                            },
+                    },
+            } => (next_offset, complete, chunk),
+            other => panic!("unexpected page: {other:?}"),
+        };
+        bytes.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(chunk)
+                .unwrap(),
+        );
+        offset = next;
+        if complete {
+            break;
+        }
+    }
+    let snapshot: mj_core::relay::ProjectMemoryTurnSnapshot =
+        serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot.tree.decode().unwrap(), tree);
+    let upload = serde_json::to_vec(
+        &mj_core::relay::ProjectMemoryWireTree::encode(tree.clone(), RELAY_PROTOCOL_VERSION)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(upload.len() > mj_core::relay::MAX_FRAME_BYTES);
+    let result = upload_project_memory_bytes(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        &upload,
+        UploadKind::Deliver {
+            id: snapshot.id,
+            version: tree.version(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        RelayResponsePayload::ProjectMemoryTransfer {
+            result: ResultKind::Delivered {
+                outcome: mj_core::relay::ProjectMemoryDeliveryOutcome::Delivered
+            }
+        }
+    ));
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginTurnSnapshot {
+            absorbed: None,
+            head_version: tree.version(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::InSync
+            }
+        }
+    ));
+    drop(writer);
+    drop(lines);
+    server.await.unwrap().unwrap();
+}
+
+// Hard-won: 844612f9f: Busy was returned before the uploaded tree was decoded.
+#[tokio::test]
+async fn deliver_decodes_uploaded_tree_before_busy_check() {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    std::fs::create_dir_all(&memory.root).unwrap();
+    std::fs::create_dir_all(&memory.baseline_root).unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(directory.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let tools = relay.lock().unwrap().tools_in_flight();
+    let call: SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+    tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory));
+    let (client, server) = project_memory_socket(relay, endpoint);
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0;
+    let bytes = serde_json::to_vec(&mj_core::relay::ProjectMemoryWireTree::Gzip {
+        gzip: "invalid base64".into(),
+    })
+    .unwrap();
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginUpload {
+            kind: UploadKind::Deliver {
+                id: "unused".into(),
+                version: mj_core::project_memory::ProjectMemorySnapshot::default().version(),
+            },
+            total_bytes: bytes.len() as u64,
+        },
+    )
+    .await;
+    let transfer_id = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        other => panic!("unexpected upload response: {other:?}"),
+    };
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id,
+            offset: 0,
+            chunk: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        },
+    )
+    .await;
+    assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::CommitUpload { transfer_id },
+    )
+    .await;
+    assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+    drop(writer);
+    drop(lines);
+    server.await.unwrap().unwrap();
 }

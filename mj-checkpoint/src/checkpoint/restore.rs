@@ -290,8 +290,66 @@ pub fn restore_checkpoint_with_notices(
 
     if spec.restore_native {
         restore_native_artifacts(&archive, &mut payload_reader, spec, native_state, false)?;
+    } else {
+        restore_project_memory(&archive, &mut payload_reader, spec)?;
     }
     Ok(notices)
+}
+
+/// Project memory belongs to the session, including when its native harness
+/// history is intentionally discarded during a cross-harness resume.
+fn restore_project_memory(
+    archive: &crate::archive::VerifiedArchive,
+    payload_reader: &mut crate::archive::CheckpointPayloadReader,
+    spec: &CheckpointRestoreSpec,
+) -> Result<()> {
+    let Some([replica, baseline]) = project_memory_roots(spec)? else {
+        return Ok(());
+    };
+    let home = resolve_target_path(&spec.harness_home)?;
+    for descriptor in &archive.manifest.payloads {
+        let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
+            continue;
+        };
+        if relative_path.starts_with(&replica) || relative_path.starts_with(&baseline) {
+            write_private_with(&home, relative_path, descriptor.mode, |file| {
+                payload_reader.copy_payload(descriptor, file)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn project_memory_roots(spec: &CheckpointRestoreSpec) -> Result<Option<[PathBuf; 2]>> {
+    let launch_path = spec.relay_root.join("launch.json");
+    if !launch_path.exists() {
+        return Ok(None);
+    }
+    let launch = super::capture::read_project_memory_checkpoint_endpoint(&launch_path)?;
+    let Some(memory) = launch.project_memory else {
+        return Ok(None);
+    };
+    let root = resolve_home_relative_target_path(&memory.root)?;
+    let baseline = match memory
+        .baseline_root
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        Some(path) => resolve_home_relative_target_path(&path)?,
+        None => root
+            .parent()
+            .context("project memory root has no parent")?
+            .join(".hel-memory-baseline"),
+    };
+    let home = resolve_target_path(&spec.harness_home)?;
+    Ok(Some([
+        root.strip_prefix(&home)
+            .context("project memory is outside the harness home")?
+            .to_path_buf(),
+        baseline
+            .strip_prefix(&home)
+            .context("project memory baseline is outside the harness home")?
+            .to_path_buf(),
+    ]))
 }
 
 /// Retryable reconstruction in a private staging checkout. Publishing must
@@ -554,6 +612,7 @@ fn restore_native_artifacts(
             }
         }
     }
+    let memory_roots = project_memory_roots(spec)?;
     let (mut changed, sqlite_families) = restore_sqlite_families(
         archive,
         payload_reader,
@@ -571,6 +630,24 @@ fn restore_native_artifacts(
             continue;
         }
         if sqlite_families.contains(relative_path) {
+            continue;
+        }
+        if memory_roots
+            .as_ref()
+            .is_some_and(|roots| roots.iter().any(|root| relative_path.starts_with(root)))
+        {
+            if missing_only {
+                changed |= write_missing_private_with(
+                    &spec.harness_home,
+                    relative_path,
+                    descriptor.mode,
+                    |file| payload_reader.copy_payload(descriptor, file),
+                )?;
+            } else {
+                write_private_with(&spec.harness_home, relative_path, descriptor.mode, |file| {
+                    payload_reader.copy_payload(descriptor, file)
+                })?;
+            }
             continue;
         }
         if !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT) {

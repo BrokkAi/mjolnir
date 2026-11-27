@@ -1,0 +1,1655 @@
+//! Integration tests for the transfer engine over small in-process pipes. The
+//! database pins are real helper processes (the test binary re-run), because
+//! the pin only works across processes.
+
+use std::collections::BTreeMap;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+
+use anyhow::{Result, anyhow};
+use mj_core::config::{Config, DataLayout, MachineId, SshConnection};
+use mj_core::state::{TargetLocator, TargetRuntimeSettings};
+use mj_store::database::{
+    MigrationRewriteSpec, StoreFenceRecord, clear_store_fence_file, read_store_fence_file,
+    save_session_to, set_store_fence_file,
+};
+use rusqlite::Connection;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+
+use super::*;
+use crate::migrate::pin::test_roles::{pin_command, row};
+use crate::migrate::preflight::HomeCopy;
+use crate::migrate::protocol::*;
+use crate::migrate::rewrite::StagedConfigRewriteSpec;
+
+struct Counting<W> {
+    inner: W,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for Counting<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let poll = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(count)) = &poll {
+            self.bytes.fetch_add(*count, Ordering::SeqCst);
+        }
+        poll
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+struct World {
+    _root: tempfile::TempDir,
+    a_data: PathBuf,
+    a_config: PathBuf,
+    a_home: PathBuf,
+    a_wiki: PathBuf,
+    b_data: PathBuf,
+    b_config: PathBuf,
+    b_home: PathBuf,
+    b_wiki: PathBuf,
+}
+
+fn write(path: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn big(seed: i64, len: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(len);
+    let mut id = seed;
+    while bytes.len() < len {
+        bytes.extend(row(id, 4096));
+        id += 1;
+    }
+    bytes.truncate(len);
+    bytes
+}
+
+fn wal_database(path: &Path, rows: i64) -> Connection {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE IF NOT EXISTS scratch(id INTEGER PRIMARY KEY, v BLOB NOT NULL);",
+        )
+        .unwrap();
+    insert_rows(&connection, 0, rows);
+    connection
+}
+
+fn insert_rows(connection: &Connection, from: i64, count: i64) {
+    let tx = connection.unchecked_transaction().unwrap();
+    for id in from..from + count {
+        tx.execute(
+            "INSERT INTO scratch(id, v) VALUES (?1, ?2)",
+            rusqlite::params![id, row(id, 4096)],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+fn count_rows(path: &Path) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM scratch", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn session() -> mj_core::state::SessionRecord {
+    let mut session = mj_store::database::test_session("one", "bundle");
+    session.checkpoint = None;
+    session.target_template_id = "localhost".into();
+    session.target_runtime = Some(Arc::new(TargetRuntimeSettings::from(
+        &mj_core::config::TargetTemplate::LocalBare,
+    )));
+    session
+}
+
+impl World {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let world = World {
+            a_data: r.join("a/data"),
+            a_config: r.join("a/home/.config/mjolnir"),
+            a_home: r.join("a/home"),
+            a_wiki: r.join("a/wiki/index.db"),
+            b_data: r.join("b/data"),
+            b_config: r.join("b/home/.config/mjolnir"),
+            b_home: r.join("b/home"),
+            b_wiki: r.join("b/wiki/index.db"),
+            _root: root,
+        };
+        let db = DataLayout::at(&world.a_data).database();
+        let mut one = session();
+        one.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: DataLayout::at(&world.a_data).worker_root("one"),
+        }));
+        one.project_directory = Some(world.a_home.join("project"));
+        std::fs::create_dir_all(world.a_home.join("project")).unwrap();
+        save_session_to(&db, &one).unwrap();
+        let store = Connection::open(&db).unwrap();
+        store
+            .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE scratch(id INTEGER PRIMARY KEY, v BLOB NOT NULL);")
+            .unwrap();
+        drop(store);
+        // Three thousand 4 KiB rows: a database of about twelve 1 MiB blocks.
+        let scratch = Connection::open(&db).unwrap();
+        insert_rows(&scratch, 0, 3000);
+        drop(scratch);
+
+        write(&world.a_data.join("instance-identity"), b"identity-a\n");
+        write(&world.a_data.join("api-token"), b"token");
+        write(
+            &world.a_data.join("sessions/one/attachments/big.bin"),
+            &big(1, 3 * 1024 * 1024 + 123),
+        );
+        write(&world.a_data.join("sessions/one/attachments.deleted"), b"");
+        write(&world.a_data.join("sessions/one/attachments.lock"), b"lock");
+        std::fs::create_dir_all(world.a_data.join("sessions/empty-dir")).unwrap();
+        write(
+            &world.a_data.join("tool-details/a/b.bin"),
+            &big(9, 1_500_000),
+        );
+        write(&world.a_data.join("tool-details/a/keep.txt"), b"keep");
+        write(&world.a_data.join("projects/x/memory/notes.md"), b"notes");
+        write(&world.a_data.join("unknown-user-file"), b"mine");
+        write(&world.a_data.join("workers/one/state"), b"local worker");
+        write(&world.a_data.join("daemon.log"), b"log");
+
+        Config::default()
+            .save_to(&world.a_config.join("config.toml"))
+            .unwrap();
+        write(&world.a_config.join("ec2/x/key"), b"ec2 key");
+        write(&world.a_home.join("secrets/actual"), b"credential");
+        std::fs::create_dir_all(world.a_config.join("keys")).unwrap();
+        symlink(
+            world.a_home.join("secrets/actual"),
+            world.a_config.join("keys/linked"),
+        )
+        .unwrap();
+
+        write(
+            &world.a_home.join(".codex-personal/auth.json"),
+            b"{\"a\":1}",
+        );
+        symlink(
+            "/nonexistent/absolute",
+            world.a_home.join(".codex-personal/dangling"),
+        )
+        .unwrap();
+        write(
+            &world.a_home.join(".secrets/token-target"),
+            b"private token",
+        );
+        symlink(
+            world.a_home.join(".secrets/token-target"),
+            world.a_home.join(".secrets/token"),
+        )
+        .unwrap();
+        // A credential inside a copied profile home, and a profile home that is
+        // itself a link to a directory elsewhere.
+        write(&world.a_home.join(".codex-personal/ssh_key"), b"ssh key");
+        let outside = world.a_home.parent().unwrap().join("outside-profile");
+        write(&outside.join("auth.json"), b"{\"linked\":1}");
+        write(&outside.join("history.jsonl"), b"history");
+        symlink(&outside, world.a_home.join(".codex-linked")).unwrap();
+        // OpenCode's live database: its newest rows exist only in the WAL.
+        let opencode = wal_database(&world.a_home.join(".codex-personal/opencode.db"), 300);
+        std::mem::forget(opencode);
+
+        let wiki = wal_database(&world.a_wiki, 600);
+        drop(wiki);
+        world
+    }
+
+    fn plan(&self) -> SenderPlan {
+        SenderPlan {
+            data_dir: self.a_data.clone(),
+            config_dir: self.a_config.clone(),
+            sessionwiki_db: self.a_wiki.clone(),
+            home_copies: vec![
+                HomeCopy {
+                    source: self.a_home.join(".codex-personal"),
+                    destination: self.b_home.join(".codex-personal"),
+                    private: false,
+                },
+                HomeCopy {
+                    source: self.a_home.join(".codex-personal/ssh_key"),
+                    destination: self.b_home.join(".codex-personal/ssh_key"),
+                    private: true,
+                },
+                HomeCopy {
+                    source: self.a_home.join(".codex-linked"),
+                    destination: self.b_home.join(".codex-linked"),
+                    private: false,
+                },
+                HomeCopy {
+                    source: self.a_home.join(".secrets/token"),
+                    destination: self.b_home.join(".secrets/token"),
+                    private: true,
+                },
+            ],
+            dereference_config_paths: [PathBuf::from("keys/linked")].into(),
+            include_logs: false,
+            migrate_sessionwiki: true,
+            warm_base_pass: true,
+            pin_command: Box::new(pin_command),
+        }
+    }
+
+    fn receiver(&self, hook: Option<PublicationHook>) -> ReceiverConfig {
+        ReceiverConfig {
+            data_dir: self.b_data.clone(),
+            config_dir: self.b_config.clone(),
+            home_dir: self.b_home.clone(),
+            sessionwiki_db: self.b_wiki.clone(),
+            start_daemon: None,
+            hook,
+        }
+    }
+
+    fn fence(&self, at: &str) -> StoreFenceRecord {
+        StoreFenceRecord {
+            destination: "b".into(),
+            fenced_at: at.into(),
+            fenced_host: "a".into(),
+            fenced_data_dir: self.a_data.clone(),
+            note: None,
+        }
+    }
+}
+
+struct Hooks {
+    a_db: PathBuf,
+    fence: StoreFenceRecord,
+    world: (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf),
+    overwrite_sessionwiki: bool,
+    log: Vec<&'static str>,
+}
+
+impl Hooks {
+    fn new(world: &World, fence: StoreFenceRecord) -> Self {
+        Self {
+            a_db: DataLayout::at(&world.a_data).database(),
+            fence,
+            world: (
+                world.a_data.clone(),
+                world.a_config.clone(),
+                world.a_home.clone(),
+                world.b_data.clone(),
+                world.b_config.clone(),
+                world.b_home.clone(),
+            ),
+            overwrite_sessionwiki: false,
+            log: Vec::new(),
+        }
+    }
+}
+
+impl CutoverHooks for Hooks {
+    async fn stop_and_lock(&mut self) -> Result<()> {
+        self.log.push("stop");
+        Ok(())
+    }
+    async fn recheck(&mut self, pinned_user_version: i64) -> Result<()> {
+        assert_eq!(
+            pinned_user_version,
+            mj_store::database::STORE_SCHEMA_VERSION
+        );
+        self.log.push("recheck");
+        Ok(())
+    }
+    async fn fence(&mut self, _stage_id: Option<&str>) -> Result<StoreFenceRecord> {
+        self.log.push("fence");
+        set_store_fence_file(&self.a_db, &self.fence)?;
+        Ok(self.fence.clone())
+    }
+    async fn clear_fence(&mut self) -> Result<()> {
+        self.log.push("clear");
+        clear_store_fence_file(&self.a_db, &self.fence)
+    }
+    async fn build_commit(
+        &mut self,
+        fence: &StoreFenceRecord,
+        _destination: &HelloAck,
+        home_targets: &[HomeTarget],
+    ) -> Result<CommitPublication> {
+        self.log.push("build");
+        let (a_data, a_config, a_home, b_data, b_config, b_home) = self.world.clone();
+        let source_ssh = SshConnection {
+            host: "source".into(),
+            user: None,
+            identity_file: None,
+            extra_args: vec![],
+        };
+        Ok(CommitPublication {
+            rewrite_spec: MigrationRewriteSpec {
+                expected_fence: fence.clone(),
+                old_data_root: a_data,
+                new_data_root: b_data,
+                old_config_root: a_config.clone(),
+                new_config_root: b_config.clone(),
+                old_home: a_home.clone(),
+                new_home: b_home.clone(),
+                remote_template_ids: Default::default(),
+                source_ssh: source_ssh.clone(),
+                source_machine_id: MachineId::new("source").unwrap(),
+                source_templates: Default::default(),
+                pinned_memory_keys: BTreeMap::new(),
+                staged_sessions_dir: PathBuf::new(),
+            },
+            config_rewrite_spec: StagedConfigRewriteSpec {
+                old_config_root: a_config,
+                new_config_root: b_config,
+                old_home: a_home,
+                new_home: b_home,
+                source_machine_id: MachineId::new("source").unwrap(),
+                source_ssh,
+                historical_local_templates: BTreeMap::from([(
+                    "localhost".into(),
+                    ["local-bare".to_owned()].into(),
+                )]),
+            },
+            home_targets: home_targets.to_vec(),
+            migrate_sessionwiki: true,
+            overwrite_sessionwiki: self.overwrite_sessionwiki,
+            start_daemon: false,
+        })
+    }
+    async fn rollback(&mut self) -> Result<()> {
+        self.log.push("rollback");
+        Ok(())
+    }
+    async fn activated(&mut self, _summary: &PublicationSummary) -> Result<()> {
+        self.log.push("activated");
+        Ok(())
+    }
+}
+
+fn pipe() -> (
+    impl AsyncRead + Unpin,
+    Counting<impl AsyncWrite + Unpin>,
+    Arc<AtomicUsize>,
+    impl AsyncRead + Unpin,
+    impl AsyncWrite + Unpin,
+) {
+    // 64 KiB: the buffer size that deadlocks a sender that writes everything first.
+    let (sender_end, receiver_end) = tokio::io::duplex(64 * 1024);
+    let (sender_read, sender_write) = tokio::io::split(sender_end);
+    let (receiver_read, receiver_write) = tokio::io::split(receiver_end);
+    let bytes = Arc::new(AtomicUsize::new(0));
+    (
+        sender_read,
+        Counting {
+            inner: sender_write,
+            bytes: bytes.clone(),
+        },
+        bytes,
+        receiver_read,
+        receiver_write,
+    )
+}
+
+fn spawn_receiver(
+    config: ReceiverConfig,
+    reader: impl AsyncRead + Unpin + Send + 'static,
+    writer: impl AsyncWrite + Unpin + Send + 'static,
+) -> tokio::task::JoinHandle<Result<()>> {
+    mj_core::runtime::spawn(run_receiver(config, reader, writer))
+}
+
+#[tokio::test]
+async fn migration_resumes_over_small_pipes_and_publishes_one_activation() {
+    let world = World::new();
+    let a_db = DataLayout::at(&world.a_data).database();
+    // Phase 1 only, then the sender goes away: an interrupted pre-sync.
+    let (sender_read, sender_write, first_bytes, receiver_read, receiver_write) = pipe();
+    let receiver = spawn_receiver(world.receiver(None), receiver_read, receiver_write);
+    let mut sender = Sender::new(world.plan(), sender_read, sender_write);
+    let phase1 = sender.phase1().await.unwrap();
+    drop(phase1);
+    drop(sender);
+    receiver.await.unwrap().unwrap();
+    let first = first_bytes.load(Ordering::SeqCst);
+    assert!(first > 15 * 1024 * 1024, "first run sent {first} bytes");
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    assert_eq!(
+        std::fs::read(stage.join("raw/data/mj.sqlite3")).unwrap(),
+        std::fs::read(&a_db).unwrap(),
+        "an idle source copies to an identical base"
+    );
+
+    // The source moves on: a little database change, a changed file, a removed
+    // file and a new one.
+    let scratch = Connection::open(&a_db).unwrap();
+    insert_rows(&scratch, 3000, 20);
+    drop(scratch);
+    write(
+        &world.a_data.join("tool-details/a/keep.txt"),
+        b"keep, changed",
+    );
+    std::fs::remove_file(world.a_data.join("tool-details/a/b.bin")).unwrap();
+    write(&world.a_data.join("tool-details/new.txt"), b"new");
+
+    let (sender_read, sender_write, second_bytes, receiver_read, receiver_write) = pipe();
+    let receiver = spawn_receiver(world.receiver(None), receiver_read, receiver_write);
+    let mut hooks = Hooks::new(&world, world.fence("t1"));
+    let sender = Sender::new(world.plan(), sender_read, sender_write);
+    let mut sender = sender;
+    let phase1 = sender.phase1().await.unwrap();
+    let resumed = second_bytes.load(Ordering::SeqCst);
+    assert!(
+        resumed * 2 < first,
+        "resuming sent {resumed} bytes against {first} for the first run"
+    );
+    let outcome = sender.phase2(phase1, &mut hooks).await.unwrap();
+    drop(sender);
+    receiver.await.unwrap().unwrap();
+    assert!(!outcome.daemon_started);
+    assert_eq!(
+        hooks.log,
+        ["stop", "recheck", "fence", "build", "activated"]
+    );
+
+    // B: the activated store, rewritten, unfenced and writable.
+    let b_db = DataLayout::at(&world.b_data).database();
+    assert_eq!(read_store_fence_file(&b_db).unwrap(), None);
+    let mut one = session();
+    one.id = "two".into();
+    save_session_to(&b_db, &one).unwrap();
+    let b = Connection::open(&b_db).unwrap();
+    let kind: String = b
+        .query_row(
+            "SELECT kind FROM session_targets WHERE session_id='one'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "ssh-host-bare");
+    assert_eq!(count_rows(&b_db), 3020, "the WAL-only rows arrived");
+    drop(b);
+    assert_eq!(
+        read_store_fence_file(&a_db).unwrap(),
+        Some(world.fence("t1")),
+        "the source stays fenced"
+    );
+    assert!(!stage.exists(), "staging is removed after activation");
+    let data = |name: &str| world.b_data.join(name);
+    assert_eq!(
+        std::fs::read(data("instance-identity")).unwrap(),
+        b"identity-a\n"
+    );
+    assert_eq!(
+        std::fs::read(data("sessions/one/attachments/big.bin")).unwrap(),
+        big(1, 3 * 1024 * 1024 + 123)
+    );
+    assert!(data("sessions/empty-dir").is_dir());
+    assert!(data("sessions/one/attachments.deleted").exists());
+    assert!(!data("sessions/one/attachments.lock").exists());
+    assert!(!data("workers").exists() && !data("daemon.log").exists());
+    assert_eq!(std::fs::read(data("unknown-user-file")).unwrap(), b"mine");
+    assert_eq!(
+        std::fs::read(data("tool-details/a/keep.txt")).unwrap(),
+        b"keep, changed"
+    );
+    assert!(
+        !data("tool-details/a/b.bin").exists(),
+        "a file removed on A is removed"
+    );
+    assert_eq!(std::fs::read(data("tool-details/new.txt")).unwrap(), b"new");
+
+    // Config: rewritten, with the credential link sent as a private regular file.
+    Config::load_from(&world.b_config.join("config.toml")).unwrap();
+    assert_eq!(
+        std::fs::read(world.b_config.join("ec2/x/key")).unwrap(),
+        b"ec2 key"
+    );
+    let linked = world.b_config.join("keys/linked");
+    assert!(std::fs::symlink_metadata(&linked).unwrap().is_file());
+    assert_eq!(std::fs::metadata(&linked).unwrap().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(&linked).unwrap(), b"credential");
+
+    // Home: links stay links, a private link becomes a regular 0600 file, and
+    // the live SQLite database arrives as a whole snapshot without WAL files.
+    let profile = world.b_home.join(".codex-personal");
+    assert_eq!(
+        std::fs::read(profile.join("auth.json")).unwrap(),
+        b"{\"a\":1}"
+    );
+    assert_eq!(
+        std::fs::read_link(profile.join("dangling")).unwrap(),
+        Path::new("/nonexistent/absolute")
+    );
+    // A private credential inside a copied profile home is 0600 there.
+    let ssh_key = profile.join("ssh_key");
+    assert_eq!(std::fs::read(&ssh_key).unwrap(), b"ssh key");
+    assert_eq!(std::fs::metadata(&ssh_key).unwrap().mode() & 0o777, 0o600);
+    // A profile home that is a link arrives as a real directory.
+    let linked_profile = world.b_home.join(".codex-linked");
+    assert!(std::fs::symlink_metadata(&linked_profile).unwrap().is_dir());
+    assert_eq!(
+        std::fs::read(linked_profile.join("auth.json")).unwrap(),
+        b"{\"linked\":1}"
+    );
+    assert_eq!(
+        std::fs::read(linked_profile.join("history.jsonl")).unwrap(),
+        b"history"
+    );
+    let token = world.b_home.join(".secrets/token");
+    assert!(std::fs::symlink_metadata(&token).unwrap().is_file());
+    assert_eq!(
+        std::fs::metadata(&token).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::read(&token).unwrap(), b"private token");
+    assert_eq!(count_rows(&profile.join("opencode.db")), 300);
+    assert!(!profile.join("opencode.db-wal").exists() && !profile.join("opencode.db-shm").exists());
+
+    // SessionWiki: one file, WAL folded in.
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert!(!world.b_wiki.with_file_name("index.db-wal").exists());
+    assert!(!world.b_wiki.with_file_name("index.db-shm").exists());
+}
+
+async fn exchange(
+    config: ReceiverConfig,
+    requests: Vec<(Request, Vec<u8>)>,
+) -> (Vec<Response>, Result<()>) {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (server_read, server_write) = tokio::io::split(server);
+    let receiver = spawn_receiver(config, server_read, server_write);
+    let (mut reader, mut writer) = tokio::io::split(client);
+    let reader_task = mj_core::runtime::spawn(async move {
+        let mut responses = Vec::new();
+        while let Ok(Some((response, _))) = read_frame::<_, Response>(&mut reader).await {
+            responses.push(response);
+        }
+        responses
+    });
+    for (request, payload) in requests {
+        if write_frame(&mut writer, &request, &payload).await.is_err() {
+            break;
+        }
+    }
+    writer.flush().await.unwrap();
+    let outcome = receiver.await.unwrap();
+    drop(writer);
+    (reader_task.await.unwrap(), outcome)
+}
+
+fn hello() -> (Request, Vec<u8>) {
+    (
+        Request::Hello(Hello {
+            mj_version: "test".into(),
+            schema_version: mj_store::database::STORE_SCHEMA_VERSION,
+            protocol_version: PROTOCOL_VERSION,
+            os_family: "unix".into(),
+        }),
+        Vec::new(),
+    )
+}
+
+fn put(scope: TransferScope, rel: &str, data: &[u8]) -> Vec<(Request, Vec<u8>)> {
+    let mut requests = vec![(
+        Request::PutFileStart {
+            scope,
+            rel_path: rel.into(),
+            kind: FileKind::Regular {
+                size: data.len() as u64,
+                mode: 0o640,
+                mtime_ns: 1_700_000_000_000_000_000,
+            },
+        },
+        Vec::new(),
+    )];
+    for chunk in data.chunks(BLOCK_BYTES) {
+        requests.push((
+            Request::PutFileChunk {
+                raw_len: chunk.len() as u32,
+            },
+            compress(chunk).unwrap(),
+        ));
+    }
+    requests.push((
+        Request::PutFileEnd {
+            sha256: sha256_hex(data),
+        },
+        Vec::new(),
+    ));
+    requests
+}
+
+fn is_error(responses: &[Response]) -> bool {
+    matches!(responses.last(), Some(Response::Error { .. }))
+}
+
+#[tokio::test]
+async fn receiver_rejects_corruption_escapes_and_follows_no_staged_symlink() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let outside = world._root.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+
+    // More than 1 MiB through 64 KiB pipes, intact: staged byte for byte, mode and mtime kept.
+    let data = big(5, 3 * 1024 * 1024 + 1);
+    let mut requests = vec![hello()];
+    requests.extend(put(TransferScope::Data, "sessions/s/big.bin", &data));
+    requests.push((Request::Done, Vec::new()));
+    let (responses, outcome) = exchange(world.receiver(None), requests).await;
+    outcome.unwrap();
+    assert!(
+        matches!(responses.last(), Some(Response::DoneAck)),
+        "{responses:?}"
+    );
+    let staged = stage.join("raw/data/sessions/s/big.bin");
+    assert_eq!(std::fs::read(&staged).unwrap(), data);
+    let metadata = std::fs::metadata(&staged).unwrap();
+    assert_eq!(metadata.mode() & 0o777, 0o640);
+    assert_eq!(metadata.mtime(), 1_700_000_000);
+
+    // A corrupted file, a corrupted block, and a block past the announced size.
+    let mut corrupt = put(TransferScope::Data, "bad.bin", &data);
+    let last = corrupt.len() - 1;
+    corrupt[last].0 = Request::PutFileEnd {
+        sha256: sha256_hex(b"other"),
+    };
+    let block = big(6, BLOCK_BYTES);
+    let patch = |sha: String, index: u64| {
+        vec![
+            hello(),
+            (
+                Request::PatchBlocksBegin {
+                    target: DbTarget::Main,
+                    total_size: BLOCK_BYTES as u64 + 10,
+                },
+                Vec::new(),
+            ),
+            (
+                Request::PatchBlock {
+                    index,
+                    raw_len: block.len() as u32,
+                    sha256: sha,
+                },
+                compress(&block).unwrap(),
+            ),
+            (Request::PatchBlocksEnd, Vec::new()),
+        ]
+    };
+    let mut cases: Vec<Vec<(Request, Vec<u8>)>> = vec![
+        [vec![hello()], corrupt].concat(),
+        patch(sha256_hex(b"other"), 0),
+        patch(sha256_hex(&block), 1),
+    ];
+    // Paths that leave their directory, locks, and database files.
+    for (scope, rel) in [
+        (TransferScope::Data, "../escape"),
+        (TransferScope::Data, "a/../../escape"),
+        (TransferScope::Data, "/absolute"),
+        (TransferScope::Home, ".."),
+        (TransferScope::Config, "./a/../b"),
+        (TransferScope::Data, "controller.lock"),
+        (TransferScope::Data, "daemon-start.lock"),
+        (TransferScope::Data, "mj.sqlite3"),
+        (TransferScope::SessionWiki, "other.db"),
+    ] {
+        cases.push([vec![hello()], put(scope, rel, b"x")].concat());
+    }
+    cases.push(vec![
+        hello(),
+        (
+            Request::RemoveFile {
+                scope: TransferScope::Data,
+                rel_path: "../outside".into(),
+            },
+            Vec::new(),
+        ),
+    ]);
+    cases.push(put(TransferScope::Data, "before-hello", b"x"));
+    for case in cases {
+        let (responses, outcome) = exchange(world.receiver(None), case).await;
+        assert!(is_error(&responses) && outcome.is_err(), "{responses:?}");
+    }
+    assert!(!world.b_data.join("escape").exists());
+    assert!(!stage.join("raw/data/bad.bin").exists());
+
+    // A staged symlink never redirects a later file: the link is replaced by a
+    // directory inside the stage.
+    let mut requests = vec![
+        hello(),
+        (
+            Request::PutFileStart {
+                scope: TransferScope::Home,
+                rel_path: "link".into(),
+                kind: FileKind::Symlink {
+                    target: outside.clone(),
+                },
+            },
+            Vec::new(),
+        ),
+    ];
+    requests.extend(put(TransferScope::Home, "link/evil", b"evil"));
+    requests.push((Request::Done, Vec::new()));
+    let (_, outcome) = exchange(world.receiver(None), requests).await;
+    outcome.unwrap();
+    assert!(!outside.join("evil").exists());
+    assert!(stage.join("raw/home/link").is_dir());
+    assert_eq!(
+        std::fs::read(stage.join("raw/home/link/evil")).unwrap(),
+        b"evil"
+    );
+
+    // A destination that already has a store refuses every write.
+    write(&world.b_config.join("config.toml"), b"");
+    let mut requests = vec![hello()];
+    requests.extend(put(TransferScope::Data, "late", b"x"));
+    let (responses, outcome) = exchange(world.receiver(None), requests).await;
+    let Some(Response::HelloAck(ack)) = responses.first() else {
+        panic!("{responses:?}")
+    };
+    assert!(matches!(
+        ack.destination_status,
+        DestinationStatus::ExistingStore {
+            has_config: true,
+            ..
+        }
+    ));
+    assert!(is_error(&responses) && outcome.is_err());
+    assert!(!stage.join("raw/data/late").exists());
+}
+
+#[tokio::test]
+async fn a_home_target_with_a_parent_component_is_rejected() {
+    let world = World::new();
+    let mut plan = world.plan();
+    plan.home_copies[0].destination = world.b_home.join("../escape");
+    let (sender_read, sender_write, _, receiver_read, receiver_write) = pipe();
+    let receiver = spawn_receiver(world.receiver(None), receiver_read, receiver_write);
+    let mut sender = Sender::new(plan, sender_read, sender_write);
+    let error = sender.phase1().await.err().expect("must fail").to_string();
+    assert!(error.contains("escapes"), "{error}");
+    drop(sender);
+    receiver.await.unwrap().unwrap();
+    assert!(!world.b_data.join("../escape").exists());
+}
+
+fn failing_at(step: PublicationStep) -> PublicationHook {
+    Arc::new(move |reached| {
+        if reached == step {
+            Err(anyhow!("injected failure at {reached:?}"))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+async fn attempt(
+    world: &World,
+    fence: &str,
+    hook: Option<PublicationHook>,
+) -> (Result<SenderOutcome>, Vec<&'static str>) {
+    attempt_with(world, fence, hook, false).await
+}
+
+async fn attempt_with(
+    world: &World,
+    fence: &str,
+    hook: Option<PublicationHook>,
+    overwrite_sessionwiki: bool,
+) -> (Result<SenderOutcome>, Vec<&'static str>) {
+    let (sender_read, sender_write, _, receiver_read, receiver_write) = pipe();
+    let receiver = spawn_receiver(world.receiver(hook), receiver_read, receiver_write);
+    let mut hooks = Hooks::new(world, world.fence(fence));
+    hooks.overwrite_sessionwiki = overwrite_sessionwiki;
+    let result = run_migration_sender(world.plan(), sender_read, sender_write, &mut hooks).await;
+    receiver.await.unwrap().unwrap();
+    (result, hooks.log)
+}
+
+#[tokio::test]
+async fn publication_failures_leave_the_destination_fenced_and_a_retry_completes() {
+    let world = World::new();
+    let a_db = DataLayout::at(&world.a_data).database();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let rollback_log = ["stop", "recheck", "fence", "build", "clear", "rollback"];
+
+    // Before the rewritten store is set aside.
+    let (result, log) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeStoreRename)),
+    )
+    .await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("injected failure"), "{error}");
+    assert_eq!(log, rollback_log);
+    assert_eq!(
+        read_store_fence_file(&a_db).unwrap(),
+        None,
+        "the source is unfenced"
+    );
+    assert!(!b_db.exists());
+
+    // Dependencies are published, the store is not yet in place.
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeStorePlacement)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!b_db.exists());
+    assert!(world.b_home.join(".codex-personal/auth.json").exists());
+
+    assert!(world.b_data.join("unknown-user-file").exists());
+    // A file removed on the source after the rolled-back attempt must not
+    // survive the next attempt.
+    std::fs::remove_file(world.a_data.join("unknown-user-file")).unwrap();
+
+    // The store is in place and still fenced; a new source fence replaces the
+    // rolled-back attempt, which was stale.
+    let (result, _) = attempt(
+        &world,
+        "t2",
+        Some(failing_at(PublicationStep::BeforeUnfence)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(
+        read_store_fence_file(&b_db).unwrap(),
+        Some(world.fence("t2"))
+    );
+    let refused = save_session_to(&b_db, &session()).unwrap_err();
+    assert!(
+        format!("{refused:#}").to_lowercase().contains("fence"),
+        "a normal open must refuse the fenced store: {refused:#}"
+    );
+    assert!(
+        !world.b_wiki.exists(),
+        "the migrated SessionWiki index appears only at activation"
+    );
+
+    // Retry under the same fence resumes and activates.
+    let (result, log) = attempt(&world, "t2", None).await;
+    let outcome = result.unwrap();
+    assert_eq!(log.last(), Some(&"activated"));
+    assert!(outcome.summary.sessionwiki);
+    assert_eq!(read_store_fence_file(&b_db).unwrap(), None);
+    let mut two = session();
+    two.id = "two".into();
+    save_session_to(&b_db, &two).unwrap();
+    assert!(!DataLayout::at(&world.b_data).migrate_stage().exists());
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert_eq!(count_rows(&b_db), 3000);
+    assert!(
+        !world
+            .b_wiki
+            .with_file_name("index.db.mj-migrate-pending")
+            .exists()
+    );
+    assert!(!world.b_data.join("unknown-user-file").exists());
+}
+
+/// A receiver kept open across several requests, to hold its staging lock.
+struct Live {
+    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    responses: tokio::sync::mpsc::UnboundedReceiver<Response>,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl Live {
+    fn open(config: ReceiverConfig) -> Self {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server);
+        let task = spawn_receiver(config, server_read, server_write);
+        let (mut reader, writer) = tokio::io::split(client);
+        let (sender, responses) = tokio::sync::mpsc::unbounded_channel();
+        mj_core::runtime::spawn(async move {
+            while let Ok(Some((response, _))) = read_frame::<_, Response>(&mut reader).await {
+                if sender.send(response).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            writer,
+            responses,
+            task,
+        }
+    }
+
+    async fn send(&mut self, request: Request) -> Response {
+        write_frame(&mut self.writer, &request, &[]).await.unwrap();
+        self.writer.flush().await.unwrap();
+        self.responses.recv().await.unwrap()
+    }
+}
+
+fn manifest_request() -> (Request, Vec<u8>) {
+    (
+        Request::StageManifest {
+            files: true,
+            hash_files: false,
+            blocks: Vec::new(),
+        },
+        Vec::new(),
+    )
+}
+
+#[tokio::test]
+async fn one_receiver_owns_a_destinations_staging_and_hello_alone_creates_none() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+
+    // A dry run's requests leave nothing on the destination.
+    let (responses, outcome) = exchange(
+        world.receiver(None),
+        vec![
+            hello(),
+            (
+                Request::ProbePaths {
+                    paths: vec![world.b_home.clone()],
+                },
+                Vec::new(),
+            ),
+            (Request::Done, Vec::new()),
+        ],
+    )
+    .await;
+    outcome.unwrap();
+    let Response::HelloAck(hello_ack) = &responses[0] else {
+        panic!("missing hello acknowledgement")
+    };
+    assert!(hello_ack.stage_id.is_none());
+    let mut legacy = serde_json::to_value(hello_ack).unwrap();
+    legacy.as_object_mut().unwrap().remove("stage_id");
+    assert!(
+        serde_json::from_value::<HelloAck>(legacy)
+            .unwrap()
+            .stage_id
+            .is_none()
+    );
+    assert!(matches!(responses.last(), Some(Response::DoneAck)));
+    assert!(!stage.exists() && !world.b_data.exists());
+
+    // The first receiver to stage holds the lock until it ends.
+    let mut first = Live::open(world.receiver(None));
+    assert!(matches!(first.send(hello().0).await, Response::HelloAck(_)));
+    let Response::StageManifestAck(page) = first.send(manifest_request().0).await else {
+        panic!("missing staging manifest")
+    };
+    let id = page.stage_id.as_ref().unwrap();
+    assert!(page.last && id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        std::fs::read_to_string(stage.join("stage-id")).unwrap(),
+        *id
+    );
+    let mut legacy = serde_json::to_value(&page).unwrap();
+    legacy.as_object_mut().unwrap().remove("stage_id");
+    assert!(
+        serde_json::from_value::<ManifestPage>(legacy)
+            .unwrap()
+            .stage_id
+            .is_none()
+    );
+    assert!(stage.join("receiver.lock").exists());
+    let (responses, outcome) =
+        exchange(world.receiver(None), vec![hello(), manifest_request()]).await;
+    let Response::HelloAck(hello_ack) = &responses[0] else {
+        panic!("missing hello acknowledgement")
+    };
+    assert_eq!(hello_ack.stage_id.as_ref(), Some(id));
+    let Some(Response::Error { message }) = responses.last() else {
+        panic!("{responses:?}")
+    };
+    assert!(message.contains("already in progress"), "{message}");
+    assert!(outcome.is_err());
+    // The refused receiver did not disturb the first one's staging.
+    assert!(matches!(
+        first.send(manifest_request().0).await,
+        Response::StageManifestAck(_)
+    ));
+    assert!(matches!(first.send(Request::Done).await, Response::DoneAck));
+    first.task.await.unwrap().unwrap();
+
+    // Released: the next receiver stages normally.
+    let (_, outcome) = exchange(
+        world.receiver(None),
+        vec![hello(), manifest_request(), (Request::Done, Vec::new())],
+    )
+    .await;
+    outcome.unwrap();
+}
+
+#[tokio::test]
+async fn hello_reports_staged_bytes_without_following_symlinks() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let (responses, outcome) = exchange(
+        world.receiver(None),
+        vec![hello(), (Request::Done, Vec::new())],
+    )
+    .await;
+    outcome.unwrap();
+    let Response::HelloAck(empty) = &responses[0] else {
+        panic!("{responses:?}")
+    };
+    assert_eq!(
+        (
+            empty.staged_bytes_data,
+            empty.staged_bytes_config,
+            empty.staged_bytes_sessionwiki
+        ),
+        (0, 0, 0)
+    );
+    assert!(!stage.exists());
+    let mut old_ack = serde_json::to_value(empty).unwrap();
+    let object = old_ack.as_object_mut().unwrap();
+    object.remove("staged_bytes_data");
+    object.remove("staged_bytes_config");
+    object.remove("staged_bytes_sessionwiki");
+    let old_ack: HelloAck = serde_json::from_value(old_ack).unwrap();
+    assert_eq!(
+        (
+            old_ack.staged_bytes_data,
+            old_ack.staged_bytes_config,
+            old_ack.staged_bytes_sessionwiki
+        ),
+        (0, 0, 0)
+    );
+
+    let data = big(7, 1024 * 1024 + 17);
+    let home = vec![1; 123];
+    let config = vec![2; 211];
+    let wiki = vec![3; 333];
+    let mut requests = vec![hello()];
+    requests.extend(put(TransferScope::Data, "nested/data", &data));
+    requests.extend(put(TransferScope::Home, "profile/token", &home));
+    requests.extend(put(TransferScope::Config, "keys/key", &config));
+    requests.extend(put(TransferScope::SessionWiki, "index.db", &wiki));
+    requests.push((Request::Done, Vec::new()));
+    let (_, outcome) = exchange(world.receiver(None), requests).await;
+    outcome.unwrap();
+    write(&stage.join("rewritten/store"), &[4; 77]);
+    write(
+        &world.b_wiki.with_file_name("index.db.mj-migrate-pending"),
+        &[5; 444],
+    );
+    let outside = world._root.path().join("outside");
+    write(&outside.join("large"), &[9; 2048]);
+    symlink(outside.join("large"), stage.join("raw/data/link-to-file")).unwrap();
+    symlink(&outside, stage.join("raw/config/link-to-directory")).unwrap();
+
+    let (responses, outcome) = exchange(
+        world.receiver(None),
+        vec![hello(), (Request::Done, Vec::new())],
+    )
+    .await;
+    outcome.unwrap();
+    let Response::HelloAck(ack) = &responses[0] else {
+        panic!("{responses:?}")
+    };
+    assert_eq!(ack.staged_bytes_data, (data.len() + home.len() + 77) as u64);
+    assert_eq!(ack.staged_bytes_config, config.len() as u64);
+    assert_eq!(ack.staged_bytes_sessionwiki, (wiki.len() + 444) as u64);
+}
+
+#[tokio::test]
+async fn destination_entries_that_already_exist_are_refused_and_never_touched() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    // Neither an mj.sqlite3 nor a config.toml, so only the entry check can refuse.
+    write(&world.b_data.join("sessions/unrelated"), b"mine");
+    for (fence, hook) in [
+        ("t1", None),
+        ("t2", Some(failing_at(PublicationStep::BeforeStoreRename))),
+    ] {
+        let (result, log) = attempt(&world, fence, hook).await;
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(log.last(), Some(&"rollback"));
+        assert_eq!(
+            std::fs::read(world.b_data.join("sessions/unrelated")).unwrap(),
+            b"mine"
+        );
+        assert!(!b_db.exists());
+    }
+}
+
+#[tokio::test]
+async fn an_entry_created_during_publication_is_neither_replaced_nor_deleted_on_retry() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let profile = world.b_home.join(".codex-personal");
+    let token = world.b_home.join(".secrets/token");
+
+    // Created between Hello and CommitPublication.
+    let (sender_read, sender_write, _, receiver_read, receiver_write) = pipe();
+    let receiver = spawn_receiver(world.receiver(None), receiver_read, receiver_write);
+    let mut hooks = Hooks::new(&world, world.fence("t1"));
+    let mut sender = Sender::new(world.plan(), sender_read, sender_write);
+    let phase1 = sender.phase1().await.unwrap();
+    write(&profile.join("user.txt"), b"user data");
+    let error = format!("{:#}", sender.phase2(phase1, &mut hooks).await.unwrap_err());
+    assert!(error.contains("already exists"), "{error}");
+    drop(sender);
+    receiver.await.unwrap().unwrap();
+    assert_eq!(
+        std::fs::read(profile.join("user.txt")).unwrap(),
+        b"user data"
+    );
+    assert!(
+        !profile.join("auth.json").exists(),
+        "nothing merged into it"
+    );
+
+    // Created after the existence checks passed: the atomic install refuses it.
+    std::fs::remove_dir_all(&profile).unwrap();
+    let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let racing: PublicationHook = {
+        let token = token.clone();
+        let created = created.clone();
+        Arc::new(move |step| {
+            if step == PublicationStep::BeforeStoreRename && !created.swap(true, Ordering::SeqCst) {
+                write(&token, b"user token");
+            }
+            Ok(())
+        })
+    };
+    let (result, _) = attempt(&world, "t2", Some(racing)).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(std::fs::read(&token).unwrap(), b"user token");
+    assert!(!b_db.exists());
+
+    // A retry with a new fence removes what the failed attempt created, and
+    // still refuses to touch the user's file.
+    let (result, _) = attempt(&world, "t3", None).await;
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&token).unwrap(), b"user token");
+    assert!(
+        !profile.exists(),
+        "the failed attempt's own entries are removed"
+    );
+
+    // Once the user's file is gone the migration completes.
+    std::fs::remove_file(&token).unwrap();
+    let (result, _) = attempt(&world, "t4", None).await;
+    result.unwrap();
+    assert_eq!(read_store_fence_file(&b_db).unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_existing_sessionwiki_survives_failures_before_it_is_replaced() {
+    let world = World::new();
+    drop(wal_database(&world.b_wiki, 5));
+    for fence in ["t1", "t2"] {
+        let (result, _) = attempt_with(
+            &world,
+            fence,
+            Some(failing_at(PublicationStep::BeforeStoreRename)),
+            true,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(count_rows(&world.b_wiki), 5, "{fence}");
+    }
+    let (result, _) = attempt_with(&world, "t3", None, true).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+}
+
+#[tokio::test]
+async fn an_entry_replaced_by_someone_else_is_never_deleted_by_a_retry() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let config_toml = world.b_config.join("config.toml");
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeStorePlacement)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(config_toml.exists());
+
+    // Someone removes the half-published config and puts their own at its
+    // path. The old inode stays allocated, so the new file cannot reuse it.
+    let kept = world._root.path().join("old-config.toml");
+    std::fs::hard_link(&config_toml, &kept).unwrap();
+    std::fs::remove_file(&config_toml).unwrap();
+    write(&config_toml, b"mine");
+
+    let (result, _) = attempt(&world, "t2", None).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("replaced externally"), "{error}");
+    assert_eq!(std::fs::read(&config_toml).unwrap(), b"mine");
+    assert!(
+        world.b_data.join("sessions").exists(),
+        "a refused cleanup removes nothing"
+    );
+    assert!(!b_db.exists());
+}
+
+#[tokio::test]
+async fn a_sessionwiki_index_in_use_is_not_replaced() {
+    let world = World::new();
+    // Another connection holds a read transaction on the destination's index.
+    let held = wal_database(&world.b_wiki, 5);
+    held.execute_batch("BEGIN; SELECT count(*) FROM scratch")
+        .unwrap();
+    let (result, _) = attempt_with(&world, "t1", None, true).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("currently in use"), "{error}");
+    assert_eq!(count_rows(&world.b_wiki), 5);
+
+    held.execute_batch("COMMIT").unwrap();
+    drop(held);
+    let (result, _) = attempt_with(&world, "t2", None, true).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+}
+
+/// Restores owner access to read-only test directories so cleanup can run.
+struct Writable(Vec<PathBuf>);
+
+impl Drop for Writable {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_read_only_directory_in_a_copied_profile_home_arrives_with_its_files() {
+    let world = World::new();
+    let source = world.a_home.join(".codex-personal/readonly-dir");
+    write(&source.join("file.txt"), b"inside");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let _restore = Writable(vec![
+        source.clone(),
+        world.b_home.join(".codex-personal/readonly-dir"),
+    ]);
+    let (result, _) = attempt(&world, "t1", None).await;
+    result.unwrap();
+    let copied = world.b_home.join(".codex-personal/readonly-dir");
+    assert_eq!(std::fs::read(copied.join("file.txt")).unwrap(), b"inside");
+    assert_eq!(
+        std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+        0o555,
+        "the source's mode is restored once the directory is filled"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_sessionwiki_index_appears_only_at_activation_and_stale_files_are_refused() {
+    let world = World::new();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    let wal = world.b_wiki.with_file_name("index.db-wal");
+    // The destination's own index, held open: overwriting it fails before
+    // anything is placed, so a retry's cleanup must leave it alone.
+    let held = wal_database(&world.b_wiki, 5);
+    held.execute_batch("BEGIN; SELECT count(*) FROM scratch")
+        .unwrap();
+    for fence in ["t1", "t2"] {
+        let (result, _) = attempt_with(&world, fence, None, true).await;
+        assert!(result.is_err());
+        assert_eq!(count_rows(&world.b_wiki), 5, "{fence}");
+    }
+    held.execute_batch("COMMIT").unwrap();
+    drop(held);
+    assert!(!pending.exists());
+
+    // A fresh destination stays without an index until activation, so no other
+    // process can open it and write what a rollback would then lose.
+    std::fs::remove_file(&world.b_wiki).unwrap();
+    let (result, _) = attempt_with(
+        &world,
+        "t3",
+        Some(failing_at(PublicationStep::BeforeStorePlacement)),
+        false,
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!world.b_wiki.exists());
+    assert!(pending.exists());
+    // Someone creates an index of their own before the retry: it is refused
+    // and kept, and the failed attempt's pending file is cleaned up.
+    drop(wal_database(&world.b_wiki, 7));
+    let (result, _) = attempt_with(&world, "t4", None, false).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("already has SessionWiki files"), "{error}");
+    assert_eq!(count_rows(&world.b_wiki), 7);
+    assert!(!pending.exists());
+
+    // A stale journal file without an index is refused as well, and kept.
+    std::fs::remove_file(&world.b_wiki).unwrap();
+    write(&wal, b"stale");
+    let (result, _) = attempt_with(&world, "t5", None, false).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("already has SessionWiki files"), "{error}");
+    assert_eq!(std::fs::read(&wal).unwrap(), b"stale");
+
+    // Once the destination is clean the migration completes.
+    std::fs::remove_file(&wal).unwrap();
+    let (result, _) = attempt_with(&world, "t6", None, false).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert!(!pending.exists());
+}
+
+#[test]
+fn a_private_directory_is_never_visible_with_wider_access_while_it_is_filled() {
+    use super::fsops::{PublishMode, publish_entry_no_replace};
+    let root = tempfile::tempdir().unwrap();
+    for (mode, expected_during) in [(0o700, 0o700), (0o755, 0o700)] {
+        let src = root.path().join(format!("src-{mode:o}"));
+        write(&src.join("secret.txt"), b"secret");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(mode)).unwrap();
+        // Copy first: a move consumes the source.
+        for publish_mode in [PublishMode::Copy, PublishMode::Move] {
+            let dst = root
+                .path()
+                .join(format!("dst-{mode:o}-{}", publish_mode as u8));
+            let mut seen = None;
+            publish_entry_no_replace(&src, &dst, publish_mode, &mut || {
+                seen = Some(std::fs::metadata(&dst)?.permissions().mode() & 0o777);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(seen, Some(expected_during), "{mode:o}");
+            assert_eq!(
+                std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+                mode,
+                "the real mode is restored once filled"
+            );
+            assert_eq!(std::fs::read(dst.join("secret.txt")).unwrap(), b"secret");
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_overwritten_sessionwiki_index_is_replaced_only_after_the_activation_commit() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    drop(wal_database(&world.b_wiki, 5));
+
+    // Failing before the commit, even with the migrated index installed beside
+    // it, leaves the destination's own index as it was.
+    for (fence, step) in [
+        ("t1", PublicationStep::BeforeStorePlacement),
+        ("t1", PublicationStep::BeforeUnfence),
+        ("t2", PublicationStep::BeforeUnfence),
+    ] {
+        let (result, _) = attempt_with(&world, fence, Some(failing_at(step)), true).await;
+        assert!(result.is_err(), "{fence} {step:?}");
+        assert_eq!(count_rows(&world.b_wiki), 5, "{fence} {step:?}");
+        assert!(pending.exists(), "{fence} {step:?}");
+    }
+
+    // The commit happened and the process died before the rename: a retry under
+    // the same fence finishes the replacement.
+    let (result, _) = attempt_with(
+        &world,
+        "t3",
+        Some(failing_at(PublicationStep::BeforeUnfence)),
+        true,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(count_rows(&world.b_wiki), 5);
+    clear_store_fence_file(&b_db, &world.fence("t3")).unwrap();
+    let (result, _) = attempt_with(&world, "t3", None, true).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert!(!pending.exists());
+}
+
+#[tokio::test]
+async fn a_stale_directory_mode_is_not_applied_through_a_link_that_replaced_the_directory() {
+    let world = World::new();
+    let source = world.a_home.join(".codex-personal/readonly-dir");
+    write(&source.join("file.txt"), b"inside");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let outside = world._root.path().join("outside-directory");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _restore = Writable(vec![
+        source.clone(),
+        outside.clone(),
+        world.b_home.join(".codex-personal/readonly-dir"),
+    ]);
+    // Between staging and publication the staged directory, whose real mode
+    // is recorded as 0555, is replaced by a link to a directory elsewhere.
+    let staged = DataLayout::at(&world.b_data)
+        .migrate_stage()
+        .join("raw/home/.codex-personal/readonly-dir");
+    let target = outside.clone();
+    let swap: PublicationHook = Arc::new(move |step| {
+        if step == PublicationStep::BeforeStoreRename {
+            std::fs::remove_dir_all(&staged).unwrap();
+            symlink(&target, &staged).unwrap();
+        }
+        Ok(())
+    });
+    let (result, _) = attempt_with(&world, "t1", Some(swap), false).await;
+    result.unwrap();
+    let published = world.b_home.join(".codex-personal/readonly-dir");
+    assert!(std::fs::symlink_metadata(&published).unwrap().is_symlink());
+    assert_eq!(
+        std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "the directory outside the migration was not chmod-ed"
+    );
+}
+
+#[tokio::test]
+async fn an_unfenced_store_counts_as_activated_only_if_this_publication_placed_it() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+
+    // Failed before the store was placed; a client then makes a store of its own.
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeStorePlacement)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!b_db.exists());
+    let mut theirs = session();
+    theirs.id = "theirs".into();
+    save_session_to(&b_db, &theirs).unwrap();
+    let (result, _) = attempt(&world, "t1", None).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("unrelated active mj.sqlite3"), "{error}");
+    assert!(stage.exists(), "staging is kept");
+    assert!(
+        Connection::open(&b_db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE session_id='theirs'",
+                [],
+                |r| { r.get::<_, i64>(0) }
+            )
+            .unwrap()
+            == 1
+    );
+    std::fs::remove_file(&b_db).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(b_db.with_file_name(format!("mj.sqlite3{suffix}")));
+    }
+
+    // Placed and then unfenced, with the reply lost: the retry recognizes it.
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeUnfence)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(
+        read_store_fence_file(&b_db).unwrap(),
+        Some(world.fence("t1"))
+    );
+    clear_store_fence_file(&b_db, &world.fence("t1")).unwrap();
+    let (result, _) = attempt(&world, "t1", None).await;
+    let outcome = result.unwrap();
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("already activated"))
+    );
+    assert!(!stage.exists());
+    let mut two = session();
+    two.id = "two".into();
+    save_session_to(&b_db, &two).unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_sessionwiki_install_after_activation_keeps_staging_for_a_retry() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    // Just before the commit, an index of someone else's appears at the path.
+    let racing: PublicationHook = {
+        let wiki = world.b_wiki.clone();
+        Arc::new(move |step| {
+            if step == PublicationStep::BeforeUnfence && !wiki.exists() {
+                drop(wal_database(&wiki, 7));
+            }
+            Ok(())
+        })
+    };
+    let (result, _) = attempt(&world, "t1", Some(racing)).await;
+    let outcome = result.unwrap();
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("waiting at"))
+    );
+    assert_eq!(read_store_fence_file(&b_db).unwrap(), None);
+    assert_eq!(count_rows(&world.b_wiki), 7, "their index is untouched");
+    assert!(pending.exists() && stage.exists());
+
+    // Once the way is clear, a retry finishes the install from the kept staging.
+    for path in [
+        world.b_wiki.clone(),
+        world.b_wiki.with_file_name("index.db-wal"),
+        world.b_wiki.with_file_name("index.db-shm"),
+    ] {
+        let _ = std::fs::remove_file(path);
+    }
+    let (result, _) = attempt(&world, "t1", None).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert!(!pending.exists() && !stage.exists());
+}
+
+#[tokio::test]
+async fn recovery_after_the_commit_never_fails_the_publication() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeUnfence)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(pending.exists());
+    // The commit happened and the reply was lost; the pending index was then
+    // replaced by someone else.
+    clear_store_fence_file(&b_db, &world.fence("t1")).unwrap();
+    let kept = world._root.path().join("old-pending");
+    std::fs::hard_link(&pending, &kept).unwrap();
+    std::fs::remove_file(&pending).unwrap();
+    write(&pending, b"theirs");
+
+    let (result, log) = attempt(&world, "t1", None).await;
+    let outcome = result.expect("an activated destination must not report a failure");
+    assert_eq!(log.last(), Some(&"activated"), "{log:?}");
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("already activated"))
+    );
+    assert_eq!(std::fs::read(&pending).unwrap(), b"theirs");
+    assert!(!world.b_wiki.exists());
+    assert!(stage.exists(), "staging is kept for inspection");
+}
+
+#[tokio::test]
+async fn an_overwrite_never_replaces_an_index_it_does_not_hold() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    // Overwrite was asked for, but there was no index to lock; a rival index
+    // appears just before the commit.
+    let rival: PublicationHook = {
+        let wiki = world.b_wiki.clone();
+        Arc::new(move |step| {
+            if step == PublicationStep::BeforeUnfence && !wiki.exists() {
+                drop(wal_database(&wiki, 7));
+            }
+            Ok(())
+        })
+    };
+    let (result, _) = attempt_with(&world, "t1", Some(rival), true).await;
+    let outcome = result.unwrap();
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("waiting at"))
+    );
+    assert_eq!(count_rows(&world.b_wiki), 7);
+    assert!(pending.exists() && stage.exists());
+}
+
+#[tokio::test]
+async fn orphaned_put_temporaries_are_purged_and_user_lock_files_are_published() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    write(&world.a_config.join("key.lock"), b"user credential");
+    // A receiver killed mid-transfer left temporaries in the staging area.
+    write(&stage.join("raw/data/.mj-put-stale"), b"half a file");
+    write(&stage.join("raw/data/sessions/s/.mj-put-nested"), b"half");
+    let (result, _) = attempt(&world, "t1", None).await;
+    result.unwrap();
+    assert!(!world.b_data.join(".mj-put-stale").exists());
+    assert!(!world.b_data.join("sessions/s/.mj-put-nested").exists());
+    assert_eq!(
+        std::fs::read(world.b_config.join("key.lock")).unwrap(),
+        b"user credential"
+    );
+}

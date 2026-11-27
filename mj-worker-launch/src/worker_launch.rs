@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::targets::{self, CommandExecutor, backend_locator, target_profile_home};
 use mj_core::aws_credentials::AwsCredentialSource;
 use mj_core::config::Config;
-use mj_core::state::State;
+use mj_core::state::{SessionRecord, State};
 use mj_core::targets::SshTrafficClass;
 use mj_core::worker_build::worker_build_id;
 use mj_core::worker_launch::ReviewMcpServer;
@@ -236,7 +236,7 @@ pub fn stage_worker_files_for(
         .target_runtime_settings(config)?
         .launch_environment()?;
     let aws_source = crate::aws_credentials::source(profile, backend, &target_environment)?;
-    let (mut launch, project_memory, target_profile_home) = session_launch_config_with_source(
+    let (mut launch, _project_memory, target_profile_home) = session_launch_config_with_source(
         config,
         state,
         session_id,
@@ -259,6 +259,11 @@ pub fn stage_worker_files_for(
         launch.accepted_reload_operation_id = Some(operation_id.clone());
     }
     let staging = tempfile::tempdir().context("create worker staging directory")?;
+    let seed_stage = staging.path().join("project-memory-seed");
+    if let Some(memory) = &launch.project_memory {
+        stage_memory_seed(memory, &seed_stage)?;
+    }
+    let project_memory = launch.project_memory.clone();
     let launch_path = staging.path().join("launch.json");
     launch.write(&launch_path)?;
     let ownership_path = staging.path().join("ownership.json");
@@ -360,28 +365,37 @@ pub fn stage_worker_files_for(
         configure_claude_mailbox_hook(&profile_stage, worker_root)?;
     }
     let mut shared_paths: Vec<&Path> = shared_profile_paths(profile.kind);
-    // A session without project memory gets no replica, no baseline and
-    // no history server: nothing of the workspace's memory reaches it.
-    if let Some(project_memory) = &project_memory {
-        shared_paths.extend(stage_memory_replica(
-            project_memory,
+    if let (
+        WorkerFilePreparation::StageCandidate {
+            worker_protocol, ..
+        },
+        Some(memory),
+    ) = (&preparation, &project_memory)
+        && *worker_protocol < mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL
+    {
+        shared_paths.extend(stage_legacy_candidate_memory(
+            memory,
             Path::new(&target_profile_home),
             &profile_stage,
+            &seed_stage,
         )?);
-        if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
-            configure_kimi_history_mcp(
-                &profile_stage,
-                worker_root,
-                project_memory.history_socket.as_deref(),
-            )?;
-        }
+    }
+    // A session without project memory gets no replica, no baseline and
+    // no history server: nothing of the workspace's memory reaches it.
+    if let Some(project_memory) = &project_memory
+        && project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile
+    {
+        configure_kimi_history_mcp(
+            &profile_stage,
+            worker_root,
+            project_memory.history_socket.as_deref(),
+        )?;
     }
     if mj_core::session_instructions::delivered_by_staging(profile.kind) {
         let index = if let Some(memory) = &project_memory {
-            let index =
-                staged_memory_index(memory, Path::new(&target_profile_home), &profile_stage)
-                    .map(|contents| contents.unwrap_or_default())
-                    .map_err(|error| format!("{error:#}"));
+            let index = staged_memory_index(&seed_stage)
+                .map(|contents| contents.unwrap_or_default())
+                .map_err(|error| format!("{error:#}"));
             if let Err(reason) = &index {
                 executor.notify_notice(&format!(
                     "Warning: Project memory index {} unavailable: {reason}",
@@ -409,6 +423,7 @@ pub fn stage_worker_files_for(
         operation_id,
         expected_store_id,
         candidate_id,
+        worker_protocol,
     } = &preparation
     {
         use mj_core::worker_launch::{ReloadCandidateManifest, ReloadSharedLogin};
@@ -446,6 +461,17 @@ pub fn stage_worker_files_for(
                 shared_paths: &shared_paths,
             },
         )?;
+        if *worker_protocol >= mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL
+            && let Some(memory) = &project_memory
+        {
+            install_memory_seed(
+                executor,
+                backend,
+                session_id,
+                &seed_stage,
+                &mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root),
+            )?;
+        }
         return Ok((Some(launch), staged_profile));
     }
     if preparation != WorkerFilePreparation::Install {
@@ -491,6 +517,15 @@ pub fn stage_worker_files_for(
                 shared_paths: &shared_paths,
             },
         )?;
+        if let Some(memory) = &project_memory {
+            install_memory_seed(
+                executor,
+                backend,
+                session_id,
+                &seed_stage,
+                &mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root),
+            )?;
+        }
         if upgrade_retained_worker {
             let worker = WorkerInstall::for_target(backend, executor)?;
             install_worker_binary(executor, backend, session_id, &worker, "hel")?;
@@ -512,11 +547,34 @@ pub fn stage_worker_files_for(
         shared_login.as_ref(),
         &shared_paths,
     )?;
+    if let Some(memory) = &project_memory {
+        install_memory_seed(
+            executor,
+            backend,
+            session_id,
+            &seed_stage,
+            &mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root),
+        )?;
+    }
     if session.build_cache.is_some() {
         install_build_cache_shim(session, backend, &launch, executor)
             .context("install shared machine build cache configuration")?;
     }
     Ok((Some(launch), staged_profile))
+}
+
+// Remove this compatibility path once workers older than seed installation are gone.
+fn stage_legacy_candidate_memory<'a>(
+    memory: &'a ProjectMemoryLaunchConfig,
+    target_profile_home: &Path,
+    profile_stage: &Path,
+    seed: &Path,
+) -> Result<[&'a Path; 2]> {
+    let replica = memory.root.strip_prefix(target_profile_home)?;
+    let baseline = memory.baseline_root.strip_prefix(target_profile_home)?;
+    copy_profile_entry(seed, &profile_stage.join(replica))?;
+    copy_profile_entry(seed, &profile_stage.join(baseline))?;
+    Ok([replica, baseline])
 }
 
 /// Stage and verify the session's mbx, then install marked launchers in
@@ -866,6 +924,7 @@ fn session_launch_config_with_source(
         );
     }
     working_directories.reverse();
+    let pinned_memory_key = pinned_legacy_memory_key(session, owner)?;
     let (mut launch, project_memory, target_profile_home) = worker_launch_config_with_checkout(
         session,
         &checkout,
@@ -883,6 +942,7 @@ fn session_launch_config_with_source(
         target_environment.clone(),
         config,
         aws_source,
+        pinned_memory_key.as_deref(),
     )?;
     launch.reviewer_launch = if subagent.is_some() {
         crate::database::load_subagent(session_id)?
@@ -1165,6 +1225,7 @@ pub fn project_memory_sync_target(
         },
     )?;
     let target_home = target_profile_home(&backend, session_id, profile);
+    let pinned_memory_key = pinned_legacy_memory_key(session, owner)?;
     let launch = project_memory_launch(
         session,
         &checkout,
@@ -1172,10 +1233,27 @@ pub fn project_memory_sync_target(
         &workspace,
         &target_home,
         owner.managed_worktree.as_deref(),
+        pinned_memory_key.as_deref(),
     )?;
     Ok(Some(ProjectMemorySyncTarget {
         canonical_root: canonical_memory_root(&launch.project_key),
+        relay: mj_targets::targets::project_memory_relay_command(&backend, session_id)?,
     }))
+}
+
+fn pinned_legacy_memory_key(
+    session: &SessionRecord,
+    owner: &SessionRecord,
+) -> Result<Option<String>> {
+    if session.project.is_some() {
+        return Ok(None);
+    }
+    let key = crate::database::read_pinned_memory_key(&session.id)?;
+    if key.is_some() || session.id == owner.id {
+        Ok(key)
+    } else {
+        crate::database::read_pinned_memory_key(&owner.id)
+    }
 }
 
 /// Writes `servers` into the staged profile of a harness that reads its MCP
@@ -1378,7 +1456,7 @@ mod tests {
             let no_host_mbx = dir.path().join("no-host-mbx");
             std::fs::create_dir(&no_host_mbx).unwrap();
             for utility in [
-                "mkdir", "cp", "chmod", "sh", "rm", "ln", "find", "dirname", "cat",
+                "mkdir", "cp", "chmod", "sh", "rm", "ln", "find", "dirname", "cat", "tar",
             ] {
                 let executable = ["/usr/bin", "/bin"]
                     .into_iter()
@@ -1403,6 +1481,7 @@ mod tests {
                     operation_id: "move".into(),
                     expected_store_id: "store".into(),
                     candidate_id: "candidate".into(),
+                    worker_protocol: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 },
                 LaunchHistory::Stored,
             )
@@ -1416,6 +1495,61 @@ mod tests {
         }
         let candidate = root.join("reload-candidates/candidate");
         let launch = WorkerLaunchConfig::read(&candidate.join("launch.json")).unwrap();
+        let memory = launch.project_memory.as_ref().unwrap();
+        let canonical = canonical_memory_root(&memory.project_key);
+        let current = mj_core::project_memory::read_canonical_state(&canonical).unwrap();
+        let tree = mj_core::project_memory::ProjectMemorySnapshot {
+            files: [("/MEMORY.md".into(), "staged memory".into())].into(),
+        };
+        mj_core::project_memory::commit_canonical(&canonical, &current, id, &tree, None).unwrap();
+        // Seed installation was introduced at this protocol boundary.
+        for (candidate_id, protocol, legacy) in [
+            (
+                "old-worker",
+                mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL - 1,
+                true,
+            ),
+            (
+                "seed-worker",
+                mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL,
+                false,
+            ),
+            ("new-worker", mj_core::relay::RELAY_PROTOCOL_VERSION, false),
+        ] {
+            crate::database::test_fixtures::worker_test_scope(id, || {
+                prepare_worker_files_for(
+                    &config,
+                    &state,
+                    id,
+                    &backend,
+                    root.to_str().unwrap(),
+                    &mj_core::targets::ProcessExecutor,
+                    WorkerFilePreparation::StageCandidate {
+                        operation_id: "move".into(),
+                        expected_store_id: "store".into(),
+                        candidate_id: candidate_id.into(),
+                        worker_protocol: protocol,
+                    },
+                    LaunchHistory::Stored,
+                )
+                .unwrap();
+            });
+            let overlay = root
+                .join("reload-candidates")
+                .join(candidate_id)
+                .join("profile");
+            for path in [&memory.root, &memory.baseline_root] {
+                let staged_tree = overlay.join(path.strip_prefix(&home).unwrap());
+                if legacy {
+                    assert_eq!(
+                        std::fs::read_to_string(staged_tree.join("MEMORY.md")).unwrap(),
+                        "staged memory"
+                    );
+                } else {
+                    assert!(!staged_tree.exists());
+                }
+            }
+        }
         assert_eq!(launch.accepted_reload_operation_id.as_deref(), Some("move"));
         for name in [
             "launch.json",
@@ -1723,11 +1857,20 @@ mod tests {
         crate::database::save_lifecycle_session(&parent).unwrap();
         let report = workspace.join(".mj/agents").join(child_id);
         crate::database::record_subagent_report_dir(child_id, report.to_str().unwrap()).unwrap();
+        let owner_key = "c".repeat(64);
+        crate::database::pin_session_memory_key(parent_id, &owner_key).unwrap();
+        assert_eq!(
+            pinned_legacy_memory_key(&child, &parent).unwrap(),
+            Some(owner_key)
+        );
+        let pinned_key = "a".repeat(64);
+        crate::database::pin_session_memory_key(child_id, &pinned_key).unwrap();
         let state = crate::database::load_state().unwrap();
         let (backend, _) = worker_placement(&config, &state, child_id).unwrap();
-        let (launch, _, _) =
+        let (launch, memory, _) =
             session_launch_config(&config, &state, child_id, &backend, LaunchHistory::Stored)
                 .unwrap();
+        assert_eq!(memory.unwrap().project_key, pinned_key);
         assert_eq!(launch.cwd, workspace);
         assert_eq!(
             launch.environment[CHILD_REPORT_DIR_ENV],

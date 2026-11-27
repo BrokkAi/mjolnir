@@ -7,7 +7,7 @@ pub fn reconcile_action(
     match (actor, desired) {
         (None, None) => ReconcileAction::Idle,
         (None, Some(_)) => ReconcileAction::Spawn,
-        (Some(actor), Some(desired)) if actor == desired => ReconcileAction::Keep,
+        (Some(actor), Some(desired)) if actor.same_actor_identity(desired) => ReconcileAction::Keep,
         (Some(_), Some(_) | None) => ReconcileAction::Retire,
     }
 }
@@ -50,11 +50,20 @@ pub fn reconcile_actors(
         live
     });
 
-    for (session_id, actor) in actors.iter() {
+    for (session_id, actor) in actors.iter_mut() {
         let retiring = matches!(
             reconcile_action(Some(&actor.target), targets.get(session_id)),
             ReconcileAction::Retire
         );
+        if !retiring
+            && let Some(desired) = targets.get(session_id)
+            && actor.target != *desired
+        {
+            actor
+                .worker_recovery
+                .send_replace(desired.worker_recovery.clone());
+            actor.target = desired.clone();
+        }
         actor.retirement.send_replace(retiring);
     }
 
@@ -71,6 +80,8 @@ pub fn reconcile_actors(
         let (actor_tx, actor_rx) = mpsc::channel(32);
         let (release_tx, release_rx) = mpsc::unbounded_channel();
         let (retirement_tx, retirement_rx) = watch::channel(false);
+        let (worker_recovery_tx, worker_recovery_rx) =
+            watch::channel(target.worker_recovery.clone());
         let (view_tx, view_rx) = watch::channel(ManagedSessionView::default());
         let mut actor_updates = updates.for_actor(session_id);
         actor_updates.observer = updates
@@ -79,22 +90,24 @@ pub fn reconcile_actors(
             .map(|feed| feed.register(session_id));
         let task_target = target.clone();
         let task_id = session_id.clone();
+        let actor = run_session_actor(
+            task_target,
+            actor_rx,
+            release_rx,
+            retirement_rx,
+            view_tx,
+            actor_updates,
+            worker_recovery_rx,
+        );
         let abort = tasks.spawn(async move {
-            run_session_actor(
-                task_target,
-                actor_rx,
-                release_rx,
-                retirement_rx,
-                view_tx,
-                actor_updates,
-            )
-            .await;
+            actor.await;
             task_id
         });
         actors.insert(
             session_id.clone(),
             ActorRegistration {
                 target: target.clone(),
+                worker_recovery: worker_recovery_tx,
                 commands: actor_tx,
                 releases: release_tx,
                 retirement: retirement_tx,
@@ -105,9 +118,18 @@ pub fn reconcile_actors(
     }
 }
 
-pub async fn run_remote_session_actor(
+pub fn run_remote_session_actor(
     session_id: String,
-    mut commands: mpsc::Receiver<ActorCommand>,
+    commands: mpsc::Receiver<ActorCommand>,
+    requests: mpsc::Sender<RemoteSessionRequest>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let commands = ActorCommandQueue::new(commands, session_id.clone());
+    run_remote_session_actor_inner(session_id, commands, requests)
+}
+
+async fn run_remote_session_actor_inner(
+    session_id: String,
+    mut commands: ActorCommandQueue,
     requests: mpsc::Sender<RemoteSessionRequest>,
 ) {
     while let Some(command) = commands.recv().await {

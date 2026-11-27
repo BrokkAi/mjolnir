@@ -1860,6 +1860,9 @@ pub async fn run_daemon_owned(
             config.parked_move.as_ref(),
         )?
     };
+    if let Some(memory) = &config.project_memory {
+        super::project_memory::prepare_project_memory(memory, &config.session_id)?;
+    }
     if let Some(operation_id) = config.accepted_reload_operation_id.as_deref() {
         durable_relay.reconcile_committed_reload(operation_id)?;
     }
@@ -4274,6 +4277,8 @@ pub(super) async fn serve_client_with_shared_credentials(
                     envelope,
                     &project_memory,
                     &mut project_memory_transfer,
+                    &session_id,
+                    relay.lock().expect("relay state lock poisoned").tools_in_flight(),
                     cancel.clone(),
                 );
                 tokio::pin!(response);

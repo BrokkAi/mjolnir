@@ -439,6 +439,8 @@ pub(super) async fn project_memory_response(
     envelope: RelayRequestEnvelope,
     endpoint: &ProjectMemoryEndpoint,
     transfer: &mut ConnectionProjectMemoryTransfer,
+    session_id: &str,
+    tools: mj_core::activity::ToolsInFlight,
     cancel: CancellationToken,
 ) -> Option<RelayResponseEnvelope> {
     let body = match endpoint.config.as_ref() {
@@ -463,12 +465,15 @@ pub(super) async fn project_memory_response(
                     | RelayRequest::ProjectMemoryTransfer {
                         action: mj_core::relay::ProjectMemoryTransferAction::CommitUpload { .. }
                     }
+                    | RelayRequest::ProjectMemoryTransfer {
+                        action: mj_core::relay::ProjectMemoryTransferAction::BeginTurnSnapshot { .. }
+                    }
             );
             #[cfg(test)]
             endpoint.io_requested.notify_one();
             #[cfg(test)]
             let io_block = endpoint.io_block.clone();
-            let io_span = tracing::info_span!("project_memory_io", project_key = %memory.project_key, operation = request.method_name());
+            let io_span = tracing::info_span!("project_memory_io", %session_id, project_key = %memory.project_key, operation = request.method_name());
             let result = run_serialized_project_memory_io(
                 &endpoint.io,
                 &cancel,
@@ -493,6 +498,7 @@ pub(super) async fn project_memory_response(
                                 action,
                                 &request_id,
                                 protocol_version,
+                                &tools,
                             )
                         }
                         _ => apply_project_memory_request(&memory, &request),
@@ -588,6 +594,7 @@ fn apply_project_memory_transfer_request(
     action: &mj_core::relay::ProjectMemoryTransferAction,
     request_id: &str,
     protocol_version: u32,
+    tools: &mj_core::activity::ToolsInFlight,
 ) -> Result<RelayResponsePayload> {
     use base64::Engine as _;
     use mj_core::relay::{
@@ -596,6 +603,47 @@ fn apply_project_memory_transfer_request(
     };
 
     match action {
+        Action::BeginTurnSnapshot {
+            absorbed,
+            head_version,
+        } => {
+            anyhow::ensure!(
+                matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
+                "this connection already owns a project-memory transfer; abort it first"
+            );
+            if !tools.is_empty() {
+                return Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::Busy,
+                });
+            }
+            let Some((base, id, tree)) = crate::worker_runtime::project_memory::snapshot(
+                memory,
+                absorbed.as_deref(),
+                head_version,
+            )?
+            else {
+                return Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::InSync,
+                });
+            };
+            let bytes = serde_json::to_vec(&mj_core::relay::ProjectMemoryTurnSnapshot {
+                base: mj_core::relay::ProjectMemoryWireTree::encode(base, protocol_version)?,
+                id,
+                tree: mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol_version)?,
+            })?;
+            let total_bytes = u64::try_from(bytes.len())?;
+            let transfer_id = transfer.allocate_id()?;
+            transfer.active = ActiveProjectMemoryTransfer::Download {
+                transfer_id,
+                download: mj_core::relay::FrozenSnapshotDownload::new(bytes),
+            };
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::SnapshotStarted {
+                    transfer_id,
+                    total_bytes,
+                },
+            })
+        }
         Action::BeginSnapshot => {
             anyhow::ensure!(
                 matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
@@ -751,6 +799,15 @@ fn apply_project_memory_transfer_request(
             let tree: mj_core::relay::ProjectMemoryWireTree =
                 serde_json::from_slice(&bytes).context("parse uploaded project-memory tree")?;
             match kind {
+                UploadKind::Deliver { id, version } => {
+                    let tree = tree.decode()?;
+                    let outcome = crate::worker_runtime::project_memory::deliver(
+                        memory, &id, tree, version, tools,
+                    )?;
+                    Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                        result: ResultKind::Delivered { outcome },
+                    })
+                }
                 UploadKind::InstallSnapshot => {
                     apply_project_memory_request(
                         memory,
@@ -1064,6 +1121,80 @@ pub(crate) async fn write_logged_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: 1e7e59c0d: snapshot recovery could overwrite a foreground tool's edit.
+    #[test]
+    fn busy_turn_snapshot_does_not_finish_pending_incoming() {
+        use mj_core::relay::{
+            ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as Reply,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let memory = crate::worker_runtime::ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        std::fs::create_dir_all(&memory.root).unwrap();
+        std::fs::create_dir_all(&memory.baseline_root).unwrap();
+        std::fs::write(memory.root.join("note.md"), "original").unwrap();
+        let old = serde_json::json!({"files": {"/note.md": "original"}});
+        let incoming = serde_json::json!({"files": {"/note.md": "incoming"}});
+        let record = serde_json::json!({"base": old, "base_version": null, "handout": {"id": "id", "tree": old}, "incoming": incoming});
+        let record_path = memory.baseline_root.join(".hel-memory-record.json");
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&record_path, &bytes).unwrap();
+        let tools = mj_core::activity::ToolsInFlight::default();
+        let call: agent_client_protocol::v1::schema::SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+        tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+        let mut transfer = ConnectionProjectMemoryTransfer::default();
+        let action = Action::BeginTurnSnapshot {
+            absorbed: None,
+            head_version: mj_core::project_memory::ProjectMemorySnapshot::default().version(),
+        };
+        let result = apply_project_memory_transfer_request(
+            &memory,
+            &mut transfer,
+            &action,
+            "request",
+            mj_core::relay::RELAY_PROTOCOL_VERSION,
+            &tools,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            RelayResponsePayload::ProjectMemoryTransfer {
+                result: Reply::Busy
+            }
+        ));
+        assert_eq!(std::fs::read(&record_path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("note.md")).unwrap(),
+            "original"
+        );
+        tools.retire_owner(&mj_core::activity::ForegroundOwner::Unowned);
+        let result = apply_project_memory_transfer_request(
+            &memory,
+            &mut transfer,
+            &action,
+            "request",
+            mj_core::relay::RELAY_PROTOCOL_VERSION,
+            &tools,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            RelayResponsePayload::ProjectMemoryTransfer {
+                result: Reply::SnapshotStarted { .. }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("note.md")).unwrap(),
+            "incoming"
+        );
+    }
 
     fn codex_login(refreshed: &str) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({

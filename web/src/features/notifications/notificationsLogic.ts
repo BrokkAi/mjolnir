@@ -119,7 +119,7 @@ export function badgeTone(badge: InboxBadge): string {
 }
 
 /**
- * Every session needing attention, highest priority first, then newest.
+ * Every session needing attention, newest first, with priority breaking ties.
  * Ignored and already-dismissed notifications do not appear.
  */
 export function inboxItems(
@@ -141,13 +141,19 @@ export function inboxItems(
     items.push({
       row,
       badge: inboxBadge(row),
-      timestamp: card?.since_ms ?? sessionTimestamp(row),
+      timestamp: card
+        ? Math.max(
+            card.since_ms ?? 0,
+            card.form?.raised_at_ms ?? 0,
+            ...card.entries.map(entry => entry.completed_at_ms ?? 0),
+          ) || sessionTimestamp(row)
+        : sessionTimestamp(row),
     });
   }
   return items.sort(
     (left, right) =>
-      BADGE_RANK[left.badge] - BADGE_RANK[right.badge] ||
       right.timestamp - left.timestamp ||
+      BADGE_RANK[left.badge] - BADGE_RANK[right.badge] ||
       String(left.row.title || '').localeCompare(String(right.row.title || '')) ||
       left.row.id.localeCompare(right.row.id),
   );

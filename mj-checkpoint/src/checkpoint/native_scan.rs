@@ -518,6 +518,11 @@ pub(super) fn collect_native_tree(
                     && name.to_str() == Some(&format!("session_{session_id}")))
         });
     if metadata.is_dir() {
+        if harness == HarnessKind::Antigravity
+            && path.strip_prefix(home).ok() == Some(antigravity_scratch(session_id).as_path())
+        {
+            return Ok(());
+        }
         for entry in fs::read_dir(path)? {
             collect_native_tree(
                 harness,
@@ -630,12 +635,22 @@ pub(super) const ANTIGRAVITY_BRAIN: &str = "antigravity-cli/brain";
 /// everything under its `brain` directory (the full text of long tool output,
 /// which the conversation points the model at, and agy's artifacts). Never
 /// the login, the logs, the indexes shared by all conversations, or another
-/// conversation's files. The database's `-wal` and `-shm` files are not
-/// selected: the snapshot taken of the database already holds their pages.
+/// conversation's files. The walk never enters the conversation's
+/// [`antigravity_scratch`] directory. The database's `-wal` and `-shm` files
+/// are not selected: the snapshot taken of the database already holds their
+/// pages.
 pub(super) fn is_antigravity_native_artifact(relative_path: &Path, session_id: &str) -> bool {
     relative_path == Path::new(ANTIGRAVITY_CONVERSATIONS).join(format!("{session_id}.db"))
         || relative_path == Path::new(ANTIGRAVITY_CONVERSATIONS).join(format!("{session_id}.pb"))
         || relative_path.starts_with(Path::new(ANTIGRAVITY_BRAIN).join(session_id))
+}
+
+/// The agent's own working directory inside a conversation's `brain`, kept
+/// out of checkpoints like `/tmp`, so `collect_native_tree` does not descend
+/// into it. Agents fill it with throwaway copies: one held 101 copies of a
+/// project tree, 260,000 files in 11 GB.
+fn antigravity_scratch(session_id: &str) -> PathBuf {
+    Path::new(ANTIGRAVITY_BRAIN).join(session_id).join("scratch")
 }
 
 fn is_antigravity_legacy_conversation(path: &Path) -> bool {
@@ -885,6 +900,11 @@ mod tests {
 
         let conversation = Path::new(ANTIGRAVITY_CONVERSATIONS).join(format!("{id}.pb"));
         fs::write(home.path().join(&conversation), b"legacy conversation").unwrap();
+        let scratch = home.path().join(antigravity_scratch(id)).join("copy");
+        fs::create_dir_all(&scratch).unwrap();
+        // Hard-won: suspend failed with "archive manifest is too large" when
+        // an agent's scratch held 260,000 files, each captured as a payload.
+        fs::write(scratch.join("Cargo.lock"), b"throwaway copy").unwrap();
         let artifacts =
             collect_native_artifacts(HarnessKind::Antigravity, home.path(), id, false).unwrap();
         assert_eq!(

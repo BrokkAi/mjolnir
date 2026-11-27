@@ -4936,6 +4936,203 @@ for line in sys.stdin:
     }
 }
 
+// Hard-won: 0d930fcd3: a pull-only delivery had no canonical handout acknowledgment for fencing.
+#[tokio::test]
+async fn pull_only_turn_sync_absorbs_handout_before_delivery() {
+    use mj_core::project_memory::{
+        ProjectMemorySnapshot, SwapOutcome, commit_canonical, read_canonical_state,
+    };
+    use mj_core::relay::{
+        ProjectMemoryDeliveryOutcome, ProjectMemoryTransferAction as Action,
+        ProjectMemoryTransferResult as Reply, ProjectMemoryTurnSnapshot, ProjectMemoryWireTree,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("canonical/memory");
+    let base = ProjectMemorySnapshot {
+        files: [("/note.md".into(), "old".into())].into(),
+    };
+    let canonical = ProjectMemorySnapshot {
+        files: [("/note.md".into(), "foreign".into())].into(),
+    };
+    let state = read_canonical_state(&root).unwrap();
+    assert_eq!(
+        commit_canonical(&root, &state, "other", &canonical, None).unwrap(),
+        SwapOutcome::Swapped
+    );
+    let wire = ProjectMemoryTurnSnapshot {
+        base: ProjectMemoryWireTree::encode(base.clone(), RELAY_PROTOCOL_VERSION).unwrap(),
+        id: "pull-handout".into(),
+        tree: ProjectMemoryWireTree::encode(base, RELAY_PROTOCOL_VERSION).unwrap(),
+    };
+    let bytes = serde_json::to_vec(&wire).unwrap();
+    let (controller, worker) = tokio::io::duplex(16384);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let peer_root = root.clone();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        for expected in 0..5 {
+            let line = lines.next_line().await.unwrap().unwrap();
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let RelayRequest::ProjectMemoryTransfer { action } = request.request else {
+                panic!("unexpected request")
+            };
+            let reply = match (expected, action) {
+                (0, Action::BeginTurnSnapshot { .. }) => Reply::SnapshotStarted {
+                    transfer_id: 1,
+                    total_bytes: bytes.len() as u64,
+                },
+                (
+                    1,
+                    Action::ReadSnapshotPage {
+                        transfer_id: 1,
+                        offset: 0,
+                    },
+                ) => Reply::SnapshotPage {
+                    transfer_id: 1,
+                    offset: 0,
+                    next_offset: bytes.len() as u64,
+                    complete: true,
+                    chunk: BASE64.encode(&bytes),
+                },
+                (2, Action::BeginUpload { .. }) => {
+                    let state = read_canonical_state(&peer_root).unwrap();
+                    assert_eq!(
+                        state.absorbed.get(SESSION_ID).map(String::as_str),
+                        Some("pull-handout")
+                    );
+                    Reply::UploadStarted { transfer_id: 2 }
+                }
+                (
+                    3,
+                    Action::AppendUpload {
+                        transfer_id: 2,
+                        offset,
+                        chunk,
+                    },
+                ) => Reply::UploadProgress {
+                    transfer_id: 2,
+                    next_offset: offset + BASE64.decode(chunk).unwrap().len() as u64,
+                },
+                (4, Action::CommitUpload { transfer_id: 2 }) => Reply::Delivered {
+                    outcome: ProjectMemoryDeliveryOutcome::Delivered,
+                },
+                other => panic!("unexpected action: {other:?}"),
+            };
+            let response = RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::ProjectMemoryTransfer { result: reply },
+                },
+            };
+            let mut frame = serde_json::to_vec(&response).unwrap();
+            frame.push(b'\n');
+            writer.write_all(&frame).await.unwrap();
+        }
+    });
+    let target = crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: root,
+        relay: CommandSpec::new("unused", ["unused"]),
+    };
+    crate::session_manager::sync_turn_project_memory(
+        &mut client,
+        &target,
+        SESSION_ID,
+        &mj_core::config::Config::default(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    peer.await.unwrap();
+}
+
+// Hard-won: 0d930fcd3: a Busy reply does not retire the handout and cannot fence a delivery.
+#[tokio::test]
+async fn project_memory_fence_refuses_busy_snapshot() {
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as Reply,
+    };
+    let (controller, worker) = tokio::io::duplex(8192);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let request: RelayRequestEnvelope =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(matches!(
+            request.request,
+            RelayRequest::ProjectMemoryTransfer {
+                action: Action::BeginTurnSnapshot { .. }
+            }
+        ));
+        let response = RelayResponseEnvelope {
+            request_id: request.request_id,
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ProjectMemoryTransfer {
+                    result: Reply::Busy,
+                },
+            },
+        };
+        let mut frame = serde_json::to_vec(&response).unwrap();
+        frame.push(b'\n');
+        writer.write_all(&frame).await.unwrap();
+    });
+    let error = client
+        .fence_project_memory_snapshot(
+            Some("absorbed".into()),
+            mj_core::project_memory::ProjectMemorySnapshot::default().version(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("busy"));
+    peer.await.unwrap();
+}
+
+// Hard-won: 0d930fcd3: a Busy Snapshot did not retire an earlier turn's handout.
+#[tokio::test]
+async fn busy_turn_snapshot_is_not_a_completed_sync() {
+    use mj_core::relay::ProjectMemoryTransferResult as Reply;
+    let temp = tempfile::tempdir().unwrap();
+    let target = crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: temp.path().join("canonical/memory"),
+        relay: CommandSpec::new("unused", ["unused"]),
+    };
+    let (controller, worker) = tokio::io::duplex(8192);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let request: RelayRequestEnvelope =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let response = RelayResponseEnvelope {
+            request_id: request.request_id,
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ProjectMemoryTransfer {
+                    result: Reply::Busy,
+                },
+            },
+        };
+        let mut frame = serde_json::to_vec(&response).unwrap();
+        frame.push(b'\n');
+        writer.write_all(&frame).await.unwrap();
+    });
+    let completed = crate::session_manager::sync_turn_project_memory(
+        &mut client,
+        &target,
+        SESSION_ID,
+        &mj_core::config::Config::default(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(!completed);
+    peer.await.unwrap();
+}
+
 // Hard-won: #1542: a 15 s per-RPC deadline that counted worker queueing failed Suspend on a loaded host
 #[tokio::test(start_paused = true)]
 async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
@@ -5085,6 +5282,57 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
             assert!(peer.await.unwrap_err().is_cancelled());
         }
     }
+}
+
+// Hard-won: 0187f165f: a stalled initial snapshot prevented checkpoint preemption.
+#[tokio::test]
+async fn checkpoint_preempts_turn_snapshot_start_and_closes_transfer() {
+    use mj_core::project_memory::ProjectMemorySnapshot;
+    use mj_core::relay::ProjectMemoryTransferAction as Action;
+
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let slot = Arc::new(mj_core::recovery_gate::ProjectMemorySyncSlot::default());
+    let (guard, cancel) = slot.start_turn().unwrap();
+    let (queued, waiting) = tokio::sync::oneshot::channel();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, _writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            request.request,
+            RelayRequest::ProjectMemoryTransfer {
+                action: Action::BeginTurnSnapshot { .. }
+            }
+        ));
+        queued.send(()).unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(
+            line.is_empty(),
+            "cancelled transfer must close its connection"
+        );
+    });
+    let turn = mj_core::runtime::spawn(async move {
+        let _guard = guard;
+        let result = client
+            .project_memory_turn_snapshot(None, ProjectMemorySnapshot::default().version(), &cancel)
+            .await;
+        (client, result)
+    });
+    waiting.await.unwrap();
+    let checkpoint = tokio::time::timeout(Duration::from_secs(1), slot.checkpoint())
+        .await
+        .expect("checkpoint must preempt the stalled snapshot");
+    let (client, result) = turn.await.unwrap();
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert!(client.abandoned.is_some());
+    assert!(client.input.is_none());
+    drop(client);
+    peer.await.unwrap();
+    drop(checkpoint);
 }
 
 /// A job the actor refuses while its connection is leased makes the actor wake

@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use mj_core::config::Config;
 use mj_core::project_memory::{
     ConflictedFile, ProjectMemorySnapshot, ReplicaReplaceOutcome, SwapOutcome, TreeVersion,
+    is_memory_document,
 };
 use tokio::sync::OnceCell;
 use tokio::time::{Instant, timeout_at};
@@ -148,44 +149,59 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Read, merge, resolve, and compare-and-swap the canonical tree. Filesystem
-/// calls run on Tokio's blocking pool; the model runs after the read and before
-/// the swap, with no canonical-memory lock held.
-pub async fn merge_and_swap_canonical<R: ConflictResolver>(
-    canonical_root: &Path,
-    baseline: &ProjectMemorySnapshot,
-    replica: &ProjectMemorySnapshot,
-    resolver: &R,
-    cancel: CancellationToken,
-) -> Result<CanonicalSyncOutcome> {
-    // Resolver deadlines may cancel model work without cancelling the sync.
-    let resolver_cancel = cancel.child_token();
-    let _cancel_on_drop = CancelOnDrop(resolver_cancel.clone());
-    let deadline = Instant::now() + CONFLICT_RESOLUTION_TIMEOUT;
-    let mut cached_resolutions = Vec::<CachedResolution>::new();
+/// One deadline and cache shared by every compare-and-swap attempt in a sync.
+pub struct ConflictResolutionSession {
+    resolver_cancel: CancelOnDrop,
+    deadline: Instant,
+    cached_resolutions: Vec<CachedResolution>,
+}
 
-    for attempt in 1..=MAX_CANONICAL_SYNC_ATTEMPTS {
-        let canonical = tokio::select! {
-            biased;
-            () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
-            result = read_canonical_blocking(canonical_root.to_path_buf()) => result?,
-        };
-        let mut merged = mj_core::project_memory::merge_trees(baseline, &canonical, replica);
+impl ConflictResolutionSession {
+    pub fn new(cancel: &CancellationToken) -> Self {
+        Self {
+            resolver_cancel: CancelOnDrop(cancel.child_token()),
+            deadline: Instant::now() + CONFLICT_RESOLUTION_TIMEOUT,
+            cached_resolutions: Vec::new(),
+        }
+    }
+
+    /// Resolve a turn merge, using the checkpoint path's deadline and fallback.
+    pub async fn merge_turn_tree<R: ConflictResolver>(
+        &mut self,
+        base: &ProjectMemorySnapshot,
+        canonical: &ProjectMemorySnapshot,
+        replica: &ProjectMemorySnapshot,
+        resolver: &R,
+        cancel: &CancellationToken,
+    ) -> Result<(ProjectMemorySnapshot, Vec<ConflictResolutionRecord>)> {
+        self.resolve_merge(base, canonical, replica, resolver, cancel)
+            .await
+    }
+
+    async fn resolve_merge<R: ConflictResolver>(
+        &mut self,
+        base: &ProjectMemorySnapshot,
+        canonical: &ProjectMemorySnapshot,
+        replica: &ProjectMemorySnapshot,
+        resolver: &R,
+        cancel: &CancellationToken,
+    ) -> Result<(ProjectMemorySnapshot, Vec<ConflictResolutionRecord>)> {
+        let mut merged = mj_core::project_memory::merge_trees(base, canonical, replica);
         let mut resolutions = Vec::with_capacity(merged.conflicts.len());
-
         for conflict in &merged.conflicts {
-            let cached = cached_resolutions
+            let cached = self
+                .cached_resolutions
                 .iter()
                 .find(|cached| cached.conflict == *conflict)
                 .cloned();
             let resolution = if let Some(cached) = cached {
                 cached
             } else {
-                let model_content = if Instant::now() < deadline {
+                let model_content = if Instant::now() < self.deadline {
                     let resolved = tokio::select! {
                         biased;
-                        () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
-                        result = timeout_at(deadline, resolver.resolve(conflict, resolver_cancel.clone())) => result,
+                        () = cancel.cancelled() => bail!("project-memory synchronization was cancelled"),
+                        result = timeout_at(self.deadline, resolver.resolve(conflict, self.resolver_cancel.0.clone())) => result,
                     };
                     match resolved {
                         Ok(Ok(content)) => match validate_model_output(&content) {
@@ -208,7 +224,7 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                             None
                         }
                         Err(_) => {
-                            resolver_cancel.cancel();
+                            self.resolver_cancel.0.cancel();
                             tracing::warn!(
                                 path = %conflict.path,
                                 "project-memory conflict resolution reached its 60 second deadline; using replica text"
@@ -217,7 +233,7 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                         }
                     }
                 } else {
-                    resolver_cancel.cancel();
+                    self.resolver_cancel.0.cancel();
                     None
                 };
                 let resolution = match model_content {
@@ -232,7 +248,7 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                         method: ConflictResolutionMethod::ReplicaWins,
                     },
                 };
-                cached_resolutions.push(resolution.clone());
+                self.cached_resolutions.push(resolution.clone());
                 resolution
             };
 
@@ -242,20 +258,45 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                 method: resolution.method,
             });
         }
+        Ok((merged.tree, resolutions))
+    }
+}
+
+/// Read, merge, resolve, and compare-and-swap the canonical tree. Filesystem
+/// calls run on Tokio's blocking pool; the model runs after the read and before
+/// the swap, with no canonical-memory lock held.
+pub async fn merge_and_swap_canonical<R: ConflictResolver>(
+    canonical_root: &Path,
+    baseline: &ProjectMemorySnapshot,
+    replica: &ProjectMemorySnapshot,
+    resolver: &R,
+    cancel: CancellationToken,
+) -> Result<CanonicalSyncOutcome> {
+    let mut resolutions = ConflictResolutionSession::new(&cancel);
+
+    for attempt in 1..=MAX_CANONICAL_SYNC_ATTEMPTS {
+        let canonical = tokio::select! {
+            biased;
+            () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
+            result = read_canonical_blocking(canonical_root.to_path_buf()) => result?,
+        };
+        let (tree, records) = resolutions
+            .resolve_merge(baseline, &canonical, replica, resolver, &cancel)
+            .await?;
 
         let expected = canonical.version();
         match swap_canonical_blocking(
             canonical_root.to_path_buf(),
             expected,
-            merged.tree.clone(),
+            tree.clone(),
             &cancel,
         )
         .await?
         {
             SwapOutcome::Swapped => {
                 return Ok(CanonicalSyncOutcome::Swapped(CanonicalSync {
-                    tree: merged.tree,
-                    resolutions,
+                    tree,
+                    resolutions: records,
                     attempts: attempt,
                 }));
             }
@@ -269,15 +310,15 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
 }
 
 fn set_file_content(tree: &mut ProjectMemorySnapshot, path: &str, content: &str) {
-    if content.trim().is_empty() {
-        tree.files.remove(path);
-    } else {
+    if is_memory_document(content) {
         tree.files.insert(path.to_owned(), content.to_owned());
+    } else {
+        tree.files.remove(path);
     }
 }
 
 fn validate_model_output(content: &str) -> Result<()> {
-    if content.trim().is_empty() {
+    if !is_memory_document(content) {
         bail!("model returned an empty file");
     }
     if content.lines().any(is_conflict_marker_line) {
@@ -416,80 +457,83 @@ impl CanonicalSync {
         replica: &ProjectMemorySnapshot,
         install: WorkerInstallOutcome,
     ) -> Option<ReplicaChangeNotice> {
-        let Self {
-            mut tree,
-            resolutions,
-            ..
-        } = self;
-        match install {
-            WorkerInstallOutcome::ReplicaChanged => return None,
-            WorkerInstallOutcome::Replaced => {}
-            WorkerInstallOutcome::Additive => {
-                // The legacy ACK reports only success. Relative to the
-                // worker's snapshot, paths omitted by the upload stay put.
-                for (path, content) in &replica.files {
-                    if !tree.files.contains_key(path) {
-                        tree.files.insert(path.clone(), content.clone());
-                    }
-                }
-            }
-        }
-        if &tree == replica {
-            return None;
-        }
-
-        let mut added = Vec::new();
-        let mut updated = Vec::new();
-        let mut removed = Vec::new();
-        for (path, content) in &tree.files {
-            match replica.files.get(path) {
-                None => added.push(path),
-                Some(old) if old != content => updated.push(path),
-                Some(_) => {}
-            }
-        }
-        for path in replica.files.keys() {
-            if !tree.files.contains_key(path) {
-                removed.push(path);
-            }
-        }
-
-        const PATHS_PER_CATEGORY: usize = 10;
-        let mut text =
-            String::from("Project memory changed. Reread MEMORY.md and the affected notes.");
-        for (label, paths) in [("Added", added), ("Updated", updated), ("Removed", removed)] {
-            if paths.is_empty() {
-                continue;
-            }
-            write!(text, " {label} ").unwrap();
-            for (index, path) in paths.iter().take(PATHS_PER_CATEGORY).enumerate() {
-                if index != 0 {
-                    text.push_str(", ");
-                }
-                write!(text, "{}", path.trim_start_matches('/').escape_debug()).unwrap();
-                if let Some(resolution) = resolutions.iter().find(|r| r.conflict.path == **path) {
-                    let installed = tree.files.get(*path);
-                    let label = if installed == Some(&resolution.conflict.canonical) {
-                        "updated from canonical on conflict"
-                    } else if resolution.method == ConflictResolutionMethod::ReplicaWins {
-                        "kept local version on conflict"
-                    } else {
-                        "overlapping edits merged"
-                    };
-                    write!(text, " ({label})").unwrap();
-                }
-            }
-            if paths.len() > PATHS_PER_CATEGORY {
-                write!(text, " and {} more", paths.len() - PATHS_PER_CATEGORY).unwrap();
-            }
-            text.push('.');
-        }
-        Some(ReplicaChangeNotice {
-            before: replica.version(),
-            after: tree.version(),
-            text,
-        })
+        replica_change_notice(self.tree, self.resolutions, replica, install)
     }
+}
+
+pub(crate) fn replica_change_notice(
+    mut tree: ProjectMemorySnapshot,
+    resolutions: Vec<ConflictResolutionRecord>,
+    replica: &ProjectMemorySnapshot,
+    install: WorkerInstallOutcome,
+) -> Option<ReplicaChangeNotice> {
+    match install {
+        WorkerInstallOutcome::ReplicaChanged => return None,
+        WorkerInstallOutcome::Replaced => {}
+        WorkerInstallOutcome::Additive => {
+            // The legacy ACK reports only success. Relative to the
+            // worker's snapshot, paths omitted by the upload stay put.
+            for (path, content) in &replica.files {
+                if !tree.files.contains_key(path) {
+                    tree.files.insert(path.clone(), content.clone());
+                }
+            }
+        }
+    }
+    if &tree == replica {
+        return None;
+    }
+
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+    for (path, content) in &tree.files {
+        match replica.files.get(path) {
+            None => added.push(path),
+            Some(old) if old != content => updated.push(path),
+            Some(_) => {}
+        }
+    }
+    for path in replica.files.keys() {
+        if !tree.files.contains_key(path) {
+            removed.push(path);
+        }
+    }
+
+    const PATHS_PER_CATEGORY: usize = 10;
+    let mut text = String::from("Project memory changed. Reread MEMORY.md and the affected notes.");
+    for (label, paths) in [("Added", added), ("Updated", updated), ("Removed", removed)] {
+        if paths.is_empty() {
+            continue;
+        }
+        write!(text, " {label} ").unwrap();
+        for (index, path) in paths.iter().take(PATHS_PER_CATEGORY).enumerate() {
+            if index != 0 {
+                text.push_str(", ");
+            }
+            write!(text, "{}", path.trim_start_matches('/').escape_debug()).unwrap();
+            if let Some(resolution) = resolutions.iter().find(|r| r.conflict.path == **path) {
+                let installed = tree.files.get(*path);
+                let label = if installed == Some(&resolution.conflict.canonical) {
+                    "updated from canonical on conflict"
+                } else if resolution.method == ConflictResolutionMethod::ReplicaWins {
+                    "kept local version on conflict"
+                } else {
+                    "overlapping edits merged"
+                };
+                write!(text, " ({label})").unwrap();
+            }
+        }
+        if paths.len() > PATHS_PER_CATEGORY {
+            write!(text, " and {} more", paths.len() - PATHS_PER_CATEGORY).unwrap();
+        }
+        text.push('.');
+    }
+    Some(ReplicaChangeNotice {
+        before: replica.version(),
+        after: tree.version(),
+        text,
+    })
 }
 
 #[cfg(test)]
@@ -564,7 +608,7 @@ mod tests {
     async fn cancellation_awaits_a_started_canonical_swap_and_reports_its_result() {
         for fails in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let path = root.path().to_path_buf();
+            let path = root.path().join("memory");
             let tree = snapshot(&[("/MEMORY.md", "committed before checkpoint returns\n")]);
             let swapped = tree.clone();
             let cancel = CancellationToken::new();
@@ -606,7 +650,7 @@ mod tests {
             } else {
                 assert_eq!(result.unwrap(), SwapOutcome::Swapped);
                 assert_eq!(
-                    mj_core::project_memory::read_canonical(root.path()).unwrap(),
+                    mj_core::project_memory::read_canonical(&root.path().join("memory")).unwrap(),
                     tree
                 );
             }
@@ -619,15 +663,30 @@ mod tests {
         }
     }
 
+    // Hard-won: P1 blank-document review: replica-wins fallback reinserted blank
+    // content after merge filtering.
     #[tokio::test]
-    async fn unavailable_utility_model_stores_replica_wins_text() {
+    async fn unavailable_utility_model_applies_replica_wins_and_drops_blank_files() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = StaticResolver::unavailable();
 
+        let turn_tree = ConflictResolutionSession::new(&CancellationToken::new())
+            .merge_turn_tree(
+                &base,
+                &canonical,
+                &replica,
+                &resolver,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(turn_tree.files["/MEMORY.md"], "replica\n");
+
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -644,17 +703,51 @@ mod tests {
             result.resolutions[0].method,
             ConflictResolutionMethod::ReplicaWins
         );
+
+        let empty_dir = tempfile::tempdir().unwrap();
+        let empty_root = empty_dir.path().join("memory");
+        install_initial(&empty_root, &canonical);
+        let empty_replica = snapshot(&[("/MEMORY.md", "")]);
+        let turn_tree = ConflictResolutionSession::new(&CancellationToken::new())
+            .merge_turn_tree(
+                &base,
+                &canonical,
+                &empty_replica,
+                &resolver,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .0;
+        assert!(!turn_tree.files.contains_key("/MEMORY.md"));
+        let outcome = merge_and_swap_canonical(
+            &empty_root,
+            &base,
+            &empty_replica,
+            &resolver,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let CanonicalSyncOutcome::Swapped(result) = outcome else {
+            panic!("canonical sync unexpectedly exhausted retries");
+        };
+        assert!(!result.tree.files.contains_key("/MEMORY.md"));
+        assert_eq!(
+            mj_core::project_memory::read_canonical(&empty_root).unwrap(),
+            result.tree
+        );
     }
 
     #[tokio::test]
     async fn invalid_model_output_stores_replica_wins_text() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = StaticResolver::output("<<<<<<< canonical\ninvalid\n>>>>>>> replica\n");
 
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -712,14 +805,14 @@ mod tests {
     async fn canonical_change_retries_and_preserves_both_sessions_changes() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = ConcurrentAdditionResolver {
-            root: root.path().to_path_buf(),
+            root: root.path().join("memory"),
             calls: AtomicUsize::new(0),
         };
 
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -735,6 +828,97 @@ mod tests {
         assert_eq!(resolver.calls.load(Ordering::Relaxed), 1);
         assert_eq!(result.tree.files["/MEMORY.md"], "resolved conflict\n");
         assert_eq!(result.tree.files["/other.md"], "concurrent change\n");
+    }
+
+    // Hard-won: 7fbe96f3c: a turn-sync version retry repeated the same model request.
+    #[tokio::test]
+    async fn turn_sync_version_retry_reuses_unchanged_conflict_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("memory");
+        let (base, canonical, replica) = conflicting_inputs();
+        install_initial(&path, &canonical);
+        let resolver = ConcurrentAdditionResolver {
+            root: path.clone(),
+            calls: AtomicUsize::new(0),
+        };
+        let cancel = CancellationToken::new();
+        let mut resolutions = ConflictResolutionSession::new(&cancel);
+        let first = mj_core::project_memory::read_canonical_state(&path).unwrap();
+        let merged = resolutions
+            .merge_turn_tree(&base, &first.tree, &replica, &resolver, &cancel)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            mj_core::project_memory::commit_canonical(
+                &path,
+                &first,
+                "session",
+                &merged,
+                Some("handout")
+            )
+            .unwrap(),
+            SwapOutcome::Changed
+        );
+        let second = mj_core::project_memory::read_canonical_state(&path).unwrap();
+        let merged = resolutions
+            .merge_turn_tree(&base, &second.tree, &replica, &resolver, &cancel)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            mj_core::project_memory::commit_canonical(
+                &path,
+                &second,
+                "session",
+                &merged,
+                Some("handout")
+            )
+            .unwrap(),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(resolver.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(merged.files["/MEMORY.md"], "resolved conflict\n");
+        assert_eq!(merged.files["/other.md"], "concurrent change\n");
+    }
+
+    // Hard-won: 7fbe96f3c: version retries restarted the conflict-resolution deadline.
+    #[tokio::test(start_paused = true)]
+    async fn turn_sync_version_retries_share_one_conflict_deadline() {
+        struct SlowResolver(AtomicUsize);
+        impl ConflictResolver for SlowResolver {
+            fn resolve<'a>(
+                &'a self,
+                _conflict: &'a ConflictedFile,
+                _cancel: CancellationToken,
+            ) -> ConflictResolutionFuture<'a> {
+                Box::pin(async move {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_secs(40)).await;
+                    Ok("model\n".into())
+                })
+            }
+        }
+        let (base, canonical, replica) = conflicting_inputs();
+        let resolver = SlowResolver(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+        let start = Instant::now();
+        let mut resolutions = ConflictResolutionSession::new(&cancel);
+        let first = resolutions
+            .merge_turn_tree(&base, &canonical, &replica, &resolver, &cancel)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(first.files["/MEMORY.md"], "model\n");
+        let changed = snapshot(&[("/MEMORY.md", "new canonical\n")]);
+        let second = resolutions
+            .merge_turn_tree(&base, &changed, &replica, &resolver, &cancel)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(second.files["/MEMORY.md"], "replica\n");
+        assert_eq!(resolver.0.load(Ordering::Relaxed), 2);
+        assert_eq!(Instant::now() - start, CONFLICT_RESOLUTION_TIMEOUT);
     }
 
     struct AlwaysChangingResolver {
@@ -770,14 +954,14 @@ mod tests {
     async fn exhausted_compare_and_swap_attempts_return_ok_outcome() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = AlwaysChangingResolver {
-            root: root.path().to_path_buf(),
+            root: root.path().join("memory"),
             calls: AtomicUsize::new(0),
         };
 
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -882,7 +1066,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let baseline = snapshot(&[("/MEMORY.md", "A\n")]);
         let replica = snapshot(&[("/MEMORY.md", "A\nX\n")]);
-        install_initial(root.path(), &baseline);
+        install_initial(&root.path().join("memory"), &baseline);
         let mut worker = FakeWorker {
             supports_replace: true,
             baseline: baseline.clone(),
@@ -892,7 +1076,7 @@ mod tests {
         let resolver = StaticResolver::unavailable();
 
         let first = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &worker.baseline,
             &worker.replica,
             &resolver,
@@ -914,13 +1098,17 @@ mod tests {
 
         // Another session deletes X from canonical after the first sync.
         assert_eq!(
-            mj_core::project_memory::swap_canonical(root.path(), &first.tree.version(), &baseline)
-                .unwrap(),
+            mj_core::project_memory::swap_canonical(
+                &root.path().join("memory"),
+                &first.tree.version(),
+                &baseline
+            )
+            .unwrap(),
             SwapOutcome::Swapped
         );
 
         let second = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &worker.baseline,
             &worker.replica,
             &resolver,
@@ -947,7 +1135,7 @@ mod tests {
             Some(WorkerInstallOutcome::Replaced)
         );
         assert_eq!(
-            mj_core::project_memory::read_canonical(root.path()).unwrap(),
+            mj_core::project_memory::read_canonical(&root.path().join("memory")).unwrap(),
             baseline
         );
     }

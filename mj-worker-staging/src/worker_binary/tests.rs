@@ -6384,12 +6384,16 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
         std::fs::write(canonical.join("MEMORY.md"), "- a remembered fact\n").unwrap();
         let stage = tempfile::tempdir().unwrap();
         stage_profile(&profile, stage.path()).unwrap();
-        stage_memory_replica(&memory, &target_home, stage.path()).unwrap();
+        let seed_stage = tempfile::tempdir().unwrap();
+        let seed = seed_stage.path().join("seed");
+        stage_memory_seed(&memory, &seed).unwrap();
         std::fs::create_dir_all(&worker_root).unwrap();
         for entry in std::fs::read_dir(stage.path()).unwrap() {
             let entry = entry.unwrap();
             copy_profile_entry(&entry.path(), &target_home.join(entry.file_name())).unwrap();
         }
+        // Seeding happens in the worker, after profile installation.
+        copy_profile_entry(&seed, &memory.root).unwrap();
         assert!(memory.root.join("MEMORY.md").is_file(), "{kind:?}");
 
         targets::close_plan(&locator, &session_id)
@@ -7070,13 +7074,9 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
                 "newer index with a note absent from the staged copy",
             )
             .unwrap();
-            let index = staged_memory_index(
-                launch.project_memory.as_ref().unwrap(),
-                Path::new(&launch.harness_home),
-                stage.path(),
-            )
-            .unwrap()
-            .unwrap();
+            let index = staged_memory_index(&stage.path().join("memory"))
+                .unwrap()
+                .unwrap();
             assert_eq!(index, original);
             std::fs::write(&memory, original).unwrap();
             append_composed_session_instructions(&launch, stage.path(), Ok(&index)).unwrap();

@@ -90,3 +90,52 @@ pub(crate) fn scoped_log_capture_sees_every_callsite() {
             .expect("no other global subscriber in worker unit tests");
     });
 }
+
+pub(crate) fn launch_config(profile_home: &str) -> mj_core::worker_launch::WorkerLaunchConfig {
+    use mj_core::config::{ExecutionPolicy, HarnessKind};
+    use mj_core::worker_launch::WorkerLaunchConfig;
+    use std::collections::BTreeMap;
+    const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+    WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
+        parked_move: None,
+        cpu_accounting: Default::default(),
+        no_github_credentials: false,
+        oracle: false,
+        initial_commands: Vec::new(),
+        reviewer_launch: None,
+        subagents: mj_core::subagent::SubagentPolicy::Native,
+        handback_tool: false,
+        subagent_kind: None,
+        orchestrator: false,
+        orchestrators_enabled: false,
+        agent_mailboxes_enabled: true,
+        subtle_subagents: true,
+        initial_model: None,
+        review_trigger: Default::default(),
+        review_capture: false,
+        goal_resume_request: Default::default(),
+        target_environment: Default::default(),
+        seed_image_environment: false,
+        run_mode: Default::default(),
+        suspend_capture: None,
+        session_id: SESSION_ID.into(),
+        harness: HarnessKind::Codex,
+        harness_home: profile_home.into(),
+        authentication_marker: None,
+        bridge_command: "/usr/bin/false".into(),
+        bridge_args: Vec::new(),
+        harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
+        environment: BTreeMap::from([("CODEX_HOME".into(), profile_home.into())]),
+        excluded_environment: Vec::new(),
+        cwd: ".local/share/hel/workspaces/session/repo".into(),
+        additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
+        native_session_id: None,
+        project_memory: None,
+        execution_policy: ExecutionPolicy::Unconstrained,
+        claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
+        observe_policy: None,
+    }
+}

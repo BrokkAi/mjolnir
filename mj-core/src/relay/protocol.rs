@@ -93,6 +93,14 @@ pub struct ProjectMemoryWireSnapshot {
     pub replica: ProjectMemoryWireTree,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMemoryTurnSnapshot {
+    pub base: ProjectMemoryWireTree,
+    pub id: String,
+    pub tree: ProjectMemoryWireTree,
+}
+
 impl ProjectMemoryWireSnapshot {
     pub fn encode(
         baseline: ProjectMemorySnapshot,
@@ -124,6 +132,10 @@ impl ProjectMemoryWireSnapshot {
 )]
 pub enum ProjectMemoryTransferAction {
     BeginSnapshot,
+    BeginTurnSnapshot {
+        absorbed: Option<String>,
+        head_version: TreeVersion,
+    },
     ReadSnapshotPage {
         transfer_id: u64,
         offset: u64,
@@ -156,6 +168,16 @@ pub enum ProjectMemoryTransferAction {
 pub enum ProjectMemoryUploadKind {
     InstallSnapshot,
     ReplaceTree { expected_replica: TreeVersion },
+    Deliver { id: String, version: TreeVersion },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectMemoryDeliveryOutcome {
+    Delivered,
+    Dirty,
+    Stale,
+    Busy,
 }
 
 /// Results returned by protocol-59 project-memory transfer actions.
@@ -167,6 +189,8 @@ pub enum ProjectMemoryUploadKind {
     deny_unknown_fields
 )]
 pub enum ProjectMemoryTransferResult {
+    InSync,
+    Busy,
     SnapshotStarted {
         transfer_id: u64,
         total_bytes: u64,
@@ -188,6 +212,9 @@ pub enum ProjectMemoryTransferResult {
     Installed,
     Replaced {
         outcome: ReplicaReplaceOutcome,
+    },
+    Delivered {
+        outcome: ProjectMemoryDeliveryOutcome,
     },
     Aborted {
         transfer_id: u64,
@@ -820,6 +847,14 @@ impl RelayRequest {
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
+            Self::ProjectMemoryTransfer {
+                action:
+                    ProjectMemoryTransferAction::BeginTurnSnapshot { .. }
+                    | ProjectMemoryTransferAction::BeginUpload {
+                        kind: ProjectMemoryUploadKind::Deliver { .. },
+                        ..
+                    },
+            } => super::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL,
             Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
             Self::BeginLiveBaseline
             | Self::ReadLiveBaselinePage { .. }

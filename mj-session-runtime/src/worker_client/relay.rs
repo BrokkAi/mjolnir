@@ -3,6 +3,25 @@ use mj_core::relay::{
     ProjectMemoryTransferAction as MemoryAction, ProjectMemoryTransferResult as MemoryResult,
 };
 
+/// The worker's turn Snapshot outcome, including an in-flight tool call.
+#[derive(Debug)]
+pub enum ProjectMemoryTurnSnapshotResult {
+    Busy,
+    InSync,
+    Snapshot {
+        base: mj_core::project_memory::ProjectMemorySnapshot,
+        id: String,
+        tree: mj_core::project_memory::ProjectMemorySnapshot,
+    },
+}
+
+async fn memory_cancelled(cancel: Option<&tokio_util::sync::CancellationToken>) {
+    match cancel {
+        Some(cancel) => cancel.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Owns a staged transfer until completion or an acknowledged abort. Dropping
 /// its future closes the input and invalidates the existing connection owner.
 struct ProjectMemoryTransfer<'a> {
@@ -647,12 +666,78 @@ impl RelayClient {
         mj_core::project_memory::ProjectMemorySnapshot,
         mj_core::project_memory::ProjectMemorySnapshot,
     )> {
+        let started = self
+            .begin_memory_transfer(MemoryAction::BeginSnapshot)
+            .await?;
+        let bytes = self.download_memory_pages(started, None).await?;
+        mj_core::runtime::spawn_blocking(move || {
+            mj_core::relay::ProjectMemoryWireSnapshot::decode(&bytes)
+        })
+        .await
+        .context("decode project-memory snapshot task failed")?
+    }
+
+    pub async fn project_memory_turn_snapshot(
+        &mut self,
+        absorbed: Option<String>,
+        head_version: mj_core::project_memory::TreeVersion,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<ProjectMemoryTurnSnapshotResult> {
+        let started = tokio::select! {
+            () = cancel.cancelled() => bail!("project-memory synchronization cancelled"),
+            result = self.begin_memory_transfer(MemoryAction::BeginTurnSnapshot {
+                absorbed,
+                head_version,
+            }) => result?,
+        };
+        match started {
+            MemoryResult::Busy => return Ok(ProjectMemoryTurnSnapshotResult::Busy),
+            MemoryResult::InSync => return Ok(ProjectMemoryTurnSnapshotResult::InSync),
+            _ => {}
+        }
+        let bytes = self.download_memory_pages(started, Some(cancel)).await?;
+        tokio::select! {
+            () = cancel.cancelled() => bail!("project-memory synchronization cancelled"),
+            result = mj_core::runtime::spawn_blocking(move || {
+                let snapshot: mj_core::relay::ProjectMemoryTurnSnapshot =
+                    serde_json::from_slice(&bytes)?;
+                Ok(ProjectMemoryTurnSnapshotResult::Snapshot {
+                    base: snapshot.base.decode()?,
+                    id: snapshot.id,
+                    tree: snapshot.tree.decode()?,
+                })
+            }) => result.context("decode project-memory turn snapshot task failed")?,
+        }
+    }
+
+    /// A successful Snapshot fences an earlier uncertain delivery under the
+    /// worker's memory I/O semaphore. The new handout needs no page download.
+    pub async fn fence_project_memory_snapshot(
+        &mut self,
+        absorbed: Option<String>,
+        head_version: mj_core::project_memory::TreeVersion,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let started = tokio::select! {
+            () = cancel.cancelled() => bail!("project-memory synchronization cancelled"),
+            result = self.begin_memory_transfer(MemoryAction::BeginTurnSnapshot { absorbed, head_version }) => result?,
+        };
+        match started {
+            MemoryResult::SnapshotStarted { .. } | MemoryResult::InSync => Ok(()),
+            MemoryResult::Busy => bail!("worker was busy during project-memory fence"),
+            _ => bail!("relay returned an unexpected project-memory fence response"),
+        }
+    }
+
+    async fn download_memory_pages(
+        &mut self,
+        started: MemoryResult,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<Vec<u8>> {
         let MemoryResult::SnapshotStarted {
             transfer_id,
             total_bytes,
-        } = self
-            .begin_memory_transfer(MemoryAction::BeginSnapshot)
-            .await?
+        } = started
         else {
             self.abandoned =
                 Some("invalid project-memory snapshot start; reconnect the relay".into());
@@ -676,18 +761,21 @@ impl RelayClient {
                     next_offset,
                     complete,
                     chunk,
-                } = transfer
-                    .call(MemoryAction::ReadSnapshotPage {
+                } = tokio::select! (
+                    () = memory_cancelled(cancel) => bail!("project-memory synchronization cancelled"),
+                    result = transfer.call(MemoryAction::ReadSnapshotPage {
                         transfer_id,
                         offset,
-                    })
-                    .await?
+                    }) => result?,
+                )
                 else {
                     bail!("relay returned an unexpected project-memory page response");
                 };
-                let chunk = mj_core::runtime::spawn_blocking(move || BASE64.decode(chunk))
-                    .await
-                    .context("decode project-memory page task failed")??;
+                let chunk = tokio::select! {
+                    () = memory_cancelled(cancel) => bail!("project-memory synchronization cancelled"),
+                    result = mj_core::runtime::spawn_blocking(move || BASE64.decode(chunk)) =>
+                        result.context("decode project-memory page task failed")??,
+                };
                 anyhow::ensure!(
                     page_id == transfer_id && page_offset == offset,
                     "project-memory page identity or offset changed"
@@ -723,40 +811,44 @@ impl RelayClient {
                 );
                 bytes
             }
-            Err(error) => return Err(transfer.abort(error).await),
+            Err(error) if cancel.is_some_and(|cancel| cancel.is_cancelled()) => return Err(error),
+            Err(error) => {
+                return tokio::select! {
+                    () = memory_cancelled(cancel) => Err(anyhow!("project-memory synchronization cancelled")),
+                    result = transfer.abort(error) => Err(result),
+                };
+            }
         };
-        mj_core::runtime::spawn_blocking(move || {
-            mj_core::relay::ProjectMemoryWireSnapshot::decode(&bytes)
-        })
-        .await
-        .context("decode project-memory snapshot task failed")?
+        Ok(bytes)
     }
 
     async fn upload_project_memory(
         &mut self,
         kind: mj_core::relay::ProjectMemoryUploadKind,
         tree: mj_core::project_memory::ProjectMemorySnapshot,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<MemoryResult> {
         let protocol = self.protocol_version;
-        let bytes = mj_core::runtime::spawn_blocking(move || -> Result<Vec<u8>> {
+        let bytes = tokio::select! {
+            () = memory_cancelled(cancel) => bail!("project-memory synchronization cancelled"),
+            result = mj_core::runtime::spawn_blocking(move || -> Result<Vec<u8>> {
             Ok(serde_json::to_vec(
                 &mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)?,
             )?)
-        })
-        .await
-        .context("encode project-memory upload task failed")??;
+            }) => result.context("encode project-memory upload task failed")??,
+        };
         // The counter's type bounds the actual ID width for every page.
         let chunk_bytes = mj_core::relay::project_memory_transfer_request_chunk_bytes(
             protocol,
             &self.request_id_for(u64::MAX),
         )?;
-        let MemoryResult::UploadStarted { transfer_id } = self
-            .begin_memory_transfer(MemoryAction::BeginUpload {
+        let MemoryResult::UploadStarted { transfer_id } = tokio::select! (
+            () = memory_cancelled(cancel) => bail!("project-memory synchronization cancelled"),
+            result = self.begin_memory_transfer(MemoryAction::BeginUpload {
                 kind,
                 total_bytes: bytes.len() as u64,
-            })
-            .await?
-        else {
+            }) => result?,
+        ) else {
             self.abandoned =
                 Some("invalid project-memory upload start; reconnect the relay".into());
             self.input.take();
@@ -778,13 +870,14 @@ impl RelayClient {
                 let MemoryResult::UploadProgress {
                     transfer_id: upload_id,
                     next_offset,
-                } = transfer
-                    .call(MemoryAction::AppendUpload {
+                } = tokio::select! (
+                    () = memory_cancelled(cancel) => bail!("project-memory synchronization cancelled"),
+                    result = transfer.call(MemoryAction::AppendUpload {
                         transfer_id,
                         offset,
                         chunk,
-                    })
-                    .await?
+                    }) => result?,
+                )
                 else {
                     bail!("relay returned an unexpected project-memory upload progress response");
                 };
@@ -795,11 +888,16 @@ impl RelayClient {
                 offset = next_offset;
                 pages += 1;
             }
-            match transfer
+            if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+                bail!("project-memory synchronization cancelled");
+            }
+            let outcome = transfer
                 .call(MemoryAction::CommitUpload { transfer_id })
-                .await?
-            {
-                outcome @ (MemoryResult::Installed | MemoryResult::Replaced { .. }) => Ok(outcome),
+                .await?;
+            match outcome {
+                outcome @ (MemoryResult::Installed
+                | MemoryResult::Replaced { .. }
+                | MemoryResult::Delivered { .. }) => Ok(outcome),
                 _ => bail!("relay returned an unexpected project-memory upload commit response"),
             }
         }
@@ -817,7 +915,28 @@ impl RelayClient {
                 );
                 Ok(outcome)
             }
+            Err(error) if cancel.is_some_and(|cancel| cancel.is_cancelled()) => Err(error),
             Err(error) => Err(transfer.abort(error).await),
+        }
+    }
+
+    pub async fn deliver_project_memory(
+        &mut self,
+        id: String,
+        tree: mj_core::project_memory::ProjectMemorySnapshot,
+        version: mj_core::project_memory::TreeVersion,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<mj_core::relay::ProjectMemoryDeliveryOutcome> {
+        match self
+            .upload_project_memory(
+                mj_core::relay::ProjectMemoryUploadKind::Deliver { id, version },
+                tree,
+                Some(cancel),
+            )
+            .await?
+        {
+            MemoryResult::Delivered { outcome } => Ok(outcome),
+            _ => bail!("relay returned an unexpected project-memory delivery response"),
         }
     }
 
@@ -830,6 +949,7 @@ impl RelayClient {
                 .upload_project_memory(
                     mj_core::relay::ProjectMemoryUploadKind::InstallSnapshot,
                     snapshot,
+                    None,
                 )
                 .await?
             {
@@ -868,6 +988,7 @@ impl RelayClient {
                 .upload_project_memory(
                     mj_core::relay::ProjectMemoryUploadKind::ReplaceTree { expected_replica },
                     tree,
+                    None,
                 )
                 .await?
             {

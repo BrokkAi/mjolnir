@@ -410,6 +410,11 @@ pub struct ProjectMemoryLaunchConfig {
     pub mcp_delivery: ProjectMemoryMcpDelivery,
 }
 
+/// The session's seed is a sibling of its baseline and never part of a profile overlay.
+pub fn project_memory_seed_root(baseline_root: &Path) -> PathBuf {
+    baseline_root.with_file_name(".hel-memory-seed")
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectMemoryMcpDelivery {

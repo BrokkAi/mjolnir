@@ -30,9 +30,26 @@ pub struct RelaySessionTarget {
     pub project_memory: Option<ProjectMemorySyncTarget>,
 }
 
+impl RelaySessionTarget {
+    pub fn same_actor_identity(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.spec == other.spec
+            && self.project_memory == other.project_memory
+            && self
+                .worker_recovery
+                .as_ref()
+                .map(|plan| &plan.source_target)
+                == other
+                    .worker_recovery
+                    .as_ref()
+                    .map(|plan| &plan.source_target)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectMemorySyncTarget {
     pub canonical_root: std::path::PathBuf,
+    pub relay: CommandSpec,
 }
 
 /// The working directory a bare-target worker must be able to enter before it

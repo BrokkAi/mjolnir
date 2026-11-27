@@ -29,15 +29,14 @@ export interface WebPushController {
   busy: boolean;
   enabled: boolean;
   subscribed: boolean;
-  dismissed: boolean;
+  bannerDismissed: boolean;
   permission: PermissionState;
   statusText: string;
   error: string | null;
-  showOffer: boolean;
   enable: () => Promise<void>;
   disable: () => Promise<void>;
   test: () => Promise<void>;
-  dismissOffer: () => Promise<void>;
+  dismissBanner: () => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -128,13 +127,23 @@ export function reconcilePendingPush(): Promise<void> {
   return run;
 }
 
+const BANNER_DISMISSED_KEY = 'mj.web.push_banner_dismissed';
+
+function readBannerDismissed(): boolean {
+  try {
+    return localStorage.getItem(BANNER_DISMISSED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
 export function useWebPush(): WebPushController {
   const supported = pushSupported();
   const [loading, setLoading] = useState(supported);
   const [busy, setBusy] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [subscribed, setSubscribed] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(readBannerDismissed);
   const [permission, setPermission] = useState<PermissionState>(() => permissionState());
   const [statusText, setStatusText] = useState(
     supported ? 'Checking notifications…' : 'Notifications need a supported browser and HTTPS. On iOS, add Mjolnir to the Home Screen.',
@@ -171,7 +180,7 @@ export function useWebPush(): WebPushController {
         : null;
       if (!mounted.current) return;
       setEnabled(local.enabled === true);
-      setDismissed(local.dismissed === true);
+      setBannerDismissed(previous => previous || local.dismissed === true || readBannerDismissed());
       setSubscribed(status?.subscribed === true);
       setPermission(permissionState());
       setError(status?.error ?? null);
@@ -254,18 +263,21 @@ export function useWebPush(): WebPushController {
     }
   }, [busy]);
 
-  const dismissOffer = useCallback(async () => {
+  const dismissBanner = useCallback(async () => {
+    setBannerDismissed(true);
+    try {
+      localStorage.setItem(BANNER_DISMISSED_KEY, 'true');
+    } catch {
+      // Storage can be unavailable in private browsing.
+    }
+    if (!pushSupported()) return;
     try {
       const api = await loadMjPush();
       await api.dismiss();
-      if (mounted.current) setDismissed(true);
     } catch (failure) {
-      if (mounted.current) setError(messageOf(failure));
+      console.warn('Could not persist notification dismissal', messageOf(failure));
     }
   }, []);
-
-  const showOffer =
-    supported && !loading && !enabled && !dismissed && permission === 'default';
 
   return {
     supported,
@@ -273,15 +285,14 @@ export function useWebPush(): WebPushController {
     busy,
     enabled,
     subscribed,
-    dismissed,
+    bannerDismissed,
     permission,
     statusText,
     error,
-    showOffer,
     enable,
     disable,
     test,
-    dismissOffer,
+    dismissBanner,
     refresh,
   };
 }

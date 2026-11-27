@@ -109,6 +109,246 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use sha2::Digest;
 
+fn run_session_actor(
+    target: RelaySessionTarget,
+    commands: mpsc::Receiver<ActorCommand>,
+    releases: mpsc::UnboundedReceiver<ReturnedConnection>,
+    retirement: watch::Receiver<bool>,
+    view: watch::Sender<ManagedSessionView>,
+    updates: CoalescedUpdateSender,
+) -> impl std::future::Future<Output = ()> {
+    let recovery = watch::channel(target.worker_recovery.clone()).1;
+    actor::run_session_actor(
+        target, commands, releases, retirement, view, updates, recovery,
+    )
+}
+
+struct TestRelayJob {
+    reply: oneshot::Sender<anyhow::Result<()>>,
+    wake: bool,
+}
+
+impl RelayConnectionJob for TestRelayJob {
+    fn wake_when_usable(&self) -> bool {
+        self.wake
+    }
+
+    fn run<'a>(
+        self: Box<Self>,
+        _client: &'a mut RelayClient,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let _ = self.reply.send(Ok(()));
+        })
+    }
+
+    fn refuse(self: Box<Self>, error: anyhow::Error) {
+        let _ = self.reply.send(Err(error));
+    }
+}
+
+fn test_relay_job(
+    wake: bool,
+) -> (
+    Box<dyn RelayConnectionJob>,
+    oneshot::Receiver<anyhow::Result<()>>,
+) {
+    let (reply, response) = oneshot::channel();
+    (Box::new(TestRelayJob { reply, wake }), response)
+}
+
+fn test_recovery_plan() -> WorkerRecoveryPlan {
+    WorkerRecoveryPlan {
+        source_target: recovery_source_target(),
+        target: None,
+        workspace: None,
+        exit_record: None,
+        liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: CommandPlan {
+            description: "test restart".into(),
+            commands: vec![],
+        }
+        .into(),
+    }
+}
+
+// Hard-won: fc669db12: a command could win selection just before a new plan cleared TargetMissing.
+#[tokio::test]
+async fn pending_plan_is_applied_before_command_rejects_missing_target() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct PublishOnQueueRelease {
+        recovery: watch::Sender<Option<WorkerRecoveryPlan>>,
+        plan: WorkerRecoveryPlan,
+        fired: AtomicBool,
+    }
+    impl futures::task::ArcWake for PublishOnQueueRelease {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.fired.store(true, Ordering::SeqCst);
+            this.recovery.send_replace(Some(this.plan.clone()));
+        }
+    }
+
+    let mut target = target("sh");
+    let plan = test_recovery_plan();
+    target.worker_recovery = Some(plan.clone());
+    let mut corrected = plan;
+    corrected.liveness_probe = CommandSpec::new("printf", ["starting"]).into();
+    let (recovery, recovery_rx) = watch::channel(target.worker_recovery.clone());
+    let (commands, receiver) = mpsc::channel(1);
+    let (_releases_tx, releases_rx) = mpsc::unbounded_channel();
+    let (_retirement_tx, retirement_rx) = watch::channel(false);
+    let (view_tx, _view_rx) = watch::channel(ManagedSessionView {
+        error: Some(ViewError::TargetMissing("old workspace missing".into())),
+        ..ManagedSessionView::default()
+    });
+    let (updates, _updates_rx) = coalesced_update_channel();
+    let mut actor = Box::pin(actor::run_session_actor(
+        target,
+        receiver,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates,
+        recovery_rx,
+    ));
+    assert!(futures::poll!(actor.as_mut()).is_pending());
+
+    let (job, mut result) = test_relay_job(true);
+    commands.try_send(ActorCommand::RelayJob { job }).unwrap();
+    // A full queue parks this reservation. Dequeuing the job wakes its waiter
+    // synchronously, publishing the plan after select picked the command.
+    let wake = Arc::new(PublishOnQueueRelease {
+        recovery,
+        plan: corrected,
+        fired: AtomicBool::new(false),
+    });
+    let waker = futures::task::waker(wake.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut reservation = Box::pin(commands.reserve());
+    assert!(matches!(
+        reservation.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(futures::poll!(actor.as_mut()).is_pending());
+    assert!(
+        wake.fired.load(Ordering::SeqCst),
+        "the plan was not published during dequeue"
+    );
+    let error = result
+        .try_recv()
+        .expect("actor answered the job")
+        .unwrap_err();
+    assert!(
+        RelayJobDeferred::marks(&error),
+        "stale missing-target error: {error:#}"
+    );
+    assert_eq!(error.to_string(), RELAY_JOB_RECONNECTING);
+}
+
+// Hard-won: post-create credential sync: recovery metadata changes must not retire a connected actor.
+#[test]
+fn recovery_plan_changes_keep_only_the_same_actor_identity() {
+    let mut original = target("relay");
+    original.worker_recovery = Some(test_recovery_plan());
+    let mut changed = original.clone();
+    changed.worker_recovery.as_mut().unwrap().liveness_probe =
+        CommandSpec::new("printf", ["alive"]).into();
+    assert_eq!(
+        reconcile_action(Some(&original), Some(&changed)),
+        ReconcileAction::Keep
+    );
+    let mut variants = Vec::new();
+    let mut spec = original.clone();
+    spec.spec = CommandSpec::new("different-relay", ["argument"]);
+    variants.push(spec);
+    let mut memory = original.clone();
+    memory.project_memory = Some(ProjectMemorySyncTarget {
+        canonical_root: PathBuf::from("/different"),
+        relay: CommandSpec::new("memory-relay", ["argument"]),
+    });
+    variants.push(memory);
+    let mut no_recovery = original.clone();
+    no_recovery.worker_recovery = None;
+    variants.push(no_recovery);
+    let mut source = original.clone();
+    source.worker_recovery.as_mut().unwrap().source_target =
+        mj_core::state::TargetLocator::LocalBare {
+            worker_root: PathBuf::from("/different"),
+        };
+    variants.push(source);
+    for variant in variants {
+        assert_eq!(
+            reconcile_action(Some(&original), Some(&variant)),
+            ReconcileAction::Retire
+        );
+        assert_eq!(
+            reconcile_action(Some(&variant), Some(&original)),
+            ReconcileAction::Retire
+        );
+    }
+}
+
+// Hard-won: post-create credential sync: closed actor channels used to turn a deferred job into a hard failure.
+#[tokio::test]
+async fn relay_job_sent_to_closed_actor_is_deferred() {
+    let (commands, receiver) = mpsc::channel(1);
+    drop(receiver);
+    let handle = ManagedSessionHandle {
+        session_id: "session-1".into(),
+        commands,
+        releases: mpsc::unbounded_channel().0,
+        view: watch::channel(ManagedSessionView::default()).1,
+    };
+    let (job, result) = test_relay_job(true);
+    handle.run_on_connection(job).await;
+    let error = result.await.expect("job was answered").unwrap_err();
+    assert!(RelayJobDeferred::marks(&error));
+    assert_eq!(error.to_string(), RELAY_JOB_ACTOR_STOPPED);
+}
+
+// Hard-won: post-create credential sync: aborting an unpolled actor dropped its queued jobs.
+#[tokio::test]
+async fn cancelling_unpolled_local_and_remote_actors_defers_queued_jobs() {
+    let (commands, receiver) = mpsc::channel(1);
+    let (job, result) = test_relay_job(true);
+    commands.send(ActorCommand::RelayJob { job }).await.unwrap();
+    let target = target("sh");
+    let recovery = watch::channel(target.worker_recovery.clone()).1;
+    let local = actor::run_session_actor(
+        target,
+        receiver,
+        mpsc::unbounded_channel().1,
+        watch::channel(false).1,
+        watch::channel(ManagedSessionView::default()).0,
+        coalesced_update_channel().0,
+        recovery,
+    );
+    drop(local);
+    let error = result
+        .await
+        .expect("local queue answered the job")
+        .unwrap_err();
+    assert!(RelayJobDeferred::marks(&error));
+    assert_eq!(error.to_string(), RELAY_JOB_ACTOR_STOPPED);
+
+    let (commands, receiver) = mpsc::channel(1);
+    let (job, result) = test_relay_job(true);
+    commands.send(ActorCommand::RelayJob { job }).await.unwrap();
+    let remote = run_remote_session_actor("session-1".into(), receiver, mpsc::channel(1).0);
+    drop(remote);
+    let error = result
+        .await
+        .expect("remote queue answered the job")
+        .unwrap_err();
+    assert!(RelayJobDeferred::marks(&error));
+    assert_eq!(error.to_string(), RELAY_JOB_ACTOR_STOPPED);
+}
+
 fn ordering_request(session_id: &str, command_id: &str) -> RemoteSessionRequest {
     let (reply, _response) = oneshot::channel();
     RemoteSessionRequest::Submit {
@@ -558,6 +798,105 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
     })
     .await
     .expect("new target did not resume recovery");
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+// Hard-won: 39b578023: a new recovery plan left the same actor parked on a missing workspace.
+#[tokio::test]
+async fn missing_workspace_actor_retries_when_recovery_plan_changes() {
+    const CHILD: &str = "MJ_TEST_MISSING_WORKSPACE_PLAN_CHANGE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "missing_workspace_actor_retries_when_recovery_plan_changes",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.target = Some(Box::new(recovery_source_target()));
+    crate::database::save_session(&record).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing-workspace");
+    let restored = directory.path().join("restored-workspace");
+    let restarted = directory.path().join("worker-restarted");
+    std::fs::create_dir(&restored).unwrap();
+    let mut target = RelaySessionTarget {
+        session_id: LEASED_RELAY_SESSION.into(),
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+        worker_recovery: Some(WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
+            target: None,
+            workspace: Some(WorkerWorkspace {
+                target: mj_core::state::ManagedWorktreeTarget::Local,
+                directory: missing.clone(),
+            }),
+            exit_record: None,
+            liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: CommandPlan {
+                description: "restart with restored workspace".into(),
+                commands: vec![CommandSpec::new(
+                    "touch",
+                    [restarted.to_string_lossy().into_owned()],
+                )],
+            }
+            .into(),
+        }),
+        project_memory: None,
+    };
+    let manager = spawn_session_manager().unwrap();
+    manager.targets.send_replace(vec![target.clone()]);
+    let handle = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let mut view = handle.view.clone();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        view.wait_for(|view| matches!(view.error, Some(ViewError::TargetMissing(_)))),
+    )
+    .await
+    .expect("missing workspace was not reported")
+    .unwrap();
+    assert!(!restarted.exists());
+    target
+        .worker_recovery
+        .as_mut()
+        .unwrap()
+        .workspace
+        .as_mut()
+        .unwrap()
+        .directory = restored;
+    manager.targets.send_replace(vec![target]);
+    let same = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(
+        handle.commands.same_channel(&same.commands),
+        "plan update replaced the actor"
+    );
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if !matches!(view.borrow().error, Some(ViewError::TargetMissing(_)))
+                && restarted.exists()
+            {
+                break;
+            }
+            view.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("actor did not retry recovery with the updated workspace");
+    assert!(!missing.exists(), "the old workspace must remain missing");
     manager.shutdown.shutdown().await.unwrap();
 }
 
@@ -1361,6 +1700,7 @@ async fn stopped_actor_is_replaced_without_late_completion_removing_replacement(
         "session-1".to_owned(),
         ActorRegistration {
             target: desired.clone(),
+            worker_recovery: watch::channel(desired.worker_recovery.clone()).0,
             commands,
             releases,
             retirement,
@@ -2037,6 +2377,12 @@ async fn retirement_ends_a_connect_that_never_answers() {
         .await
         .unwrap();
 
+    let (job, job_result) = test_relay_job(true);
+    commands_tx
+        .send(ActorCommand::RelayJob { job })
+        .await
+        .unwrap();
+
     retirement_tx.send(true).unwrap();
     tokio::time::timeout(SESSION_MANAGER_SHUTDOWN_GRACE, actor)
         .await
@@ -2050,6 +2396,163 @@ async fn retirement_ends_a_connect_that_never_answers() {
         error.message.contains("session manager stopped"),
         "unexpected rejection: {error:?}"
     );
+    let error = job_result
+        .await
+        .expect("the queued job was answered")
+        .unwrap_err();
+    assert!(RelayJobDeferred::marks(&error));
+    assert_eq!(error.to_string(), RELAY_JOB_ACTOR_STOPPED);
+}
+
+// Hard-won: 3c9929f33: turn delivery changed memory without telling the agent to reread it.
+#[cfg(unix)]
+#[tokio::test]
+async fn turn_memory_delivery_notifies_only_for_changed_replica() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+    use mj_core::project_memory::{
+        ProjectMemorySnapshot, SwapOutcome, commit_canonical, read_canonical_state,
+    };
+    use mj_core::relay::{
+        ProjectMemoryDeliveryOutcome, ProjectMemoryTransferAction as Action,
+        ProjectMemoryTransferResult as Reply, ProjectMemoryTurnSnapshot, ProjectMemoryWireTree,
+        RELAY_PROTOCOL_VERSION, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
+        RelayResponseEnvelope, RelayResponsePayload,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const CHILD: &str = "MJ_TEST_TURN_MEMORY_NOTICE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "turn_memory_delivery_notifies_only_for_changed_replica",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let temp = tempfile::tempdir().unwrap();
+    for mode in ["in_sync", "equal", "stale", "changed"] {
+        let base = ProjectMemorySnapshot {
+            files: [("/note.md".into(), "old".into())].into(),
+        };
+        let mut canonical = base.clone();
+        if matches!(mode, "stale" | "changed") {
+            canonical.files.insert("/note.md".into(), "foreign".into());
+            canonical.files.insert("/new.md".into(), "new".into());
+        }
+        let root = temp.path().join(mode).join("memory");
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(
+            commit_canonical(&root, &state, "other", &canonical, None).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let wire = ProjectMemoryTurnSnapshot {
+            base: ProjectMemoryWireTree::encode(base.clone(), RELAY_PROTOCOL_VERSION).unwrap(),
+            id: format!("{mode}-handout"),
+            tree: ProjectMemoryWireTree::encode(base, RELAY_PROTOCOL_VERSION).unwrap(),
+        };
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let (controller, worker) = tokio::io::duplex(16384);
+        let mut client = crate::worker_client::test_fixtures::duplex_relay_client(
+            controller,
+            LEASED_RELAY_SESSION,
+        );
+        let peer = mj_core::runtime::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut lines = BufReader::new(reader).lines();
+            let count = if mode == "in_sync" { 1 } else { 5 };
+            for expected in 0..count {
+                let request: RelayRequestEnvelope =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let RelayRequest::ProjectMemoryTransfer { action } = request.request else {
+                    panic!("unexpected request")
+                };
+                let result = match (expected, action) {
+                    (0, Action::BeginTurnSnapshot { .. }) if mode == "in_sync" => Reply::InSync,
+                    (0, Action::BeginTurnSnapshot { .. }) => Reply::SnapshotStarted {
+                        transfer_id: 1,
+                        total_bytes: bytes.len() as u64,
+                    },
+                    (
+                        1,
+                        Action::ReadSnapshotPage {
+                            transfer_id: 1,
+                            offset: 0,
+                        },
+                    ) => Reply::SnapshotPage {
+                        transfer_id: 1,
+                        offset: 0,
+                        next_offset: bytes.len() as u64,
+                        complete: true,
+                        chunk: BASE64.encode(&bytes),
+                    },
+                    (2, Action::BeginUpload { .. }) => Reply::UploadStarted { transfer_id: 2 },
+                    (
+                        3,
+                        Action::AppendUpload {
+                            transfer_id: 2,
+                            offset,
+                            chunk,
+                        },
+                    ) => Reply::UploadProgress {
+                        transfer_id: 2,
+                        next_offset: offset + BASE64.decode(chunk).unwrap().len() as u64,
+                    },
+                    (4, Action::CommitUpload { transfer_id: 2 }) => Reply::Delivered {
+                        outcome: if mode == "stale" {
+                            ProjectMemoryDeliveryOutcome::Stale
+                        } else {
+                            ProjectMemoryDeliveryOutcome::Delivered
+                        },
+                    },
+                    other => panic!("unexpected action: {other:?}"),
+                };
+                let response = RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: RELAY_PROTOCOL_VERSION,
+                    body: RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::ProjectMemoryTransfer { result },
+                    },
+                };
+                let mut frame = serde_json::to_vec(&response).unwrap();
+                frame.push(b'\n');
+                writer.write_all(&frame).await.unwrap();
+            }
+        });
+        let target = ProjectMemorySyncTarget {
+            canonical_root: root,
+            relay: CommandSpec::new("unused", ["unused"]),
+        };
+        assert!(
+            standalone::sync_turn_project_memory(
+                &mut client,
+                &target,
+                LEASED_RELAY_SESSION,
+                &mj_core::config::Config::default(),
+                tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+        peer.await.unwrap();
+        let notices = crate::database::pending_mailbox_events(10).unwrap();
+        if mode == "changed" {
+            assert_eq!(notices.len(), 1);
+            let event: MailboxEvent = serde_json::from_str(&notices[0].event_json).unwrap();
+            assert_eq!(event.source, "project-memory");
+            assert!(!event.wake && !notices[0].unpark);
+            assert!(
+                event
+                    .key
+                    .starts_with(&format!("project-memory:{LEASED_RELAY_SESSION}:"))
+            );
+            assert_eq!(event.body, MailboxEventBody::PlainText { text: "Project memory changed. Reread MEMORY.md and the affected notes. Added new.md. Updated note.md.".into() });
+        } else {
+            assert!(notices.is_empty(), "{mode} must not enqueue a notice");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2279,6 +2782,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     let mut target = leased_relay_target(relay_root.path());
     target.project_memory = Some(ProjectMemorySyncTarget {
         canonical_root: canonical.path().to_path_buf(),
+        relay: target.spec.clone(),
     });
 
     let mut connection = StandaloneSession::connect(&target)
@@ -3633,6 +4137,7 @@ struct LeasedActor {
     _views: watch::Receiver<ManagedSessionView>,
     _updates: SessionManagerUpdates,
     _relay_root: tempfile::TempDir,
+    credential_wakes: Arc<crate::worker_client::CredentialWakes>,
 }
 
 /// Start an actor against a live relay and take its connection under lease.
@@ -3645,6 +4150,7 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
     let (retirement_tx, retirement_rx) = watch::channel(false);
     let (view_tx, view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, updates_rx) = coalesced_update_channel();
+    let credential_wakes = updates_tx.credential_wakes.clone();
     mj_core::runtime::spawn(run_session_actor(
         leased_relay_target(relay_root.path()),
         commands_rx,
@@ -3678,10 +4184,167 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
             _views: view_rx,
             _updates: updates_rx,
             _relay_root: relay_root,
+            credential_wakes,
         },
         lease_id,
         connection,
     )
+}
+
+#[cfg(unix)]
+// Hard-won: post-create credential sync: a cancelled retirement lost a refused credential wake.
+#[tokio::test]
+async fn retiring_leased_actor_defers_job_and_wakes_after_retirement_is_cancelled() {
+    const CHILD: &str = "MJ_TEST_RETIRED_LEASE_CREDENTIALS";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "retiring_leased_actor_defers_job_and_wakes_after_retirement_is_cancelled",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("retiring leased actor failed to wake credentials");
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    actor.credential_wakes.take();
+    let mut wakes = actor.credential_wakes.subscribe();
+    wakes.borrow_and_update();
+    actor.retirement.send_replace(true);
+    let (job, result) = test_relay_job(true);
+    actor
+        .commands
+        .send(ActorCommand::RelayJob { job })
+        .await
+        .unwrap();
+    let error = result
+        .await
+        .expect("retiring actor answered the job")
+        .unwrap_err();
+    assert!(RelayJobDeferred::marks(&error));
+    assert_eq!(error.to_string(), RELAY_JOB_TARGET_CHANGING);
+    assert!(actor.credential_wakes.take().is_empty());
+    actor.retirement.send_replace(false);
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(Box::new(connection)),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), wakes.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(actor.credential_wakes.take().contains(LEASED_RELAY_SESSION));
+    actor.retirement.send_replace(true);
+}
+
+#[cfg(unix)]
+// Hard-won: post-create credential sync: a refreshed launch plan retired the relay actor.
+#[tokio::test]
+async fn manager_updates_recovery_plan_without_replacing_connected_actor() {
+    const CHILD: &str = "MJ_TEST_REFRESH_RECOVERY_ACTOR";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "manager_updates_recovery_plan_without_replacing_connected_actor",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("updated recovery plan was not used");
+    register_leased_relay_session();
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.target = Some(Box::new(recovery_source_target()));
+    crate::database::save_session(&record).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let disabled = root.path().join("disabled");
+    let probed = root.path().join("updated-plan-probed");
+    let mut target = leased_relay_target(root.path());
+    let script = format!(
+        "if [ -f \"$DISABLED\" ]; then IFS= read -r _; exit 0; fi; \"$0\" --exact {CHILD_TEST} --nocapture | grep --line-buffered '^{{'"
+    );
+    target.spec = CommandSpec::new(
+        "sh",
+        [
+            "-c".to_owned(),
+            script,
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ],
+    );
+    target.spec.env.insert(
+        LEASED_RELAY_ROOT.into(),
+        root.path().to_string_lossy().into_owned(),
+    );
+    target
+        .spec
+        .env
+        .insert("DISABLED".into(), disabled.to_string_lossy().into_owned());
+    target.worker_recovery = Some(test_recovery_plan());
+    let manager = spawn_session_manager().unwrap();
+    manager.targets.send_replace(vec![target.clone()]);
+    let handle = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let mut view = handle.view.clone();
+    tokio::time::timeout(Duration::from_secs(10), view.wait_for(|v| v.connected))
+        .await
+        .unwrap()
+        .unwrap();
+    let recovery = target.worker_recovery.as_mut().unwrap();
+    let mut probe = CommandSpec::new("sh", ["-c", "touch \"$PROBED\"; printf starting"]);
+    probe
+        .env
+        .insert("PROBED".into(), probed.to_string_lossy().into_owned());
+    recovery.liveness_probe = probe.into();
+    recovery.launch_refresh = Some(WorkerLaunchRefreshPlan {
+        expected_sha256: "new-digest".into(),
+        installed_digest: CommandSpec::new("printf", ["old-digest"]),
+        replace: CommandPlan {
+            description: "updated launch".into(),
+            commands: vec![],
+        },
+    });
+    manager.targets.send_replace(vec![target]);
+    let same = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(handle.commands.same_channel(&same.commands));
+    let (job, result) = test_relay_job(false);
+    handle.run_on_connection(job).await;
+    result
+        .await
+        .expect("job was answered")
+        .expect("actor retained its connection");
+    std::fs::write(&disabled, "").unwrap();
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let admission = gate
+        .try_start(
+            LEASED_RELAY_SESSION,
+            crate::recovery_gate::BackgroundWork::DelegationDelivery,
+        )
+        .unwrap();
+    let lease = handle.lease_connection(&admission).await.unwrap();
+    drop(lease);
+    drop(admission);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !probed.exists() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the updated recovery probe did not run");
+    assert!(handle.commands.same_channel(&same.commands));
+    manager.shutdown.shutdown().await.unwrap();
 }
 
 #[cfg(unix)]

@@ -817,6 +817,7 @@ dependencies = [
  "toml",
  "tracing",
  "zip",
+ "zstd",
 ]
 
 [[package]]

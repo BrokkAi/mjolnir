@@ -1152,6 +1152,7 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         latch_relay_target(root.path(), Some(&starts), ReleaseSupport::Supported, true);
     target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
         canonical_root: root.path().join("memory"),
+        relay: target.spec.clone(),
     });
     channels.targets.send(vec![target]).unwrap();
     let handle = channels
@@ -1535,6 +1536,7 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     let mut target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
     target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
         canonical_root: root.path().join("memory"),
+        relay: target.spec.clone(),
     });
     channels.targets.send(vec![target]).unwrap();
     let handle = channels

@@ -8,8 +8,9 @@ use crate::hex::lower_hex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,11 @@ pub struct ConflictedFile {
 pub struct TreeMerge {
     pub tree: ProjectMemorySnapshot,
     pub conflicts: Vec<ConflictedFile>,
+}
+
+/// Whether file content qualifies as a project-memory document.
+pub fn is_memory_document(content: &str) -> bool {
+    !content.trim().is_empty()
 }
 
 /// Merge a session replica into the canonical tree relative to the baseline
@@ -137,7 +143,7 @@ pub fn merge_trees(
             }
         };
 
-        if let Some(content) = merged.filter(|content| !content.trim().is_empty()) {
+        if let Some(content) = merged.filter(|content| is_memory_document(content)) {
             tree.files.insert(path, content);
         }
     }
@@ -516,38 +522,237 @@ pub enum SwapOutcome {
     Changed,
 }
 
-/// Read the canonical tree, following project-merge redirects.
-pub fn read_canonical(canonical_root: &Path) -> Result<ProjectMemorySnapshot> {
-    let root = resolve_canonical_root(canonical_root)?;
-    ProjectMemoryStore::new(root).snapshot()
+/// The durable canonical tree and acknowledgements owned by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalMemory {
+    pub version: TreeVersion,
+    pub tree: ProjectMemorySnapshot,
+    pub absorbed: BTreeMap<String, String>,
 }
 
-/// Replace the canonical tree with `tree` only if it still has `expected`.
-/// The per-project lock is held only for the compare and the write.
-pub fn swap_canonical(
+impl CanonicalMemory {
+    fn new(tree: ProjectMemorySnapshot) -> Self {
+        Self {
+            version: tree.version(),
+            tree,
+            absorbed: BTreeMap::new(),
+        }
+    }
+}
+
+fn canonical_file(root: &Path) -> Result<PathBuf> {
+    Ok(root
+        .parent()
+        .context("memory store has no project directory")?
+        .join("memory.json"))
+}
+
+fn lock_canonical(root: &Path) -> Result<crate::file_lock::FileLock> {
+    let parent = root
+        .parent()
+        .context("memory store has no project directory")?;
+    fs::create_dir_all(parent)?;
+    let path = parent.join(".memory.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    // The lock is created with the process umask. Restrict it to the owner.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict {}", path.display()))?;
+    }
+    Ok(crate::file_lock::FileLock::acquire_cancellable(
+        file,
+        &|| false,
+    )?)
+}
+
+// Called with the project lock held. The old directory is consulted once only,
+// while the file is absent. Redirect metadata is beside the directory.
+fn load_canonical_locked(root: &Path) -> Result<CanonicalMemory> {
+    let path = canonical_file(root)?;
+    let parent = path.parent().context("canonical file has no parent")?;
+    // A fixed intermediate name makes the rename recoverable if the daemon
+    // stops before writing the canonical file or naming the final backup.
+    let pending = parent.join(".memory-migration-pending");
+    if pending.try_exists()? && root.try_exists()? {
+        anyhow::bail!(
+            "both project memory and a pending migration exist in {}",
+            parent.display()
+        );
+    }
+    let (state, migrated) = match fs::read(&path) {
+        Ok(bytes) => {
+            let state: CanonicalMemory = serde_json::from_slice(&bytes)
+                .with_context(|| format!("decode {}", path.display()))?;
+            anyhow::ensure!(
+                state.version == state.tree.version(),
+                "project memory version does not match tree in {}",
+                path.display()
+            );
+            (state, false)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let source = if pending.try_exists()? {
+                &pending
+            } else {
+                root
+            };
+            let mut tree = match ConfinedDir::open_root(source)? {
+                Some(directory) => migration_snapshot(&directory, &project_key(root))?,
+                None => ProjectMemorySnapshot::default(),
+            };
+            tree.files.retain(|_, content| is_memory_document(content));
+            let state = CanonicalMemory::new(tree);
+            if source == root && root.try_exists()? {
+                fs::rename(root, &pending).context("preserve legacy project memory")?;
+            }
+            write_canonical_locked(root, &state)?;
+            (state, true)
+        }
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let preserved_legacy = pending.try_exists()?;
+    if preserved_legacy {
+        let mut backup = parent.join("memory.pre-migration");
+        let mut suffix = 1_u64;
+        loop {
+            match fs::symlink_metadata(&backup) {
+                Ok(_) => {
+                    backup = parent.join(format!("memory.pre-migration.{suffix}"));
+                    suffix += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error).context("inspect project memory backup path"),
+            }
+        }
+        fs::rename(&pending, &backup).context("finish legacy project memory backup")?;
+    }
+    if (migrated || preserved_legacy)
+        && let Err(error) = render_memory_tree(root, &state.tree, true)
+    {
+        tracing::warn!(project = %project_key(root), %error, "project memory render failed after migration");
+    }
+    Ok(state)
+}
+
+fn write_canonical_locked(root: &Path, state: &CanonicalMemory) -> Result<()> {
+    validate_renderable_tree(&state.tree)?;
+    write_canonical_before_rename(root, state, || Ok(()))
+}
+
+fn write_canonical_before_rename(
+    root: &Path,
+    state: &CanonicalMemory,
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let path = canonical_file(root)?;
+    let parent = path.parent().context("canonical file has no parent")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(&serde_json::to_vec(state)?)?;
+    // NamedTempFile follows the process umask. The canonical file must stay
+    // owner-only after the rename, which keeps this inode's mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.as_file().sync_all()?;
+    before_rename()?;
+    temporary.persist(&path).map_err(|error| error.error)?;
+    // The rename has made the new state visible to every reader, so the
+    // commit has happened. A failed directory sync only weakens durability
+    // across power loss; reporting it as a failed commit would make callers
+    // skip the worker step for a tree canonical already holds.
+    if let Err(error) = crate::config::sync_directory(parent) {
+        tracing::warn!(
+            path = %path.display(),
+            error = format!("{error:#}"),
+            "could not sync the canonical project-memory directory after commit"
+        );
+    }
+    Ok(())
+}
+
+/// Read the durable state, following project-merge redirects.
+pub fn read_canonical_state(canonical_root: &Path) -> Result<CanonicalMemory> {
+    loop {
+        let root = resolve_canonical_root(canonical_root)?;
+        let _lock = lock_canonical(&root)?;
+        if resolve_canonical_root(canonical_root)? != root {
+            continue;
+        }
+        return load_canonical_locked(&root);
+    }
+}
+
+/// Read the canonical tree, following project-merge redirects.
+pub fn read_canonical(canonical_root: &Path) -> Result<ProjectMemorySnapshot> {
+    Ok(read_canonical_state(canonical_root)?.tree)
+}
+
+/// Commit a tree and optionally acknowledge a snapshot for one session.
+/// A stale tree or session acknowledgement must be read and merged again.
+pub fn commit_canonical(
     canonical_root: &Path,
+    expected: &CanonicalMemory,
+    session_id: &str,
+    tree: &ProjectMemorySnapshot,
+    absorbed: Option<&str>,
+) -> Result<SwapOutcome> {
+    validate_renderable_tree(tree)?;
+    loop {
+        let root = resolve_canonical_root(canonical_root)?;
+        let _lock = lock_canonical(&root)?;
+        if resolve_canonical_root(canonical_root)? != root {
+            continue;
+        }
+        let mut current = load_canonical_locked(&root)?;
+        if current.version != expected.version
+            || current.absorbed.get(session_id) != expected.absorbed.get(session_id)
+        {
+            return Ok(SwapOutcome::Changed);
+        }
+        current.tree = tree.clone();
+        current.version = tree.version();
+        if let Some(snapshot) = absorbed {
+            current
+                .absorbed
+                .insert(session_id.to_owned(), snapshot.to_owned());
+        }
+        write_canonical_locked(&root, &current)?;
+        // The rename is the commit. A later render failure leaves the new
+        // tree in place; the next commit renders it again.
+        if let Err(error) = render_memory_tree(&root, tree, true) {
+            tracing::warn!(
+                project = %project_key(&root),
+                %error,
+                "project memory render failed after the commit"
+            );
+        }
+        return Ok(SwapOutcome::Swapped);
+    }
+}
+
+/// Checkpoint protocol has no acknowledgement and leaves all entries alone.
+pub fn swap_canonical(
+    root: &Path,
     expected: &TreeVersion,
     tree: &ProjectMemorySnapshot,
 ) -> Result<SwapOutcome> {
-    let mut locks = MEMORY_LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .expect("project memory lock registry poisoned");
-    let canonical_root = resolve_canonical_root(canonical_root)?;
-    let lock = locks
-        .entry(canonical_root.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let _guard = lock.lock().expect("project memory lock poisoned");
-    drop(locks);
-
-    let store = ProjectMemoryStore::new(canonical_root);
-    let current = store.snapshot()?;
-    if current.version() != expected.clone() {
+    let state = read_canonical_state(root)?;
+    if &state.version != expected {
         return Ok(SwapOutcome::Changed);
     }
-    store.replace_tree(tree)?;
-    Ok(SwapOutcome::Swapped)
+    commit_canonical(root, &state, "", tree, None)
 }
 
 /// Worker answer to a whole-tree replace request.
@@ -770,7 +975,6 @@ impl ProjectMemoryStore {
         let mut changed = false;
         for (path, content) in &snapshot.files {
             let relative = validate_virtual_path(path)?;
-            ensure_snapshot_document(content)?;
             let (parent, name) = document_location(&relative);
             let existing = match &root {
                 Some(root) => match root.open_dir(parent)? {
@@ -790,30 +994,206 @@ impl ProjectMemoryStore {
         Ok(changed)
     }
 
+    /// Apply only paths named in a handout or its delivered tree.
+    pub fn apply_delivery(
+        &self,
+        handout: &PreparedMemoryTree<'_>,
+        incoming: &PreparedMemoryTree<'_>,
+        mode: MemoryApplyMode,
+    ) -> Result<MemoryApplyResult> {
+        self.apply_delivery_with_sync(handout, incoming, mode, |path, directory| match directory {
+            Some(directory) => directory.sync(),
+            None => crate::config::sync_directory(path),
+        })
+    }
+
+    fn apply_delivery_with_sync(
+        &self,
+        handout: &PreparedMemoryTree<'_>,
+        incoming: &PreparedMemoryTree<'_>,
+        mode: MemoryApplyMode,
+        mut sync: impl FnMut(&Path, Option<&ConfinedDir>) -> Result<()>,
+    ) -> Result<MemoryApplyResult> {
+        let mut root = ConfinedDir::open_root(&self.root)?;
+        let mut base = handout.tree.clone();
+        let mut preserved_edits = BTreeSet::new();
+
+        // Replica-only entries, including hidden files and symlinks, are not
+        // in either prepared tree and are never removed.
+        for (relative, previous) in &handout.files {
+            if incoming.files.contains_key(relative) {
+                continue;
+            }
+            let current = delivery_destination(root.as_ref(), relative)?;
+            let Destination::File(current) = current else {
+                // Missing or untracked entries are already absent from the snapshot.
+                base.files.remove(handout.paths[relative]);
+                continue;
+            };
+            if !is_memory_document(&current) {
+                base.files.remove(handout.paths[relative]);
+                continue;
+            }
+            if mode == MemoryApplyMode::PreserveEdits && current != *previous {
+                continue;
+            }
+            let (parent, name) = document_location(relative);
+            let Some(directory) = root
+                .as_ref()
+                .expect("an existing document has a root")
+                .open_dir(parent)?
+            else {
+                continue;
+            };
+            match directory.remove_file(name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("delete memory document {}", relative.display()));
+                }
+            }
+            base.files.remove(handout.paths[relative]);
+        }
+
+        // Directories that block an incoming file can be removed only while
+        // they are empty: an empty directory at the incoming path itself (for
+        // example left behind when this session deleted its last note there),
+        // and directories that held tracked handout files.
+        if let Some(root) = &root {
+            let mut blocking = BTreeSet::new();
+            for destination in incoming.files.keys() {
+                blocking.insert(destination.to_path_buf());
+                for previous in handout
+                    .files
+                    .keys()
+                    .filter(|path| path.starts_with(destination) && *path != destination)
+                {
+                    let mut parent = previous.parent();
+                    while let Some(path) = parent {
+                        if !path.starts_with(destination) || path.as_os_str().is_empty() {
+                            break;
+                        }
+                        blocking.insert(path.to_owned());
+                        if path == destination {
+                            break;
+                        }
+                        parent = path.parent();
+                    }
+                }
+            }
+            let mut blocking: Vec<_> = blocking.into_iter().collect();
+            blocking.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+            for relative in blocking {
+                let (parent, name) = document_location(&relative);
+                let Some(directory) = open_memory_directory(root, parent)? else {
+                    continue;
+                };
+                if !directory
+                    .entries()?
+                    .iter()
+                    .any(|(entry, kind)| entry == name && *kind == EntryKind::Directory)
+                {
+                    continue;
+                }
+                let Some(child) = directory.open_dir(Path::new(name))? else {
+                    continue;
+                };
+                if !child.entries()?.is_empty() {
+                    continue;
+                }
+                drop(child);
+                match directory.remove_dir(name) {
+                    Ok(()) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound
+                                | std::io::ErrorKind::NotADirectory
+                                | std::io::ErrorKind::DirectoryNotEmpty
+                        ) => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "remove empty tracked memory directory {}",
+                                relative.display()
+                            )
+                        });
+                    }
+                }
+            }
+        }
+
+        for (relative, content) in &incoming.files {
+            let current = match delivery_destination(root.as_ref(), relative)? {
+                Destination::Obstructed => {
+                    tracing::warn!(path = %relative.display(), "untracked entry blocks project-memory delivery");
+                    continue;
+                }
+                Destination::Missing => None,
+                Destination::File(content) => Some(content),
+            };
+            let should_write = current.as_deref() != Some(*content)
+                && (mode == MemoryApplyMode::Delivery
+                    || current
+                        .as_deref()
+                        .is_none_or(|value| !is_memory_document(value))
+                    || current.as_deref() == handout.files.get(relative).copied());
+            if should_write {
+                write_document(&self.root, &mut root, relative, content)
+                    .with_context(|| format!("write memory document {}", relative.display()))?;
+            } else if current.as_deref() != Some(*content) {
+                preserved_edits.insert(incoming.paths[relative].to_owned());
+            }
+        }
+        if let Some(root) = &root {
+            // A prior interrupted apply may have changed paths that already
+            // match now. Sync every potentially affected ancestor on recovery
+            // too, including parents of created or removed directories.
+            let mut directories = BTreeSet::new();
+            for path in handout.files.keys().chain(incoming.files.keys()) {
+                let mut parent = path.parent();
+                while let Some(relative) = parent {
+                    directories.insert(relative.to_path_buf());
+                    parent = relative.parent();
+                }
+            }
+            let mut directories: Vec<_> = directories.into_iter().collect();
+            directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+            for relative in directories {
+                if let Some(directory) = open_memory_directory(root, &relative)? {
+                    sync(directory.path(), Some(&directory))?;
+                }
+            }
+            // The replica root itself may have been created by this apply or
+            // by an interrupted earlier attempt.
+            let parent = self
+                .root
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            sync(parent, None)?;
+        }
+        Ok(MemoryApplyResult {
+            base,
+            preserved_edits,
+        })
+    }
+
     /// Make the directory hold exactly `tree`: write changed documents and
     /// delete documents that `tree` omits. Returns whether anything changed.
     pub fn replace_tree(&self, tree: &ProjectMemorySnapshot) -> Result<bool> {
-        let mut desired = BTreeMap::<String, (PathBuf, &str)>::new();
-        let mut relative_paths = BTreeSet::new();
-        for (path, content) in &tree.files {
-            let relative = validate_virtual_path(path)?;
-            ensure_snapshot_document(content)?;
-            anyhow::ensure!(
-                relative_paths.insert(relative.clone()),
-                "project memory snapshot contains duplicate paths"
-            );
-            desired.insert(path.clone(), (relative, content));
-        }
-        for relative in &relative_paths {
-            let mut parent = relative.parent();
-            while let Some(path) = parent {
-                anyhow::ensure!(
-                    !relative_paths.contains(path),
-                    "project memory snapshot contains both a document and its parent"
-                );
-                parent = path.parent();
-            }
-        }
+        validate_renderable_tree(tree)?;
+        let desired = tree
+            .files
+            .iter()
+            .map(|(path, content)| {
+                Ok((
+                    path.clone(),
+                    (validate_virtual_path(path)?, content.as_str()),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
 
         // Every read, delete, and write below resolves from this one handle,
         // so a link planted in the tree mid-sync cannot redirect them (#1419).
@@ -864,6 +1244,28 @@ impl ProjectMemoryStore {
     }
 }
 
+fn validate_renderable_tree(tree: &ProjectMemorySnapshot) -> Result<()> {
+    let mut relative_paths = BTreeSet::new();
+    for path in tree.files.keys() {
+        let relative = validate_virtual_path(path)?;
+        anyhow::ensure!(
+            relative_paths.insert(relative),
+            "project memory snapshot contains duplicate paths"
+        );
+    }
+    for relative in &relative_paths {
+        let mut parent = relative.parent();
+        while let Some(path) = parent {
+            anyhow::ensure!(
+                !relative_paths.contains(path),
+                "project memory snapshot contains both a document and its parent"
+            );
+            parent = path.parent();
+        }
+    }
+    Ok(())
+}
+
 /// The directory holding a validated memory document, relative to the memory
 /// root, and the document's own name in it.
 fn document_location(relative: &Path) -> (&Path, &OsStr) {
@@ -873,6 +1275,66 @@ fn document_location(relative: &Path) -> (&Path, &OsStr) {
             .file_name()
             .expect("a validated memory path ends in a document name"),
     )
+}
+
+fn open_memory_directory(root: &ConfinedDir, relative: &Path) -> Result<Option<ConfinedDir>> {
+    match root.open_dir(relative) {
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotADirectory) =>
+        {
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
+enum Destination {
+    Missing,
+    File(String),
+    Obstructed,
+}
+
+// Inspect every component without following links. A directory at the final
+// name, a link, or a non-directory ancestor is not part of the snapshot.
+fn delivery_destination(root: Option<&ConfinedDir>, relative: &Path) -> Result<Destination> {
+    let Some(root) = root else {
+        return Ok(Destination::Missing);
+    };
+    let mut directory = root.open_dir(Path::new(""))?.expect("open root handle");
+    let (parent, name) = document_location(relative);
+    for component in parent.components() {
+        let Component::Normal(part) = component else {
+            unreachable!("validated path")
+        };
+        match directory
+            .entries()?
+            .into_iter()
+            .find(|(entry, _)| entry == part)
+        {
+            None => return Ok(Destination::Missing),
+            Some((_, EntryKind::Directory)) => {
+                let Some(child) = directory.open_dir(Path::new(part))? else {
+                    return Ok(Destination::Missing);
+                };
+                directory = child;
+            }
+            Some(_) => return Ok(Destination::Obstructed),
+        }
+    }
+    match directory
+        .entries()?
+        .into_iter()
+        .find(|(entry, _)| entry == name)
+    {
+        None => Ok(Destination::Missing),
+        Some((_, EntryKind::File)) => Ok(match directory.read_to_string(name)? {
+            Some(content) => Destination::File(content),
+            None => Destination::Missing,
+        }),
+        Some(_) => Ok(Destination::Obstructed),
+    }
 }
 
 /// Write one document below `root`, creating the memory root on first use.
@@ -896,7 +1358,13 @@ fn write_document(
 /// names nor links are read or entered.
 fn root_snapshot(root: &ConfinedDir) -> Result<ProjectMemorySnapshot> {
     let mut files = BTreeMap::new();
-    collect_documents(root, Path::new(""), &mut files)?;
+    collect_documents(root, Path::new(""), &mut files, None)?;
+    Ok(ProjectMemorySnapshot { files })
+}
+
+fn migration_snapshot(root: &ConfinedDir, project: &str) -> Result<ProjectMemorySnapshot> {
+    let mut files = BTreeMap::new();
+    collect_documents(root, Path::new(""), &mut files, Some(project))?;
     Ok(ProjectMemorySnapshot { files })
 }
 
@@ -904,6 +1372,7 @@ fn collect_documents(
     directory: &ConfinedDir,
     relative: &Path,
     files: &mut BTreeMap<String, String>,
+    migration_project: Option<&str>,
 ) -> Result<()> {
     for (name, kind) in directory.entries()? {
         if name.to_string_lossy().starts_with('.') {
@@ -913,16 +1382,38 @@ fn collect_documents(
         match kind {
             EntryKind::Directory => {
                 if let Some(subdirectory) = directory.open_dir(Path::new(&name))? {
-                    collect_documents(&subdirectory, &child, files)?;
+                    collect_documents(&subdirectory, &child, files, migration_project)?;
                 }
             }
             EntryKind::File => {
                 let path = format!("/{}", child.to_string_lossy().replace('\\', "/"));
-                validate_virtual_path(&path)?;
-                let content = directory
-                    .read_to_string(&name)
+                // A name the tree cannot hold (a reserved component, for
+                // example) is untracked, like a hidden file: a legacy one stays
+                // in the migration backup, and a replica one stays on disk.
+                if let Err(error) = validate_virtual_path(&path) {
+                    tracing::warn!(
+                        project = migration_project.map(tracing::field::display),
+                        %path,
+                        error = format!("{error:#}"),
+                        "skipping a project memory file whose name memory cannot hold"
+                    );
+                    continue;
+                }
+                let bytes = directory
+                    .read_bytes(&name)
                     .and_then(|content| content.context("the document disappeared"))
                     .with_context(|| format!("read memory snapshot document {path}"))?;
+                let content = match String::from_utf8(bytes) {
+                    Ok(content) => content,
+                    Err(_) if migration_project.is_some() => {
+                        tracing::warn!(project = %migration_project.expect("migration project"), %path, "skipping non-UTF-8 legacy project memory document");
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("read memory snapshot document {path}"));
+                    }
+                };
                 files.insert(path, content);
             }
             EntryKind::Other => {}
@@ -962,21 +1453,177 @@ fn prune_empty_memory_directories(directory: &ConfinedDir, changed: &mut bool) -
     Ok(())
 }
 
-fn ensure_snapshot_document(content: &str) -> Result<()> {
-    anyhow::ensure!(
-        !content.trim().is_empty(),
-        "project memory snapshot contains an empty document"
-    );
+// Remove rendered entries through confined handles, which never follow a
+// planted link. A hidden name at the render root stays (redirect metadata
+// lives beside this directory, and a root-level dotfile is not a document).
+// Anything inside a directory the render owns is removed, hidden names
+// included, so a leftover dotfile cannot keep a directory that a document
+// now needs to replace.
+fn clear_render(directory: &ConfinedDir) -> Result<()> {
+    clear_render_entries(directory, false)
+}
+
+fn clear_render_entries(directory: &ConfinedDir, remove_hidden: bool) -> Result<()> {
+    set_render_directory_writable(directory)?;
+    for (name, kind) in directory.entries()? {
+        let hidden = name.to_string_lossy().starts_with('.');
+        if hidden && !remove_hidden {
+            continue;
+        }
+        match kind {
+            EntryKind::Directory => {
+                let Some(child) = directory.open_dir(Path::new(&name))? else {
+                    continue;
+                };
+                clear_render_entries(&child, true)?;
+                drop(child);
+                directory.remove_dir(&name)?;
+            }
+            EntryKind::File | EntryKind::Other => {
+                #[cfg(windows)]
+                if kind == EntryKind::File {
+                    set_render_file_writable(directory, &name)?;
+                }
+                directory.remove_file(&name)?;
+            }
+        }
+    }
     Ok(())
 }
 
-static MEMORY_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+#[cfg(unix)]
+fn set_render_directory_writable(directory: &ConfinedDir) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    directory.set_directory_permissions(fs::Permissions::from_mode(0o700))
+}
 
-/// Redirects are published while holding both store locks and the decision
-/// registry. A stale sync cannot decide to write the old store during a merge.
+#[cfg(not(unix))]
+fn set_render_directory_writable(_directory: &ConfinedDir) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_render_file_writable(directory: &ConfinedDir, name: &OsStr) -> Result<()> {
+    directory.set_file_readonly(name, false)
+}
+
+#[cfg(unix)]
+fn finish_render_directory(directory: &ConfinedDir) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, kind) in directory.entries()? {
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        match kind {
+            EntryKind::Directory => {
+                if let Some(child) = directory.open_dir(Path::new(&name))? {
+                    finish_render_directory(&child)?;
+                }
+            }
+            EntryKind::File => {
+                directory.set_file_permissions(&name, fs::Permissions::from_mode(0o400))?
+            }
+            EntryKind::Other => {}
+        }
+    }
+    directory.set_directory_permissions(fs::Permissions::from_mode(0o500))
+}
+
+#[cfg(not(unix))]
+fn finish_render_directory(directory: &ConfinedDir) -> Result<()> {
+    for (name, kind) in directory.entries()? {
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        match kind {
+            EntryKind::Directory => {
+                if let Some(child) = directory.open_dir(Path::new(&name))? {
+                    finish_render_directory(&child)?;
+                }
+            }
+            EntryKind::File => directory.set_file_readonly(&name, true)?,
+            EntryKind::Other => {}
+        }
+    }
+    Ok(())
+}
+
+/// Whether an apply may replace all tracked paths or must preserve later edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryApplyMode {
+    Delivery,
+    PreserveEdits,
+}
+
+/// Handout-based result before verification against the replica after apply.
+pub struct MemoryApplyResult {
+    pub base: ProjectMemorySnapshot,
+    pub preserved_edits: BTreeSet<String>,
+}
+
+/// A tree whose paths have been validated before a rendering decision.
+pub struct PreparedMemoryTree<'a> {
+    files: BTreeMap<PathBuf, &'a str>,
+    paths: BTreeMap<PathBuf, &'a str>,
+    tree: &'a ProjectMemorySnapshot,
+}
+
+/// Validate and resolve every document path before beginning a render.
+pub fn prepare_memory_tree(tree: &ProjectMemorySnapshot) -> Result<PreparedMemoryTree<'_>> {
+    validate_renderable_tree(tree)?;
+    let files = tree
+        .files
+        .iter()
+        .map(|(path, content)| Ok((validate_virtual_path(path)?, content.as_str())))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let paths = tree
+        .files
+        .keys()
+        .map(|path| Ok((validate_virtual_path(path)?, path.as_str())))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    Ok(PreparedMemoryTree { files, paths, tree })
+}
+
+impl PreparedMemoryTree<'_> {
+    /// Materialize the prepared tree without rereading the destination.
+    pub fn render(self, root: &Path, read_only: bool) -> Result<()> {
+        let directory = match ConfinedDir::open_root(root)? {
+            Some(directory) => directory,
+            None => ConfinedDir::create_root(root)?,
+        };
+        clear_render(&directory)?;
+        let mut handle = Some(directory);
+        for (path, content) in self.files {
+            write_document(root, &mut handle, &path, content)?;
+        }
+        if read_only {
+            finish_render_directory(handle.as_ref().expect("render handle exists"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Materialize a tree without reading documents from the destination. Existing
+/// hidden entries are left alone. Set `read_only` for the canonical view.
+pub fn render_memory_tree(
+    root: &Path,
+    tree: &ProjectMemorySnapshot,
+    read_only: bool,
+) -> Result<()> {
+    prepare_memory_tree(tree)?.render(root, read_only)
+}
+
+fn project_key(root: &Path) -> std::borrow::Cow<'_, str> {
+    root.parent()
+        .and_then(|parent| parent.file_name())
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| root.to_string_lossy())
+}
+
+/// Follow the existing project redirect metadata.
 pub fn resolve_canonical_root(root: &Path) -> Result<PathBuf> {
     let mut root = root.to_owned();
-    let mut visited = std::collections::BTreeSet::new();
+    let mut visited = BTreeSet::new();
     loop {
         ensure_memory_alias_unique(&mut visited, &root)?;
         let alias = root
@@ -1003,54 +1650,64 @@ fn ensure_memory_alias_unique(
     Ok(())
 }
 
+/// Merge the source before publishing its redirect. Both project locks are
+/// acquired in path order, and redirects are checked again after locking.
 pub fn merge_canonical_stores(old: &Path, new: &Path) -> Result<Vec<String>> {
-    let mut locks = MEMORY_LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .expect("project memory lock registry poisoned");
-    let old = resolve_canonical_root(old)?;
-    let new = resolve_canonical_root(new)?;
-    if old == new {
-        return Ok(Vec::new());
+    loop {
+        let source = resolve_canonical_root(old)?;
+        let destination = resolve_canonical_root(new)?;
+        if source == destination {
+            return Ok(Vec::new());
+        }
+        let (first, second) = if source < destination {
+            (&source, &destination)
+        } else {
+            (&destination, &source)
+        };
+        let _first = lock_canonical(first)?;
+        let _second = lock_canonical(second)?;
+        if resolve_canonical_root(old)? != source || resolve_canonical_root(new)? != destination {
+            continue;
+        }
+        let source_state = load_canonical_locked(&source)?;
+        let mut destination_state = load_canonical_locked(&destination)?;
+        let merged = merge_trees(
+            &ProjectMemorySnapshot::default(),
+            &destination_state.tree,
+            &source_state.tree,
+        );
+        for (session, snapshot) in source_state.absorbed {
+            destination_state
+                .absorbed
+                .entry(session)
+                .or_insert(snapshot);
+        }
+        destination_state.tree = merged.tree;
+        destination_state.version = destination_state.tree.version();
+        write_canonical_locked(&destination, &destination_state)?;
+        // As for ordinary commits, the rename is the commit and the rendered
+        // view is derived. A render failure must not stop the redirect, or a
+        // retry would merge the source again over later destination edits.
+        if let Err(error) = render_memory_tree(&destination, &destination_state.tree, true) {
+            tracing::warn!(
+                project = %project_key(&destination),
+                %error,
+                "project memory render failed after the store merge"
+            );
+        }
+        let parent = source
+            .parent()
+            .context("old memory project directory is missing")?;
+        crate::config::atomic_write(
+            &parent.join("memory-redirect.json"),
+            &serde_json::to_vec(&destination)?,
+        )?;
+        return Ok(merged
+            .conflicts
+            .into_iter()
+            .map(|conflict| conflict.path)
+            .collect());
     }
-    let old_lock = locks
-        .entry(old.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let new_lock = locks
-        .entry(new.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let (_first_guard, _second_guard) = if old < new {
-        (
-            old_lock.lock().expect("project memory lock poisoned"),
-            new_lock.lock().expect("project memory lock poisoned"),
-        )
-    } else {
-        (
-            new_lock.lock().expect("project memory lock poisoned"),
-            old_lock.lock().expect("project memory lock poisoned"),
-        )
-    };
-    let old_snapshot = ProjectMemoryStore::new(&old).snapshot()?;
-    let new_store = ProjectMemoryStore::new(&new);
-    let current = new_store.snapshot()?;
-    let merged = merge_trees(&ProjectMemorySnapshot::default(), &current, &old_snapshot);
-    new_store.replace_tree(&merged.tree)?;
-    let parent = old
-        .parent()
-        .context("old memory project directory is missing")?;
-    fs::create_dir_all(parent)?;
-    crate::config::atomic_write(
-        &parent.join("memory-redirect.json"),
-        &serde_json::to_vec(&new)?,
-    )?;
-    drop(locks);
-    Ok(merged
-        .conflicts
-        .into_iter()
-        .map(|conflict| conflict.path)
-        .collect())
 }
 
 pub fn truncate_startup_index(content: &str) -> String {
@@ -1155,6 +1812,9 @@ fn validate_virtual_path(path: &str) -> Result<PathBuf> {
     if path == "/" {
         bail!("memory document path cannot be the root");
     }
+    if path.ends_with('/') {
+        bail!("memory document path cannot end with a slash");
+    }
     let mut relative = PathBuf::new();
     for component in Path::new(path).components() {
         match component {
@@ -1221,6 +1881,15 @@ mod tests {
             &file_snapshot(canonical),
             &file_snapshot(replica),
         )
+    }
+
+    #[test]
+    fn merge_trees_drop_empty_and_whitespace_documents() {
+        for content in ["", " \n\t"] {
+            let merged = merge_file(None, None, Some(content));
+            assert!(merged.tree.files.is_empty(), "content: {content:?}");
+            assert!(merged.conflicts.is_empty(), "content: {content:?}");
+        }
     }
 
     fn seed_file(store: &ProjectMemoryStore, path: &str, content: &str) {
@@ -1432,6 +2101,62 @@ mod tests {
         );
     }
 
+    // Hard-won: e0573215d: interrupted delivery could advance its record before directory changes were durable.
+    #[test]
+    fn delivery_retries_sync_of_all_potentially_changed_directories_deepest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        fs::create_dir_all(root.join("notes/old")).unwrap();
+        fs::write(root.join("notes/old/remove.md"), "old").unwrap();
+        let handout = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes/old/remove.md".into(), "old".into())]),
+        };
+        let incoming = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes/new/deep/note.md".into(), "new".into())]),
+        };
+        let prepared_handout = prepare_memory_tree(&handout).unwrap();
+        let prepared_incoming = prepare_memory_tree(&incoming).unwrap();
+        let store = ProjectMemoryStore::new(&root);
+        let failed = store.apply_delivery_with_sync(
+            &prepared_handout,
+            &prepared_incoming,
+            MemoryApplyMode::Delivery,
+            |_, _| anyhow::bail!("injected directory sync failure"),
+        );
+        assert!(failed.is_err());
+        assert!(!root.join("notes/old/remove.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("notes/new/deep/note.md")).unwrap(),
+            "new"
+        );
+        let mut synced = Vec::new();
+        store
+            .apply_delivery_with_sync(
+                &prepared_handout,
+                &prepared_incoming,
+                MemoryApplyMode::PreserveEdits,
+                |path, directory| {
+                    synced.push(path.to_path_buf());
+                    match directory {
+                        Some(directory) => directory.sync(),
+                        None => crate::config::sync_directory(path),
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            synced,
+            vec![
+                root.join("notes/new/deep"),
+                root.join("notes/new"),
+                root.join("notes/old"),
+                root.join("notes"),
+                root.clone(),
+                temp.path().to_path_buf()
+            ]
+        );
+    }
+
     // Hard-won: #1419: a link planted in the memory tree redirected sync deletes and writes outside it.
     #[cfg(unix)]
     #[test]
@@ -1451,15 +2176,22 @@ mod tests {
         store
             .replace_tree(&ProjectMemorySnapshot::default())
             .unwrap();
-        // Writing a document under the link is refused instead of followed.
+        // Store writes refuse the link; rendering unlinks it and creates a
+        // real directory without following it.
         let write = ProjectMemorySnapshot {
             files: BTreeMap::from([("/notes/a.md".into(), "sync content".into())]),
         };
         assert!(store.replace_tree(&write).is_err());
         assert!(store.install_snapshot(&write).is_err());
+        render_memory_tree(&root, &write, false).unwrap();
 
         assert_eq!(fs::read_to_string(outside.join("a.md")).unwrap(), "victim");
-        assert!(root.join("notes").is_symlink());
+        assert!(root.join("notes").is_dir());
+        assert!(!root.join("notes").is_symlink());
+        assert_eq!(
+            fs::read_to_string(root.join("notes/a.md")).unwrap(),
+            "sync content"
+        );
     }
 
     // Hard-won: a5d320817: memory trees above one MiB prevented Move, Suspend and recovery checkpoints.
@@ -1509,17 +2241,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("project/memory");
         let store = ProjectMemoryStore::new(&root);
-        store
-            .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/memory.md".into(), "read version".into())]),
-            })
-            .unwrap();
+        let initial = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/memory.md".into(), "read version".into())]),
+        };
+        store.install_snapshot(&initial).unwrap();
         let expected = read_canonical(&root).unwrap().version();
-        store
-            .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/memory.md".into(), "changed later".into())]),
-            })
-            .unwrap();
+        let later = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/memory.md".into(), "changed later".into())]),
+        };
+        assert_eq!(
+            swap_canonical(&root, &expected, &later).unwrap(),
+            SwapOutcome::Swapped
+        );
         let replacement = ProjectMemorySnapshot {
             files: BTreeMap::from([("/replacement.md".into(), "must not write".into())]),
         };
@@ -1533,6 +2266,70 @@ mod tests {
             "changed later"
         );
         assert!(!root.join("replacement.md").exists());
+    }
+
+    // Hard-won: 518a785f0: a project merge committed an unrenderable tree before rendering.
+    #[test]
+    fn project_merge_rejects_unrenderable_tree_before_writing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("old/memory");
+        let destination = directory.path().join("new/memory");
+        let source_state = read_canonical_state(&source).unwrap();
+        let source_tree = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes/topic.md".into(), "source".into())]),
+        };
+        assert_eq!(
+            commit_canonical(&source, &source_state, "source", &source_tree, None).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let destination_state = read_canonical_state(&destination).unwrap();
+        let destination_file = canonical_file(&destination).unwrap();
+        let before_invalid_commit = fs::read(&destination_file).unwrap();
+        for tree in [
+            ProjectMemorySnapshot {
+                files: BTreeMap::from([("/notes/".into(), "old alias".into())]),
+            },
+            ProjectMemorySnapshot {
+                files: BTreeMap::from([
+                    ("/notes".into(), "parent".into()),
+                    ("/notes/topic.md".into(), "child".into()),
+                ]),
+            },
+        ] {
+            assert!(
+                commit_canonical(&destination, &destination_state, "destination", &tree, None)
+                    .is_err()
+            );
+            assert!(render_memory_tree(&directory.path().join("rejected"), &tree, false).is_err());
+            assert_eq!(fs::read(&destination_file).unwrap(), before_invalid_commit);
+        }
+
+        // A previously accepted on-disk canonical tree can contain this alias.
+        // Merge used to miss its collision with /notes/topic.md and commit it.
+        let mut legacy = destination_state;
+        legacy
+            .tree
+            .files
+            .insert("/notes/".into(), "old alias".into());
+        legacy.version = legacy.tree.version();
+        fs::write(&destination_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let before_merge = fs::read(&destination_file).unwrap();
+        let merged = merge_trees(
+            &ProjectMemorySnapshot::default(),
+            &legacy.tree,
+            &source_tree,
+        );
+        assert!(merged.tree.files.contains_key("/notes/"));
+        assert!(merged.tree.files.contains_key("/notes/topic.md"));
+        assert!(merge_canonical_stores(&source, &destination).is_err());
+        assert_eq!(fs::read(&destination_file).unwrap(), before_merge);
+        assert!(
+            !source
+                .parent()
+                .unwrap()
+                .join("memory-redirect.json")
+                .exists()
+        );
     }
 
     #[test]
@@ -1589,6 +2386,252 @@ mod tests {
                 .unwrap()
                 .files
                 .contains_key("/late.md")
+        );
+    }
+    #[test]
+    fn canonical_concurrent_sessions_retry_and_preserve_both_commits() {
+        use std::sync::{Arc, Barrier};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project/memory");
+        let initial = read_canonical_state(&root).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                let initial = initial.clone();
+                std::thread::spawn(move || {
+                    let mut expected = initial;
+                    barrier.wait();
+                    loop {
+                        let mut tree = expected.tree.clone();
+                        tree.files.insert(format!("/{id}.md"), id.to_owned());
+                        if commit_canonical(&root, &expected, id, &tree, Some(id)).unwrap()
+                            == SwapOutcome::Swapped
+                        {
+                            break;
+                        }
+                        expected = read_canonical_state(&root).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(state.tree.files.len(), 2);
+        assert_eq!(state.absorbed.get("a").unwrap(), "a");
+        assert_eq!(state.absorbed.get("b").unwrap(), "b");
+        // A different tree can have the same version when only this session's
+        // acknowledgement changed; the session check must still reject it.
+        assert_eq!(
+            commit_canonical(&root, &initial, "a", &initial.tree, Some("later")).unwrap(),
+            SwapOutcome::Changed
+        );
+        let before_ack = state.clone();
+        assert_eq!(
+            commit_canonical(&root, &state, "a", &state.tree, Some("new")).unwrap(),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(
+            commit_canonical(&root, &before_ack, "a", &state.tree, Some("stale")).unwrap(),
+            SwapOutcome::Changed
+        );
+    }
+
+    #[test]
+    fn canonical_interrupted_before_rename_preserves_previous_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project/memory");
+        let old = read_canonical_state(&root).unwrap();
+        let mut next = old.clone();
+        next.tree = file_snapshot(Some("new"));
+        next.version = next.tree.version();
+        assert!(
+            write_canonical_before_rename(&root, &next, || anyhow::bail!("interrupted")).is_err()
+        );
+        assert_eq!(read_canonical_state(&root).unwrap(), old);
+    }
+
+    // Hard-won: 1e7e59c0d: non-UTF-8 legacy documents blocked canonical migration.
+    // Hard-won: e0573215d: unsupported names blocked canonical migration.
+    #[test]
+    fn canonical_migration_and_render_never_read_stale_directory() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects");
+        let root = projects.join("project/memory");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("MEMORY.md"), "legacy").unwrap();
+        fs::write(root.join("sub/note.md"), "note").unwrap();
+        fs::write(root.join("skills"), "unsupported name kept in backup").unwrap();
+        fs::write(root.join("empty.md"), "").unwrap();
+        fs::write(root.join("whitespace.md"), " \n\t").unwrap();
+        fs::write(root.join(".hidden"), "hidden").unwrap();
+        fs::write(root.join("sub/.hidden"), "nested hidden").unwrap();
+        // A directory whose only leftover is hidden must not block a document
+        // that takes its name. The render owns everything inside it.
+        fs::create_dir_all(root.join("topic")).unwrap();
+        fs::write(root.join("topic/.secret"), "secret").unwrap();
+        fs::create_dir_all(root.parent().unwrap().join("memory.pre-migration")).unwrap();
+        let bad = projects.join("bad-utf8/memory");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("note.md"), [0xff, 0xfe]).unwrap();
+        fs::write(bad.join("valid.md"), "kept").unwrap();
+        // Resume after a crash between preserving the old directory and the
+        // canonical file commit.
+        let recovering = projects.join("recovering");
+        let pending = recovering.join(".memory-migration-pending");
+        fs::create_dir_all(pending.join("notes")).unwrap();
+        fs::write(pending.join("notes/a.md"), "recover me").unwrap();
+        fs::write(pending.join("notes/.hidden"), "keep me").unwrap();
+        let lazy = projects.join("lazy/memory");
+        fs::create_dir_all(lazy.join("notes")).unwrap();
+        fs::write(lazy.join("notes/a.md"), "lazy migration").unwrap();
+        fs::write(lazy.join("notes/.hidden"), "preserved").unwrap();
+        read_canonical(&lazy).unwrap();
+        assert_eq!(
+            fs::read_to_string(lazy.join("notes/a.md")).unwrap(),
+            "lazy migration"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                lazy.parent()
+                    .unwrap()
+                    .join("memory.pre-migration/notes/.hidden")
+            )
+            .unwrap(),
+            "preserved"
+        );
+        let alias = projects.join("alias/memory");
+        fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        fs::write(
+            alias.parent().unwrap().join("memory-redirect.json"),
+            serde_json::to_vec(&root).unwrap(),
+        )
+        .unwrap();
+        let expected = ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "legacy".into()),
+                ("/sub/note.md".into(), "note".into()),
+            ]),
+        };
+        assert_eq!(
+            read_canonical(&recovering.join("memory")).unwrap().files["/notes/a.md"],
+            "recover me"
+        );
+        assert_eq!(read_canonical(&root).unwrap(), expected);
+        let migrated_bad = read_canonical(&bad).unwrap();
+        assert_eq!(
+            migrated_bad.files,
+            BTreeMap::from([("/valid.md".into(), "kept".into())])
+        );
+        assert_eq!(
+            fs::read(bad.parent().unwrap().join("memory.pre-migration/note.md")).unwrap(),
+            [0xff, 0xfe]
+        );
+        let warnings = log.at(tracing::Level::WARN);
+        assert!(
+            warnings.iter().any(|line| line.contains("bad-utf8")
+                && line.contains("/note.md")
+                && line.contains("non-UTF-8")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(recovering.join("memory/notes/a.md")).unwrap(),
+            "recover me"
+        );
+        assert_eq!(
+            fs::read_to_string(recovering.join("memory.pre-migration/notes/.hidden")).unwrap(),
+            "keep me"
+        );
+        assert_eq!(read_canonical(&root).unwrap(), expected);
+        let backup = root.parent().unwrap().join("memory.pre-migration.1");
+        assert_eq!(
+            fs::read_to_string(backup.join("skills")).unwrap(),
+            "unsupported name kept in backup"
+        );
+        assert!(
+            warnings.iter().any(|line| line.contains("project")
+                && line.contains("/skills")
+                && line.contains("name memory cannot hold")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join(".hidden")).unwrap(),
+            "hidden"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("sub/.hidden")).unwrap(),
+            "nested hidden"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("topic/.secret")).unwrap(),
+            "secret"
+        );
+        assert!(!root.join(".hidden").exists());
+        assert!(!root.join("topic").exists());
+        assert!(!root.join("empty.md").exists());
+        assert!(!root.join("whitespace.md").exists());
+        assert!(bad.parent().unwrap().join("memory.json").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&root.join("MEMORY.md")), 0o400);
+            assert_eq!(mode(&root.join("sub")), 0o500);
+            assert_eq!(mode(&root), 0o500);
+            assert_eq!(mode(&root.parent().unwrap().join("memory.json")), 0o600);
+            assert_eq!(mode(&root.parent().unwrap().join(".memory.lock")), 0o600);
+        }
+        set_render_directory_writable(&ConfinedDir::open_root(&root).unwrap().unwrap()).unwrap();
+        fs::remove_file(root.join("MEMORY.md")).unwrap();
+        fs::write(root.join("MEMORY.md"), "stale edit").unwrap();
+        assert_eq!(read_canonical(&root).unwrap(), expected);
+        assert_eq!(
+            fs::read_to_string(root.join("MEMORY.md")).unwrap(),
+            "stale edit"
+        );
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(
+            commit_canonical(&root, &state, "", &state.tree, None).unwrap(),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("MEMORY.md")).unwrap(),
+            "legacy"
+        );
+        assert_eq!(read_canonical(&root).unwrap(), expected);
+    }
+
+    #[test]
+    fn commit_reports_success_when_render_fails_after_rename() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project/memory");
+        let old = read_canonical_state(&root).unwrap();
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::write(&root, b"not a directory").unwrap();
+        let mut tree = old.tree.clone();
+        tree.files.insert("/note.md".to_owned(), "kept".to_owned());
+        assert_eq!(
+            commit_canonical(&root, &old, "session", &tree, Some("snap")).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(state.tree.files.get("/note.md").unwrap(), "kept");
+        assert_eq!(state.absorbed.get("session").unwrap(), "snap");
+        let warnings = log.at(tracing::Level::WARN);
+        assert!(
+            warnings.iter().any(|line| line.contains("project")
+                && line.contains("project memory render failed after the commit")),
+            "{warnings:?}"
         );
     }
 }

@@ -297,9 +297,10 @@ mod tests {
             serde_json::to_vec(&second).unwrap(),
         )
         .unwrap();
-        for name in ["launch.json", "ownership.json"] {
-            std::fs::write(candidate.join(name), "destination").unwrap();
-        }
+        let mut launch = crate::test_support::launch_config(home.to_str().unwrap());
+        launch.harness = HarnessKind::OpenCode;
+        launch.write(&candidate.join("launch.json")).unwrap();
+        std::fs::write(candidate.join("ownership.json"), "destination").unwrap();
         let manifest = ReloadCandidateManifest {
             operation_id: "move".into(),
             expected_store_id: "store".into(),
