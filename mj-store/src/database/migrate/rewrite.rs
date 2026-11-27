@@ -27,7 +27,7 @@ pub struct MigrationRewriteSpec {
     pub staged_sessions_dir: PathBuf,
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct StoreRewriteSummary {
     pub session_targets: usize,
     pub environment_workers: usize,
@@ -912,6 +912,21 @@ pub fn apply_store_migration(
         }
     }
     tx.commit()?;
+    drop(connection);
+    // The rewrite is committed; a crash or failure here leaves it durable, so
+    // the caller can repeat this function or only the truncation.
+    checkpoint_truncate_fenced_store(path)?;
+    Ok(summary)
+}
+
+/// Fold the staged store's WAL into its main file and truncate it, so the file
+/// can be moved alone. The store stays fenced. Safe to repeat.
+pub fn checkpoint_truncate_fenced_store(path: &Path) -> Result<()> {
+    let connection = super::super::schema::open_writable_ignoring_fence(path)?;
+    ensure!(
+        read_store_fence(&connection)?.is_some(),
+        "staged store is not fenced"
+    );
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -920,7 +935,7 @@ pub fn apply_store_migration(
         busy == 0,
         "could not truncate staged store WAL: another connection holds it"
     );
-    Ok(summary)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1061,6 +1076,57 @@ mod tests {
             discovery, 1,
             "session UPDATE must not create discovery work"
         );
+    }
+
+    #[test]
+    fn migration_rewrite_is_idempotent_when_retried_after_commit() {
+        let (_root, path, spec) = fixture();
+        let mut session = super::super::super::tests::session("one", "project");
+        session.checkpoint = None;
+        session.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: DataLayout::at(&spec.old_data_root).worker_root("one"),
+        }));
+        session.target_runtime = Some(Arc::new(TargetRuntimeSettings::from(
+            &mj_core::config::TargetTemplate::LocalBare,
+        )));
+        session.project_directory = Some("/work/project".into());
+        save_session_to(&path, &session).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        set_store_fence(&connection, &spec.expected_fence).unwrap();
+        drop(connection);
+        let snapshot = || {
+            let connection = Connection::open(&path).unwrap();
+            let mut rows = Vec::new();
+            for sql in [
+                "SELECT kind||host||machine_id||hex(data_root) FROM session_targets",
+                "SELECT target_template_id||coalesce(target_runtime_json,'') FROM sessions",
+                "SELECT session_id||memory_key FROM session_memory_keys",
+                "SELECT sequence||target_template_id FROM project_discovery_changes",
+                "SELECT destination||fenced_host FROM store_fence",
+            ] {
+                let mut query = connection.prepare(sql).unwrap();
+                rows.extend(
+                    query
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap(),
+                );
+            }
+            rows
+        };
+        let first = apply_store_migration(&path, &spec).unwrap();
+        let after_first = snapshot();
+        // A crash after the commit but before the rename leaves this state behind.
+        let second = apply_store_migration(&path, &spec).unwrap();
+        assert_eq!(first.session_targets, 1);
+        assert_eq!(second.pinned_memory_keys, first.pinned_memory_keys);
+        assert_eq!(snapshot(), after_first);
+        // Truncation alone is repeatable and leaves an empty WAL.
+        checkpoint_truncate_fenced_store(&path).unwrap();
+        checkpoint_truncate_fenced_store(&path).unwrap();
+        let wal = path.with_file_name("mj.sqlite3-wal");
+        assert!(!wal.exists() || std::fs::metadata(wal).unwrap().len() == 0);
     }
 
     #[test]

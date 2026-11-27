@@ -156,6 +156,44 @@ pub fn fence_configured_store(
     Ok((record, previous))
 }
 
+/// The fence of the store file at `path`, read without creating, migrating, or
+/// writing it. A missing database is unfenced.
+pub fn read_store_fence_file(path: &Path) -> Result<Option<StoreFenceRecord>> {
+    schema::read_store_fence_at(path)
+}
+
+/// Write `record` as the fence of the store file at `path`. The caller holds
+/// that store's controller lock, so no daemon writes it.
+pub fn set_store_fence_file(path: &Path, record: &StoreFenceRecord) -> Result<()> {
+    let connection = schema::open_writable_ignoring_fence(path)?;
+    set_store_fence(&connection, record)
+}
+
+/// Remove the fence from the store file at `path` in one SQLite commit, only
+/// if it is exactly `expected`, then fold and truncate the WAL (best effort).
+/// The commit is a migration's activation: once this returns `Ok` or the
+/// commit returns, the store is unfenced.
+pub fn clear_store_fence_file(path: &Path, expected: &StoreFenceRecord) -> Result<()> {
+    let mut connection = schema::open_writable_ignoring_fence(path)?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let fence = read_store_fence(&transaction)?.context("store is not fenced")?;
+    ensure!(
+        fence.matches_snapshot(expected),
+        "store fence does not match the migration being activated"
+    );
+    clear_store_fence(&transaction)?;
+    transaction.commit().context("commit store unfence")?;
+    // The unfence is durable. Folding the WAL only tidies the file, so a
+    // failure must not look like a failed activation.
+    if let Err(error) = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    }) {
+        tracing::warn!(%error, "could not truncate store WAL after unfence");
+    }
+    Ok(())
+}
+
 /// Remove the fence from the configured store. A store with no fence is left
 /// untouched, not even migrated. Returns the fence that was removed.
 pub fn unfence_configured_store() -> Result<Option<StoreFenceRecord>> {

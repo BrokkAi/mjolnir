@@ -84,6 +84,57 @@ pub enum ActorCommand {
     },
 }
 
+/// Owns the queue even if its actor task is aborted during an await.
+pub struct ActorCommandQueue {
+    commands: mpsc::Receiver<ActorCommand>,
+    session_id: String,
+}
+
+impl ActorCommandQueue {
+    pub fn new(commands: mpsc::Receiver<ActorCommand>, session_id: String) -> Self {
+        Self {
+            commands,
+            session_id,
+        }
+    }
+
+    pub fn close_and_drain(&mut self) {
+        self.commands.close();
+        while let Ok(command) = self.commands.try_recv() {
+            match command {
+                ActorCommand::Submit { reply, .. } => {
+                    if reply.send(Err("session manager stopped".into())).is_err() {
+                        tracing::debug!(session_id = %self.session_id, operation = "submit", "queued submit shutdown receiver was already closed");
+                    }
+                }
+                ActorCommand::RelayJob { job } => {
+                    job.refuse(RelayJobDeferred(RELAY_JOB_ACTOR_STOPPED).into())
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for ActorCommandQueue {
+    type Target = mpsc::Receiver<ActorCommand>;
+    fn deref(&self) -> &Self::Target {
+        &self.commands
+    }
+}
+
+impl std::ops::DerefMut for ActorCommandQueue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.commands
+    }
+}
+
+impl Drop for ActorCommandQueue {
+    fn drop(&mut self) {
+        self.close_and_drain();
+    }
+}
+
 /// Work run on a session actor's own relay connection, in turn with the
 /// actor's other relay traffic. A periodic exchange such as credential sync
 /// uses this instead of opening a connection of its own to every worker.
@@ -101,6 +152,8 @@ pub trait RelayConnectionJob: Send + Sync + 'static {
 
 pub const RELAY_JOB_LEASED: &str = "a lifecycle operation holds the relay connection";
 pub const RELAY_JOB_RECONNECTING: &str = "the relay connection is reconnecting";
+pub const RELAY_JOB_TARGET_CHANGING: &str = "session target is changing";
+pub const RELAY_JOB_ACTOR_STOPPED: &str = "session actor stopped";
 
 /// The actor had no connection to lend: a lifecycle operation holds it, or
 /// the actor is reconnecting. The job belongs to the next cycle.
@@ -270,6 +323,7 @@ impl ActorLifecycle {
 
 pub struct ActorRegistration {
     pub target: RelaySessionTarget,
+    pub worker_recovery: watch::Sender<Option<WorkerRecoveryPlan>>,
     pub commands: mpsc::Sender<ActorCommand>,
     pub releases: mpsc::UnboundedSender<ReturnedConnection>,
     pub retirement: watch::Sender<bool>,

@@ -88,6 +88,8 @@ const DAEMON_LOG: &str = "daemon.log";
 const LOGS: &str = "logs";
 const DIAGNOSTICS: &str = "diagnostics";
 const JEV_DECISIONS: &str = "jev-decisions";
+/// Receiver staging for `mj migrate`; never carried to another host.
+const MIGRATE_STAGE: &str = ".mj-migrate-stage";
 const INSTANCES: &str = super::loading::INSTANCE_DIR;
 
 // Configuration directory names.
@@ -147,6 +149,7 @@ const DATA_ENTRIES: &[(&str, MigrateAction)] = &[
     (LOGS, MigrateAction::CopyOptional),
     (DIAGNOSTICS, MigrateAction::CopyOptional),
     (JEV_DECISIONS, MigrateAction::CopyOptional),
+    (MIGRATE_STAGE, MigrateAction::Skip),
     // Legacy leftovers; current code no longer writes these diagnostics.
     ("backups", MigrateAction::CopyOptional),
     ("moves", MigrateAction::CopyOptional),
@@ -281,6 +284,10 @@ mod migration_classification_tests {
                 Classification::Known(MigrateAction::Skip),
             ),
             ("node.log", Classification::Known(MigrateAction::Skip)),
+            (
+                ".mj-migrate-stage/raw/data/mj.sqlite3",
+                Classification::Known(MigrateAction::Skip),
+            ),
             ("sessions/id/user-file", Classification::Unknown),
             ("user-file", Classification::Unknown),
         ] {
@@ -322,6 +329,12 @@ impl DataLayout {
 
     pub fn database(&self) -> PathBuf {
         self.entry(DATABASE)
+    }
+    pub fn database_wal(&self) -> PathBuf {
+        self.entry(DATABASE_WAL)
+    }
+    pub fn database_shm(&self) -> PathBuf {
+        self.entry(DATABASE_SHM)
     }
     pub fn tool_details_dir(&self) -> PathBuf {
         self.entry(TOOL_DETAILS)
@@ -455,6 +468,10 @@ impl DataLayout {
     }
     pub fn jev_decisions_dir(&self) -> PathBuf {
         self.entry(JEV_DECISIONS)
+    }
+    /// Where `mj migrate-receive` stages an incoming store before publication.
+    pub fn migrate_stage(&self) -> PathBuf {
+        self.entry(MIGRATE_STAGE)
     }
     /// Named instances under the default data directory; each child is a
     /// complete store.

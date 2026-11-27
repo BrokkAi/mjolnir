@@ -193,8 +193,25 @@ fn startup_notice_interval() -> Duration {
 /// The daemon startup lock held exclusively: the only hold under which a
 /// client may start, stop or replace the daemon.
 #[derive(Debug)]
-struct DaemonStartGuard {
+pub(crate) struct DaemonStartGuard {
     _lock: StartLock,
+}
+
+/// Proof that the startup lock is held for the duration of an operation.
+struct StartLockHeld<'a>(std::marker::PhantomData<&'a DaemonStartGuard>);
+
+impl<'a> From<&'a DaemonStartGuard> for StartLockHeld<'a> {
+    fn from(_: &'a DaemonStartGuard) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl StartLockHeld<'_> {
+    /// The migration receiver owns the real lock until its callback returns.
+    #[cfg(unix)]
+    fn already_held() -> Self {
+        Self(std::marker::PhantomData)
+    }
 }
 
 /// The daemon startup lock held shared: enough to use the running daemon,
@@ -207,7 +224,7 @@ struct SharedStartGuard {
 
 type StartLock = mj_core::file_lock::FileLock;
 
-async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
+pub(crate) async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
     acquire_start_lock(path, false)
         .await
         .map(|lock| DaemonStartGuard { _lock: lock })
@@ -359,13 +376,21 @@ async fn connect_or_start_local() -> Result<DaemonClient> {
 /// replacement — must come through here instead of calling
 /// [`connect_or_start`] again. The guard is taken by reference only so the
 /// requirement is visible at every call site.
-async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonClient> {
+pub(crate) async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonClient> {
     let mut prepared = PreparedDaemonLaunch::default();
-    connect_or_start_prepared(startup, &mut prepared).await
+    connect_or_start_prepared(&StartLockHeld::from(startup), &mut prepared).await
+}
+
+/// The migration receiver holds this instance's exclusive start lock across
+/// publication and this call. The lock is owned by the receiver, not this guard.
+#[cfg(unix)]
+pub(crate) async fn connect_or_start_with_held_start_lock() -> Result<DaemonClient> {
+    let mut prepared = PreparedDaemonLaunch::default();
+    connect_or_start_prepared(&StartLockHeld::already_held(), &mut prepared).await
 }
 
 async fn connect_or_start_prepared(
-    startup: &DaemonStartGuard,
+    startup: &StartLockHeld<'_>,
     prepared: &mut PreparedDaemonLaunch,
 ) -> Result<DaemonClient> {
     maybe_replace_stale_development_daemon(startup, prepared).await?;
@@ -1339,7 +1364,7 @@ enum PreparedDaemon {
 /// answers or provably exits; starting another beside it could leave two
 /// daemons serving one instance.
 async fn prepare_existing_daemon(
-    startup: &DaemonStartGuard,
+    startup: &StartLockHeld<'_>,
     prepared: &mut PreparedDaemonLaunch,
 ) -> Result<PreparedDaemon> {
     let asked = Instant::now();
@@ -1544,7 +1569,8 @@ pub(crate) async fn stop_instance(force: bool) -> Result<bool> {
 
 /// [`stop_instance`] for a caller that already holds the startup lock and
 /// needs it held after the stop, as `mj daemon fence` does.
-async fn stop_instance_holding(startup: &DaemonStartGuard, force: bool) -> Result<bool> {
+pub(crate) async fn stop_instance_holding(startup: &DaemonStartGuard, force: bool) -> Result<bool> {
+    let startup = &StartLockHeld::from(startup);
     let fallback = if force {
         StopFallback::Force
     } else {
@@ -1578,7 +1604,7 @@ fn clear_unreadable_container_owner() -> Result<()> {
 }
 
 async fn stop_pending_container(
-    startup: &DaemonStartGuard,
+    startup: &StartLockHeld<'_>,
     record: &ContainerDaemonRecord,
     force: bool,
 ) -> Result<bool> {
@@ -1634,6 +1660,7 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
     // while the old one still runs.
     ensure_config_loads(&mj_core::config::config_path(), "restarted")?;
     let startup = acquire_start_guard(DataLayout::current().daemon_start_lock()).await?;
+    let held = StartLockHeld::from(&startup);
     let mut prepared = PreparedDaemonLaunch::default();
     for attempt in 1..=RESTART_ATTEMPTS {
         prepared.resolve(host_daemon_login_environment).await?;
@@ -1658,12 +1685,12 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
                      start this older build instead."
                 )
             );
-            ensure_container_owner_recorded(&startup, &metadata, &identity.placement).await?;
+            ensure_container_owner_recorded(&held, &metadata, &identity.placement).await?;
             // Keep restart's ability to stop an unresponsive tracked daemon.
             // Clearing an untracked container record requires explicit stop --force.
-            stop_daemon(&startup, &metadata, StopFallback::Restart).await?;
+            stop_daemon(&held, &metadata, StopFallback::Restart).await?;
         }
-        let mut client = connect_or_start_prepared(&startup, &mut prepared).await?;
+        let mut client = connect_or_start_prepared(&held, &mut prepared).await?;
         let status = client.status().await?;
         let identity = client.identity().await?;
         let runs_this_build = daemon_runs_this_build(&identity)?;
@@ -1973,7 +2000,7 @@ fn development_workers_changed_since(
 }
 
 async fn maybe_replace_stale_development_daemon(
-    _startup: &DaemonStartGuard,
+    _startup: &StartLockHeld<'_>,
     _prepared: &mut PreparedDaemonLaunch,
 ) -> Result<()> {
     if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
@@ -2023,7 +2050,7 @@ async fn maybe_replace_stale_development_daemon(
 /// Automatic upgrades have no authority to cancel work, even when a daemon
 /// is slow or temporarily unreachable. Explicit restart uses `stop_daemon`.
 async fn replace_daemon(
-    startup: &DaemonStartGuard,
+    startup: &StartLockHeld<'_>,
     metadata: &DaemonMetadata,
     placement: &DaemonPlacement,
     prepared: &mut PreparedDaemonLaunch,
@@ -2039,7 +2066,7 @@ async fn replace_daemon(
 }
 
 async fn replace_daemon_with_resolver(
-    startup: &DaemonStartGuard,
+    startup: &StartLockHeld<'_>,
     metadata: &DaemonMetadata,
     placement: &DaemonPlacement,
     prepared: &mut PreparedDaemonLaunch,
@@ -2334,7 +2361,7 @@ async fn upgrade_blockers(metadata: &DaemonMetadata) -> Option<Vec<String>> {
 }
 
 async fn ensure_container_owner_recorded(
-    _startup: &DaemonStartGuard,
+    _startup: &StartLockHeld<'_>,
     metadata: &DaemonMetadata,
     placement: &DaemonPlacement,
 ) -> Result<()> {
@@ -2382,7 +2409,7 @@ enum StopFallback {
 
 /// Whether the configured daemon runs in a container, whose store lives in
 /// the container's volume rather than in this data directory.
-async fn daemon_configured_for_container() -> bool {
+pub(crate) async fn daemon_configured_for_container() -> bool {
     load_daemon_config()
         .await
         .map(|daemon| daemon.runtime.engine().is_some())
@@ -2476,7 +2503,7 @@ pub(crate) async fn unfence_store() -> Result<Option<mj_controller::database::St
 }
 
 async fn stop_daemon(
-    startup: &DaemonStartGuard,
+    startup: &StartLockHeld<'_>,
     metadata: &DaemonMetadata,
     fallback: StopFallback,
 ) -> Result<bool> {
@@ -3575,7 +3602,7 @@ esac
             let error = tokio::time::timeout(
                 Duration::from_secs(5),
                 replace_daemon(
-                    &startup,
+                    &StartLockHeld::from(&startup),
                     &metadata,
                     &identity.placement,
                     &mut PreparedDaemonLaunch::default(),
@@ -4375,7 +4402,7 @@ esac
             .unwrap();
         let mut prepared = PreparedDaemonLaunch::default();
         let error = replace_daemon_with_resolver(
-            &startup,
+            &StartLockHeld::from(&startup),
             &metadata,
             &DaemonPlacement::Host,
             &mut prepared,

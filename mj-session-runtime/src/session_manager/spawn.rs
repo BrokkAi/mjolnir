@@ -299,7 +299,11 @@ fn active_actor_handle(
     actors
         .get(session_id)
         .filter(|actor| !actor.commands.is_closed())
-        .filter(|actor| desired_targets.get(session_id) == Some(&actor.target))
+        .filter(|actor| {
+            desired_targets
+                .get(session_id)
+                .is_some_and(|desired| actor.target.same_actor_identity(desired))
+        })
         .map(|actor| ManagedSessionHandle {
             session_id: session_id.to_owned(),
             commands: actor.commands.clone(),

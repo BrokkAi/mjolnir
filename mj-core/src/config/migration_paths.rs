@@ -1,9 +1,20 @@
 //! Component-aware relocation of connection files during host migration.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+/// `path` relative to `root` when it is lexically inside it. A path such as
+/// `<root>/../shared` has `root` as a textual prefix but names a place outside
+/// it, so any relative part other than plain names is refused.
+pub fn strip_normal_prefix<'a>(path: &'a Path, root: &Path) -> Option<&'a Path> {
+    let relative = path.strip_prefix(root).ok()?;
+    relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+        .then_some(relative)
+}
 
 pub fn relocate_ec2_path(path: &mut PathBuf, old_config: &Path, new_config: &Path) {
-    if let Ok(relative) = path.strip_prefix(old_config.join("ec2")) {
+    if let Some(relative) = strip_normal_prefix(path, &old_config.join("ec2")) {
         *path = new_config.join("ec2").join(relative);
     }
 }
@@ -15,11 +26,11 @@ pub fn relocate_ssh_identity_path(
     old_home: &Path,
     new_home: &Path,
 ) {
-    if let Ok(relative) = path.strip_prefix(old_config)
+    if let Some(relative) = strip_normal_prefix(path, old_config)
         && !relative.starts_with("instances")
     {
         *path = new_config.join(relative);
-    } else if let Ok(relative) = path.strip_prefix(old_home) {
+    } else if let Some(relative) = strip_normal_prefix(path, old_home) {
         *path = new_home.join(relative);
     }
 }
@@ -59,6 +70,17 @@ pub fn extract_ssh_identity_arg_paths(args: &[String]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for_each_ssh_path(&mut args.to_vec(), |path, identity| {
         if identity {
+            paths.push(path.clone());
+        }
+    });
+    paths
+}
+
+/// Extract known-hosts paths from the SSH argument forms this module relocates.
+pub fn extract_ssh_known_hosts_arg_paths(args: &[String]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for_each_ssh_path(&mut args.to_vec(), |path, identity| {
+        if !identity {
             paths.push(path.clone());
         }
     });

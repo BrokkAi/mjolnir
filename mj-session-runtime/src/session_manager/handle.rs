@@ -346,7 +346,7 @@ impl ManagedSessionHandle {
         if let Err(error) = self.commands.send(ActorCommand::RelayJob { job }).await
             && let ActorCommand::RelayJob { job } = error.0
         {
-            job.refuse(anyhow::anyhow!("session actor stopped"));
+            job.refuse(RelayJobDeferred(crate::session_manager::RELAY_JOB_ACTOR_STOPPED).into());
         }
     }
 
