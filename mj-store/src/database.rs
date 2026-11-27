@@ -32,6 +32,8 @@ use mj_core::workspace::{
 };
 
 const SCHEMA_VERSION: i64 = 164;
+/// The schema revision this build reads and writes, for migration peers to compare.
+pub const STORE_SCHEMA_VERSION: i64 = SCHEMA_VERSION;
 
 mod memory_keys;
 pub use memory_keys::*;

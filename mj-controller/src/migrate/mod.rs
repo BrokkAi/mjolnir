@@ -1,7 +1,10 @@
 //! Controller host migration support.
 
+pub mod pin;
 pub mod preflight;
+pub mod protocol;
 pub mod rewrite;
+pub mod transfer;
 
 use anyhow::{Context, Result, ensure};
 use mj_core::config::{Config, DataLayout};

@@ -359,7 +359,9 @@ pub fn rewrite_staged_config_and_files(
             profile.home = profile
                 .kind
                 .managed_profile_home_in(&spec.new_config_root, id);
-        } else if let Ok(relative) = profile.home.strip_prefix(&spec.old_home) {
+        } else if let Some(relative) =
+            migration_paths::strip_normal_prefix(&profile.home, &spec.old_home)
+        {
             profile.home = spec.new_home.join(relative);
         }
     }

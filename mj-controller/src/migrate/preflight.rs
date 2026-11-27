@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
+use mj_core::config::migration_paths::strip_normal_prefix;
 use mj_core::config::{
     Classification, Config, ConfigLayout, DaemonRuntime, DataLayout, EnvironmentValue, HarnessKind,
     Machine, MigrateAction, classify_config_entry, classify_data_entry,
@@ -21,7 +22,7 @@ pub struct ClassifiedEntry {
     pub size_bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HomeCopy {
     pub source: PathBuf,
     pub destination: PathBuf,
@@ -47,6 +48,10 @@ pub struct MigrationPreflight {
     pub warnings: Vec<String>,
     pub sessionwiki_db: PathBuf,
     pub ec2_resources: Vec<Ec2Resource>,
+    /// Credential files inside the configuration directory (relative to it)
+    /// that are symlinks on the source. The transfer sends their dereferenced
+    /// contents as regular mode-0600 files, so no link dangles on the destination.
+    pub dereference_config_paths: BTreeSet<PathBuf>,
 }
 
 /// `destination_exists` runs on B (for example over the already established
@@ -127,6 +132,7 @@ pub fn inspect_preflight(
         &remote_templates,
     )?;
     let mut home_copies = Vec::new();
+    let mut dereference_config_paths = BTreeSet::new();
     let mut warnings = ec2_warnings;
     let mut checked_destinations = BTreeSet::new();
     for (id, profile) in &config.profiles {
@@ -158,7 +164,7 @@ pub fn inspect_preflight(
         if home == managed {
             continue;
         }
-        let Ok(relative) = home.strip_prefix(old_home) else {
+        let Some(relative) = strip_normal_prefix(&home, old_home) else {
             warnings.push(format!(
                 "profile {id} uses unmanaged home outside source HOME: {}",
                 home.display()
@@ -211,18 +217,18 @@ pub fn inspect_preflight(
     ] {
         if let Some(path) = path {
             let source = mj_core::path_input::expand_home(path, Some(old_home))?;
-            let config_copied = source
-                .strip_prefix(old_config_root)
-                .is_ok_and(|relative| !relative.starts_with("instances"));
-            if config_copied {
+            let config_relative = strip_normal_prefix(&source, old_config_root)
+                .filter(|relative| !relative.starts_with("instances"));
+            if let Some(relative) = config_relative {
                 ensure!(
                     credential_file_exists(&source)?,
                     "{label} does not exist or is not a regular file on source: {}",
                     source.display()
                 );
+                note_symlinked_config_credential(&source, relative, &mut dereference_config_paths)?;
                 continue;
             }
-            if let Ok(relative) = source.strip_prefix(old_home) {
+            if let Some(relative) = strip_normal_prefix(&source, old_home) {
                 ensure!(
                     credential_file_exists(&source)?,
                     "{label} does not exist or is not a regular file on source: {}",
@@ -327,10 +333,12 @@ pub fn inspect_preflight(
     }
     for (path, configured) in identity_paths {
         let source = mj_core::path_input::expand_home(&path, Some(old_home))?;
-        let config_copied = source
-            .strip_prefix(old_config_root)
-            .is_ok_and(|relative| !relative.starts_with("instances"));
-        if (config_copied || source.starts_with(old_home)) && !credential_file_exists(&source)? {
+        let config_relative = strip_normal_prefix(&source, old_config_root)
+            .filter(|relative| !relative.starts_with("instances"));
+        let config_copied = config_relative.is_some();
+        if (config_copied || strip_normal_prefix(&source, old_home).is_some())
+            && !credential_file_exists(&source)?
+        {
             ensure!(
                 !configured,
                 "configured SSH identity does not exist or is not a regular file on source: {}",
@@ -342,10 +350,11 @@ pub fn inspect_preflight(
             ));
             continue;
         }
-        if config_copied {
+        if let Some(relative) = config_relative {
+            note_symlinked_config_credential(&source, relative, &mut dereference_config_paths)?;
             continue;
         }
-        if let Ok(relative) = source.strip_prefix(old_home) {
+        if let Some(relative) = strip_normal_prefix(&source, old_home) {
             let destination = new_home.join(relative);
             check_destination(&destination, &destination_exists, &mut checked_destinations)?;
             home_copies.push(HomeCopy {
@@ -533,7 +542,21 @@ pub fn inspect_preflight(
         warnings,
         sessionwiki_db: mj_core::config::session_index_db_path()?,
         ec2_resources,
+        dereference_config_paths,
     })
+}
+
+fn note_symlinked_config_credential(
+    source: &Path,
+    relative: &Path,
+    paths: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(source)
+        .with_context(|| format!("inspect credential {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        paths.insert(relative.to_path_buf());
+    }
+    Ok(())
 }
 
 fn exists(path: &Path) -> Result<bool> {
@@ -577,7 +600,7 @@ fn plan_extra_home_file(
     copies: &mut Vec<HomeCopy>,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    if let Ok(relative) = source.strip_prefix(old_home) {
+    if let Some(relative) = strip_normal_prefix(source, old_home) {
         if !exists(source)? {
             return Ok(());
         }
@@ -888,14 +911,37 @@ pub fn probe_source_from_destination(
     expected_identity: &str,
     engines: &[String],
 ) -> Result<String> {
+    let arguments = source_probe_arguments(source_data_root, expected_identity, engines)?;
+    let output = probe_nested_ssh(executor, destination, source, arguments)?;
+    Ok(String::from_utf8(output)?.trim().to_owned())
+}
+
+/// The same probe, run by B itself: `executor` runs on B, so `ssh` there uses
+/// B's own OpenSSH configuration and keys.
+pub fn probe_source_directly(
+    executor: &impl mj_core::targets::CommandExecutor,
+    source: &mj_core::targets::SshTarget,
+    source_data_root: &Path,
+    expected_identity: &str,
+    engines: &[String],
+) -> Result<String> {
+    let arguments = source_probe_arguments(source_data_root, expected_identity, engines)?;
+    let output = probe_ssh_directly(executor, source, arguments)?;
+    Ok(String::from_utf8(output)?.trim().to_owned())
+}
+
+fn source_probe_arguments(
+    source_data_root: &Path,
+    expected_identity: &str,
+    engines: &[String],
+) -> Result<Vec<String>> {
     let identity = DataLayout::at(source_data_root).instance_identity();
     let identity = identity
         .to_str()
         .context("source instance-identity path is not UTF-8")?;
     let mut arguments = vec!["sh".to_owned(),"-c".to_owned(),"set -eu; id -un; test \"$(cat \"$1\")\" = \"$2\"; shift 2; for engine do command -v \"$engine\" >/dev/null; done".to_owned(),"mj".to_owned(),identity.to_owned(),expected_identity.to_owned()];
     arguments.extend(engines.iter().cloned());
-    let output = probe_nested_ssh(executor, destination, source, arguments)?;
-    Ok(String::from_utf8(output)?.trim().to_owned())
+    Ok(arguments)
 }
 
 /// Probe a third host with the SSH configuration and credentials effective on B.
@@ -908,18 +954,52 @@ pub fn probe_third_host_from_destination(
     Ok(())
 }
 
+/// The third-host probe, run by B itself.
+pub fn probe_third_host_directly(
+    executor: &impl mj_core::targets::CommandExecutor,
+    third_host: &mj_core::targets::SshTarget,
+) -> Result<()> {
+    probe_ssh_directly(executor, third_host, vec!["true".into()])?;
+    Ok(())
+}
+
+fn batch_mode_command(
+    target: &mj_core::targets::SshTarget,
+    arguments: Vec<String>,
+) -> mj_core::targets::CommandSpec {
+    use mj_core::targets::{SshTrafficClass, ssh_command_owned};
+    let mut inner_target = target.clone();
+    inner_target
+        .ssh_args
+        .extend(["-o".into(), "BatchMode=yes".into()]);
+    ssh_command_owned(SshTrafficClass::Control, &inner_target, arguments)
+}
+
+fn probe_ssh_directly(
+    executor: &impl mj_core::targets::CommandExecutor,
+    target: &mj_core::targets::SshTarget,
+    arguments: Vec<String>,
+) -> Result<Vec<u8>> {
+    let command =
+        batch_mode_command(target, arguments).purpose("probe SSH from migration destination");
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "destination cannot reach {} over SSH: {}",
+        target.destination,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output.stdout)
+}
+
 fn probe_nested_ssh(
     executor: &impl mj_core::targets::CommandExecutor,
     destination: &mj_core::targets::SshTarget,
     target: &mj_core::targets::SshTarget,
     arguments: Vec<String>,
 ) -> Result<Vec<u8>> {
-    use mj_core::targets::{SshTrafficClass, ssh_command, ssh_command_owned};
-    let mut inner_target = target.clone();
-    inner_target
-        .ssh_args
-        .extend(["-o".into(), "BatchMode=yes".into()]);
-    let inner = ssh_command_owned(SshTrafficClass::Control, &inner_target, arguments);
+    use mj_core::targets::{SshTrafficClass, ssh_command};
+    let inner = batch_mode_command(target, arguments);
     let mut command = vec![inner.program];
     command.extend(inner.args);
     let outer = ssh_command(SshTrafficClass::Control, destination, command)
@@ -1348,7 +1428,10 @@ mod tests {
         let preflight = inspect(&config).unwrap();
         for (source, destination) in [
             (&token, new_home.join("secrets/token")),
-            (&old_home.join("secrets/app.pem"), new_home.join("secrets/app.pem")),
+            (
+                &old_home.join("secrets/app.pem"),
+                new_home.join("secrets/app.pem"),
+            ),
             (&identity, new_home.join(".ssh/key")),
         ] {
             assert!(
@@ -1420,6 +1503,33 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("not a regular file")
+        );
+        // A credential symlink inside the config root is sent dereferenced.
+        let linked_key = old_config.join("keys/linked");
+        symlink(&target, &linked_key).unwrap();
+        let Machine::Ssh { ssh, .. } = config.machines.get_mut("ssh").unwrap() else {
+            unreachable!()
+        };
+        ssh.identity_file = Some(linked_key);
+        config.github.session_token_path = Some(old_config.join("keys/id"));
+        let preflight = inspect(&config).unwrap();
+        assert_eq!(
+            preflight.dereference_config_paths,
+            BTreeSet::from([PathBuf::from("keys/linked")])
+        );
+        // `$HOME/../shared` starts with the home path but is outside it.
+        let escaped = old_home.join("../shared-credential");
+        std::fs::write(root.path().join("shared-credential"), "shared").unwrap();
+        let Machine::Ssh { ssh, .. } = config.machines.get_mut("ssh").unwrap() else {
+            unreachable!()
+        };
+        ssh.identity_file = Some(escaped.clone());
+        // Outside HOME means it must already exist on B, not be copied under B's HOME.
+        assert!(
+            inspect(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("configured SSH identity is absent on destination")
         );
     }
 

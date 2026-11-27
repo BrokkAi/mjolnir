@@ -241,6 +241,37 @@ impl ControllerStoreGuard {
         }))
     }
 
+    /// Take `controller.lock` for a migration that publishes a store into
+    /// `directory`. Unlike [`Self::acquire`] this does not create
+    /// `instance-identity`: the migration brings the source store's identity,
+    /// and a random one made here would have to be overwritten.
+    pub fn acquire_migration_lock_at(directory: &Path) -> Result<mj_core::file_lock::FileLock> {
+        mj_core::config::ensure_may_control_store(directory, "own this data store")?;
+        mj_core::config::create_owner_only_directory(directory)
+            .with_context(|| format!("create controller data directory {}", directory.display()))?;
+        let path = mj_core::config::DataLayout::at(directory).controller_lock();
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open controller lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(mj_core::file_lock::FileLock::new(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Err(StoreAlreadyOwnedError {
+                data_dir: directory.to_path_buf(),
+            }
+            .into()),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("lock controller store {}", directory.display()))
+            }
+        }
+    }
+
     /// The ownership identity of this store, from `<data_dir>/instance-identity`.
     pub fn instance_identity(&self) -> &mj_core::config::InstanceIdentity {
         &self.instance_identity
