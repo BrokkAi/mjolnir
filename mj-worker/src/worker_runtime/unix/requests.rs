@@ -1122,6 +1122,80 @@ pub(crate) async fn write_logged_response(
 mod tests {
     use super::*;
 
+    // Hard-won: 1e7e59c0d: snapshot recovery could overwrite a foreground tool's edit.
+    #[test]
+    fn busy_turn_snapshot_does_not_finish_pending_incoming() {
+        use mj_core::relay::{
+            ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as Reply,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let memory = crate::worker_runtime::ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        std::fs::create_dir_all(&memory.root).unwrap();
+        std::fs::create_dir_all(&memory.baseline_root).unwrap();
+        std::fs::write(memory.root.join("note.md"), "original").unwrap();
+        let old = serde_json::json!({"files": {"/note.md": "original"}});
+        let incoming = serde_json::json!({"files": {"/note.md": "incoming"}});
+        let record = serde_json::json!({"base": old, "base_version": null, "handout": {"id": "id", "tree": old}, "incoming": incoming});
+        let record_path = memory.baseline_root.join(".hel-memory-record.json");
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&record_path, &bytes).unwrap();
+        let tools = mj_core::activity::ToolsInFlight::default();
+        let call: agent_client_protocol::v1::schema::SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+        tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+        let mut transfer = ConnectionProjectMemoryTransfer::default();
+        let action = Action::BeginTurnSnapshot {
+            absorbed: None,
+            head_version: mj_core::project_memory::ProjectMemorySnapshot::default().version(),
+        };
+        let result = apply_project_memory_transfer_request(
+            &memory,
+            &mut transfer,
+            &action,
+            "request",
+            mj_core::relay::RELAY_PROTOCOL_VERSION,
+            &tools,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            RelayResponsePayload::ProjectMemoryTransfer {
+                result: Reply::Busy
+            }
+        ));
+        assert_eq!(std::fs::read(&record_path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("note.md")).unwrap(),
+            "original"
+        );
+        tools.retire_owner(&mj_core::activity::ForegroundOwner::Unowned);
+        let result = apply_project_memory_transfer_request(
+            &memory,
+            &mut transfer,
+            &action,
+            "request",
+            mj_core::relay::RELAY_PROTOCOL_VERSION,
+            &tools,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            RelayResponsePayload::ProjectMemoryTransfer {
+                result: Reply::SnapshotStarted { .. }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("note.md")).unwrap(),
+            "incoming"
+        );
+    }
+
     fn codex_login(refreshed: &str) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "auth_mode": "chatgpt",

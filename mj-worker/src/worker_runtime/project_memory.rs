@@ -67,6 +67,10 @@ impl Record {
         let mut temporary = tempfile::NamedTempFile::new_in(&memory.baseline_root)?;
         serde_json::to_writer(&mut temporary, self)?;
         temporary.flush()?;
+        temporary
+            .as_file()
+            .sync_all()
+            .context("sync project memory record")?;
         Ok(temporary)
     }
 
@@ -104,6 +108,7 @@ fn persist_record(
     temporary
         .persist(memory.baseline_root.join(RECORD_FILE))
         .map_err(|error| error.error)?;
+    mj_core::config::sync_directory(&memory.baseline_root)?;
     Ok(())
 }
 
@@ -186,6 +191,9 @@ fn deliver_with_apply(
     use mj_core::relay::ProjectMemoryDeliveryOutcome;
     let prepared = mj_core::project_memory::prepare_memory_tree(&tree)?;
     let mut record = Record::load(memory)?;
+    if !tools.is_empty() {
+        return Ok(ProjectMemoryDeliveryOutcome::Busy);
+    }
     record.finish_incoming(memory)?;
     let Some(handout) = record.handout.as_ref().filter(|handout| handout.id == id) else {
         return Ok(ProjectMemoryDeliveryOutcome::Stale);
@@ -1001,6 +1009,30 @@ mod tests {
             replica
         );
         assert!(Record::load(&memory).unwrap().incoming.is_none());
+    }
+
+    // Hard-won: 1e7e59c0d: a busy tool's edits were overwritten by pending delivery recovery.
+    #[test]
+    fn busy_delivery_does_not_finish_pending_incoming() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let (_, id, mut incoming) = handout(&memory, &canonical);
+        incoming.files.insert("/note.md".into(), "incoming".into());
+        let mut record = Record::load(&memory).unwrap();
+        record.incoming = Some(incoming.clone());
+        record.save(&memory).unwrap();
+        let tools = mj_core::activity::ToolsInFlight::default();
+        let call: agent_client_protocol::v1::schema::SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+        tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+        assert_eq!(
+            deliver(&memory, &id, incoming.clone(), incoming.version(), &tools).unwrap(),
+            ProjectMemoryDeliveryOutcome::Busy
+        );
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("note.md")).unwrap(),
+            "initial\n"
+        );
+        assert_eq!(Record::load(&memory).unwrap().incoming, Some(incoming));
     }
 
     #[test]

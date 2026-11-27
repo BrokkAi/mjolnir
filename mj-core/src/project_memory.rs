@@ -604,7 +604,10 @@ fn load_canonical_locked(root: &Path) -> Result<CanonicalMemory> {
             } else {
                 root
             };
-            let mut tree = ProjectMemoryStore::new(source).snapshot()?;
+            let mut tree = match ConfinedDir::open_root(source)? {
+                Some(directory) => migration_snapshot(&directory, &project_key(root))?,
+                None => ProjectMemorySnapshot::default(),
+            };
             tree.files.retain(|_, content| is_memory_document(content));
             let state = CanonicalMemory::new(tree);
             if source == root && root.try_exists()? {
@@ -1311,7 +1314,13 @@ fn write_document(
 /// names nor links are read or entered.
 fn root_snapshot(root: &ConfinedDir) -> Result<ProjectMemorySnapshot> {
     let mut files = BTreeMap::new();
-    collect_documents(root, Path::new(""), &mut files)?;
+    collect_documents(root, Path::new(""), &mut files, None)?;
+    Ok(ProjectMemorySnapshot { files })
+}
+
+fn migration_snapshot(root: &ConfinedDir, project: &str) -> Result<ProjectMemorySnapshot> {
+    let mut files = BTreeMap::new();
+    collect_documents(root, Path::new(""), &mut files, Some(project))?;
     Ok(ProjectMemorySnapshot { files })
 }
 
@@ -1319,6 +1328,7 @@ fn collect_documents(
     directory: &ConfinedDir,
     relative: &Path,
     files: &mut BTreeMap<String, String>,
+    migration_project: Option<&str>,
 ) -> Result<()> {
     for (name, kind) in directory.entries()? {
         if name.to_string_lossy().starts_with('.') {
@@ -1328,16 +1338,27 @@ fn collect_documents(
         match kind {
             EntryKind::Directory => {
                 if let Some(subdirectory) = directory.open_dir(Path::new(&name))? {
-                    collect_documents(&subdirectory, &child, files)?;
+                    collect_documents(&subdirectory, &child, files, migration_project)?;
                 }
             }
             EntryKind::File => {
                 let path = format!("/{}", child.to_string_lossy().replace('\\', "/"));
                 validate_virtual_path(&path)?;
-                let content = directory
-                    .read_to_string(&name)
+                let bytes = directory
+                    .read_bytes(&name)
                     .and_then(|content| content.context("the document disappeared"))
                     .with_context(|| format!("read memory snapshot document {path}"))?;
+                let content = match String::from_utf8(bytes) {
+                    Ok(content) => content,
+                    Err(_) if migration_project.is_some() => {
+                        tracing::warn!(project = %migration_project.expect("migration project"), %path, "skipping non-UTF-8 legacy project memory document");
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("read memory snapshot document {path}"));
+                    }
+                };
                 files.insert(path, content);
             }
             EntryKind::Other => {}
@@ -2314,8 +2335,11 @@ mod tests {
         assert_eq!(read_canonical_state(&root).unwrap(), old);
     }
 
+    // Hard-won: 1e7e59c0d: non-UTF-8 legacy documents blocked canonical migration.
     #[test]
     fn canonical_migration_and_render_never_read_stale_directory() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
         let directory = tempfile::tempdir().unwrap();
         let projects = directory.path().join("projects");
         let root = projects.join("project/memory");
@@ -2334,6 +2358,7 @@ mod tests {
         let bad = projects.join("bad-utf8/memory");
         fs::create_dir_all(&bad).unwrap();
         fs::write(bad.join("note.md"), [0xff, 0xfe]).unwrap();
+        fs::write(bad.join("valid.md"), "kept").unwrap();
         // Resume after a crash between preserving the old directory and the
         // canonical file commit.
         let recovering = projects.join("recovering");
@@ -2377,7 +2402,22 @@ mod tests {
             "recover me"
         );
         assert_eq!(read_canonical(&root).unwrap(), expected);
-        assert!(read_canonical(&bad).is_err());
+        let migrated_bad = read_canonical(&bad).unwrap();
+        assert_eq!(
+            migrated_bad.files,
+            BTreeMap::from([("/valid.md".into(), "kept".into())])
+        );
+        assert_eq!(
+            fs::read(bad.parent().unwrap().join("memory.pre-migration/note.md")).unwrap(),
+            [0xff, 0xfe]
+        );
+        let warnings = log.at(tracing::Level::WARN);
+        assert!(
+            warnings.iter().any(|line| line.contains("bad-utf8")
+                && line.contains("/note.md")
+                && line.contains("non-UTF-8")),
+            "{warnings:?}"
+        );
         assert_eq!(
             fs::read_to_string(recovering.join("memory/notes/a.md")).unwrap(),
             "recover me"
@@ -2404,10 +2444,7 @@ mod tests {
         assert!(!root.join("topic").exists());
         assert!(!root.join("empty.md").exists());
         assert!(!root.join("whitespace.md").exists());
-        assert!(
-            !bad.parent().unwrap().join("memory.json").exists(),
-            "a failed migration writes no canonical file"
-        );
+        assert!(bad.parent().unwrap().join("memory.json").exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
