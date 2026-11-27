@@ -42,6 +42,19 @@ pub fn install_configured_session_github_token(
     let Some(token) = configured_session_github_token(github)? else {
         return Ok(());
     };
+    write_session_github_token(&token, executor, locator, worker_root)
+}
+
+/// Write a GitHub token beside a worker whose root must already exist.
+///
+/// The caller owns where the token came from; a retained session with no live
+/// actor still receives a renewed App token this way.
+pub fn write_session_github_token(
+    token: &str,
+    executor: &impl CommandExecutor,
+    locator: &mj_core::targets::TargetLocator,
+    worker_root: &str,
+) -> Result<()> {
     const INSTALL: &str = r#"set -eu
 umask 077
 root=$1
@@ -49,12 +62,13 @@ path=$root/github-token
 if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
     echo 'session GitHub token is not a regular file' >&2; exit 1
 fi
+[ -d "$root" ] || { echo 'session worker root is missing' >&2; exit 1; }
 temporary=$(mktemp "$root/github-token.XXXXXXXX")
 trap 'rm -f -- "$temporary"' EXIT
 cat > "$temporary"
 mv -f -- "$temporary" "$path"
 "#;
-    let mut bytes = token.into_bytes();
+    let mut bytes = token.as_bytes().to_vec();
     bytes.push(b'\n');
     // A token is a few bytes and a session waits on it, so it must not queue
     // behind bulk transfers to the same target.

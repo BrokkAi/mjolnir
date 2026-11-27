@@ -208,6 +208,19 @@ impl mj_client::session::SessionControlBackend for ClientSessionControl {
     ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::SessionHandle>> {
         Box::pin(async move { Ok(self.0.session(session_id).await?.client()) })
     }
+
+    fn find_session(
+        &self,
+        session_id: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<Option<mj_client::session::SessionHandle>>> {
+        Box::pin(async move {
+            Ok(self
+                .0
+                .find_session(session_id)
+                .await?
+                .map(|handle| handle.client()))
+        })
+    }
 }
 
 impl SessionManagerControl {

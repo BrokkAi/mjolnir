@@ -9,7 +9,7 @@ use crate::controller::test_support::{
     FIXTURE_FETCH_URL, FixtureRemoteExecutor, IsolatedTest, RefusingExecutor,
     checkout_with_network_remote, checkpoint_test_session, committed_repository, local_bundle,
     managed_worktree_session, network_remote_for, raw_session_on, resume_compatibility_config,
-    write_checkpoint_archive_with_native_state, write_checkpoint_gate_archive,
+    test_name, write_checkpoint_archive_with_native_state, write_checkpoint_gate_archive,
 };
 use crate::controller::{Controller, SessionResumeOptions};
 use mj_checkpoint::archive::{GitCommandRunner, verify_archive_streaming};
@@ -4295,4 +4295,318 @@ fn resolve_move_keep_dir_matches_worker_startup_for_subdirs_nested_repos_and_pla
             "Move keep dir must match worker startup MJ_KEEP_DIR for {label}"
         );
     }
+}
+
+const MISSING_NATIVE_HISTORY_CHILD: &str = "MJ_MISSING_NATIVE_HISTORY_CHILD";
+
+/// A session whose native conversation the harness lost while its checkout and
+/// Mjolnir transcript survived: the state issue #1710 is about.
+fn missing_native_history_session(directory: &Path, session_id: &str) -> (SessionRecord, PathBuf) {
+    let checkout = directory.join("retained checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let root = directory.join("worker roots").join(session_id);
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Error;
+    session.native_session_id = Some("missing-native-thread".into());
+    session.checkpoint = None;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    }));
+    session.target_template_id = "local-bare".into();
+    session.project_directory = Some(checkout.clone());
+    session.last_profile = "codex".into();
+    (session, checkout)
+}
+
+fn missing_native_history_controller(directory: &Path, session: SessionRecord) -> Controller {
+    let mut config = resume_compatibility_config();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            directory.join("profile-config"),
+        ),
+    );
+    let session_id = session.id.clone();
+    Controller {
+        config,
+        state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())]
+                .into_iter()
+                .collect(),
+            sessions: [(session_id, session)].into_iter().collect(),
+            ..State::default()
+        },
+    }
+}
+
+/// The harness home is absent, so `recover_missing_parent_data` cannot rebuild
+/// the runtime from durable state; the target still has the checkout.
+struct MissingNativeHistoryExecutor;
+
+impl CommandExecutor for MissingNativeHistoryExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        match command.purpose.as_str() {
+            "probe retained environment directory" => Ok(CommandOutput {
+                status: 0,
+                stdout: b"absent".to_vec(),
+                stderr: Vec::new(),
+            }),
+            "stop Mjolnir worker daemon" => Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            purpose => panic!("unexpected command in missing native history test: {purpose}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_native_history_without_a_checkpoint_names_the_kept_checkout_and_fresh_session_path()
+ {
+    if std::env::var_os(MISSING_NATIVE_HISTORY_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "missing_native_history_without_a_checkpoint_names_the_kept_checkout_and_fresh_session_path",
+        ))
+        .env(MISSING_NATIVE_HISTORY_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let (session, checkout) = missing_native_history_session(directory.path(), session_id);
+    crate::database::save_session(&session).unwrap();
+    let mut controller = missing_native_history_controller(directory.path(), session);
+
+    let error = controller
+        .recover_missing_parent_data(session_id, false, &MissingNativeHistoryExecutor)
+        .await
+        .unwrap_err();
+    assert!(is_missing_native_history_error(&error));
+    let message = format!("{error:#}");
+    assert!(message.contains("Codex"), "{message}");
+    assert!(message.contains("missing-native-thread"), "{message}");
+    assert!(
+        message.contains("no recovery archive holds it"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&checkout.to_string_lossy().into_owned()),
+        "{message}"
+    );
+    assert!(message.contains("kept untouched"), "{message}");
+    assert!(
+        message.contains("no blank conversation was started"),
+        "{message}"
+    );
+    for command in [
+        "mj transcript --session",
+        "mj diff --session",
+        "mj export --session",
+        "mj fetch --session",
+        "mj new",
+        "mj destroy --session",
+    ] {
+        assert!(message.contains(command), "missing {command}: {message}");
+    }
+    assert!(!message.contains("retry Resume"), "{message}");
+
+    let record = &controller.state.sessions[session_id];
+    assert_eq!(record.state, SessionState::Error);
+    assert_eq!(record.last_error.as_deref(), Some(message.as_str()));
+    let stored = crate::database::load_session_record(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, SessionState::Error);
+    assert_eq!(
+        stored.last_error.as_deref(),
+        Some(message.as_str()),
+        "the actionable diagnostic must be the one mj sessions shows"
+    );
+}
+
+#[tokio::test]
+async fn a_recovery_archive_for_another_native_session_is_refused_with_both_ids_and_the_fresh_path()
+{
+    if std::env::var_os(MISSING_NATIVE_HISTORY_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_recovery_archive_for_another_native_session_is_refused_with_both_ids_and_the_fresh_path",
+        ))
+        .env(MISSING_NATIVE_HISTORY_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let (mut session, checkout) = missing_native_history_session(directory.path(), session_id);
+    session.checkpoint = Some(Box::new(write_checkpoint_gate_archive(
+        directory.path(),
+        session_id,
+        3,
+    )));
+    session.native_session_id = Some("different-native-thread".into());
+    crate::database::save_session(&session).unwrap();
+    let mut controller = missing_native_history_controller(directory.path(), session);
+
+    let error = controller
+        .recover_missing_parent_data(
+            session_id,
+            false,
+            &RefusingExecutor("a mismatched archive must not touch the target"),
+        )
+        .await
+        .unwrap_err();
+    assert!(is_missing_native_history_error(&error));
+    let message = format!("{error:#}");
+    assert!(message.contains("Codex"), "{message}");
+    assert!(message.contains("native-session"), "{message}");
+    assert!(message.contains("different-native-thread"), "{message}");
+    assert!(
+        message.contains(&checkout.to_string_lossy().into_owned()),
+        "{message}"
+    );
+    assert!(
+        message.contains("children were kept untouched"),
+        "{message}"
+    );
+    assert!(
+        message.contains("Supply a matching recovery archive"),
+        "{message}"
+    );
+    assert!(message.contains("mj new"), "{message}");
+    assert!(message.contains("mj destroy --session"), "{message}");
+    assert!(!message.contains("retry Resume"), "{message}");
+
+    let record = &controller.state.sessions[session_id];
+    assert_eq!(record.state, SessionState::Error);
+    assert_eq!(record.last_error.as_deref(), Some(message.as_str()));
+    assert_eq!(
+        crate::database::load_session_record(session_id)
+            .unwrap()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some(message.as_str())
+    );
+}
+
+#[tokio::test]
+async fn repair_existing_environment_keeps_the_missing_native_history_instruction() {
+    if std::env::var_os(MISSING_NATIVE_HISTORY_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "repair_existing_environment_keeps_the_missing_native_history_instruction",
+        ))
+        .env(MISSING_NATIVE_HISTORY_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let (session, _) = missing_native_history_session(directory.path(), session_id);
+    crate::database::save_session(&session).unwrap();
+    let mut controller = missing_native_history_controller(directory.path(), session);
+
+    let error = crate::controller::test_support::worker_test_scope_async(session_id, async {
+        controller
+            .repair_existing_environment(
+                session_id,
+                RetainedWorker::Missing,
+                false,
+                &MissingNativeHistoryExecutor,
+            )
+            .await
+    })
+    .await
+    .unwrap_err();
+    assert!(is_missing_native_history_error(&error));
+    let message = format!("{error:#}");
+    assert!(!message.contains("Resume repair failed"), "{message}");
+    assert!(!message.contains("retry Resume"), "{message}");
+    assert!(message.contains("mj new"), "{message}");
+    let stored = crate::database::load_session_record(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, SessionState::Error);
+    assert_eq!(stored.last_error.as_deref(), Some(message.as_str()));
+}
+
+#[test]
+fn a_started_resume_failure_for_missing_native_history_is_not_wrapped_as_retryable() {
+    if std::env::var_os(MISSING_NATIVE_HISTORY_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_started_resume_failure_for_missing_native_history_is_not_wrapped_as_retryable",
+        ))
+        .env(MISSING_NATIVE_HISTORY_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let (session, _) = missing_native_history_session(directory.path(), session_id);
+    crate::database::save_session(&session).unwrap();
+    let mut controller = missing_native_history_controller(directory.path(), session);
+    let message = "Codex has no native history for session 0123456789abcdef0123456789abcdef; the existing conversation or goal cannot be resumed. The session, checkout, and Mjolnir transcript were kept; read the transcript, export any work, and start a fresh session instead of retrying Resume.";
+
+    let error = controller
+        .keep_started_resume_after_failure(
+            session_id,
+            anyhow::Error::new(MissingNativeHistoryError::new(message)),
+        )
+        .unwrap();
+    assert!(is_missing_native_history_error(&error));
+    assert_eq!(format!("{error:#}"), message);
+    let record = &controller.state.sessions[session_id];
+    assert_eq!(record.state, SessionState::Error);
+    assert_eq!(record.last_error.as_deref(), Some(message));
+    assert!(
+        !record
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("retry Resume")
+    );
+    let stored = crate::database::load_session_record(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.last_error.as_deref(), Some(message));
 }
