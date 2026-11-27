@@ -55,20 +55,63 @@ const WIKI_WAL: &str = "index.db-wal";
 const WIKI_SHM: &str = "index.db-shm";
 const PUBLICATION_FILE: &str = "publication.json";
 
+/// What this publication has proven it created on the destination. A
+/// rolled-back attempt removes exactly these entries and nothing else, so a
+/// file or directory that was already there is never deleted. An entry is
+/// recorded right after its atomic creation, never before.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PublicationRecord {
     expected_fence: StoreFenceRecord,
-    home_targets: Vec<PathBuf>,
-    /// Set once the SessionWiki index has been placed, so a rolled-back
-    /// attempt can remove exactly what it placed.
+    /// Entries created under the home directory, relative to it.
+    #[serde(default)]
+    owned_home_targets: Vec<PathBuf>,
+    /// Top-level entries created in the data directory.
+    #[serde(default)]
+    owned_data_entries: Vec<PathBuf>,
+    /// Top-level entries created in the configuration directory.
+    #[serde(default)]
+    owned_config_entries: Vec<PathBuf>,
+    /// Set immediately before the SessionWiki index is placed or replaced.
     #[serde(default)]
     sessionwiki_published: bool,
-    /// Top-level names this publication places in the data directory.
-    #[serde(default)]
-    published_data_entries: Vec<PathBuf>,
-    /// Top-level names this publication places in the configuration directory.
-    #[serde(default)]
-    published_config_entries: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+enum Owned {
+    Home,
+    Data,
+    Config,
+}
+
+impl PublicationRecord {
+    fn list(&mut self, which: Owned) -> &mut Vec<PathBuf> {
+        match which {
+            Owned::Home => &mut self.owned_home_targets,
+            Owned::Data => &mut self.owned_data_entries,
+            Owned::Config => &mut self.owned_config_entries,
+        }
+    }
+}
+
+/// Install one entry. One this publication already created is finished with
+/// `publish_entry`, which may merge into it. Anything else must not exist: it
+/// is created atomically and recorded as ours before more is placed.
+fn install_entry(
+    stage: &Stage,
+    record: &mut PublicationRecord,
+    which: Owned,
+    name: &Path,
+    src: &Path,
+    dst: &Path,
+    mode: PublishMode,
+) -> Result<()> {
+    if record.list(which).iter().any(|owned| owned == name) {
+        return publish_entry(src, dst, mode);
+    }
+    publish_entry_no_replace(src, dst, mode, &mut || {
+        record.list(which).push(name.to_path_buf());
+        stage.write_publication(record)
+    })
 }
 
 /// The top-level names of `raw` that publication moves or copies on.
@@ -179,6 +222,9 @@ struct Receiver {
     ready: Option<std::result::Result<(), String>>,
     put: Option<PutState>,
     patch: Option<PatchState>,
+    /// Held from the first staging request until publication has removed the
+    /// staging directory: one receiver at a time owns a destination's staging.
+    stage_lock: Option<FileLock>,
 }
 
 type Reply = Vec<(Response, Vec<u8>)>;
@@ -199,6 +245,7 @@ where
         ready: None,
         put: None,
         patch: None,
+        stage_lock: None,
     };
     loop {
         let Some((request, payload)) = read_frame::<_, Request>(&mut reader).await? else {
@@ -273,7 +320,7 @@ impl Receiver {
                 hash_files,
                 blocks,
             } => {
-                self.require_ready()?;
+                self.ensure_staging_locked()?;
                 let stage = self.stage.clone();
                 mj_core::runtime::spawn_blocking(move || {
                     stage_manifest(&stage, files, hash_files, &blocks)
@@ -286,7 +333,7 @@ impl Receiver {
                 rel_path,
                 kind,
             } => {
-                self.require_ready()?;
+                self.ensure_staging_locked()?;
                 self.put_start(scope, &rel_path, kind)
             }
             Request::PutFileChunk { raw_len } => {
@@ -301,7 +348,7 @@ impl Receiver {
             }
             Request::PutFileEnd { sha256 } => self.put_end(&sha256),
             Request::PatchBlocksBegin { target, total_size } => {
-                self.require_ready()?;
+                self.ensure_staging_locked()?;
                 ensure!(self.patch.is_none(), "PatchBlocks is already open");
                 let (scope, name) = match target {
                     DbTarget::Main => (TransferScope::Data, MAIN_DB),
@@ -353,7 +400,7 @@ impl Receiver {
                 Ok(ack())
             }
             Request::RemoveFile { scope, rel_path } => {
-                self.require_ready()?;
+                self.ensure_staging_locked()?;
                 validate_scope_path(scope, &rel_path, false)?;
                 if let Some(path) = resolve_in_scope(&self.stage.raw(scope), &rel_path, false)? {
                     remove_path(&path)?;
@@ -361,7 +408,7 @@ impl Receiver {
                 Ok(ack())
             }
             Request::CommitPublication(request) => {
-                self.require_ready()?;
+                self.ensure_staging_locked()?;
                 ensure!(
                     self.put.is_none() && self.patch.is_none(),
                     "a transfer is still open"
@@ -371,6 +418,52 @@ impl Receiver {
             }
             Request::Done => Ok(vec![(Response::DoneAck, Vec::new())]),
         }
+    }
+
+    /// Take the staging lock, create the staging directories, and check the
+    /// destination again under the lock. Called by every request that stages
+    /// or publishes, so a second receiver for the same destination fails here.
+    fn ensure_staging_locked(&mut self) -> Result<()> {
+        self.require_ready()?;
+        if self.stage_lock.is_some() {
+            return Ok(());
+        }
+        let lock_path = self.stage.root.join("receiver.lock");
+        let mut attempts = 0;
+        let lock = loop {
+            attempts += 1;
+            mj_core::config::create_owner_only_directory(&self.config.data_dir)?;
+            mj_core::config::create_owner_only_directory(&self.stage.root)?;
+            let file = open_lock_file(&lock_path)?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    bail!("another migration to this destination is already in progress")
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(error).with_context(|| format!("lock {}", lock_path.display()));
+                }
+            }
+            // A finishing receiver removes the staging directory, lock file
+            // included; a lock on a file that is no longer there excludes nobody.
+            if lock_file_is_current(&file, &lock_path)? {
+                break FileLock::new(file);
+            }
+            ensure!(
+                attempts < 2,
+                "the staging directory kept disappearing while it was locked"
+            );
+        };
+        self.stage.create()?;
+        match destination_status(&self.config, &self.stage)? {
+            DestinationStatus::Empty | DestinationStatus::ResumablePublication { .. } => {}
+            _ => bail!(
+                "the destination changed while it was being staged; it now holds a store or a \
+                 container daemon"
+            ),
+        }
+        self.stage_lock = Some(lock);
+        Ok(())
     }
 
     async fn hello(&mut self, hello: Hello) -> Result<Reply> {
@@ -413,9 +506,7 @@ impl Receiver {
                 mj_store::database::STORE_SCHEMA_VERSION
             ));
         }
-        if refusal.is_none() {
-            self.stage.create()?;
-        }
+        // Nothing is created here: Hello, probes and dry runs leave no staging.
         let config = &self.config;
         let ack = HelloAck {
             mj_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -791,6 +882,23 @@ struct Published {
     summary: PublicationSummary,
 }
 
+fn lock_file_is_current(file: &std::fs::File, path: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(path) {
+            Ok(on_disk) => Ok(on_disk.ino() == file.metadata()?.ino()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Ok(true)
+    }
+}
+
 fn open_lock_file(path: &Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).read(true).write(true);
@@ -808,7 +916,7 @@ impl Receiver {
     /// Publish and activate. `Err` is a failure of the stream or the task that
     /// leaves the outcome unknown; a definite failure before the activation
     /// commit is `FailedBeforeCommit`.
-    async fn commit(&self, request: CommitPublication) -> Result<CommitPublicationAck> {
+    async fn commit(&mut self, request: CommitPublication) -> Result<CommitPublicationAck> {
         let config = self.config.clone();
         let stage = self.stage.clone();
         let start_daemon = request.start_daemon;
@@ -823,6 +931,8 @@ impl Receiver {
                 });
             }
         };
+        // The staging directory is gone; release its lock with the commit.
+        self.stage_lock = None;
         let Published {
             start_lock,
             mut summary,
@@ -887,23 +997,34 @@ fn publish(
             .context("lock the destination daemon start lock")?;
 
     // 2. Re-verify the destination under the lock.
-    let mut record = stage.read_publication()?;
-    if let Some(old) = &record
+    let mut loaded = stage.read_publication()?;
+    if let Some(old) = &loaded
         && !old.expected_fence.matches_snapshot(&spec.expected_fence)
     {
         // An earlier attempt was rolled back on the source, which then ran on
-        // and fenced again, so its fence is not this one. What it left here
-        // is provably ours (recorded, and fenced with its own fence) and
-        // stale; clear it so this attempt does not strand the user.
+        // and fenced again, so its fence is not this one. What it created is
+        // recorded, so it is provably ours and stale; remove exactly that.
         discard_unfinished_publication(config, stage, old)?;
-        record = None;
+        loaded = None;
     }
-    let resuming = record.is_some();
+    let resuming = loaded.is_some();
     let mut summary = PublicationSummary {
         home_targets: request.home_targets.len(),
         sessionwiki: request.migrate_sessionwiki,
         ..PublicationSummary::default()
     };
+    // Parents before children, and children a copied parent already contains.
+    let mut targets = request.home_targets.clone();
+    targets.sort_by_key(|target| target.rel_path.components().count());
+    let covered = |target: &HomeTarget| {
+        targets.iter().any(|parent| {
+            !parent.private
+                && parent.rel_path != target.rel_path
+                && target.rel_path.starts_with(&parent.rel_path)
+        })
+    };
+    let raw_data = stage.raw(TransferScope::Data);
+    let raw_config = stage.raw(TransferScope::Config);
     if exists(&final_db)? {
         ensure!(
             resuming,
@@ -928,15 +1049,33 @@ fn publish(
         }
     }
     if !resuming {
+        // Nothing this migration will create may already exist: it creates
+        // entries atomically and never merges into or replaces user data.
         ensure!(
             !exists(&layout.config_toml())? && !exists(&layout.secrets_toml())?,
             "the destination already has a config.toml; clean it manually or choose --dest-instance"
         );
-        for target in &request.home_targets {
+        for target in targets.iter().filter(|target| !covered(target)) {
             let path = config.home_dir.join(&target.rel_path);
             ensure!(
                 !exists(&path)?,
                 "destination path already exists: {}",
+                path.display()
+            );
+        }
+        for name in publishable_names(&raw_data, skipped_data_name)? {
+            let path = config.data_dir.join(&name);
+            ensure!(
+                !exists(&path)?,
+                "destination path already exists: {}; remove it or choose --dest-instance",
+                path.display()
+            );
+        }
+        for name in publishable_names(&raw_config, skipped_config_name)? {
+            let path = config.config_dir.join(&name);
+            ensure!(
+                !exists(&path)?,
+                "destination path already exists: {}; remove it or choose --dest-instance",
                 path.display()
             );
         }
@@ -951,49 +1090,22 @@ fn publish(
     // 3. The controller lock, again without creating an instance identity.
     let controller = ControllerStoreGuard::acquire_migration_lock_at(&config.data_dir)?;
 
-    // 4. Durable record, before anything is placed, of what is ours: a
-    // rolled-back attempt removes exactly these, so files deleted on the source
-    // in between cannot linger here. A resumed attempt keeps what its earlier
-    // run recorded, because those entries have already left the staging area.
-    let raw_data = stage.raw(TransferScope::Data);
-    let raw_config = stage.raw(TransferScope::Config);
-    {
-        let mut record = record.unwrap_or_else(|| PublicationRecord {
-            expected_fence: spec.expected_fence.clone(),
-            home_targets: Vec::new(),
-            sessionwiki_published: false,
-            published_data_entries: Vec::new(),
-            published_config_entries: Vec::new(),
-        });
-        let before = serde_json::to_vec(&record)?;
-        for target in &request.home_targets {
-            if !record.home_targets.contains(&target.rel_path) {
-                record.home_targets.push(target.rel_path.clone());
-            }
-        }
-        for (recorded, found) in [
-            (
-                &mut record.published_data_entries,
-                publishable_names(&raw_data, skipped_data_name)?,
-            ),
-            (
-                &mut record.published_config_entries,
-                publishable_names(&raw_config, skipped_config_name)?,
-            ),
-        ] {
-            for name in found {
-                if !recorded.contains(&name) {
-                    recorded.push(name);
-                }
-            }
-        }
-        // Set before the index is placed: a crash in between must still be
-        // able to clean it up.
-        record.sessionwiki_published |= request.migrate_sessionwiki;
-        if serde_json::to_vec(&record)? != before || !resuming {
+    // 4. Durable record that an attempt is under way. It owns nothing yet;
+    // entries are added as each one is created.
+    let mut record = match loaded {
+        Some(record) => record,
+        None => {
+            let record = PublicationRecord {
+                expected_fence: spec.expected_fence.clone(),
+                owned_home_targets: Vec::new(),
+                owned_data_entries: Vec::new(),
+                owned_config_entries: Vec::new(),
+                sessionwiki_published: false,
+            };
             stage.write_publication(&record)?;
+            record
         }
-    }
+    };
 
     // 5. The configuration, from the immutable raw copy, so it can repeat.
     let rewritten_config = stage.rewritten().join("config.toml");
@@ -1026,57 +1138,82 @@ fn publish(
     }
 
     // 7. Dependencies first. The final store is not in place yet.
-    let mut published_data = 0;
-    for target in &request.home_targets {
+    for target in &targets {
         let src = stage.raw(TransferScope::Home).join(&target.rel_path);
         let dst = config.home_dir.join(&target.rel_path);
-        ensure!(
-            resuming || exists(&src)?,
-            "staged home entry is missing: {}",
-            target.rel_path.display()
-        );
-        publish_entry(&src, &dst, PublishMode::Move)?;
+        if covered(target) {
+            // Its parent directory already carried it over.
+            ensure!(
+                exists(&dst)?,
+                "copied home entry is missing: {}",
+                dst.display()
+            );
+        } else {
+            ensure!(
+                exists(&src)? || record.owned_home_targets.contains(&target.rel_path),
+                "staged home entry is missing: {}",
+                target.rel_path.display()
+            );
+            install_entry(
+                stage,
+                &mut record,
+                Owned::Home,
+                &target.rel_path,
+                &src,
+                &dst,
+                PublishMode::Move,
+            )?;
+        }
         if target.private {
             set_unix_mode(&dst, 0o600)?;
         }
     }
     std::fs::create_dir_all(&config.config_dir)?;
-    for entry in std::fs::read_dir(&raw_config)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if skipped_config_name(&name.to_string_lossy()) {
-            continue;
-        }
-        publish_entry(
-            &entry.path(),
+    for name in publishable_names(&raw_config, skipped_config_name)? {
+        install_entry(
+            stage,
+            &mut record,
+            Owned::Config,
+            &name,
+            &raw_config.join(&name),
             &config.config_dir.join(&name),
             PublishMode::Copy,
         )?;
     }
     if request.migrate_sessionwiki {
-        publish_sessionwiki(config, stage, request, resuming)?;
+        publish_sessionwiki(config, stage, request, &mut record)?;
     }
-    for entry in std::fs::read_dir(&raw_data)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if skipped_data_name(&name.to_string_lossy()) {
-            continue;
-        }
-        publish_entry(
-            &entry.path(),
+    let mut published_data = 0;
+    for name in publishable_names(&raw_data, skipped_data_name)? {
+        install_entry(
+            stage,
+            &mut record,
+            Owned::Data,
+            &name,
+            &raw_data.join(&name),
             &config.data_dir.join(&name),
             PublishMode::Move,
         )?;
         published_data += 1;
     }
     summary.data_entries = published_data;
-    publish_entry(&rewritten_config, &layout.config_toml(), PublishMode::Copy)?;
+    install_entry(
+        stage,
+        &mut record,
+        Owned::Config,
+        Path::new("config.toml"),
+        &rewritten_config,
+        &layout.config_toml(),
+        PublishMode::Copy,
+    )?;
     hook(PublicationStep::BeforeStorePlacement)?;
     if !exists(&final_db)? {
         // A stale WAL beside a database that is not ours would be replayed into it.
         remove_path(&data.database_wal())?;
         remove_path(&data.database_shm())?;
-        publish_entry(&rewritten_store, &final_db, PublishMode::Move)?;
+        publish_entry_no_replace(&rewritten_store, &final_db, PublishMode::Move, &mut || {
+            Ok(())
+        })?;
         sync_directory(&config.data_dir)?;
     }
     hook(PublicationStep::BeforeUnfence)?;
@@ -1098,15 +1235,15 @@ fn publish(
     })
 }
 
-/// Remove what a rolled-back publication placed outside the staging directory:
-/// its still-fenced store, its configuration and its copied home entries.
+/// Remove what a rolled-back publication created outside the staging
+/// directory: its still-fenced store and the entries it recorded as created.
+/// Anything it did not record was on the destination before it and stays.
 fn discard_unfinished_publication(
     config: &ReceiverConfig,
     stage: &Stage,
     old: &PublicationRecord,
 ) -> Result<()> {
     let data = DataLayout::at(&config.data_dir);
-    let layout = ConfigLayout::at(&config.config_dir);
     let final_db = data.database();
     if exists(&final_db)? {
         match read_store_fence_file(&final_db)? {
@@ -1115,16 +1252,14 @@ fn discard_unfinished_publication(
             None => bail!("the destination store is already active"),
         }
         remove_path(&final_db)?;
+        remove_path(&data.database_wal())?;
+        remove_path(&data.database_shm())?;
     }
-    remove_path(&data.database_wal())?;
-    remove_path(&data.database_shm())?;
-    remove_path(&layout.config_toml())?;
-    remove_path(&layout.secrets_toml())?;
-    for rel_path in &old.home_targets {
+    for rel_path in &old.owned_home_targets {
         validate_relative_path(rel_path)?;
         remove_path(&config.home_dir.join(rel_path))?;
     }
-    for name in &old.published_data_entries {
+    for name in &old.owned_data_entries {
         single_normal_name(name)?;
         ensure!(
             !skipped_data_name(&name.to_string_lossy()),
@@ -1133,7 +1268,7 @@ fn discard_unfinished_publication(
         );
         remove_path(&config.data_dir.join(name))?;
     }
-    for name in &old.published_config_entries {
+    for name in &old.owned_config_entries {
         single_normal_name(name)?;
         remove_path(&config.config_dir.join(name))?;
     }
@@ -1157,18 +1292,20 @@ fn remove_empty_file(path: &Path) -> Result<()> {
 }
 
 /// Fold the staged index's WAL into it so the index moves as one file, then
-/// place it. The staged `-shm` is never carried.
+/// place it. The staged `-shm` is never carried. The destination's own index is
+/// untouched until the replacement is certain, and it is only deleted by a
+/// later discard once this publication has recorded that it replaced it.
 fn publish_sessionwiki(
     config: &ReceiverConfig,
     stage: &Stage,
     request: &CommitPublication,
-    resuming: bool,
+    record: &mut PublicationRecord,
 ) -> Result<()> {
     let raw = stage.raw(TransferScope::SessionWiki);
     let staged = raw.join(WIKI_DB);
     if !exists(&staged)? {
         ensure!(
-            resuming && exists(&config.sessionwiki_db)?,
+            record.sessionwiki_published && exists(&config.sessionwiki_db)?,
             "the staged SessionWiki index is missing"
         );
         return Ok(());
@@ -1190,15 +1327,31 @@ fn publish_sessionwiki(
         remove_path(&raw.join(WIKI_WAL))?;
         remove_path(&raw.join(WIKI_SHM))?;
     }
-    if request.overwrite_sessionwiki || resuming {
+    if let Some(parent) = config.sessionwiki_db.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if request.overwrite_sessionwiki || record.sessionwiki_published {
+        // Replacing: an index of ours from an earlier run, or one the user asked
+        // to overwrite. Recorded first, so a crash mid-replace is cleaned up.
+        if !record.sessionwiki_published {
+            record.sessionwiki_published = true;
+            stage.write_publication(record)?;
+        }
         for suffix in ["", "-wal", "-shm"] {
             let mut name = config.sessionwiki_db.as_os_str().to_owned();
             name.push(suffix);
             remove_path(Path::new(&name))?;
         }
+        publish_entry(&staged, &config.sessionwiki_db, PublishMode::Move)
+    } else {
+        publish_entry_no_replace(
+            &staged,
+            &config.sessionwiki_db,
+            PublishMode::Move,
+            &mut || {
+                record.sessionwiki_published = true;
+                stage.write_publication(record)
+            },
+        )
     }
-    if let Some(parent) = config.sessionwiki_db.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    publish_entry(&staged, &config.sessionwiki_db, PublishMode::Move)
 }

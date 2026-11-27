@@ -106,6 +106,107 @@ pub(super) fn publish_entry(src: &Path, dst: &Path, mode: PublishMode) -> Result
     }
 }
 
+fn collision(dst: &Path, error: std::io::Error) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        anyhow::anyhow!(
+            "destination path already exists: {}; remove it or choose another instance",
+            dst.display()
+        )
+    } else {
+        anyhow::Error::new(error).context(format!("create {}", dst.display()))
+    }
+}
+
+/// Install `src` at `dst` only if nothing is there: the creation itself is the
+/// existence check, so an entry that appears concurrently is never replaced or
+/// merged into. `on_created` runs right after the entry at `dst` exists and
+/// before anything else is placed, so the caller can record that it owns it. A
+/// directory is created empty, recorded, and then filled.
+pub(super) fn publish_entry_no_replace(
+    src: &Path,
+    dst: &Path,
+    mode: PublishMode,
+    on_created: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    let source =
+        symlink_metadata_opt(src)?.with_context(|| format!("{} is missing", src.display()))?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    if source.file_type().is_symlink() {
+        let target = std::fs::read_link(src)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, dst).map_err(|error| collision(dst, error))?;
+        #[cfg(not(unix))]
+        bail!(
+            "cannot publish symlink {} on this platform",
+            target.display()
+        );
+        on_created()?;
+        if mode == PublishMode::Move {
+            std::fs::remove_file(src)?;
+        }
+    } else if source.is_dir() {
+        std::fs::create_dir(dst).map_err(|error| collision(dst, error))?;
+        on_created()?;
+        for child in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+            let child = child?;
+            publish_entry(&child.path(), &dst.join(child.file_name()), mode)?;
+        }
+        std::fs::set_permissions(dst, source.permissions())?;
+        if mode == PublishMode::Move {
+            std::fs::remove_dir(src).with_context(|| format!("remove {}", src.display()))?;
+        }
+    } else if source.is_file() {
+        // A hard link fails with `AlreadyExists` atomically. Where links are
+        // not possible (another filesystem), a create-new copy does the same.
+        let linked = match mode {
+            PublishMode::Move => match std::fs::hard_link(src, dst) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(collision(dst, error));
+                }
+                Err(_) => false,
+            },
+            PublishMode::Copy => false,
+        };
+        if !linked {
+            copy_file_create_new(src, dst, &source)?;
+        }
+        on_created()?;
+        if mode == PublishMode::Move {
+            std::fs::remove_file(src)?;
+        }
+    } else {
+        bail!("cannot publish special file {}", src.display());
+    }
+    Ok(())
+}
+
+fn copy_file_create_new(src: &Path, dst: &Path, source: &std::fs::Metadata) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(source.permissions().mode() & 0o7777);
+    }
+    let mut output = options.open(dst).map_err(|error| collision(dst, error))?;
+    let copied = (|| -> Result<()> {
+        let mut input = std::fs::File::open(src)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.set_permissions(source.permissions())?;
+        output.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = copied {
+        // `create_new` made this file, so removing it cannot touch anything else.
+        let _ = std::fs::remove_file(dst);
+        return Err(error.context(format!("copy {} to {}", src.display(), dst.display())));
+    }
+    Ok(())
+}
+
 /// Copy beside `dst` under a temporary name, then rename, so `dst` is either
 /// absent or complete.
 fn copy_tree_into_place(src: &Path, dst: &Path) -> Result<()> {

@@ -1008,7 +1008,32 @@ fn scan_home(
         }
         Ok(())
     }
-    visit(source, rel_path, out)
+    // A profile home that is itself a symlink to a directory is carried as a
+    // real directory (its target's contents); links inside it stay links.
+    let root = std::fs::metadata(source)
+        .with_context(|| format!("profile home {} does not resolve", source.display()))?;
+    if root.is_dir() {
+        out.insert(
+            (TransferScope::Home, rel_path.to_path_buf()),
+            SourceEntry {
+                kind: FileKind::Directory {
+                    mode: unix_mode(&root, 0o755),
+                },
+                origin: Origin::Nothing,
+            },
+        );
+        for child in std::fs::read_dir(source)? {
+            let name = match child {
+                Ok(child) => child.file_name(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            visit(&source.join(&name), &rel_path.join(&name), out)?;
+        }
+        Ok(())
+    } else {
+        visit(source, rel_path, out)
+    }
 }
 
 fn regular_kind(metadata: &std::fs::Metadata, mode: Option<u32>) -> FileKind {

@@ -203,6 +203,13 @@ impl World {
             world.a_home.join(".secrets/token"),
         )
         .unwrap();
+        // A credential inside a copied profile home, and a profile home that is
+        // itself a link to a directory elsewhere.
+        write(&world.a_home.join(".codex-personal/ssh_key"), b"ssh key");
+        let outside = world.a_home.parent().unwrap().join("outside-profile");
+        write(&outside.join("auth.json"), b"{\"linked\":1}");
+        write(&outside.join("history.jsonl"), b"history");
+        symlink(&outside, world.a_home.join(".codex-linked")).unwrap();
         // OpenCode's live database: its newest rows exist only in the WAL.
         let opencode = wal_database(&world.a_home.join(".codex-personal/opencode.db"), 300);
         std::mem::forget(opencode);
@@ -221,6 +228,16 @@ impl World {
                 HomeCopy {
                     source: self.a_home.join(".codex-personal"),
                     destination: self.b_home.join(".codex-personal"),
+                    private: false,
+                },
+                HomeCopy {
+                    source: self.a_home.join(".codex-personal/ssh_key"),
+                    destination: self.b_home.join(".codex-personal/ssh_key"),
+                    private: true,
+                },
+                HomeCopy {
+                    source: self.a_home.join(".codex-linked"),
+                    destination: self.b_home.join(".codex-linked"),
                     private: false,
                 },
                 HomeCopy {
@@ -263,6 +280,7 @@ struct Hooks {
     a_db: PathBuf,
     fence: StoreFenceRecord,
     world: (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf),
+    overwrite_sessionwiki: bool,
     log: Vec<&'static str>,
 }
 
@@ -279,6 +297,7 @@ impl Hooks {
                 world.b_config.clone(),
                 world.b_home.clone(),
             ),
+            overwrite_sessionwiki: false,
             log: Vec::new(),
         }
     }
@@ -350,7 +369,7 @@ impl CutoverHooks for Hooks {
             },
             home_targets: home_targets.to_vec(),
             migrate_sessionwiki: true,
-            overwrite_sessionwiki: false,
+            overwrite_sessionwiki: self.overwrite_sessionwiki,
             start_daemon: false,
         })
     }
@@ -517,6 +536,21 @@ async fn migration_resumes_over_small_pipes_and_publishes_one_activation() {
     assert_eq!(
         std::fs::read_link(profile.join("dangling")).unwrap(),
         Path::new("/nonexistent/absolute")
+    );
+    // A private credential inside a copied profile home is 0600 there.
+    let ssh_key = profile.join("ssh_key");
+    assert_eq!(std::fs::read(&ssh_key).unwrap(), b"ssh key");
+    assert_eq!(std::fs::metadata(&ssh_key).unwrap().mode() & 0o777, 0o600);
+    // A profile home that is a link arrives as a real directory.
+    let linked_profile = world.b_home.join(".codex-linked");
+    assert!(std::fs::symlink_metadata(&linked_profile).unwrap().is_dir());
+    assert_eq!(
+        std::fs::read(linked_profile.join("auth.json")).unwrap(),
+        b"{\"linked\":1}"
+    );
+    assert_eq!(
+        std::fs::read(linked_profile.join("history.jsonl")).unwrap(),
+        b"history"
     );
     let token = world.b_home.join(".secrets/token");
     assert!(std::fs::symlink_metadata(&token).unwrap().is_file());
@@ -770,9 +804,19 @@ async fn attempt(
     fence: &str,
     hook: Option<PublicationHook>,
 ) -> (Result<SenderOutcome>, Vec<&'static str>) {
+    attempt_with(world, fence, hook, false).await
+}
+
+async fn attempt_with(
+    world: &World,
+    fence: &str,
+    hook: Option<PublicationHook>,
+    overwrite_sessionwiki: bool,
+) -> (Result<SenderOutcome>, Vec<&'static str>) {
     let (sender_read, sender_write, _, receiver_read, receiver_write) = pipe();
     let receiver = spawn_receiver(world.receiver(hook), receiver_read, receiver_write);
     let mut hooks = Hooks::new(world, world.fence(fence));
+    hooks.overwrite_sessionwiki = overwrite_sessionwiki;
     let result = run_migration_sender(world.plan(), sender_read, sender_write, &mut hooks).await;
     receiver.await.unwrap().unwrap();
     (result, hooks.log)
@@ -851,4 +895,211 @@ async fn publication_failures_leave_the_destination_fenced_and_a_retry_completes
     assert_eq!(count_rows(&world.b_wiki), 600);
     assert_eq!(count_rows(&b_db), 3000);
     assert!(!world.b_data.join("unknown-user-file").exists());
+}
+
+/// A receiver kept open across several requests, to hold its staging lock.
+struct Live {
+    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    responses: tokio::sync::mpsc::UnboundedReceiver<Response>,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl Live {
+    fn open(config: ReceiverConfig) -> Self {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server);
+        let task = spawn_receiver(config, server_read, server_write);
+        let (mut reader, writer) = tokio::io::split(client);
+        let (sender, responses) = tokio::sync::mpsc::unbounded_channel();
+        mj_core::runtime::spawn(async move {
+            while let Ok(Some((response, _))) = read_frame::<_, Response>(&mut reader).await {
+                if sender.send(response).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            writer,
+            responses,
+            task,
+        }
+    }
+
+    async fn send(&mut self, request: Request) -> Response {
+        write_frame(&mut self.writer, &request, &[]).await.unwrap();
+        self.writer.flush().await.unwrap();
+        self.responses.recv().await.unwrap()
+    }
+}
+
+fn manifest_request() -> (Request, Vec<u8>) {
+    (
+        Request::StageManifest {
+            files: true,
+            hash_files: false,
+            blocks: Vec::new(),
+        },
+        Vec::new(),
+    )
+}
+
+#[tokio::test]
+async fn one_receiver_owns_a_destinations_staging_and_hello_alone_creates_none() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+
+    // A dry run's requests leave nothing on the destination.
+    let (responses, outcome) = exchange(
+        world.receiver(None),
+        vec![
+            hello(),
+            (
+                Request::ProbePaths {
+                    paths: vec![world.b_home.clone()],
+                },
+                Vec::new(),
+            ),
+            (Request::Done, Vec::new()),
+        ],
+    )
+    .await;
+    outcome.unwrap();
+    assert!(matches!(responses.last(), Some(Response::DoneAck)));
+    assert!(!stage.exists() && !world.b_data.exists());
+
+    // The first receiver to stage holds the lock until it ends.
+    let mut first = Live::open(world.receiver(None));
+    assert!(matches!(first.send(hello().0).await, Response::HelloAck(_)));
+    assert!(matches!(
+        first.send(manifest_request().0).await,
+        Response::StageManifestAck(_)
+    ));
+    assert!(stage.join("receiver.lock").exists());
+    let (responses, outcome) =
+        exchange(world.receiver(None), vec![hello(), manifest_request()]).await;
+    let Some(Response::Error { message }) = responses.last() else {
+        panic!("{responses:?}")
+    };
+    assert!(message.contains("already in progress"), "{message}");
+    assert!(outcome.is_err());
+    // The refused receiver did not disturb the first one's staging.
+    assert!(matches!(
+        first.send(manifest_request().0).await,
+        Response::StageManifestAck(_)
+    ));
+    assert!(matches!(first.send(Request::Done).await, Response::DoneAck));
+    first.task.await.unwrap().unwrap();
+
+    // Released: the next receiver stages normally.
+    let (_, outcome) = exchange(
+        world.receiver(None),
+        vec![hello(), manifest_request(), (Request::Done, Vec::new())],
+    )
+    .await;
+    outcome.unwrap();
+}
+
+#[tokio::test]
+async fn destination_entries_that_already_exist_are_refused_and_never_touched() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    // Neither an mj.sqlite3 nor a config.toml, so only the entry check can refuse.
+    write(&world.b_data.join("sessions/unrelated"), b"mine");
+    for (fence, hook) in [
+        ("t1", None),
+        ("t2", Some(failing_at(PublicationStep::BeforeStoreRename))),
+    ] {
+        let (result, log) = attempt(&world, fence, hook).await;
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(log.last(), Some(&"rollback"));
+        assert_eq!(
+            std::fs::read(world.b_data.join("sessions/unrelated")).unwrap(),
+            b"mine"
+        );
+        assert!(!b_db.exists());
+    }
+}
+
+#[tokio::test]
+async fn an_entry_created_during_publication_is_neither_replaced_nor_deleted_on_retry() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let profile = world.b_home.join(".codex-personal");
+    let token = world.b_home.join(".secrets/token");
+
+    // Created between Hello and CommitPublication.
+    let (sender_read, sender_write, _, receiver_read, receiver_write) = pipe();
+    let receiver = spawn_receiver(world.receiver(None), receiver_read, receiver_write);
+    let mut hooks = Hooks::new(&world, world.fence("t1"));
+    let mut sender = Sender::new(world.plan(), sender_read, sender_write);
+    let phase1 = sender.phase1().await.unwrap();
+    write(&profile.join("user.txt"), b"user data");
+    let error = format!("{:#}", sender.phase2(phase1, &mut hooks).await.unwrap_err());
+    assert!(error.contains("already exists"), "{error}");
+    drop(sender);
+    receiver.await.unwrap().unwrap();
+    assert_eq!(
+        std::fs::read(profile.join("user.txt")).unwrap(),
+        b"user data"
+    );
+    assert!(
+        !profile.join("auth.json").exists(),
+        "nothing merged into it"
+    );
+
+    // Created after the existence checks passed: the atomic install refuses it.
+    std::fs::remove_dir_all(&profile).unwrap();
+    let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let racing: PublicationHook = {
+        let token = token.clone();
+        let created = created.clone();
+        Arc::new(move |step| {
+            if step == PublicationStep::BeforeStoreRename && !created.swap(true, Ordering::SeqCst) {
+                write(&token, b"user token");
+            }
+            Ok(())
+        })
+    };
+    let (result, _) = attempt(&world, "t2", Some(racing)).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(std::fs::read(&token).unwrap(), b"user token");
+    assert!(!b_db.exists());
+
+    // A retry with a new fence removes what the failed attempt created, and
+    // still refuses to touch the user's file.
+    let (result, _) = attempt(&world, "t3", None).await;
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&token).unwrap(), b"user token");
+    assert!(
+        !profile.exists(),
+        "the failed attempt's own entries are removed"
+    );
+
+    // Once the user's file is gone the migration completes.
+    std::fs::remove_file(&token).unwrap();
+    let (result, _) = attempt(&world, "t4", None).await;
+    result.unwrap();
+    assert_eq!(read_store_fence_file(&b_db).unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_existing_sessionwiki_survives_failures_before_it_is_replaced() {
+    let world = World::new();
+    drop(wal_database(&world.b_wiki, 5));
+    for fence in ["t1", "t2"] {
+        let (result, _) = attempt_with(
+            &world,
+            fence,
+            Some(failing_at(PublicationStep::BeforeStoreRename)),
+            true,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(count_rows(&world.b_wiki), 5, "{fence}");
+    }
+    let (result, _) = attempt_with(&world, "t3", None, true).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
 }
