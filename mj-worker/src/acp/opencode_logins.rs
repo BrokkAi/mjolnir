@@ -297,7 +297,7 @@ mod tests {
             serde_json::to_vec(&second).unwrap(),
         )
         .unwrap();
-        let mut launch = crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap());
+        let mut launch = crate::test_support::launch_config(home.to_str().unwrap());
         launch.harness = HarnessKind::OpenCode;
         launch.write(&candidate.join("launch.json")).unwrap();
         std::fs::write(candidate.join("ownership.json"), "destination").unwrap();

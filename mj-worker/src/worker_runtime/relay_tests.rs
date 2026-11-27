@@ -372,50 +372,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
     mpsc::channel(1)
 }
 
-pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
-    WorkerLaunchConfig {
-        accepted_reload_operation_id: None,
-        parked_move: None,
-        cpu_accounting: Default::default(),
-        no_github_credentials: false,
-        oracle: false,
-        initial_commands: Vec::new(),
-        reviewer_launch: None,
-        subagents: mj_core::subagent::SubagentPolicy::Native,
-        handback_tool: false,
-        subagent_kind: None,
-        orchestrator: false,
-        orchestrators_enabled: false,
-        agent_mailboxes_enabled: true,
-        subtle_subagents: true,
-        initial_model: None,
-        review_trigger: Default::default(),
-        review_capture: false,
-        goal_resume_request: Default::default(),
-        target_environment: Default::default(),
-        seed_image_environment: false,
-        run_mode: Default::default(),
-        suspend_capture: None,
-        session_id: SESSION_ID.into(),
-        harness: HarnessKind::Codex,
-        harness_home: profile_home.into(),
-        authentication_marker: None,
-        bridge_command: "/usr/bin/false".into(),
-        bridge_args: Vec::new(),
-        harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
-        environment: BTreeMap::from([("CODEX_HOME".into(), profile_home.into())]),
-        excluded_environment: Vec::new(),
-        cwd: ".local/share/hel/workspaces/session/repo".into(),
-        additional_directories: Vec::new(),
-        writable_directories: Vec::new(),
-        native_session_id: None,
-        project_memory: None,
-        execution_policy: ExecutionPolicy::Unconstrained,
-        claude_permission_mode: Default::default(),
-        mjolnir_guardian: true,
-        observe_policy: None,
-    }
-}
+pub(crate) use crate::test_support::launch_config;
 
 async fn expect_daemon_launch_failure(root: &Path, config: WorkerLaunchConfig) {
     let daemon = mj_core::runtime::spawn(unix::run_daemon(root.to_owned(), config));
