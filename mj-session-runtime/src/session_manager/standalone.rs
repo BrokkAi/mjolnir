@@ -1388,6 +1388,41 @@ impl StandaloneSession {
         result
     }
 
+    /// Wait behind any admitted delivery and retire its absorbed handout.
+    pub async fn fence_project_memory(
+        &mut self,
+        memory_relay: &CommandSpec,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let target = self
+            .project_memory
+            .as_ref()
+            .context("session has no project-memory endpoint")?;
+        let root = target.canonical_root.clone();
+        let canonical = tokio::select! {
+            () = cancel.cancelled() => anyhow::bail!("project-memory fence was cancelled"),
+            result = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => result.context("canonical read task failed")??,
+        };
+        let mut client = tokio::select! {
+            () = cancel.cancelled() => anyhow::bail!("project-memory fence was cancelled"),
+            result = RelayClient::connect(memory_relay, &self.materialized.session_id) => result.context("open project-memory fence relay")?,
+        };
+        let result = client
+            .fence_project_memory_snapshot(
+                canonical
+                    .absorbed
+                    .get(&self.materialized.session_id)
+                    .cloned(),
+                canonical.version,
+                &cancel,
+            )
+            .await;
+        if let Err(error) = client.detach().await {
+            tracing::warn!(session_id = %self.materialized.session_id, error = format!("{error:#}"), "could not close project-memory fence relay");
+        }
+        result
+    }
+
     async fn sync_project_memory_on(
         &mut self,
         client: &mut RelayClient,
@@ -1404,14 +1439,16 @@ impl StandaloneSession {
             return Ok(());
         }
         if client.protocol_version() >= mj_core::relay::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL {
-            return sync_turn_project_memory(
+            let completed = sync_turn_project_memory(
                 client,
                 target,
                 &self.materialized.session_id,
                 config,
                 cancel,
             )
-            .await;
+            .await?;
+            anyhow::ensure!(completed, "worker was busy during project-memory snapshot");
+            return Ok(());
         }
         let snapshot = tokio::select! {
             biased;
@@ -1491,13 +1528,14 @@ impl StandaloneSession {
 
 /// Synchronize on the bulk connection. Once a commit or delivery starts, wait
 /// for it to finish even if a checkpoint preempts the surrounding sync.
+/// Returns false when cancelled or when a tool prevented the Snapshot.
 pub async fn sync_turn_project_memory(
     client: &mut RelayClient,
     target: &ProjectMemorySyncTarget,
     session_id: &str,
     config: &mj_core::config::Config,
     cancel: tokio_util::sync::CancellationToken,
-) -> Result<()> {
+) -> Result<bool> {
     use mj_core::project_memory::SwapOutcome;
     use mj_core::relay::ProjectMemoryDeliveryOutcome;
     let resolver = crate::project_memory_merge::UtilityModelConflictResolver::new(config);
@@ -1506,11 +1544,11 @@ pub async fn sync_turn_project_memory(
     'snapshot: loop {
         let root = target.canonical_root.clone();
         let mut canonical = tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
+            () = cancel.cancelled() => return Ok(false),
             state = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => state.context("canonical read task failed")??,
         };
         if cancel.is_cancelled() {
-            return Ok(());
+            return Ok(false);
         }
         let snapshot = client
             .project_memory_turn_snapshot(
@@ -1519,57 +1557,59 @@ pub async fn sync_turn_project_memory(
                 &cancel,
             )
             .await?;
-        let Some((base, id, replica)) = snapshot else {
-            return Ok(());
+        let (base, id, replica) = match snapshot {
+            crate::worker_client::ProjectMemoryTurnSnapshotResult::Busy => return Ok(false),
+            crate::worker_client::ProjectMemoryTurnSnapshotResult::InSync => return Ok(true),
+            crate::worker_client::ProjectMemoryTurnSnapshotResult::Snapshot { base, id, tree } => {
+                (base, id, tree)
+            }
         };
         loop {
             if cancel.is_cancelled() {
-                return Ok(());
+                return Ok(false);
             }
             let merged = resolutions
                 .merge_turn_tree(&base, &canonical.tree, &replica, &resolver, &cancel)
                 .await?;
             if cancel.is_cancelled() {
-                return Ok(());
+                return Ok(false);
             }
-            let version = if replica != base {
-                let root = target.canonical_root.clone();
-                let expected = canonical.clone();
-                let tree = merged.clone();
-                let session = session_id.to_owned();
-                let handout = id.clone();
-                match mj_core::runtime::spawn_blocking(move || {
-                    mj_core::project_memory::commit_canonical(
-                        &root,
-                        &expected,
-                        &session,
-                        &tree,
-                        Some(&handout),
-                    )
-                })
-                .await
-                .context("canonical commit task failed")??
-                {
-                    SwapOutcome::Swapped => merged.version(),
-                    SwapOutcome::Changed => {
-                        let previous_absorbed = canonical.absorbed.get(session_id).cloned();
-                        let root = target.canonical_root.clone();
-                        canonical = tokio::select! {
-                            () = cancel.cancelled() => return Ok(()),
-                            state = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => state.context("canonical read task failed")??,
-                        };
-                        if canonical.absorbed.get(session_id).cloned() != previous_absorbed {
-                            continue 'snapshot;
-                        }
-                        continue;
+            let root = target.canonical_root.clone();
+            let expected = canonical.clone();
+            let tree = merged.clone();
+            let session = session_id.to_owned();
+            let handout = id.clone();
+            let version = match mj_core::runtime::spawn_blocking(move || {
+                mj_core::project_memory::commit_canonical(
+                    &root,
+                    &expected,
+                    &session,
+                    &tree,
+                    Some(&handout),
+                )
+            })
+            .await
+            .context("canonical commit task failed")??
+            {
+                SwapOutcome::Swapped => merged.version(),
+                SwapOutcome::Changed => {
+                    let previous_absorbed = canonical.absorbed.get(session_id).cloned();
+                    let root = target.canonical_root.clone();
+                    canonical = tokio::select! {
+                        () = cancel.cancelled() => return Ok(false),
+                        state = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => state.context("canonical read task failed")??,
+                    };
+                    if canonical.absorbed.get(session_id).cloned() != previous_absorbed {
+                        continue 'snapshot;
                     }
+                    continue;
                 }
-            } else {
-                canonical.version.clone()
             };
             if cancel.is_cancelled() {
-                return Ok(());
+                return Ok(false);
             }
+            // Every delivery, including a pull-only round, follows a commit
+            // recording this handout as absorbed. A later Snapshot can fence it.
             match client
                 .deliver_project_memory(id, merged, version, &cancel)
                 .await?
@@ -1581,7 +1621,7 @@ pub async fn sync_turn_project_memory(
                 ProjectMemoryDeliveryOutcome::Delivered
                 | ProjectMemoryDeliveryOutcome::Dirty
                 | ProjectMemoryDeliveryOutcome::Stale
-                | ProjectMemoryDeliveryOutcome::Busy => return Ok(()),
+                | ProjectMemoryDeliveryOutcome::Busy => return Ok(true),
             }
         }
     }

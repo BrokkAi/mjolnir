@@ -277,7 +277,8 @@ pub(super) fn ensure_project_memory_replica(memory: &ProjectMemoryLaunchConfig) 
             .context("project memory baseline has no parent")?;
         std::fs::create_dir_all(parent)?;
         let baseline = tempfile::tempdir_in(parent)?;
-        super::reload_commit::copy_overlay(&memory.root, baseline.path())?;
+        let tree = snapshot_documents(&memory.root)?;
+        mj_core::project_memory::render_memory_tree(baseline.path(), &tree, false)?;
         std::fs::rename(baseline.path(), &memory.baseline_root)?;
     }
     if seed.exists() {
@@ -374,6 +375,35 @@ mod tests {
     ) -> ProjectMemoryDeliveryOutcome {
         let version = tree.version();
         deliver(memory, id, tree, version, &Default::default()).unwrap()
+    }
+
+    // Hard-won: 0d930fcd3: untracked links prevented startup of a legacy replica without a baseline.
+    #[test]
+    fn legacy_replica_without_baseline_seeds_only_tracked_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        std::fs::create_dir_all(&memory.root).unwrap();
+        std::fs::write(memory.root.join("note.md"), "tracked").unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, "outside").unwrap();
+        std::os::unix::fs::symlink(&outside, memory.root.join("link.md")).unwrap();
+        prepare_project_memory(&memory, "session").unwrap();
+        assert_eq!(
+            Record::load(&memory).unwrap().base.files,
+            [("/note.md".into(), "tracked".into())].into()
+        );
+        assert_eq!(
+            std::fs::read_link(memory.root.join("link.md")).unwrap(),
+            outside
+        );
+        assert!(!memory.baseline_root.join("link.md").exists());
     }
 
     // Hard-won: 56bbaa82d: a consumed seed prevented restart after the replica was removed.
@@ -535,7 +565,9 @@ mod tests {
         let (memory, canonical) = setup(temp.path());
         std::fs::create_dir(memory.root.join("topic")).unwrap();
         let (_, id, mut incoming) = handout(&memory, &canonical);
-        incoming.files.insert("/topic".into(), "canonical note".into());
+        incoming
+            .files
+            .insert("/topic".into(), "canonical note".into());
         assert_eq!(
             apply(&memory, &id, incoming.clone()),
             ProjectMemoryDeliveryOutcome::Delivered

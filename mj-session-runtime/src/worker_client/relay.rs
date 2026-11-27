@@ -3,6 +3,18 @@ use mj_core::relay::{
     ProjectMemoryTransferAction as MemoryAction, ProjectMemoryTransferResult as MemoryResult,
 };
 
+/// The worker's turn Snapshot outcome, including an in-flight tool call.
+#[derive(Debug)]
+pub enum ProjectMemoryTurnSnapshotResult {
+    Busy,
+    InSync,
+    Snapshot {
+        base: mj_core::project_memory::ProjectMemorySnapshot,
+        id: String,
+        tree: mj_core::project_memory::ProjectMemorySnapshot,
+    },
+}
+
 async fn memory_cancelled(cancel: Option<&tokio_util::sync::CancellationToken>) {
     match cancel {
         Some(cancel) => cancel.cancelled().await,
@@ -670,13 +682,7 @@ impl RelayClient {
         absorbed: Option<String>,
         head_version: mj_core::project_memory::TreeVersion,
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<
-        Option<(
-            mj_core::project_memory::ProjectMemorySnapshot,
-            String,
-            mj_core::project_memory::ProjectMemorySnapshot,
-        )>,
-    > {
+    ) -> Result<ProjectMemoryTurnSnapshotResult> {
         let started = tokio::select! {
             () = cancel.cancelled() => bail!("project-memory synchronization cancelled"),
             result = self.begin_memory_transfer(MemoryAction::BeginTurnSnapshot {
@@ -684,8 +690,10 @@ impl RelayClient {
                 head_version,
             }) => result?,
         };
-        if matches!(started, MemoryResult::InSync | MemoryResult::Busy) {
-            return Ok(None);
+        match started {
+            MemoryResult::Busy => return Ok(ProjectMemoryTurnSnapshotResult::Busy),
+            MemoryResult::InSync => return Ok(ProjectMemoryTurnSnapshotResult::InSync),
+            _ => {}
         }
         let bytes = self.download_memory_pages(started, Some(cancel)).await?;
         tokio::select! {
@@ -693,12 +701,31 @@ impl RelayClient {
             result = mj_core::runtime::spawn_blocking(move || {
                 let snapshot: mj_core::relay::ProjectMemoryTurnSnapshot =
                     serde_json::from_slice(&bytes)?;
-                Ok(Some((
-                    snapshot.base.decode()?,
-                    snapshot.id,
-                    snapshot.tree.decode()?,
-                )))
+                Ok(ProjectMemoryTurnSnapshotResult::Snapshot {
+                    base: snapshot.base.decode()?,
+                    id: snapshot.id,
+                    tree: snapshot.tree.decode()?,
+                })
             }) => result.context("decode project-memory turn snapshot task failed")?,
+        }
+    }
+
+    /// A successful Snapshot fences an earlier uncertain delivery under the
+    /// worker's memory I/O semaphore. The new handout needs no page download.
+    pub async fn fence_project_memory_snapshot(
+        &mut self,
+        absorbed: Option<String>,
+        head_version: mj_core::project_memory::TreeVersion,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let started = tokio::select! {
+            () = cancel.cancelled() => bail!("project-memory synchronization cancelled"),
+            result = self.begin_memory_transfer(MemoryAction::BeginTurnSnapshot { absorbed, head_version }) => result?,
+        };
+        match started {
+            MemoryResult::SnapshotStarted { .. } | MemoryResult::InSync => Ok(()),
+            MemoryResult::Busy => bail!("worker was busy during project-memory fence"),
+            _ => bail!("relay returned an unexpected project-memory fence response"),
         }
     }
 
@@ -864,10 +891,10 @@ impl RelayClient {
             if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
                 bail!("project-memory synchronization cancelled");
             }
-            match transfer
+            let outcome = transfer
                 .call(MemoryAction::CommitUpload { transfer_id })
-                .await?
-            {
+                .await?;
+            match outcome {
                 outcome @ (MemoryResult::Installed
                 | MemoryResult::Replaced { .. }
                 | MemoryResult::Delivered { .. }) => Ok(outcome),

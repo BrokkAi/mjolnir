@@ -16,6 +16,24 @@ pub(in crate::controller) fn lost_wakes_notice(count: usize, missed: &str, reaso
     )
 }
 
+async fn finish_memory_sync_before_capture(
+    result: Result<()>,
+    turn_protocol: bool,
+    session_id: &str,
+    fence: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    if let Err(error) = result {
+        if !turn_protocol {
+            return Err(error.context("synchronize project memory for checkpoint"));
+        }
+        tracing::warn!(%session_id, error = format!("{error:#}"), "project-memory checkpoint sync failed");
+        fence
+            .await
+            .context("project memory couldn't be fenced before capture")?;
+    }
+    Ok(())
+}
+
 impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_delivery(
@@ -548,38 +566,49 @@ impl Controller {
         {
             let turn_protocol = relay.connection_mut().protocol_version()
                 >= mj_core::relay::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL;
-            let sync = relay.connection_mut().sync_project_memory(
-                &memory_relay,
-                &self.config,
-                memory_sync_cancel.clone(),
-            );
-            tokio::pin!(sync);
-            let cancelled = async {
-                loop {
-                    if executor.cancellation_requested() {
-                        memory_sync_cancel.cancel();
-                        return;
+            let sync_result = {
+                let sync = relay.connection_mut().sync_project_memory(
+                    &memory_relay,
+                    &self.config,
+                    memory_sync_cancel.clone(),
+                );
+                tokio::pin!(sync);
+                let cancelled = async {
+                    loop {
+                        if executor.cancellation_requested() {
+                            memory_sync_cancel.cancel();
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(25)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
+                };
+                tokio::select! {
+                    biased;
+                    // A canonical swap already started must finish and report its result.
+                    () = cancelled => {
+                        sync.await.context("synchronize project memory for checkpoint")?;
+                        bail!("project-memory synchronization for checkpoint was cancelled");
+                    },
+                    result = &mut sync => result,
                 }
             };
-            tokio::select! {
-                biased;
-                // Signal cancellation without dropping sync: a canonical swap
-                // that already started must finish and report its result.
-                () = cancelled => {
-                    sync.await.context("synchronize project memory for checkpoint")?;
-                    bail!("project-memory synchronization for checkpoint was cancelled");
-                },
-                result = &mut sync => {
-                    if let Err(error) = result {
-                        if !turn_protocol {
-                            return Err(error.context("synchronize project memory for checkpoint"));
+            finish_memory_sync_before_capture(sync_result, turn_protocol, session_id, async {
+                let fence = relay.connection_mut().fence_project_memory(&memory_relay, memory_sync_cancel.clone());
+                tokio::pin!(fence);
+                tokio::select! {
+                    biased;
+                    () = async {
+                        loop {
+                            if executor.cancellation_requested() {
+                                memory_sync_cancel.cancel();
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(25)).await;
                         }
-                        tracing::warn!(%session_id, error = format!("{error:#}"), "project-memory checkpoint sync failed");
-                    }
-                },
-            }
+                    } => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
+                    result = &mut fence => result,
+                }
+            }).await?;
         }
         let cursor = barrier
             .operational
@@ -1399,6 +1428,38 @@ mod tests {
     use mj_core::repository::ProjectBundleSnapshot;
     use mj_core::state::{ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget};
     use std::path::PathBuf;
+
+    // Hard-won: 0d930fcd3: a failed checkpoint sync could capture while an earlier turn's delivery was still applying.
+    #[tokio::test]
+    async fn checkpoint_fences_every_turn_sync_failure_and_fails_if_fence_fails() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let called = AtomicBool::new(false);
+        // A prior turn may have lost a delivery reply even if this checkpoint
+        // fails before it sends a delivery of its own.
+        let early = Err(anyhow::anyhow!("snapshot failed before delivery"));
+        finish_memory_sync_before_capture(early, true, "session", async {
+            called.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(called.load(Ordering::SeqCst));
+        let failed = Err(anyhow::anyhow!("relay disconnected"));
+        let error = finish_memory_sync_before_capture(failed, true, "session", async {
+            anyhow::bail!("fence relay lost")
+        })
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("project memory couldn't be fenced before capture"));
+        called.store(false, Ordering::SeqCst);
+        finish_memory_sync_before_capture(Ok(()), true, "session", async {
+            called.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!called.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn history_only_capture_preserves_managed_network_origin_provenance() {
