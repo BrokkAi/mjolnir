@@ -62,6 +62,7 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 - The worker's `ToolsInFlight` already owns the tool-call state shared with the stall watchdog; Snapshot and Deliver use it for `Busy`.
 - A delivery can fail while rendering `incoming` without killing the worker. Snapshot and Deliver finish that same pending incoming operation before looking at the replica, so a partial tree cannot be mistaken for an agent edit.
 - The worker filters blank and whitespace-only documents from legacy record trees and replica snapshots with `is_memory_document`, so a blank document is treated as deleted in both the handout and the replica equality check.
+- When an absent replica has no remaining seed, the worker recreates it from the record base, the legacy baseline, or an empty tree. Delivery and interrupted-delivery recovery update only tracked document paths, preserving entries excluded from snapshots.
 
 
 ## Decision Log
@@ -115,7 +116,7 @@ Slice 3: `Snapshot` and `Deliver`. The worker keeps one record file beside the r
 
 The daemon then computes `merged = merge(base, canonical tree, handout.tree)`. If the handout differs from base it commits `{ tree: merged, absorbed[session] = handout.id }`: on a version mismatch it re-reads and merges again; on an `absorbed` mismatch it starts over with a new `Snapshot`. Then it sends `Deliver { id, tree: merged, version }`.
 
-`Deliver`: answer `Stale` unless `id` is the pending handout. If the replica no longer equals the handout, set `base = handout.tree` and `base_version = none`, clear the handout, write nothing, and answer `Dirty`; the daemon runs another round, which picks up the later edits and the foreign changes together. Otherwise write `incoming`, replace the replica, set `base = merged` and `base_version = version`, and clear `handout` and `incoming`.
+`Deliver`: answer `Stale` unless `id` is the pending handout. If the replica no longer equals the handout, set `base = handout.tree` and `base_version = none`, clear the handout, write nothing, and answer `Dirty`; the daemon runs another round, which picks up the later edits and the foreign changes together. Otherwise write `incoming`, apply the delivered changes to tracked replica paths, set `base = merged` and `base_version = version`, and clear `handout` and `incoming`.
 
 Triggers: the session actor runs one sync at a time, sharing its slot with checkpoint syncs, at turn start (scheduled alongside prompt submission), at turn end (prompt completion and harness-turn settlement), and on attach. If the worker can report an open tool call from a single owner of that fact, `Snapshot` and `Deliver` answer `Busy` while one is open; otherwise the equality check decides alone. Workers below the new protocol keep the checkpoint-only path.
 

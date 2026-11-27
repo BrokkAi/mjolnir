@@ -80,8 +80,13 @@ impl Record {
                 .handout
                 .as_ref()
                 .context("pending project-memory delivery has no handout")?;
-            ProjectMemoryStore::new(&memory.root)
-                .finish_interrupted_delivery(&handout.tree, &tree)?;
+            let handout = mj_core::project_memory::prepare_memory_tree(&handout.tree)?;
+            let incoming = mj_core::project_memory::prepare_memory_tree(&tree)?;
+            ProjectMemoryStore::new(&memory.root).apply_delivery(
+                &handout,
+                &incoming,
+                mj_core::project_memory::MemoryApplyMode::PreserveEdits,
+            )?;
             self.base = tree;
             self.base_version = None;
             self.handout = None;
@@ -150,18 +155,33 @@ pub(super) fn deliver(
     version: TreeVersion,
     tools: &mj_core::activity::ToolsInFlight,
 ) -> Result<mj_core::relay::ProjectMemoryDeliveryOutcome> {
-    deliver_with_render(memory, id, tree, version, tools, |root, prepared| {
-        prepared.render(root, false)
-    })
+    deliver_with_apply(
+        memory,
+        id,
+        tree,
+        version,
+        tools,
+        |root, handout, incoming| {
+            ProjectMemoryStore::new(root).apply_delivery(
+                handout,
+                incoming,
+                mj_core::project_memory::MemoryApplyMode::Delivery,
+            )
+        },
+    )
 }
 
-fn deliver_with_render(
+fn deliver_with_apply(
     memory: &ProjectMemoryLaunchConfig,
     id: &str,
     tree: ProjectMemorySnapshot,
     version: TreeVersion,
     tools: &mj_core::activity::ToolsInFlight,
-    render: impl FnOnce(&std::path::Path, mj_core::project_memory::PreparedMemoryTree<'_>) -> Result<()>,
+    apply: impl FnOnce(
+        &std::path::Path,
+        &mj_core::project_memory::PreparedMemoryTree<'_>,
+        &mj_core::project_memory::PreparedMemoryTree<'_>,
+    ) -> Result<()>,
 ) -> Result<mj_core::relay::ProjectMemoryDeliveryOutcome> {
     use mj_core::relay::ProjectMemoryDeliveryOutcome;
     let prepared = mj_core::project_memory::prepare_memory_tree(&tree)?;
@@ -171,6 +191,7 @@ fn deliver_with_render(
         return Ok(ProjectMemoryDeliveryOutcome::Stale);
     };
     let handout_tree = handout.tree.clone();
+    let prepared_handout = mj_core::project_memory::prepare_memory_tree(&handout_tree)?;
     record.incoming = Some(tree.clone());
     let pending = record.prepare_save(memory)?;
     if !tools.is_empty() {
@@ -185,7 +206,7 @@ fn deliver_with_render(
         return Ok(ProjectMemoryDeliveryOutcome::Dirty);
     }
     persist_record(pending, memory)?;
-    render(&memory.root, prepared)?;
+    apply(&memory.root, &prepared_handout, &prepared)?;
     record.base = tree;
     record.base_version = Some(version);
     record.handout = None;
@@ -198,24 +219,24 @@ fn deliver_with_render(
 pub(super) fn ensure_project_memory_replica(memory: &ProjectMemoryLaunchConfig) -> Result<()> {
     let seed = mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root);
     if !memory.root.exists() {
-        anyhow::ensure!(
-            seed.is_dir(),
-            "project memory seed is missing: {}",
-            seed.display()
-        );
-        if memory.baseline_root.exists() {
-            std::fs::remove_dir_all(&memory.baseline_root)?;
-        }
         let parent = memory
             .root
             .parent()
             .context("project memory root has no parent")?;
         std::fs::create_dir_all(parent)?;
         let temporary = tempfile::tempdir_in(parent)?;
-        let baseline = tempfile::tempdir_in(parent)?;
-        super::reload_commit::copy_overlay(&seed, temporary.path())?;
-        super::reload_commit::copy_overlay(&seed, baseline.path())?;
-        std::fs::rename(baseline.path(), &memory.baseline_root)?;
+        if seed.is_dir() {
+            if memory.baseline_root.exists() {
+                std::fs::remove_dir_all(&memory.baseline_root)?;
+            }
+            let baseline = tempfile::tempdir_in(parent)?;
+            super::reload_commit::copy_overlay(&seed, temporary.path())?;
+            super::reload_commit::copy_overlay(&seed, baseline.path())?;
+            std::fs::rename(baseline.path(), &memory.baseline_root)?;
+        } else {
+            let record = Record::load(memory)?;
+            mj_core::project_memory::render_memory_tree(temporary.path(), &record.base, false)?;
+        }
         std::fs::rename(temporary.path(), &memory.root)?;
     } else if !memory.baseline_root.exists() {
         let parent = memory
@@ -303,6 +324,167 @@ mod tests {
     ) -> ProjectMemoryDeliveryOutcome {
         let version = tree.version();
         deliver(memory, id, tree, version, &Default::default()).unwrap()
+    }
+
+    // Hard-won: 56bbaa82d: a consumed seed prevented restart after the replica was removed.
+    #[test]
+    fn restart_without_seed_recreates_replica_from_record_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = ProjectMemoryLaunchConfig {
+            project_key: "test".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+            history_socket: None,
+        };
+        let seed = mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root);
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("note.md"), "seed version").unwrap();
+        ensure_project_memory_replica(&memory).unwrap();
+        recover_project_memory(&memory).unwrap();
+        assert!(!seed.exists());
+        let seeded = snapshot_documents(&memory.root).unwrap();
+        let (_, id, _) = snapshot(&memory, None, &seeded.version()).unwrap().unwrap();
+        let updated = ProjectMemorySnapshot {
+            files: [("/note.md".into(), "record version".into())].into(),
+        };
+        assert_eq!(
+            apply(&memory, &id, updated.clone()),
+            ProjectMemoryDeliveryOutcome::Delivered
+        );
+        std::fs::remove_dir_all(&memory.root).unwrap();
+        ensure_project_memory_replica(&memory).unwrap();
+        recover_project_memory(&memory).unwrap();
+        assert_eq!(snapshot_documents(&memory.root).unwrap(), updated);
+        assert_eq!(Record::load(&memory).unwrap().base, updated);
+        assert_eq!(
+            std::fs::read_to_string(memory.baseline_root.join("note.md")).unwrap(),
+            "seed version"
+        );
+    }
+
+    #[test]
+    fn missing_replica_without_seed_uses_legacy_baseline_or_empty_record() {
+        for legacy in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let memory = ProjectMemoryLaunchConfig {
+                project_key: "test".into(),
+                root: temp.path().join("replica"),
+                baseline_root: temp.path().join("baseline"),
+                repository_roots: Default::default(),
+                mcp_delivery: Default::default(),
+                history_socket: None,
+            };
+            if legacy {
+                std::fs::create_dir_all(&memory.baseline_root).unwrap();
+                std::fs::write(memory.baseline_root.join("legacy.md"), "legacy").unwrap();
+            }
+            ensure_project_memory_replica(&memory).unwrap();
+            recover_project_memory(&memory).unwrap();
+            let expected = if legacy {
+                ProjectMemorySnapshot {
+                    files: [("/legacy.md".into(), "legacy".into())].into(),
+                }
+            } else {
+                ProjectMemorySnapshot::default()
+            };
+            assert_eq!(snapshot_documents(&memory.root).unwrap(), expected);
+            assert_eq!(Record::load(&memory).unwrap().base, expected);
+            assert!(memory.baseline_root.join(RECORD_FILE).is_file());
+            let mut canonical = expected.clone();
+            canonical
+                .files
+                .insert("/canonical.md".into(), "canonical".into());
+            let (base, id, replica) = snapshot(&memory, None, &canonical.version())
+                .unwrap()
+                .unwrap();
+            let merged = mj_core::project_memory::merge_trees(&base, &canonical, &replica).tree;
+            assert_eq!(
+                apply(&memory, &id, merged.clone()),
+                ProjectMemoryDeliveryOutcome::Delivered
+            );
+            assert_eq!(snapshot_documents(&memory.root).unwrap(), merged);
+            assert_eq!(merged.files["/canonical.md"], "canonical");
+        }
+    }
+
+    // Hard-won: 56bbaa82d: delivery deleted nested hidden files and symlinks outside the snapshot.
+    #[test]
+    fn delivery_preserves_untracked_nested_files_and_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let nested = memory.root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("note.md"), "old").unwrap();
+        std::fs::write(nested.join("remove.md"), "remove").unwrap();
+        std::fs::write(nested.join(".private"), "hidden data").unwrap();
+        std::fs::create_dir(nested.join("empty-untracked")).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, "outside data").unwrap();
+        std::os::unix::fs::symlink(&outside, nested.join("link")).unwrap();
+        let (_, id, mut incoming) = handout(&memory, &canonical);
+        incoming
+            .files
+            .insert("/nested/note.md".into(), "new".into());
+        incoming
+            .files
+            .insert("/nested/added.md".into(), "added".into());
+        incoming.files.remove("/nested/remove.md");
+        assert_eq!(
+            apply(&memory, &id, incoming),
+            ProjectMemoryDeliveryOutcome::Delivered
+        );
+        assert_eq!(
+            std::fs::read_to_string(nested.join("note.md")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(nested.join("added.md")).unwrap(),
+            "added"
+        );
+        assert!(!nested.join("remove.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(nested.join(".private")).unwrap(),
+            "hidden data"
+        );
+        assert!(nested.join("empty-untracked").is_dir());
+        assert_eq!(std::fs::read_link(nested.join("link")).unwrap(), outside);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside data");
+    }
+
+    // Hard-won: 56bbaa82d: delivery overwrote a blank file omitted from the snapshot.
+    #[test]
+    fn delivery_does_not_overwrite_a_blank_untracked_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        std::fs::write(memory.root.join("blank.md"), " \n").unwrap();
+        let (_, id, mut incoming) = handout(&memory, &canonical);
+        incoming
+            .files
+            .insert("/blank.md".into(), "canonical note".into());
+        assert!(
+            deliver(
+                &memory,
+                &id,
+                incoming.clone(),
+                incoming.version(),
+                &Default::default()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("blank.md")).unwrap(),
+            " \n"
+        );
+        let state = read_canonical_state(&canonical).unwrap();
+        let (base, _, replica) = snapshot(&memory, None, &state.version).unwrap().unwrap();
+        assert_eq!(base, incoming);
+        assert!(!replica.files.contains_key("/blank.md"));
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("blank.md")).unwrap(),
+            " \n"
+        );
     }
 
     #[test]
@@ -403,11 +585,15 @@ mod tests {
             apply(&memory, &id, merged.clone()),
             ProjectMemoryDeliveryOutcome::Delivered
         );
+        assert_eq!(snapshot_documents(&memory.root).unwrap(), merged);
         assert_eq!(
-            ProjectMemoryStore::new(&memory.root).snapshot().unwrap(),
-            merged
+            std::fs::read_to_string(memory.root.join("note.md")).unwrap(),
+            " \n\t"
         );
-        assert!(!memory.root.join("note.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("new-empty.md")).unwrap(),
+            ""
+        );
     }
 
     #[test]
@@ -489,13 +675,13 @@ mod tests {
             SwapOutcome::Swapped
         );
         let tools = Default::default();
-        let failed = deliver_with_render(
+        let failed = deliver_with_apply(
             &memory,
             &id,
             incoming.clone(),
             incoming.version(),
             &tools,
-            |root, _prepared| {
+            |root, _handout, _incoming| {
                 std::fs::write(root.join("note.md"), "remote note")?;
                 std::fs::remove_file(root.join("remaining.md"))?;
                 std::fs::remove_file(root.join("remove.md"))?;
@@ -545,15 +731,36 @@ mod tests {
     fn recovery_after_record_save_failure_preserves_later_agent_edits() {
         let temp = tempfile::tempdir().unwrap();
         let (memory, canonical) = setup(temp.path());
+        std::fs::create_dir(memory.root.join("becomes-file")).unwrap();
+        std::fs::write(memory.root.join("becomes-file/note.md"), "old child").unwrap();
+        std::fs::write(memory.root.join("becomes-directory"), "old file").unwrap();
         let (_, id, mut incoming) = handout(&memory, &canonical);
         incoming.files.insert("/note.md".into(), "delivered".into());
+        incoming.files.remove("/becomes-file/note.md");
+        incoming
+            .files
+            .insert("/becomes-file".into(), "new file".into());
+        incoming.files.remove("/becomes-directory");
+        incoming
+            .files
+            .insert("/becomes-directory/note.md".into(), "new child".into());
         incoming
             .files
             .insert("/foreign.md".into(), "foreign".into());
         let mut record = Record::load(&memory).unwrap();
         record.incoming = Some(incoming.clone());
         record.save(&memory).unwrap();
-        mj_core::project_memory::render_memory_tree(&memory.root, &incoming, false).unwrap();
+        let handout =
+            mj_core::project_memory::prepare_memory_tree(&record.handout.as_ref().unwrap().tree)
+                .unwrap();
+        let delivered = mj_core::project_memory::prepare_memory_tree(&incoming).unwrap();
+        ProjectMemoryStore::new(&memory.root)
+            .apply_delivery(
+                &handout,
+                &delivered,
+                mj_core::project_memory::MemoryApplyMode::Delivery,
+            )
+            .unwrap();
         // The final record save fails: the persisted record still has the
         // handout and incoming, although rendering completed.
         std::fs::write(memory.root.join("note.md"), "later edit").unwrap();
@@ -566,6 +773,8 @@ mod tests {
         assert_eq!(replica.files["/note.md"], "later edit");
         assert_eq!(replica.files["/new.md"], "later addition");
         assert_eq!(replica.files["/foreign.md"], "foreign");
+        assert_eq!(replica.files["/becomes-file"], "new file");
+        assert_eq!(replica.files["/becomes-directory/note.md"], "new child");
         assert!(Record::load(&memory).unwrap().incoming.is_none());
     }
 
