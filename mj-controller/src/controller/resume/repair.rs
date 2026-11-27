@@ -23,6 +23,113 @@ const REPAIR: WorkerRestartMessages = WorkerRestartMessages {
     native_session: "wait for the retained native session",
 };
 
+/// The target kept this session's files but its harness no longer holds the
+/// native conversation, and no recovery copy can replace it.
+///
+/// The message is the operator's next step; a caller that persists it must
+/// keep the whole sentence, because retrying Resume cannot make it succeed.
+#[derive(Debug)]
+pub(in crate::controller) struct MissingNativeHistoryError(String);
+
+impl MissingNativeHistoryError {
+    pub(in crate::controller) fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for MissingNativeHistoryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MissingNativeHistoryError {}
+
+/// Whether `error` says the harness lost this session's native conversation.
+/// A worker reports it on startup, so it can arrive wrapped in the command or
+/// lifecycle context that carried it here.
+pub(in crate::controller) fn is_missing_native_history_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<MissingNativeHistoryError>().is_some()
+            || cause
+                .to_string()
+                .contains("has no native history for session ")
+    })
+}
+
+fn harness_display_name(controller: &Controller, record: &SessionRecord) -> String {
+    controller
+        .config
+        .named_profile(&record.last_profile)
+        .map(|profile| profile.kind.display_name().to_owned())
+        .unwrap_or_else(|_| record.last_profile.clone())
+}
+
+fn surviving_checkout(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+) -> Option<String> {
+    super::super::environment::resume_checkout_directory(controller, session_id, backend).ok()
+}
+
+fn without_checkpoint_message(
+    controller: &Controller,
+    record: &SessionRecord,
+    backend: &targets::TargetLocator,
+) -> String {
+    let harness = harness_display_name(controller, record);
+    let native = record
+        .native_session_id
+        .as_deref()
+        .map(|native| format!(" (saved native session {native})"))
+        .unwrap_or_default();
+    let kept = match surviving_checkout(controller, &record.id, backend) {
+        Some(checkout) => format!(
+            "The session, its Mjolnir transcript, and its checkout at {checkout} were kept untouched"
+        ),
+        None => {
+            "The session, its Mjolnir transcript, and its checkout were kept untouched".to_owned()
+        }
+    };
+    format!(
+        "The {harness} native history for session {session_id}{native} is missing and no recovery \
+         archive holds it. {kept}; no blank conversation was started under this session. Read the \
+         transcript with `mj transcript --session {session_id}` (or `mj-memory`), export work with \
+         `mj diff --session {session_id}`, `mj export --session {session_id}`, or `mj fetch \
+         --session {session_id}`, then start a fresh session with `mj new`; run `mj destroy \
+         --session {session_id}` only after verifying the replacement.",
+        session_id = record.id,
+    )
+}
+
+fn mismatched_checkpoint_message(
+    controller: &Controller,
+    record: &SessionRecord,
+    backend: &targets::TargetLocator,
+    archived_native: &str,
+) -> String {
+    let harness = harness_display_name(controller, record);
+    let expected = record.native_session_id.as_deref().unwrap_or("none");
+    let kept = match surviving_checkout(controller, &record.id, backend) {
+        Some(checkout) => format!(
+            "Current files, its Mjolnir transcript, and children were kept untouched, including the \
+             checkout at {checkout}"
+        ),
+        None => {
+            "Current files, its Mjolnir transcript, and children were kept untouched".to_owned()
+        }
+    };
+    format!(
+        "The recovery archive holds {harness} native session {archived_native}, but session \
+         {session_id} expects native session {expected}. {kept}. Supply a matching recovery \
+         archive, or read the transcript with `mj transcript --session {session_id}`, export work \
+         with `mj export --session {session_id}`, start a fresh session with `mj new`, and run `mj \
+         destroy --session {session_id}` only after verifying the replacement.",
+        session_id = record.id,
+    )
+}
+
 /// Reconcile a retained worker's dispatch fence before publishing it as ready.
 pub(in crate::controller) async fn release_settled_in_place_hold(
     session_id: &str,
@@ -220,9 +327,16 @@ impl Controller {
                 .context("repair session disappeared")?;
             record.state = SessionState::Error;
             record.updated_at = now();
-            record.last_error = Some(format!(
-                "Resume repair failed: {error:#}. The environment was kept. Retry Resume when the target is reachable."
-            ));
+            record.last_error = Some(if is_missing_native_history_error(error) {
+                // Resume cannot repair a conversation the harness no longer
+                // has. Keep the whole operator instruction, not the generic
+                // retry wrapper that promises a retry would work.
+                super::super::worker_binary::failure_line(error)
+            } else {
+                format!(
+                    "Resume repair failed: {error:#}. The environment was kept. Retry Resume when the target is reachable."
+                )
+            });
             crate::database::save_lifecycle_session(record)?;
         }
         result
@@ -230,6 +344,26 @@ impl Controller {
 }
 
 impl Controller {
+    /// Record a missing-native-history refusal before its caller returns it,
+    /// so `mj sessions`, the TUI, and Web show the operator instruction even
+    /// when the error stops here.
+    fn persist_missing_native_history(
+        &mut self,
+        session_id: &str,
+        message: String,
+    ) -> Result<anyhow::Error> {
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        record.state = SessionState::Error;
+        record.updated_at = now();
+        record.last_error = Some(message.clone());
+        crate::database::save_lifecycle_session(record)?;
+        Ok(anyhow::Error::new(MissingNativeHistoryError::new(message)))
+    }
+
     pub(in crate::controller) async fn recover_missing_parent_data(
         &mut self,
         session_id: &str,
@@ -246,17 +380,27 @@ impl Controller {
                     .recover_parent_runtime_from_store(session_id, discard_queue, executor)
                     .await;
             }
+            let message = without_checkpoint_message(self, &record, &backend);
+            return Err(self.persist_missing_native_history(session_id, message)?);
         }
-        let checkpoint = record.checkpoint.as_ref().context(
-            "The current checkout was kept, but parent runtime/history is missing and no recovery copy holds it. Supply a recovery archive and retry Resume; current files and children remain untouched.")?;
+        let checkpoint = record
+            .checkpoint
+            .as_ref()
+            .expect("checkpoint checked above");
         let archive = verify_resume_checkpoint(session_id, checkpoint)?;
-        ensure!(
-            record
-                .native_session_id
-                .as_deref()
-                .is_none_or(|id| id == archive.manifest.session.native_session_id),
-            "The recovery copy does not contain this parent's native session. Current files and children were kept; supply a recovery copy for the current conversation and retry Resume."
-        );
+        if record
+            .native_session_id
+            .as_deref()
+            .is_some_and(|id| id != archive.manifest.session.native_session_id)
+        {
+            let message = mismatched_checkpoint_message(
+                self,
+                &record,
+                &backend,
+                &archive.manifest.session.native_session_id,
+            );
+            return Err(self.persist_missing_native_history(session_id, message)?);
+        }
         let (backend, root) = self.worker_placement(session_id)?;
         let output = super::super::worker_binary::probe_worker_liveness(
             executor, &backend, session_id, &root,

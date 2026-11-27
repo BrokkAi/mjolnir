@@ -338,7 +338,9 @@ fn parent_mail(key: &str, wake: bool) -> mj_core::mailbox::MailboxEvent {
 #[test]
 fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     use crate::relay::DurableRelay;
-    use crate::relay::test_support::{ready_checkpoint, relay_request, submit_relay};
+    use crate::relay::test_support::{
+        ready_checkpoint, relay_request, submit_relay, submit_release,
+    };
     use mj_core::relay::{
         RelayCommand, RelayCommandOutcome, RelayErrorCode, RelayObservation, RelayRequest,
         RelayResponseBody, RelayResponsePayload,
@@ -432,8 +434,58 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     };
     let paged: mj_core::relay::CheckpointMailboxRead = serde_json::from_str(&page).unwrap();
     assert_eq!(paged.mailbox, mailbox);
-    // Mail accepted after the cut moves the relay past it, as it would refuse
-    // a Close there; the cut's mail can no longer be read.
+    // Mail submitted after the cut is refused until the barrier ends. The
+    // daemon's outbox retries it, so the cut keeps the mail it had and a Close
+    // still matches it.
+    let refused = source.handle(relay_request(
+        "deliver-late",
+        RelayRequest::Submit {
+            command_id: "deliver-late".into(),
+            command: deliver(parent_mail("late", false)),
+        },
+    ));
+    let RelayResponseBody::Error { error } = refused.body else {
+        panic!("the relay accepted mail after its checkpoint cut");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
+    assert!(error.retryable);
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::CheckpointMailbox { mailbox: held },
+    } = read_at_cut(&mut source)
+    else {
+        panic!("mail submitted after the cut moved it");
+    };
+    assert_eq!(held.pending_events, pending);
+    // Another observation can also move the journal while the barrier stays
+    // active. The ready cut is now stale, so both cut-bound reads must refuse
+    // it; otherwise a Close could seal a cut the relay has already passed.
+    let asked = source
+        .record_observation(RelayObservation::ElicitationRequested {
+            request: mj_core::elicitation::ElicitationRequest {
+                id: "question-after-cut".into(),
+                message: "May I continue?".into(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+                tool_permission: None,
+            },
+        })
+        .unwrap();
+    assert!(asked > cut.ordinal);
+    let state = source.operational_state();
+    assert_eq!(state.checkpoint_barrier.as_deref(), Some("suspend-barrier"));
+    assert_eq!(state.checkpoint_ready.as_ref(), Some(&cut));
+    let RelayResponseBody::Error { error } = read_at_cut(&mut source) else {
+        panic!("the relay reported mail for a cut it has moved past");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
+    let RelayResponseBody::Error { error } = read_page_at_cut(&mut source) else {
+        panic!("the relay paged mail for a cut it has moved past");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
+    // Releasing the barrier lets the outbox's retry in. The cut is still past,
+    // so neither read serves it; the barrier check now refuses first.
+    submit_release(&mut source, "release-late-mail", "suspend-barrier");
     submit_relay(
         &mut source,
         "deliver-late",

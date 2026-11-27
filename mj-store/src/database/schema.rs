@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 164;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 165;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3908,6 +3908,28 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
         )?;
         transaction.commit()?;
     }
+    // Revision 165 is breaking: the report triggers that mirrored a child's
+    // recorded report directory into its environment are removed. An older
+    // writer would record the child's directory but, with no trigger, stop
+    // recording the environment's obligation to capture and remove it, so its
+    // writes would silently lose data the next writer reads.
+    if version < 165 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        // The existing ledger rows name the environment that was bound when
+        // each report directory was written. Re-deriving them from today's
+        // bindings would move an old path into a new environment whose
+        // target never held it.
+        transaction.execute_batch(
+            "DROP TRIGGER IF EXISTS environment_report_registered;
+             DROP TRIGGER IF EXISTS environment_report_updated;
+             UPDATE schema_compatibility SET minimum_compatible_version = 165 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (165, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=165;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5168,10 +5190,10 @@ mod reader_tests {
         connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
         migrate_schema(&connection, None).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 164);
-        assert_eq!(state.minimum_compatible, Some(164));
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(163).is_err());
-        state.ensure_supported_by(164).unwrap();
+        state.ensure_supported_by(SCHEMA_VERSION).unwrap();
         super::super::pin_session_memory_key_with(&connection, "kept", "pinned").unwrap();
         assert_eq!(
             super::super::read_pinned_memory_key_with(&connection, "kept")
@@ -5198,6 +5220,43 @@ mod reader_tests {
             super::super::read_pinned_memory_key_with(&connection, "kept").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn report_trigger_removal_at_165_raises_the_compatibility_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        save_session_to(&path, &super::super::tests::session("kept", "project")).unwrap();
+        stamp_schema_version(&path, 164);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        let report_triggers = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema
+                      WHERE type='trigger' AND name IN
+                            ('environment_report_registered','environment_report_updated')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            report_triggers(&connection),
+            2,
+            "a 164 store mirrors report directories with triggers"
+        );
+        migrate_schema(&connection, None).unwrap();
+        assert_eq!(
+            report_triggers(&connection),
+            0,
+            "the report-dir writer owns the environment ledger"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(state.ensure_supported_by(SCHEMA_VERSION - 1).is_err());
+        state.ensure_supported_by(SCHEMA_VERSION).unwrap();
     }
 
     #[test]
@@ -5237,7 +5296,7 @@ mod reader_tests {
         migrate_schema(&connection, None).unwrap();
         assert_eq!(
             read_schema_state(&connection).unwrap().minimum_compatible,
-            Some(164)
+            Some(MINIMUM_COMPATIBLE_VERSION)
         );
         assert_eq!(
             connection
@@ -7418,6 +7477,32 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        // A pre-165 store mirrors report directories with these triggers.
+        if version < 165
+            && legacy_schema::table_has_column(&connection, "subagent_handbacks", "report_dir")
+                .unwrap()
+            && legacy_schema::table_has_column(&connection, "environment_reports", "report_dir")
+                .unwrap()
+        {
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER IF NOT EXISTS environment_report_registered
+                     AFTER INSERT ON subagent_handbacks
+                     WHEN NEW.report_dir IS NOT NULL BEGIN
+                         INSERT OR IGNORE INTO environment_reports
+                             SELECT environment_id,NEW.child_session_id,NEW.report_dir
+                               FROM environment_bindings WHERE session_id=NEW.child_session_id;
+                     END;
+                     CREATE TRIGGER IF NOT EXISTS environment_report_updated
+                     AFTER UPDATE OF report_dir ON subagent_handbacks
+                     WHEN NEW.report_dir IS NOT NULL BEGIN
+                         INSERT OR IGNORE INTO environment_reports
+                             SELECT environment_id,NEW.child_session_id,NEW.report_dir
+                               FROM environment_bindings WHERE session_id=NEW.child_session_id;
+                     END;",
+                )
+                .unwrap();
+        }
         if version < 164 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS session_memory_keys;")

@@ -487,6 +487,16 @@ pub trait SessionControlBackend: Send + Sync {
         })
     }
     fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>>;
+
+    /// The session's actor, or `None` while none is attached.
+    ///
+    /// A caller with work that a retained session can still take without an
+    /// actor uses this instead of [`Self::session`], which treats absence as
+    /// an error. The default suits a backend whose `session` only fails when
+    /// no actor exists; a real manager overrides it to distinguish the two.
+    fn find_session(&self, session_id: String) -> BoxFuture<'_, Result<Option<SessionHandle>>> {
+        Box::pin(async move { self.session(session_id).await.map(Some) })
+    }
 }
 
 #[derive(Clone)]
@@ -513,6 +523,14 @@ impl SessionControl {
 
     pub async fn session(&self, session_id: impl Into<String>) -> Result<SessionHandle> {
         self.backend.session(session_id.into()).await
+    }
+
+    /// The session's actor, or `None` while none is attached.
+    pub async fn find_session(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<Option<SessionHandle>> {
+        self.backend.find_session(session_id.into()).await
     }
 
     pub async fn wait_for_session(

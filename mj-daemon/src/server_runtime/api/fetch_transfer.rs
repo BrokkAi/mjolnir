@@ -20,9 +20,13 @@ fn remote_ssh(locator: &TargetLocator) -> Option<&SshTarget> {
 fn read_command(
     layout: SessionExportLayout,
     session: &str,
+    binary: &str,
     arguments: Vec<String>,
 ) -> Result<CommandSpec> {
-    Ok(worker_command_spec(layout, session, arguments, "session file fetch")?.gzip_ssh_stdout())
+    Ok(
+        worker_command_spec_for(&layout, session, binary, arguments, "session file fetch")?
+            .gzip_ssh_stdout(),
+    )
 }
 
 /// `worker store-fetch` arguments up to, not including, the payload's `--source`.
@@ -59,10 +63,101 @@ fn store_command(
     )
 }
 
+/// One fetch attempt: its spool and the executor's result for the command.
+/// Keeping the spool with the result lets the staging decision see the same
+/// error chain the executor reported.
+struct FetchAttempt {
+    spool: std::fs::File,
+    output: Result<CommandOutput>,
+}
+
+fn fetch_attempt(
+    layout: &SessionExportLayout,
+    session: &str,
+    binary: &str,
+    arguments: &[String],
+    executor: &impl CommandExecutor,
+) -> Result<FetchAttempt> {
+    let command = read_command(layout.clone(), session, binary, arguments.to_vec())?;
+    let spool = mj_checkpoint::archive::create_fetch_spool()?;
+    let output = executor.execute_to_file(&command, &spool);
+    Ok(FetchAttempt { spool, output })
+}
+
+fn finish_fetch(attempt: FetchAttempt) -> Result<FetchedPath, ExportError> {
+    let FetchAttempt { mut spool, output } = attempt;
+    let mut output = output.map_err(ExportError::Failed)?;
+    spool
+        .rewind()
+        .map_err(|error| ExportError::Failed(error.into()))?;
+    if output.status == mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE {
+        // Precondition refusals contain a diagnostic, never a payload.
+        spool
+            .read_to_end(&mut output.stdout)
+            .map_err(|error| ExportError::Failed(error.into()))?;
+    }
+    if output.status != 0 {
+        return worker_output(output, "session file fetch").map(|_| unreachable!());
+    }
+    FetchedPath::read_from(spool).map_err(ExportError::Failed)
+}
+
+/// Read one path, staging the control worker and retrying with a fresh spool
+/// when the root's own `hel` is missing or too old to know `fetch`.
+fn fetch_with_stager(
+    layout: &SessionExportLayout,
+    session: &str,
+    arguments: &[String],
+    executor: &impl CommandExecutor,
+    stager: &impl targets::ControlWorkerStager,
+) -> Result<FetchedPath, ExportError> {
+    let first =
+        fetch_attempt(layout, session, "hel", arguments, executor).map_err(ExportError::Failed)?;
+    if !should_stage_control_worker(&layout.backend, &first.output)
+        || executor.cancellation_requested()
+    {
+        return finish_fetch(first);
+    }
+    // The first spool holds at most a diagnostic from a command that did not
+    // run; the retry gets its own so an absent `hel` cannot leak into it.
+    drop(first);
+    let root = targets::worker_root(&layout.backend, session).map_err(ExportError::Failed)?;
+    stager
+        .stage_control_worker(executor, &layout.backend, session, &root)
+        .with_context(|| format!("stage the current worker in {root} for the session file fetch"))
+        .map_err(ExportError::Failed)?;
+    let second = fetch_attempt(
+        layout,
+        session,
+        targets::CONTROL_WORKER_NAME,
+        arguments,
+        executor,
+    )
+    .map_err(ExportError::Failed)?;
+    finish_fetch(second)
+}
+
 pub(super) async fn read(
     session: String,
     path: PathBuf,
     mode: FetchMode,
+) -> Result<FetchedPath, ExportError> {
+    read_with_stager(
+        session,
+        path,
+        mode,
+        mj_controller::controller::ControlWorker,
+    )
+    .await
+}
+
+/// [`read`] with an explicit stager, so the missing-`hel` fallback is
+/// testable without installing a worker build.
+pub(super) async fn read_with_stager(
+    session: String,
+    path: PathBuf,
+    mode: FetchMode,
+    stager: impl targets::ControlWorkerStager + Send + 'static,
 ) -> Result<FetchedPath, ExportError> {
     let token = CancellationToken::new();
     let _cancel = token.clone().drop_guard();
@@ -73,18 +168,9 @@ pub(super) async fn read(
             Ok(arguments) => arguments,
             Err(error) => return Ok(Err(error)),
         };
-        let command = read_command(layout, &session, arguments)?;
-        let mut spool = mj_checkpoint::archive::create_fetch_spool()?;
-        let mut output = executor.execute_to_file(&command, &spool)?;
-        spool.rewind()?;
-        if output.status == mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE {
-            // Precondition refusals contain a diagnostic, never a payload.
-            spool.read_to_end(&mut output.stdout)?;
-        }
-        if output.status != 0 {
-            return Ok(worker_output(output, "session file fetch").map(|_| unreachable!()));
-        }
-        Ok(FetchedPath::read_from(spool).map_err(ExportError::Failed))
+        Ok(fetch_with_stager(
+            &layout, &session, &arguments, &executor, &stager,
+        ))
     })
     .await?
 }
@@ -328,6 +414,7 @@ mod tests {
         let read = read_command(
             ssh_layout("child-session"),
             "child-session",
+            "hel",
             vec!["fetch".into()],
         )
         .unwrap();

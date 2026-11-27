@@ -3047,10 +3047,18 @@ impl Controller {
         // The durable boot owner is admitted before launch. An unacknowledged
         // start can already be serving work, so its files are no longer a
         // disposable archive reconstruction, even before Running is published.
-        let detail = format!(
-            "Resume failed after parent startup: {}. The current environment and history were kept; retry Resume to reconnect it.",
+        let missing_native_history = is_missing_native_history_error(&error);
+        let detail = if missing_native_history {
+            // The worker kept the session, checkout, and transcript. Retrying
+            // Resume cannot restore a native conversation the harness no
+            // longer has, so keep the operator instruction whole.
             super::worker_binary::failure_line(&error)
-        );
+        } else {
+            format!(
+                "Resume failed after parent startup: {}. The current environment and history were kept; retry Resume to reconnect it.",
+                super::worker_binary::failure_line(&error)
+            )
+        };
         let record = self
             .state
             .sessions
@@ -3060,6 +3068,9 @@ impl Controller {
         record.updated_at = now();
         record.last_error = Some(detail.clone());
         crate::database::save_lifecycle_session(record)?;
+        if missing_native_history {
+            return Ok(error);
+        }
         Ok(error.context(detail))
     }
 
@@ -4050,7 +4061,11 @@ pub(super) fn resolve_move_keep_dir(
 mod in_place;
 mod repair;
 pub use in_place::InPlaceRestartError;
-pub(super) use repair::{RetainedWorker, release_settled_in_place_hold};
+#[cfg(test)]
+pub(super) use repair::MissingNativeHistoryError;
+pub(super) use repair::{
+    RetainedWorker, is_missing_native_history_error, release_settled_in_place_hold,
+};
 
 #[cfg(test)]
 mod tests;

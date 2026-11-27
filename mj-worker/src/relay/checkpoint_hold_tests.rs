@@ -341,3 +341,74 @@ fn background_work_started_after_the_cut_refuses_the_close() {
         "{refusal}"
     );
 }
+
+/// The checkpoint's own memory sync enqueues a project-memory notice while
+/// its barrier is admitted. That delivery must not join the cut it is
+/// capturing: the worker refuses it, the daemon's durable outbox retries the
+/// same command, and the agent receives exactly one notice after the barrier
+/// ends (or after the close resumes).
+// Hard-won: e8b68529d: a project-memory notice accepted after CheckpointReady moved the relay frontier and made Suspend fail.
+#[test]
+fn a_project_memory_notice_cannot_move_a_ready_checkpoint_cut() {
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+    use mj_core::relay::{RelayCommand, RelayErrorCode, RelayRequest, RelayResponseBody};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = configured(&temp);
+    let cut = ready_checkpoint(&mut relay, "project-memory-barrier");
+    let event = MailboxEvent {
+        key: "project-memory:session:before:after:nonce".into(),
+        source: "project-memory".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: MailboxEventBody::PlainText {
+            text: "Project memory changed. Reread MEMORY.md and the affected notes.".into(),
+        },
+    };
+    let deliver = |event: MailboxEvent| RelayCommand::DeliverMailboxEvent { event };
+
+    let refused = relay.handle(relay_request(
+        "deliver-after-cut",
+        RelayRequest::Submit {
+            command_id: "mailbox-project-memory-notice".into(),
+            command: deliver(event.clone()),
+        },
+    ));
+    let RelayResponseBody::Error { error } = refused.body else {
+        panic!("a mailbox delivery must not join a ready checkpoint cut");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
+    assert!(
+        error.retryable,
+        "the outbox must retry this delivery: {error:?}"
+    );
+    let held = relay.operational_state();
+    assert_eq!(held.latest_ordinal, cut.ordinal);
+    assert_eq!(held.checkpoint_ready.as_ref(), Some(&cut));
+    assert!(held.undelivered_mailbox_event_keys.is_empty());
+
+    // Releasing the barrier is the daemon retrying after the cut: the same
+    // command id is accepted once, and a lost-ack retry does not duplicate it.
+    submit_relay(
+        &mut relay,
+        "release-project-memory-barrier",
+        RelayCommand::ReleaseCheckpoint {
+            barrier_command_id: "project-memory-barrier".into(),
+        },
+    );
+    let accepted = submit_relay(
+        &mut relay,
+        "mailbox-project-memory-notice",
+        deliver(event.clone()),
+    );
+    assert!(accepted > cut.ordinal);
+    assert_eq!(
+        submit_relay(&mut relay, "mailbox-project-memory-notice", deliver(event)),
+        accepted
+    );
+    let state = relay.operational_state();
+    assert_eq!(
+        state.undelivered_mailbox_event_keys,
+        ["project-memory:session:before:after:nonce"]
+    );
+}

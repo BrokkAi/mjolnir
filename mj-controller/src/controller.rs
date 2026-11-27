@@ -120,7 +120,7 @@ pub use worker_binary::{
     ControlWorker, image_worker_label, prepare_recovery_worker_binary,
     prestage_host_container_worker, prewarm_profile_content, profile_upload_generation,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
-    shared_content_ssh, worker_source_problem,
+    shared_content_ssh, worker_source_problem, write_session_github_token,
 };
 
 pub use checkpoint::{

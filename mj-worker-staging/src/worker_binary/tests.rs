@@ -343,6 +343,68 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     assert!(!root.exists());
 }
 
+/// A fresh bare target can arrive before its worker root exists. Staging the
+/// control worker there must create the root, because the daemon's staging
+/// fallback is what makes an absent `hel` recoverable.
+#[cfg(unix)]
+#[test]
+fn installing_a_worker_binary_creates_a_missing_worker_root() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_MISSING_WORKER_ROOT_INSTALL_CHILD";
+    const SESSION: &str = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::worker_build_id()
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "installing_a_worker_binary_creates_a_missing_worker_root",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("absent parents").join(SESSION);
+    assert!(
+        !root.exists(),
+        "the fixture must not create the worker root"
+    );
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let worker = WorkerInstall::for_target(&locator, &ProcessExecutor).unwrap();
+    store::install_worker_binary(
+        &ProcessExecutor,
+        &locator,
+        SESSION,
+        &worker,
+        targets::CONTROL_WORKER_NAME,
+    )
+    .unwrap();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(
+        control.is_file(),
+        "the control worker was not staged into a created worker root"
+    );
+    store::install_worker_binary(&ProcessExecutor, &locator, SESSION, &worker, "hel").unwrap();
+    assert!(root.join("hel").is_file());
+    assert!(
+        !control.exists(),
+        "installing hel removes the now-redundant staged control worker"
+    );
+}
+
 // Hard-won: #1573: a sub-agent suspend queued behind another upload of this
 // build held daemon admission for the whole wait, so a handoff waited 440 s on
 // it. The wait now releases admission and a handoff's cancellation ends it
