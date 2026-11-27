@@ -12532,3 +12532,167 @@ fn prompt_context_arriving_after_start_waits_for_next_turn_and_replays() {
         1
     );
 }
+
+#[tokio::test]
+async fn turn_memory_protocol_gates_old_peers_reports_busy_and_pages_delivery() {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([(
+            "/large.md".into(),
+            incompressible_memory_text(10 * 1024 * 1024),
+        )]),
+    };
+    mj_core::project_memory::render_memory_tree(&memory.baseline_root, &tree, false).unwrap();
+    mj_core::project_memory::render_memory_tree(&memory.root, &tree, false).unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(directory.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let tools = relay.lock().unwrap().tools_in_flight();
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory.clone()));
+    let (client, server) = project_memory_socket(relay, endpoint);
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0;
+    let action = Action::BeginTurnSnapshot {
+        absorbed: None,
+        head_version: tree.version(),
+    };
+    let old =
+        project_memory_transfer_exchange_at(&mut lines, &mut writer, "old", 98, action.clone())
+            .await;
+    assert!(matches!(old.body, RelayResponseBody::Error { .. }));
+    let call: SessionUpdate = serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"live", "title":"write", "kind":"execute", "status":"in_progress"})).unwrap();
+    tools.observe_for_owner(&call, 1, mj_core::activity::ForegroundOwner::Unowned);
+    let busy = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        action.clone(),
+    )
+    .await;
+    assert!(matches!(
+        busy.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::Busy
+            }
+        }
+    ));
+    tools.retire_owner(&mj_core::activity::ForegroundOwner::Unowned);
+    let response =
+        next_project_memory_transfer_exchange(&mut lines, &mut writer, &mut sequence, action).await;
+    let (transfer_id, total_bytes) = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result:
+                        ResultKind::SnapshotStarted {
+                            transfer_id,
+                            total_bytes,
+                        },
+                },
+        } => (transfer_id, total_bytes),
+        other => panic!("unexpected snapshot: {other:?}"),
+    };
+    assert!(total_bytes > mj_core::relay::MAX_FRAME_BYTES as u64);
+    let mut bytes = Vec::new();
+    let mut offset = 0;
+    loop {
+        let response = next_project_memory_transfer_exchange(
+            &mut lines,
+            &mut writer,
+            &mut sequence,
+            Action::ReadSnapshotPage {
+                transfer_id,
+                offset,
+            },
+        )
+        .await;
+        let (next, complete, chunk) = match response.body {
+            RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::ProjectMemoryTransfer {
+                        result:
+                            ResultKind::SnapshotPage {
+                                next_offset,
+                                complete,
+                                chunk,
+                                ..
+                            },
+                    },
+            } => (next_offset, complete, chunk),
+            other => panic!("unexpected page: {other:?}"),
+        };
+        bytes.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(chunk)
+                .unwrap(),
+        );
+        offset = next;
+        if complete {
+            break;
+        }
+    }
+    let snapshot: mj_core::relay::ProjectMemoryTurnSnapshot =
+        serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot.tree.decode().unwrap(), tree);
+    let upload = serde_json::to_vec(
+        &mj_core::relay::ProjectMemoryWireTree::encode(tree.clone(), RELAY_PROTOCOL_VERSION)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(upload.len() > mj_core::relay::MAX_FRAME_BYTES);
+    let result = upload_project_memory_bytes(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        &upload,
+        UploadKind::Deliver {
+            id: snapshot.id,
+            version: tree.version(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        RelayResponsePayload::ProjectMemoryTransfer {
+            result: ResultKind::Delivered {
+                outcome: mj_core::relay::ProjectMemoryDeliveryOutcome::Delivered
+            }
+        }
+    ));
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginTurnSnapshot {
+            absorbed: None,
+            head_version: tree.version(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::InSync
+            }
+        }
+    ));
+    drop(writer);
+    drop(lines);
+    server.await.unwrap().unwrap();
+}

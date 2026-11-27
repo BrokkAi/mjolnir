@@ -1,8 +1,9 @@
 //! Per-session coordination between foreground operations and background recovery.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{Notify, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 /// Resolves once an admission's cancellation flag is set. Admitted work that
 /// cannot be cancelled by being dropped polls this instead.
 pub async fn wait_until_cancelled(flag: &AtomicBool) {
@@ -145,6 +146,130 @@ struct RecoveryGateState {
     busy: BTreeMap<String, Vec<BackgroundHolder>>,
     reservations: BTreeMap<String, Vec<Reservation>>,
     leases: BTreeMap<String, &'static str>,
+    memory_sync: BTreeMap<String, Weak<ProjectMemorySyncSlot>>,
+}
+
+/// One session's turn sync or checkpoint capture. A checkpoint cancels the
+/// turn holding this slot and owns it until capture finishes.
+#[derive(Default)]
+pub struct ProjectMemorySyncSlot {
+    state: Mutex<MemorySyncState>,
+    changed: Notify,
+}
+
+#[derive(Default)]
+struct MemorySyncState {
+    active: Option<Option<CancellationToken>>,
+    checkpoints_waiting: usize,
+}
+
+pub struct ProjectMemorySyncGuard(Arc<ProjectMemorySyncSlot>);
+
+struct CheckpointWaiter(Arc<ProjectMemorySyncSlot>);
+
+impl Drop for CheckpointWaiter {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.checkpoints_waiting -= 1;
+        self.0.changed.notify_waiters();
+    }
+}
+
+impl Drop for ProjectMemorySyncGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = None;
+        self.0.changed.notify_waiters();
+    }
+}
+
+impl ProjectMemorySyncSlot {
+    pub async fn wait_available(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.active.is_none() && state.checkpoints_waiting == 0 {
+                    return;
+                }
+            }
+            changed.await;
+        }
+    }
+
+    pub fn start_turn(self: &Arc<Self>) -> Option<(ProjectMemorySyncGuard, CancellationToken)> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active.is_some() || state.checkpoints_waiting != 0 {
+            return None;
+        }
+        let cancel = CancellationToken::new();
+        state.active = Some(Some(cancel.clone()));
+        Some((ProjectMemorySyncGuard(self.clone()), cancel))
+    }
+
+    pub async fn checkpoint(self: &Arc<Self>) -> ProjectMemorySyncGuard {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.checkpoints_waiting += 1;
+            if let Some(Some(cancel)) = &state.active {
+                cancel.cancel();
+            }
+        }
+        let waiter = CheckpointWaiter(self.clone());
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.active.is_none() {
+                    state.active = Some(None);
+                    drop(state);
+                    drop(waiter);
+                    return ProjectMemorySyncGuard(self.clone());
+                }
+            }
+            changed.await;
+        }
+    }
+}
+
+impl RecoveryGate {
+    pub fn project_memory_sync_slot(&self, session_id: &str) -> Arc<ProjectMemorySyncSlot> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state.memory_sync.entry(session_id.to_owned()).or_default();
+        if let Some(slot) = entry.upgrade() {
+            return slot;
+        }
+        let slot = Arc::new(ProjectMemorySyncSlot::default());
+        *entry = Arc::downgrade(&slot);
+        slot
+    }
 }
 
 /// Reviews exclude automatic work except accepted replies, but cannot hold

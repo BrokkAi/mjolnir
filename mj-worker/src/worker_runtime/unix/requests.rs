@@ -439,6 +439,7 @@ pub(super) async fn project_memory_response(
     envelope: RelayRequestEnvelope,
     endpoint: &ProjectMemoryEndpoint,
     transfer: &mut ConnectionProjectMemoryTransfer,
+    tools: mj_core::activity::ToolsInFlight,
     cancel: CancellationToken,
 ) -> Option<RelayResponseEnvelope> {
     let body = match endpoint.config.as_ref() {
@@ -462,6 +463,9 @@ pub(super) async fn project_memory_response(
                     | RelayRequest::ReplaceProjectMemoryTree { .. }
                     | RelayRequest::ProjectMemoryTransfer {
                         action: mj_core::relay::ProjectMemoryTransferAction::CommitUpload { .. }
+                    }
+                    | RelayRequest::ProjectMemoryTransfer {
+                        action: mj_core::relay::ProjectMemoryTransferAction::BeginTurnSnapshot { .. }
                     }
             );
             #[cfg(test)]
@@ -493,6 +497,7 @@ pub(super) async fn project_memory_response(
                                 action,
                                 &request_id,
                                 protocol_version,
+                                &tools,
                             )
                         }
                         _ => apply_project_memory_request(&memory, &request),
@@ -588,6 +593,7 @@ fn apply_project_memory_transfer_request(
     action: &mj_core::relay::ProjectMemoryTransferAction,
     request_id: &str,
     protocol_version: u32,
+    tools: &mj_core::activity::ToolsInFlight,
 ) -> Result<RelayResponsePayload> {
     use base64::Engine as _;
     use mj_core::relay::{
@@ -596,6 +602,47 @@ fn apply_project_memory_transfer_request(
     };
 
     match action {
+        Action::BeginTurnSnapshot {
+            absorbed,
+            head_version,
+        } => {
+            anyhow::ensure!(
+                matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
+                "this connection already owns a project-memory transfer; abort it first"
+            );
+            if !tools.is_empty() {
+                return Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::Busy,
+                });
+            }
+            let Some((base, id, tree)) = crate::worker_runtime::project_memory::snapshot(
+                memory,
+                absorbed.as_deref(),
+                head_version,
+            )?
+            else {
+                return Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::InSync,
+                });
+            };
+            let bytes = serde_json::to_vec(&mj_core::relay::ProjectMemoryTurnSnapshot {
+                base: mj_core::relay::ProjectMemoryWireTree::encode(base, protocol_version)?,
+                id,
+                tree: mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol_version)?,
+            })?;
+            let total_bytes = u64::try_from(bytes.len())?;
+            let transfer_id = transfer.allocate_id()?;
+            transfer.active = ActiveProjectMemoryTransfer::Download {
+                transfer_id,
+                download: mj_core::relay::FrozenSnapshotDownload::new(bytes),
+            };
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::SnapshotStarted {
+                    transfer_id,
+                    total_bytes,
+                },
+            })
+        }
         Action::BeginSnapshot => {
             anyhow::ensure!(
                 matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
@@ -751,6 +798,21 @@ fn apply_project_memory_transfer_request(
             let tree: mj_core::relay::ProjectMemoryWireTree =
                 serde_json::from_slice(&bytes).context("parse uploaded project-memory tree")?;
             match kind {
+                UploadKind::Deliver { id, version } => {
+                    let outcome = if tools.is_empty() {
+                        crate::worker_runtime::project_memory::deliver(
+                            memory,
+                            &id,
+                            tree.decode()?,
+                            version,
+                        )?
+                    } else {
+                        mj_core::relay::ProjectMemoryDeliveryOutcome::Busy
+                    };
+                    Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                        result: ResultKind::Delivered { outcome },
+                    })
+                }
                 UploadKind::InstallSnapshot => {
                     apply_project_memory_request(
                         memory,

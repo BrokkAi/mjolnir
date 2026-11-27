@@ -2536,6 +2536,8 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     fs::create_dir_all(baseline.join("nested")).unwrap();
     let baseline_body = "baseline before unsynced edit\n".repeat(4096);
     fs::write(baseline.join("nested/note.md"), &baseline_body).unwrap();
+    let record = r#"{"base":{"files":{}},"base_version":null,"handout":null,"incoming":null}"#;
+    fs::write(baseline.join(".hel-memory-record.json"), record).unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
         parked_move: None,
         accepted_reload_operation_id: None,
@@ -2665,6 +2667,13 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         fs::read_to_string(cross_home.join("projects/replica/.hel-memory-baseline/nested/note.md"))
             .unwrap(),
         baseline_body
+    );
+    assert_eq!(
+        fs::read_to_string(
+            cross_home.join("projects/replica/.hel-memory-baseline/.hel-memory-record.json")
+        )
+        .unwrap(),
+        record
     );
 
     // Claude remaps project directories for native history. The private memory

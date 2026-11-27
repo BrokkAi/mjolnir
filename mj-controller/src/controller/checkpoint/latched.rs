@@ -142,6 +142,11 @@ impl Controller {
         held_relay: Option<ControllerRelayLease>,
         consent: &mj_core::suspend_consent::CaptureConsent,
     ) -> Result<LatchedCheckpoint> {
+        let memory_slot = admission
+            .gate_and_session()
+            .0
+            .project_memory_sync_slot(session_id);
+        let _memory_capture = memory_slot.checkpoint().await;
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
         let pending_legacy_queue = crate::database::load_move_operation(session_id)?.is_some_and(|operation| operation.queue_admission_started && !operation.queue_admission_finished);
         let session = self
@@ -538,11 +543,11 @@ impl Controller {
             anyhow::bail!("quota Move recovery changed before source close");
         }
         let barrier_ready_at = Instant::now();
-        // Project memory is checkpoint state, not relay connection state.
-        // Reconcile it once while the checkpoint barrier keeps the harness
-        // idle. Ordinary attach and polling deliberately never touch it.
+        // Reconcile once while the checkpoint barrier keeps the harness idle.
         let memory_sync_cancel = tokio_util::sync::CancellationToken::new();
         {
+            let turn_protocol = relay.connection_mut().protocol_version()
+                >= mj_core::relay::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL;
             let sync = relay.connection_mut().sync_project_memory(
                 &memory_relay,
                 &self.config,
@@ -566,7 +571,14 @@ impl Controller {
                     sync.await.context("synchronize project memory for checkpoint")?;
                     bail!("project-memory synchronization for checkpoint was cancelled");
                 },
-                result = &mut sync => result.context("synchronize project memory for checkpoint")?,
+                result = &mut sync => {
+                    if let Err(error) = result {
+                        if !turn_protocol {
+                            return Err(error.context("synchronize project memory for checkpoint"));
+                        }
+                        tracing::warn!(%session_id, error = format!("{error:#}"), "project-memory checkpoint sync failed");
+                    }
+                },
             }
         }
         let cursor = barrier

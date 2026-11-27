@@ -149,6 +149,33 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// Resolve a turn-boundary merge using the same replica-wins fallback as the
+/// checkpoint path when the utility model cannot resolve a conflict.
+pub async fn merge_turn_tree<R: ConflictResolver>(
+    base: &ProjectMemorySnapshot,
+    canonical: &ProjectMemorySnapshot,
+    replica: &ProjectMemorySnapshot,
+    resolver: &R,
+    cancel: CancellationToken,
+) -> Result<ProjectMemorySnapshot> {
+    let mut merged = mj_core::project_memory::merge_trees(base, canonical, replica);
+    let resolver_cancel = cancel.child_token();
+    let _cancel_on_drop = CancelOnDrop(resolver_cancel.clone());
+    let deadline = Instant::now() + CONFLICT_RESOLUTION_TIMEOUT;
+    for conflict in &merged.conflicts {
+        let resolved = tokio::select! {
+            () = cancel.cancelled() => bail!("project-memory synchronization was cancelled"),
+            result = timeout_at(deadline, resolver.resolve(conflict, resolver_cancel.clone())) => result,
+        };
+        let content = match resolved {
+            Ok(Ok(content)) if validate_model_output(&content).is_ok() => content,
+            _ => conflict.replica_wins.clone(),
+        };
+        set_file_content(&mut merged.tree, &conflict.path, &content);
+    }
+    Ok(merged.tree)
+}
+
 /// Read, merge, resolve, and compare-and-swap the canonical tree. Filesystem
 /// calls run on Tokio's blocking pool; the model runs after the read and before
 /// the swap, with no canonical-memory lock held.
@@ -629,6 +656,17 @@ mod tests {
         install_initial(&root.path().join("memory"), &canonical);
         let resolver = StaticResolver::unavailable();
 
+        let turn_tree = merge_turn_tree(
+            &base,
+            &canonical,
+            &replica,
+            &resolver,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(turn_tree.files["/MEMORY.md"], "replica\n");
+
         let outcome = merge_and_swap_canonical(
             &root.path().join("memory"),
             &base,
@@ -652,6 +690,16 @@ mod tests {
         let empty_root = empty_dir.path().join("memory");
         install_initial(&empty_root, &canonical);
         let empty_replica = snapshot(&[("/MEMORY.md", "")]);
+        let turn_tree = merge_turn_tree(
+            &base,
+            &canonical,
+            &empty_replica,
+            &resolver,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!turn_tree.files.contains_key("/MEMORY.md"));
         let outcome = merge_and_swap_canonical(
             &empty_root,
             &base,

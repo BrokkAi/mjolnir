@@ -3,6 +3,62 @@ use super::*;
 
 const DEFERRED_SUBMIT_CAPACITY: usize = 32;
 
+fn schedule_memory_sync(
+    target: &RelaySessionTarget,
+    connection: Option<&StandaloneSession>,
+    slot: &Arc<mj_core::recovery_gate::ProjectMemorySyncSlot>,
+    task: &mut Option<tokio::task::JoinHandle<()>>,
+    active_cancel: &mut Option<tokio_util::sync::CancellationToken>,
+    pending: &mut bool,
+) {
+    if !*pending || task.is_some() {
+        return;
+    }
+    let Some(connection) = connection else {
+        return;
+    };
+    if connection.protocol_version() < mj_core::relay::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL {
+        *pending = false;
+        return;
+    }
+    let Some(memory) = target.project_memory.clone() else {
+        *pending = false;
+        return;
+    };
+    let Some((guard, cancel)) = slot.start_turn() else {
+        return;
+    };
+    *pending = false;
+    *active_cancel = Some(cancel.clone());
+    let session_id = target.session_id.clone();
+    *task = Some(mj_core::runtime::spawn(async move {
+        let _guard = guard;
+        let result: Result<()> = async {
+            let config = tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                config = mj_core::runtime::spawn_blocking(mj_core::config::Config::load) => config.context("config load task failed")??,
+            };
+            let mut client = tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                client = RelayClient::connect(&memory.relay, &session_id) => client.context("open project-memory relay")?,
+            };
+            if client.protocol_version() >= mj_core::relay::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL {
+                super::standalone::sync_turn_project_memory(&mut client, &memory, &session_id, &config, cancel.clone()).await?;
+            }
+            tokio::select! {
+                () = cancel.cancelled() => {},
+                result = client.detach() => result?,
+            }
+            Ok(())
+        }.await;
+        if cancel.is_cancelled() {
+            tracing::debug!(%session_id, "project-memory turn sync preempted");
+        } else if let Err(error) = result {
+            tracing::warn!(%session_id, error = format!("{error:#}"), "project-memory turn sync failed");
+        }
+    }));
+}
+
 /// Whether a session's durable state means its relay actor should stop.
 ///
 /// `Closing` and `Destroying` are still in flight and their owners need the
@@ -132,9 +188,17 @@ pub async fn run_session_actor(
     let mut storage = crate::target_storage::subscribe();
     let mut owner_changes = updates.session_gate.subscribe();
     let mut recovery_waiting = None;
+    let memory_slot = updates
+        .session_gate
+        .project_memory_sync_slot(&target.session_id);
+    let mut memory_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut memory_cancel = None;
+    let mut memory_pending = false;
     enum Event {
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
+        Memory(std::result::Result<(), tokio::task::JoinError>),
+        MemoryReady,
         Tick,
         ConnectionActivity(ConnectionActivity),
         Policy,
@@ -144,6 +208,17 @@ pub async fn run_session_actor(
         Storage(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
+        if let Some(connection) = connection.as_mut() {
+            memory_pending |= std::mem::take(&mut connection.memory_sync_trigger);
+        }
+        schedule_memory_sync(
+            &target,
+            connection.as_ref(),
+            &memory_slot,
+            &mut memory_task,
+            &mut memory_cancel,
+            &mut memory_pending,
+        );
         let usable = connection.is_some() && !lifecycle.is_leased();
         if usable != profile_connection_usable {
             updates
@@ -179,6 +254,8 @@ pub async fn run_session_actor(
             event = async {
                 tokio::select! {
                     completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => Event::Reviewer(completed),
+                    completed = async { memory_task.as_mut().expect("memory task exists").await }, if memory_task.is_some() => Event::Memory(completed),
+                    () = memory_slot.wait_available(), if memory_pending && memory_task.is_none() && connection.is_some() => Event::MemoryReady,
                     // A definitive missing target has no relay to poll. The
                     // daemon owns persistence; a changed desired target
                     // retires this actor and starts a fresh one.
@@ -319,6 +396,17 @@ pub async fn run_session_actor(
                             }
                             continue;
                         }
+                        if matches!(deferred.command, RelayCommand::Prompt { .. }) {
+                            memory_pending = true;
+                            schedule_memory_sync(
+                                &target,
+                                connection.as_ref(),
+                                &memory_slot,
+                                &mut memory_task,
+                                &mut memory_cancel,
+                                &mut memory_pending,
+                            );
+                        }
                         deliver_submit(&target, &mut connection, deferred, &view_tx, &updates)
                             .await;
                     }
@@ -329,6 +417,14 @@ pub async fn run_session_actor(
                     tracing::error!(session_id = %target.session_id, %error, "reviewer operation task failed");
                 }
             }
+            Event::Memory(completed) => {
+                memory_task = None;
+                memory_cancel = None;
+                if let Err(error) = completed {
+                    tracing::warn!(session_id = %target.session_id, %error, "project-memory synchronization task failed");
+                }
+            }
+            Event::MemoryReady => {}
             Event::Tick => {
                 // Every outcome below either replaces this deadline or keeps
                 // it, so no path leaves one that has already passed.
@@ -886,6 +982,17 @@ pub async fn run_session_actor(
                             });
                             continue;
                         }
+                        if matches!(command, RelayCommand::Prompt { .. }) {
+                            memory_pending = true;
+                            schedule_memory_sync(
+                                &target,
+                                connection.as_ref(),
+                                &memory_slot,
+                                &mut memory_task,
+                                &mut memory_cancel,
+                                &mut memory_pending,
+                            );
+                        }
                         deliver_submit(
                             &target,
                             &mut connection,
@@ -1330,6 +1437,16 @@ pub async fn run_session_actor(
     updates
         .credential_wakes
         .invalidate_profile(&target.session_id);
+    if let Some(cancel) = memory_cancel {
+        cancel.cancel();
+    }
+    if let Some(task) = memory_task {
+        mj_core::runtime::spawn(async move {
+            if let Err(error) = task.await {
+                tracing::warn!(%error, "retired project-memory synchronization task failed");
+            }
+        });
+    }
     if let Some(connection) = connection.as_mut() {
         connection.cancel_guardian_jobs();
     }

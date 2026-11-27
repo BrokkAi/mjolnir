@@ -2279,6 +2279,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     let mut target = leased_relay_target(relay_root.path());
     target.project_memory = Some(ProjectMemorySyncTarget {
         canonical_root: canonical.path().to_path_buf(),
+        relay: target.spec.clone(),
     });
 
     let mut connection = StandaloneSession::connect(&target)

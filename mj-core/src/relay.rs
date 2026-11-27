@@ -237,7 +237,9 @@ pub const RELAY_CHECKPOINT_QUOTA_INPUT_PROTOCOL: u32 = 96;
 pub const RELAY_CHECKPOINT_MAILBOX_PAGES_PROTOCOL: u32 = 97;
 /// 98 installs the project-memory seed in the worker on launch and reload.
 pub const RELAY_PROJECT_MEMORY_SEED_PROTOCOL: u32 = 98;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PROJECT_MEMORY_SEED_PROTOCOL;
+/// 99 adds interruption-safe project-memory snapshots and delivery.
+pub const RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL: u32 = 99;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

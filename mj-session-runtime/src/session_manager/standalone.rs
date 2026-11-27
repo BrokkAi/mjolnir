@@ -52,6 +52,7 @@ pub struct StandaloneSession {
     pub operational: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
     pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub project_memory: Option<ProjectMemorySyncTarget>,
+    pub(super) memory_sync_trigger: bool,
     pub subagent_requests:
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
     pub subagent_completions:
@@ -112,6 +113,7 @@ impl StandaloneSession {
             operational: operational.into(),
             latest_credential_sync_signal: None,
             project_memory: target.project_memory.clone(),
+            memory_sync_trigger: true,
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
             subagent_queue: None,
@@ -1066,6 +1068,17 @@ impl StandaloneSession {
             through_ordinal,
             through_digest,
         } = page;
+        self.memory_sync_trigger |= events.iter().any(|event| {
+            event.ordinal > self.materialized.applied_event_ordinal
+                && matches!(
+                    &event.observation,
+                    mj_core::relay::RelayObservation::HarnessTurnSettled { .. }
+                        | mj_core::relay::RelayObservation::CommandCompleted {
+                            outcome: mj_core::relay::RelayCommandOutcome::Prompt { .. },
+                            ..
+                        }
+                )
+        });
         let event_count = events.len();
         let transaction_count = event_count.div_ceil(PROJECTION_TRANSACTION_EVENT_BUDGET);
         let started = Instant::now();
@@ -1390,6 +1403,16 @@ impl StandaloneSession {
             self.project_memory = None;
             return Ok(());
         }
+        if client.protocol_version() >= mj_core::relay::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL {
+            return sync_turn_project_memory(
+                client,
+                target,
+                &self.materialized.session_id,
+                config,
+                cancel,
+            )
+            .await;
+        }
         let snapshot = tokio::select! {
             biased;
             () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
@@ -1463,6 +1486,108 @@ impl StandaloneSession {
             &cancel,
         )
         .await
+    }
+}
+
+/// Synchronize on the bulk connection. Once a commit or delivery starts, wait
+/// for it to finish even if a checkpoint preempts the surrounding sync.
+pub async fn sync_turn_project_memory(
+    client: &mut RelayClient,
+    target: &ProjectMemorySyncTarget,
+    session_id: &str,
+    config: &mj_core::config::Config,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    use mj_core::project_memory::SwapOutcome;
+    use mj_core::relay::ProjectMemoryDeliveryOutcome;
+    let resolver = crate::project_memory_merge::UtilityModelConflictResolver::new(config);
+    let mut dirty_round = false;
+    'snapshot: loop {
+        let root = target.canonical_root.clone();
+        let mut canonical = tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            state = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => state.context("canonical read task failed")??,
+        };
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        let snapshot = client
+            .project_memory_turn_snapshot(
+                canonical.absorbed.get(session_id).cloned(),
+                canonical.version.clone(),
+                &cancel,
+            )
+            .await?;
+        let Some((base, id, replica)) = snapshot else {
+            return Ok(());
+        };
+        loop {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            let merged = crate::project_memory_merge::merge_turn_tree(
+                &base,
+                &canonical.tree,
+                &replica,
+                &resolver,
+                cancel.clone(),
+            )
+            .await?;
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            let version = if replica != base {
+                let root = target.canonical_root.clone();
+                let expected = canonical.clone();
+                let tree = merged.clone();
+                let session = session_id.to_owned();
+                let handout = id.clone();
+                match mj_core::runtime::spawn_blocking(move || {
+                    mj_core::project_memory::commit_canonical(
+                        &root,
+                        &expected,
+                        &session,
+                        &tree,
+                        Some(&handout),
+                    )
+                })
+                .await
+                .context("canonical commit task failed")??
+                {
+                    SwapOutcome::Swapped => merged.version(),
+                    SwapOutcome::Changed => {
+                        let previous_absorbed = canonical.absorbed.get(session_id).cloned();
+                        let root = target.canonical_root.clone();
+                        canonical = tokio::select! {
+                            () = cancel.cancelled() => return Ok(()),
+                            state = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => state.context("canonical read task failed")??,
+                        };
+                        if canonical.absorbed.get(session_id).cloned() != previous_absorbed {
+                            continue 'snapshot;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                canonical.version.clone()
+            };
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            match client
+                .deliver_project_memory(id, merged, version, &cancel)
+                .await?
+            {
+                ProjectMemoryDeliveryOutcome::Dirty if !dirty_round => {
+                    dirty_round = true;
+                    continue 'snapshot;
+                }
+                ProjectMemoryDeliveryOutcome::Delivered
+                | ProjectMemoryDeliveryOutcome::Dirty
+                | ProjectMemoryDeliveryOutcome::Stale
+                | ProjectMemoryDeliveryOutcome::Busy => return Ok(()),
+            }
+        }
     }
 }
 

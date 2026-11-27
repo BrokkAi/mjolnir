@@ -41,7 +41,7 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 
 - [x] (2026-11-27) Slice 1: seed only an absent replica, keep memory out of staged overlays, and capture its baseline in the checkpoint; seed materialization uses Slice 2's `render_memory_tree`.
 - [x] (2026-11-27 01:48Z) Slice 2: canonical uses an atomically replaced file and a read-only rendered directory; checkpoint sync and project-store merges commit through it.
-- [ ] Slice 3: `Snapshot` and `Deliver`, and the turn-start, turn-end and attach triggers.
+- [x] (2026-11-27 02:33Z) Slice 3: `Snapshot` and `Deliver`, turn-start, turn-end and attach triggers, and checkpoint preemption. Focused interruption, checkpoint, compatibility and paging tests and affected-package clippy pass.
 - [ ] Isolated-instance acceptance on a release build (in-place Move needs release: dev builds overflow a Tokio stack during harness preparation, a pre-existing issue).
 - [ ] Review, commit, push.
 
@@ -59,6 +59,9 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 - Legacy trees can contain empty documents and hidden entries. Empty and whitespace-only documents are excluded from merged and migrated canonical trees; `render_memory_tree(root, tree, read_only)` still accepts any tree. Migration leaves hidden entries in the backup without importing them; existing redirect metadata is beside the rendered directory. The shared renderer also materializes the staging seed.
 - The shared renderer uses confined directory and file handles for cleanup and permission changes; a planted symlink cannot redirect its writes or chmod operations.
 - The old checkpoint tests used the temporary directory itself as the memory root. The canonical file belongs beside the memory root, so the tests now give each case a `memory` child to keep files isolated.
+- The worker's `ToolsInFlight` already owns the tool-call state shared with the stall watchdog; Snapshot and Deliver use it for `Busy`.
+- A delivery can fail while rendering `incoming` without killing the worker. Snapshot and Deliver finish that same pending incoming operation before looking at the replica, so a partial tree cannot be mistaken for an agent edit.
+- The worker filters blank and whitespace-only documents from legacy record trees and replica snapshots with `is_memory_document`, so a blank document is treated as deleted in both the handout and the replica equality check.
 
 
 ## Decision Log
@@ -74,6 +77,8 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 
 - Decision: retain `ProjectMemorySnapshot::version()` as the file version. Compare the committing session's `absorbed` entry separately under the same lock, allowing other sessions to acknowledge unchanged trees without false conflicts; the commit retains all their entries. Date: 2026-11-27.
 - Decision: preserve the existing sibling redirect file. Project merges lock source and destination in path order, recheck redirects, commit destination, then atomically publish the redirect; missing source acknowledgements are copied to destination, where an existing destination acknowledgement takes precedence. Date: 2026-11-27.
+- Decision: a checkpoint cancels an active turn sync through the session's sync slot, waits for its current atomic step, then holds the slot through its own sync and capture. Checkpoint is already admitted lifecycle work; turn sync takes no handoff admission. Date: 2026-11-27.
+- Decision: use relay protocol 99 for turn sync; protocol 98 was assigned independently to seed-installation compatibility on local master. Date: 2026-11-27.
 
 
 - Decision: migrate each project on its first canonical access and render only after a commit; do not scan projects at daemon startup. Rationale: canonical reads already perform migration, and the rendered directory is never read back, so a stale view is harmless until the next commit. Date: 2026-11-26.
@@ -82,7 +87,7 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 ## Outcomes & Retrospective
 
 
-Slice 1 preserves existing replica edits and deletions across in-place reload and carries the baseline through checkpoint restore. Slice 2 provides `read_canonical` for staging and `read_canonical_state`/`commit_canonical` for the turn protocol. Slice 3, acceptance and review remain.
+Slice 1 preserves existing replica edits and deletions across in-place reload and carries the baseline through checkpoint restore. Slice 2 provides `read_canonical` for staging and `read_canonical_state`/`commit_canonical` for the turn protocol. Slice 3 synchronizes at turn boundaries and attach, and recovers an interrupted or failed delivery. Isolated-instance acceptance and review remain.
 
 
 ## Context and Orientation
@@ -114,7 +119,7 @@ The daemon then computes `merged = merge(base, canonical tree, handout.tree)`. I
 
 Triggers: the session actor runs one sync at a time, sharing its slot with checkpoint syncs, at turn start (scheduled alongside prompt submission), at turn end (prompt completion and harness-turn settlement), and on attach. If the worker can report an open tool call from a single owner of that fact, `Snapshot` and `Deliver` answer `Busy` while one is open; otherwise the equality check decides alone. Workers below the new protocol keep the checkpoint-only path.
 
-Why interruptions are safe: base advances only to a handout canonical has absorbed, or to a tree just written over an unedited replica, so no edit is dropped. A handout carrying edits is never discarded: any daemon rolls it forward, and the `absorbed` condition lets exactly one commit win. A lost `Deliver`, a daemon handoff or crash after the rename is resolved by the next `Snapshot` seeing `absorbed == handout.id`. A crash before the rename re-merges the same handout. A worker crash mid-delivery is finished at startup from `incoming`. No step holds handoff admission: every step either completes atomically or is redone from durable state.
+Why interruptions are safe: base advances only to a handout canonical has absorbed, or to a tree just written over an unedited replica, so no edit is dropped. A handout carrying edits is never discarded: any daemon rolls it forward, and the `absorbed` condition lets exactly one commit win. A lost `Deliver`, a daemon handoff or crash after the rename is resolved by the next `Snapshot` seeing `absorbed == handout.id`. A crash before the rename re-merges the same handout. A worker crash mid-delivery is finished at startup from `incoming`. Turn-boundary sync holds no handoff admission: every step either completes atomically or is redone from durable state. A checkpoint already holds lifecycle admission and preempts the turn sync before its own sync and capture.
 
 
 ## Validation and Acceptance

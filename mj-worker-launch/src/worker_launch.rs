@@ -1237,6 +1237,7 @@ pub fn project_memory_sync_target(
     )?;
     Ok(Some(ProjectMemorySyncTarget {
         canonical_root: canonical_memory_root(&launch.project_key),
+        relay: mj_targets::targets::project_memory_relay_command(&backend, session_id)?,
     }))
 }
 
@@ -1507,6 +1508,11 @@ mod tests {
                 "old-worker",
                 mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL - 1,
                 true,
+            ),
+            (
+                "seed-worker",
+                mj_core::relay::RELAY_PROJECT_MEMORY_SEED_PROTOCOL,
+                false,
             ),
             ("new-worker", mj_core::relay::RELAY_PROTOCOL_VERSION, false),
         ] {
