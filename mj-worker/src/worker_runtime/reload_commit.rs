@@ -1296,7 +1296,7 @@ mod tests {
         }
     }
 
-    // Hard-won: PENDING: in-place Move restaged canonical memory over unsynced replica edits
+    // Hard-won: 075843136: in-place Move restaged canonical memory over unsynced replica edits
     #[test]
     fn reload_commit_preserves_unsynced_project_memory_edit_and_deletion() {
         let dir = tempfile::tempdir().unwrap();

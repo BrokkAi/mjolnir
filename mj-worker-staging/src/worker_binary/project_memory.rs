@@ -87,8 +87,7 @@ pub fn stage_memory_seed(memory: &ProjectMemoryLaunchConfig, seed: &Path) -> Res
         mj_core::project_memory::read_canonical(&canonical_memory_root(&memory.project_key))?;
     // An empty snapshot still needs a directory to transfer to the worker.
     std::fs::create_dir_all(seed)?;
-    // TODO: Switch to render_memory_tree(seed, &snapshot, false) when Slice 2 lands.
-    mj_core::project_memory::ProjectMemoryStore::new(seed).replace_tree(&snapshot)?;
+    mj_core::project_memory::render_memory_tree(seed, &snapshot, false)?;
     Ok(())
 }
 
