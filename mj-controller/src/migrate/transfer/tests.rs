@@ -1467,3 +1467,87 @@ async fn a_failed_sessionwiki_install_after_activation_keeps_staging_for_a_retry
     assert_eq!(count_rows(&world.b_wiki), 600);
     assert!(!pending.exists() && !stage.exists());
 }
+
+#[tokio::test]
+async fn recovery_after_the_commit_never_fails_the_publication() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    let (result, _) = attempt(
+        &world,
+        "t1",
+        Some(failing_at(PublicationStep::BeforeUnfence)),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(pending.exists());
+    // The commit happened and the reply was lost; the pending index was then
+    // replaced by someone else.
+    clear_store_fence_file(&b_db, &world.fence("t1")).unwrap();
+    let kept = world._root.path().join("old-pending");
+    std::fs::hard_link(&pending, &kept).unwrap();
+    std::fs::remove_file(&pending).unwrap();
+    write(&pending, b"theirs");
+
+    let (result, log) = attempt(&world, "t1", None).await;
+    let outcome = result.expect("an activated destination must not report a failure");
+    assert_eq!(log.last(), Some(&"activated"), "{log:?}");
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("already activated"))
+    );
+    assert_eq!(std::fs::read(&pending).unwrap(), b"theirs");
+    assert!(!world.b_wiki.exists());
+    assert!(stage.exists(), "staging is kept for inspection");
+}
+
+#[tokio::test]
+async fn an_overwrite_never_replaces_an_index_it_does_not_hold() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    // Overwrite was asked for, but there was no index to lock; a rival index
+    // appears just before the commit.
+    let rival: PublicationHook = {
+        let wiki = world.b_wiki.clone();
+        Arc::new(move |step| {
+            if step == PublicationStep::BeforeUnfence && !wiki.exists() {
+                drop(wal_database(&wiki, 7));
+            }
+            Ok(())
+        })
+    };
+    let (result, _) = attempt_with(&world, "t1", Some(rival), true).await;
+    let outcome = result.unwrap();
+    assert!(
+        outcome
+            .summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("waiting at"))
+    );
+    assert_eq!(count_rows(&world.b_wiki), 7);
+    assert!(pending.exists() && stage.exists());
+}
+
+#[tokio::test]
+async fn orphaned_put_temporaries_are_purged_and_user_lock_files_are_published() {
+    let world = World::new();
+    let stage = DataLayout::at(&world.b_data).migrate_stage();
+    write(&world.a_config.join("key.lock"), b"user credential");
+    // A receiver killed mid-transfer left temporaries in the staging area.
+    write(&stage.join("raw/data/.mj-put-stale"), b"half a file");
+    write(&stage.join("raw/data/sessions/s/.mj-put-nested"), b"half");
+    let (result, _) = attempt(&world, "t1", None).await;
+    result.unwrap();
+    assert!(!world.b_data.join(".mj-put-stale").exists());
+    assert!(!world.b_data.join("sessions/s/.mj-put-nested").exists());
+    assert_eq!(
+        std::fs::read(world.b_config.join("key.lock")).unwrap(),
+        b"user credential"
+    );
+}

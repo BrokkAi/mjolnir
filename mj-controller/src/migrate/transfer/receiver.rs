@@ -229,7 +229,11 @@ fn skipped_data_name(name: &str) -> bool {
 }
 
 fn skipped_config_name(name: &str) -> bool {
-    name == "config.toml" || name.ends_with(".lock")
+    name == "config.toml"
+        || matches!(
+            mj_core::config::classify_config_entry(Path::new(name)),
+            mj_core::config::Classification::Known(mj_core::config::MigrateAction::Skip)
+        )
 }
 
 fn single_normal_name(path: &Path) -> Result<()> {
@@ -619,6 +623,16 @@ impl Receiver {
             );
         };
         self.stage.create()?;
+        // A receiver killed mid-PutFile leaves a temporary behind. Holding the
+        // lock, nothing of this session has started, so every one is orphaned.
+        for scope in [
+            TransferScope::Data,
+            TransferScope::Config,
+            TransferScope::SessionWiki,
+            TransferScope::Home,
+        ] {
+            remove_orphaned_put_files(&self.stage.raw(scope))?;
+        }
         match destination_status(&self.config, &self.stage)? {
             DestinationStatus::Empty | DestinationStatus::ResumablePublication { .. } => {}
             _ => bail!(
@@ -1222,50 +1236,53 @@ fn publish(
                     "the destination already has an unrelated active mj.sqlite3; clean it \
                      manually or choose --dest-instance"
                 );
-                // A crash right after the commit may have left the migrated
-                // SessionWiki index beside the old one.
-                if let Some(record) = loaded.as_ref().filter(|record| record.sessionwiki_pending) {
-                    let pending = sessionwiki_pending_path(&config.sessionwiki_db);
-                    if let Some(found) = symlink_metadata_opt(&pending)? {
-                        verify_owned(
-                            &pending,
-                            &OwnedEntry {
-                                path: pending.clone(),
-                                identity: record.sessionwiki_pending_identity,
-                            },
-                            &found,
-                        )?;
-                        let finished = (|| -> Result<()> {
-                            let _in_use = if request.overwrite_sessionwiki
+                // The store is active: from here nothing may return `Err`, which
+                // would tell the source to unfence and restart. Whatever cannot be
+                // finished is a warning, and staging is kept for a retry.
+                let finish = || -> Result<()> {
+                    // A crash right after the commit may have left the migrated
+                    // SessionWiki index beside the old one.
+                    if let Some(record) =
+                        loaded.as_ref().filter(|record| record.sessionwiki_pending)
+                    {
+                        let pending = sessionwiki_pending_path(&config.sessionwiki_db);
+                        if let Some(found) = symlink_metadata_opt(&pending)? {
+                            verify_owned(
+                                &pending,
+                                &OwnedEntry {
+                                    path: pending.clone(),
+                                    identity: record.sessionwiki_pending_identity,
+                                },
+                                &found,
+                            )?;
+                            let in_use = if request.overwrite_sessionwiki
                                 && exists(&config.sessionwiki_db)?
                             {
                                 Some(lock_existing_sessionwiki(&config.sessionwiki_db)?)
                             } else {
                                 None
                             };
-                            install_pending_sessionwiki(
-                                config,
-                                &pending,
-                                request.overwrite_sessionwiki,
-                            )
-                        })();
-                        if let Err(error) = finished {
-                            // Keep the staging record and the pending file.
-                            summary.warnings.push(format!(
-                                "the migrated SessionWiki index is waiting at {}: {error:#}",
-                                pending.display()
-                            ));
-                            return Ok(Published {
-                                start_lock,
-                                summary,
-                            });
+                            install_pending_sessionwiki(config, &pending, in_use.is_some())?;
                         }
                     }
+                    Ok(())
+                };
+                match finish() {
+                    Ok(()) => {
+                        if let Err(error) = remove_path(&stage.root) {
+                            summary
+                                .warnings
+                                .push(format!("could not remove the staging directory: {error:#}"));
+                        }
+                        summary
+                            .warnings
+                            .push("the destination was already activated".to_owned());
+                    }
+                    Err(error) => summary.warnings.push(format!(
+                        "the destination was already activated; the migrated SessionWiki index \
+                         could not be put in place and staging is kept for a retry: {error:#}"
+                    )),
                 }
-                remove_path(&stage.root)?;
-                summary
-                    .warnings
-                    .push("the destination was already activated".to_owned());
                 return Ok(Published {
                     start_lock,
                     summary,
@@ -1489,7 +1506,7 @@ fn publish(
     let mut keep_stage = false;
     if let Some(pending) = pending_wiki {
         if let Err(error) =
-            install_pending_sessionwiki(config, &pending.pending_path, pending.overwrite)
+            install_pending_sessionwiki(config, &pending.pending_path, pending._in_use.is_some())
         {
             summary.warnings.push(format!(
                 "the migrated SessionWiki index is waiting at {}: {error:#}",
@@ -1583,6 +1600,25 @@ fn discard_unfinished_publication(
     remove_path(&stage.publication())
 }
 
+fn remove_orphaned_put_files(directory: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", directory.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            remove_orphaned_put_files(&path)?;
+        } else if entry.file_name().to_string_lossy().starts_with(".mj-put-") {
+            remove_path(&path)?;
+        }
+    }
+    Ok(())
+}
+
 fn first_component_is_owned(owned: &[OwnedEntry], rel_path: &Path) -> bool {
     rel_path.components().next().is_some_and(|first| {
         owned
@@ -1616,7 +1652,6 @@ fn remove_empty_file(path: &Path) -> Result<()> {
 /// opening it until the rename.
 struct PendingSessionWiki {
     pending_path: PathBuf,
-    overwrite: bool,
     _in_use: Option<rusqlite::Connection>,
 }
 
@@ -1732,22 +1767,22 @@ fn publish_sessionwiki(
     }
     Ok(Some(PendingSessionWiki {
         pending_path: pending,
-        overwrite: request.overwrite_sessionwiki,
         _in_use: in_use,
     }))
 }
 
-/// Put the migrated index at its destination path. Replacing an index the user
-/// asked to overwrite drops its leftover journal files first and renames over
-/// it (the caller holds it exclusively). Otherwise nothing may be there:
-/// the install is atomic and refuses an index that appeared meanwhile.
+/// Put the migrated index at its destination path. `replace_existing` is true
+/// only when the caller holds the destination's existing index exclusively:
+/// its leftover journal files are then dropped and the rename goes over it.
+/// Otherwise nothing may be there, and the install is atomic and refuses an
+/// index that appeared meanwhile, however the user asked to overwrite.
 fn install_pending_sessionwiki(
     config: &ReceiverConfig,
     pending: &Path,
-    overwrite: bool,
+    replace_existing: bool,
 ) -> Result<()> {
     let db = &config.sessionwiki_db;
-    if overwrite {
+    if replace_existing {
         for path in sessionwiki_sidecar_paths(db) {
             remove_path(&path)?;
         }
