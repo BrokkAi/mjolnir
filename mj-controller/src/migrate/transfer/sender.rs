@@ -543,10 +543,16 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
                     mode: 0o600,
                     mtime_ns: mtime_ns(&metadata),
                 };
+                // Exactly the length present at the cutover: a WAL that another
+                // process keeps appending to is cut at that boundary, and one
+                // that shrank or vanished is an error.
+                let outcome = self
+                    .put_regular(scope, Path::new(name), kind, &wal, Some(metadata.len()))
+                    .await?;
                 ensure!(
-                    self.put_regular(scope, Path::new(name), kind, &wal).await?
-                        != PutOutcome::Vanished,
-                    "the write-ahead log disappeared while it was copied"
+                    outcome == PutOutcome::SentExact,
+                    "the write-ahead log {} changed while it was copied ({outcome:?})",
+                    wal.display()
                 );
                 Ok(())
             }
@@ -575,7 +581,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
             match (&entry.kind, &entry.origin) {
                 (FileKind::Regular { .. }, Origin::File(path)) => {
                     match self
-                        .put_regular(key.0, &key.1, entry.kind.clone(), path)
+                        .put_regular(key.0, &key.1, entry.kind.clone(), path, None)
                         .await?
                     {
                         PutOutcome::SentExact => {}
@@ -594,7 +600,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
                     // The announced stamp covers the database and its WAL, so
                     // the snapshot's own size is never equal to it.
                     let outcome = self
-                        .put_regular(key.0, &key.1, entry.kind.clone(), snapshot.path())
+                        .put_regular(key.0, &key.1, entry.kind.clone(), snapshot.path(), None)
                         .await?;
                     drop(snapshot);
                     if outcome == PutOutcome::Vanished {
@@ -651,6 +657,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
         rel_path: &Path,
         kind: FileKind,
         path: &Path,
+        limit: Option<u64>,
     ) -> Result<PutOutcome> {
         let announced = match &kind {
             FileKind::Regular { size, .. } => Some(*size),
@@ -677,7 +684,16 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Sender<R, W> {
         let mut buffer = vec![0_u8; BLOCK_BYTES];
         let mut bytes_sent = 0_u64;
         loop {
-            let filled = read_full(&mut file, &mut buffer).await?;
+            // A fixed boundary: a file that another process keeps appending to
+            // is sent only up to the length that was announced.
+            let want = match limit {
+                Some(max) => buffer.len().min(max.saturating_sub(bytes_sent) as usize),
+                None => buffer.len(),
+            };
+            if want == 0 {
+                break;
+            }
+            let filled = read_full(&mut file, &mut buffer[..want]).await?;
             if filled == 0 {
                 break;
             }

@@ -58,22 +58,6 @@ fn make_tree_owner_writable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Atomically replace the file at `dst` (if any) with `src`. A rename is
-/// atomic; across filesystems the copy lands beside `dst` first, so `dst` is
-/// never missing or partial.
-pub(super) fn replace_file_atomically(src: &Path, dst: &Path) -> Result<()> {
-    match std::fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            copy_tree_into_place(src, dst)?;
-            remove_path(src)
-        }
-        Err(error) => {
-            Err(error).with_context(|| format!("replace {} with {}", dst.display(), src.display()))
-        }
-    }
-}
-
 /// `root/rel`, with every ancestor below `root` a real directory. An incoming
 /// symlink that is later named as a parent must never redirect a write to a
 /// path outside `root`, so a non-directory ancestor is replaced, not followed.

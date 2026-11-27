@@ -1188,10 +1188,11 @@ async fn a_read_only_directory_in_a_copied_profile_home_arrives_with_its_files()
 }
 
 #[tokio::test]
-async fn a_replaced_or_unreplaced_sessionwiki_index_is_never_deleted_by_a_retry() {
+async fn a_sessionwiki_index_placed_then_replaced_by_someone_else_is_never_deleted() {
     let world = World::new();
-    // The destination's own index, held open: replacing it fails before any
-    // replacement, so a retry's cleanup must leave it alone.
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    // The destination's own index, held open: replacing it fails before
+    // anything is placed, so a retry's cleanup must leave it alone.
     let held = wal_database(&world.b_wiki, 5);
     held.execute_batch("BEGIN; SELECT count(*) FROM scratch")
         .unwrap();
@@ -1202,14 +1203,16 @@ async fn a_replaced_or_unreplaced_sessionwiki_index_is_never_deleted_by_a_retry(
     }
     held.execute_batch("COMMIT").unwrap();
     drop(held);
+    assert!(!pending.exists());
 
-    // Replaced by this publication, then replaced again by someone else: the
-    // retry's cleanup refuses to delete what is no longer ours.
+    // A destination with no index gets the migrated one directly. If someone
+    // replaces it before the retry, the retry refuses to delete theirs.
+    std::fs::remove_file(&world.b_wiki).unwrap();
     let (result, _) = attempt_with(
         &world,
         "t3",
         Some(failing_at(PublicationStep::BeforeStorePlacement)),
-        true,
+        false,
     )
     .await;
     assert!(result.is_err());
@@ -1218,10 +1221,86 @@ async fn a_replaced_or_unreplaced_sessionwiki_index_is_never_deleted_by_a_retry(
     std::fs::hard_link(&world.b_wiki, &kept).unwrap();
     std::fs::remove_file(&world.b_wiki).unwrap();
     drop(wal_database(&world.b_wiki, 7));
-    let (result, _) = attempt_with(&world, "t4", None, true).await;
+    let (result, _) = attempt_with(&world, "t4", None, false).await;
     let error = format!("{:#}", result.unwrap_err());
     assert!(error.contains("replaced externally"), "{error}");
     assert_eq!(count_rows(&world.b_wiki), 7);
+}
+
+#[tokio::test]
+async fn an_overwritten_sessionwiki_index_is_replaced_only_after_the_activation_commit() {
+    let world = World::new();
+    let b_db = DataLayout::at(&world.b_data).database();
+    let pending = world.b_wiki.with_file_name("index.db.mj-migrate-pending");
+    drop(wal_database(&world.b_wiki, 5));
+
+    // Failing before the commit, even with the migrated index installed beside
+    // it, leaves the destination's own index as it was.
+    for (fence, step) in [
+        ("t1", PublicationStep::BeforeStorePlacement),
+        ("t1", PublicationStep::BeforeUnfence),
+        ("t2", PublicationStep::BeforeUnfence),
+    ] {
+        let (result, _) = attempt_with(&world, fence, Some(failing_at(step)), true).await;
+        assert!(result.is_err(), "{fence} {step:?}");
+        assert_eq!(count_rows(&world.b_wiki), 5, "{fence} {step:?}");
+        assert!(pending.exists(), "{fence} {step:?}");
+    }
+
+    // The commit happened and the process died before the rename: a retry under
+    // the same fence finishes the replacement.
+    let (result, _) = attempt_with(
+        &world,
+        "t3",
+        Some(failing_at(PublicationStep::BeforeUnfence)),
+        true,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(count_rows(&world.b_wiki), 5);
+    clear_store_fence_file(&b_db, &world.fence("t3")).unwrap();
+    let (result, _) = attempt_with(&world, "t3", None, true).await;
+    result.unwrap();
+    assert_eq!(count_rows(&world.b_wiki), 600);
+    assert!(!pending.exists());
+}
+
+#[tokio::test]
+async fn a_stale_directory_mode_is_not_applied_through_a_link_that_replaced_the_directory() {
+    let world = World::new();
+    let source = world.a_home.join(".codex-personal/readonly-dir");
+    write(&source.join("file.txt"), b"inside");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let outside = world._root.path().join("outside-directory");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _restore = Writable(vec![
+        source.clone(),
+        outside.clone(),
+        world.b_home.join(".codex-personal/readonly-dir"),
+    ]);
+    // Between staging and publication the staged directory, whose real mode
+    // is recorded as 0555, is replaced by a link to a directory elsewhere.
+    let staged = DataLayout::at(&world.b_data)
+        .migrate_stage()
+        .join("raw/home/.codex-personal/readonly-dir");
+    let target = outside.clone();
+    let swap: PublicationHook = Arc::new(move |step| {
+        if step == PublicationStep::BeforeStoreRename {
+            std::fs::remove_dir_all(&staged).unwrap();
+            symlink(&target, &staged).unwrap();
+        }
+        Ok(())
+    });
+    let (result, _) = attempt_with(&world, "t1", Some(swap), false).await;
+    result.unwrap();
+    let published = world.b_home.join(".codex-personal/readonly-dir");
+    assert!(std::fs::symlink_metadata(&published).unwrap().is_symlink());
+    assert_eq!(
+        std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "the directory outside the migration was not chmod-ed"
+    );
 }
 
 #[tokio::test]
