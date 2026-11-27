@@ -62,12 +62,12 @@ test.beforeEach(() => {
   server.log.length = 0;
 });
 
-test('inbox sorts by urgency, expands the full message, dismisses and toggles AFK', async ({ browser }) => {
+test('inbox sorts newest-first, expands the full message, dismisses and toggles AFK', async ({ browser }) => {
   server.setSnapshot(
     snapshot({
       sessions: [
         attentionSession('n1', 'needs_input', { title: 'Question session' }),
-        attentionSession('n2', 'important', { title: 'Update session' }),
+        attentionSession('n2', 'important', { title: 'Update session', notification_card: { since_ms: NOW - 120_000, badge: 'important', entries: [], dismissal: { read_through: 3 }, holder: null, form: null } }),
       ],
     }),
   );
@@ -84,7 +84,7 @@ test('inbox sorts by urgency, expands the full message, dismisses and toggles AF
     await expect(page.getByRole('heading', { name: 'Notifications' })).toBeVisible();
     await expect(page.getByText('2 awaiting you')).toBeVisible();
 
-    // needs_input outranks important.
+    // The newer notification appears first.
     const cards = page.locator('article[data-testid^="notification-"]');
     await expect(cards.nth(0)).toHaveAttribute('data-testid', 'notification-n1');
     await expect(cards.nth(1)).toHaveAttribute('data-testid', 'notification-n2');
@@ -132,7 +132,7 @@ test('dashboard switches workspaces and opens the sub-agent virtual workspace', 
       sessions: [
         liveSession('a1', { title: 'Alpha', workspace_id: 'w1' }),
         liveSession('a2', { title: 'Beta', workspace_id: 'w2' }),
-        liveSession('p1', { title: 'Parent', workspace_id: 'w1', subagent_session_ids: ['c1'] }),
+        liveSession('p1', { title: 'Parent', workspace_id: 'w1', subagent_session_ids: ['c1'], verdict: { working_children: 1 } }),
         liveSession('c1', { title: 'Child', workspace_id: 'w1', subagent_parent_id: 'p1' }),
       ],
     }),

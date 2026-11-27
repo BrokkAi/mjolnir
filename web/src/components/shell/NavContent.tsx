@@ -8,7 +8,7 @@ export interface NavItem {
   name: Route['name'];
   label: string;
   route: Route;
-  icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean }>;
+  icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean; strokeWidth?: number }>;
 }
 
 export const NAV_ITEMS: NavItem[] = [

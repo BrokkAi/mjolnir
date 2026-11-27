@@ -33,10 +33,13 @@ export function BottomNav() {
                 aria-current={current ? 'page' : undefined}
                 onClick={() => navigate(item.route)}
                 className={`relative flex h-14 w-full flex-col items-center justify-center gap-0.5 text-[11px] font-medium ${
-                  current ? 'text-accent' : 'text-muted'
+                  current ? 'font-semibold text-accent' : 'text-muted hover:text-fg'
                 }`}
               >
-                <Icon className="size-5" aria-hidden />
+                {current && <span className="absolute top-0 h-[3px] w-10 rounded-b-full bg-accent" />}
+                <span className={`rounded-full px-3 ${current ? 'bg-accent/15' : ''}`}>
+                  <Icon className="size-5" strokeWidth={current ? 2.4 : 1.75} aria-hidden />
+                </span>
                 {item.label}
                 {item.name === 'notifications' && attention > 0 && (
                   <span className="absolute right-[calc(50%-22px)] top-1.5">

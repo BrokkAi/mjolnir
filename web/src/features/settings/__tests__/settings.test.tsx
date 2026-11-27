@@ -116,6 +116,53 @@ afterEach(() => {
 });
 
 describe('SettingsView', () => {
+  it('keeps push controls available after the inbox prompt was dismissed', async () => {
+    localStorage.setItem('mj.web.push_banner_dismissed', 'true');
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    vi.stubGlobal('PushManager', class {});
+    vi.stubGlobal('MjPush', { state: async () => ({ enabled: true, endpoints: [], dismissed: true }) });
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: async () => ({ active: {}, pushManager: { getSubscription: async () => ({ endpoint: 'https://push.test/endpoint' }) } }) },
+    });
+    mockFetch({
+      '/api/v1/settings': () => jsonResponse(settingsDocument()),
+      '/api/v1/git-identity': () => jsonResponse(defaultGitIdentity()),
+      '/api/v1/push/status': () => jsonResponse({ subscribed: true, error: null }),
+    });
+    render(<SettingsView path={[]} />);
+    const card = await screen.findByRole('region', { name: 'Push notifications' });
+    expect(await within(card).findByText('Enabled on this device')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Disable' })).toBeEnabled();
+    expect(within(card).getByRole('button', { name: 'Send test' })).toBeEnabled();
+    expect(within(card).queryByRole('button', { name: 'Dismiss notification prompt' })).not.toBeInTheDocument();
+    Reflect.deleteProperty(navigator, 'serviceWorker');
+    localStorage.clear();
+  });
+
+  it('offers Enable in settings when the dismissed device is disabled', async () => {
+    localStorage.setItem('mj.web.push_banner_dismissed', 'true');
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('Notification', { permission: 'default' });
+    vi.stubGlobal('PushManager', class {});
+    vi.stubGlobal('MjPush', { state: async () => ({ enabled: false, endpoints: [], dismissed: true }) });
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: async () => undefined },
+    });
+    mockFetch({
+      '/api/v1/settings': () => jsonResponse(settingsDocument()),
+      '/api/v1/git-identity': () => jsonResponse(defaultGitIdentity()),
+    });
+    render(<SettingsView path={[]} />);
+    const card = await screen.findByRole('region', { name: 'Push notifications' });
+    expect(await within(card).findByText('Not enabled (permission: default)')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Enable' })).toBeEnabled();
+    Reflect.deleteProperty(navigator, 'serviceWorker');
+    localStorage.clear();
+  });
+
   it('applies server-driven edits, shows hidden rows, and saves the draft', async () => {
     let draft = structuredClone(initialDraft) as {
       review: { enabled: boolean };

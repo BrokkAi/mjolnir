@@ -498,6 +498,13 @@ pub struct AcceptedSessionConfig {
     pub effort: Option<String>,
 }
 
+/// Effective model and effort in a live operational snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EffectiveSessionConfig {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
 /// Historical raw SDK task record, retained for old RuntimeEvent payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeBackgroundTask {
@@ -928,6 +935,31 @@ impl AcceptedSessionConfig {
     }
 }
 
+impl EffectiveSessionConfig {
+    pub fn from_operational(
+        values: &BTreeMap<String, String>,
+        options: &[SessionConfigOption],
+    ) -> Self {
+        let accepted = AcceptedSessionConfig::from_configuration(values, options);
+        let nonempty = |value: String| (!value.trim().is_empty()).then_some(value);
+        let current = |option: &SessionConfigOption| match &option.kind {
+            SessionConfigKind::Select(select) => nonempty(select.current_value.to_string()),
+            _ => None,
+        };
+        let option = find_session_config_option(options, "model");
+        let accepted_model = accepted.model.and_then(nonempty);
+        let model = match option.and_then(|option| current(option).map(|value| (option, value))) {
+            Some((option, value)) if select_contains(&option.kind, &value) => Some(value),
+            Some((_, value)) => accepted_model.or(Some(value)),
+            None => accepted_model,
+        };
+        let effort = find_session_config_option(options, "effort")
+            .and_then(current)
+            .or_else(|| accepted.effort.and_then(nonempty));
+        Self { model, effort }
+    }
+}
+
 impl AcpSessionFacts {
     /// Read the facts out of one relay operational snapshot.
     pub fn from_operational(
@@ -943,6 +975,8 @@ impl AcpSessionFacts {
         let mut surface = crate::acp::surface::AcpSessionSurface::from_configuration(&values);
         surface.set_harness_kind(harness_kind);
         surface.set_config_options(config_options);
+        let effective = EffectiveSessionConfig::from_operational(configuration, config_options);
+        surface.set_effective_selectors(effective.model, effective.effort);
         surface.set_session_modes(modes.cloned());
         Self(surface)
     }
@@ -1003,6 +1037,86 @@ pub fn plan_review_answer(response: ElicitationResponse) -> (String, Option<Stri
         _ => None,
     };
     (action, feedback)
+}
+
+#[cfg(test)]
+mod effective_config_tests {
+    use super::*;
+
+    fn option(id: &str, current: &str, choices: &[&str]) -> SessionConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "type": "select", "currentValue": current,
+            "options": choices.iter().map(|value| serde_json::json!({"value": value, "name": value})).collect::<Vec<_>>()
+        })).unwrap()
+    }
+
+    // Hard-won: live facts dropped defaults and exposed transcript IDs instead of picker aliases.
+    #[test]
+    fn effective_selectors_reconcile_live_catalogue_and_accepted_overrides() {
+        let mode = BTreeMap::from([("mode".into(), "agent".into())]);
+        let accepted = BTreeMap::from([
+            ("model".into(), "opus".into()),
+            ("reasoning_effort".into(), "high".into()),
+        ]);
+        let mut effort = option("reasoning_effort", "medium", &["medium", "high"]);
+        effort.category = Some(SessionConfigOptionCategory::ThoughtLevel);
+        let cases = [
+            (
+                mode,
+                vec![option("model", "default", &["default"]), effort.clone()],
+                Some("default"),
+                Some("medium"),
+            ),
+            (
+                accepted.clone(),
+                vec![
+                    option("model", "claude-opus-4-6", &["opus"]),
+                    effort.clone(),
+                ],
+                Some("opus"),
+                Some("medium"),
+            ),
+            (
+                accepted.clone(),
+                vec![option("model", "replacement", &["replacement"]), effort],
+                Some("replacement"),
+                Some("medium"),
+            ),
+            (
+                accepted.clone(),
+                vec![
+                    option("model", " ", &["opus"]),
+                    option("reasoning_effort", " ", &["high"]),
+                ],
+                Some("opus"),
+                Some("high"),
+            ),
+            (
+                BTreeMap::from([
+                    ("model".into(), "opus".into()),
+                    ("effort".into(), "high".into()),
+                ]),
+                vec![],
+                Some("opus"),
+                Some("high"),
+            ),
+            (
+                BTreeMap::from([("model".into(), " ".into()), ("effort".into(), " ".into())]),
+                vec![],
+                None,
+                None,
+            ),
+        ];
+        for (values, options, model, effort) in cases {
+            let effective = EffectiveSessionConfig::from_operational(&values, &options);
+            assert_eq!(effective.model.as_deref(), model);
+            assert_eq!(effective.effort.as_deref(), effort);
+            let facts =
+                AcpSessionFacts::from_operational(HarnessKind::Claude, &values, &options, None);
+            assert_eq!(facts.current_model(), model);
+            assert_eq!(facts.current_effort(), effort);
+        }
+    }
 }
 
 #[cfg(test)]

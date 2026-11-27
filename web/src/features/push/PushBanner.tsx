@@ -6,35 +6,39 @@ import { useWebPush } from './useWebPush';
 
 export interface PushBannerProps {
   className?: string;
+  variant?: 'banner' | 'settings';
 }
 
-export function PushBanner({ className = '' }: PushBannerProps) {
+export function PushBanner({ className = '', variant = 'banner' }: PushBannerProps) {
   const push = useWebPush();
-  const Icon = push.enabled ? BellRing : Bell;
+  const healthy = push.enabled && push.subscribed && !push.error;
+  const Icon = healthy ? BellRing : Bell;
+  if (variant === 'banner' && (push.loading || healthy || push.bannerDismissed)) return null;
   return (
     <section
       aria-label="Push notifications"
       className={`min-w-0 rounded-xl border border-line bg-raised px-3 py-2 ${className}`}
     >
+      {variant === 'settings' && <h3 className="mb-2 text-sm font-semibold">Push notifications</h3>}
       <div className="flex flex-wrap items-center gap-2">
-        <span className={push.enabled ? 'text-ok' : 'text-muted'}>
+        <span className={healthy ? 'text-ok' : 'text-muted'}>
           <Icon className="size-4" aria-hidden />
         </span>
         <span className="min-w-0 flex-1 basis-[12rem] break-words text-[13px] text-fg">
           {push.loading ? 'Checking notifications…' : push.statusText}
         </span>
         <div className="flex flex-wrap items-center gap-1.5">
-          {push.supported && !push.enabled && (
+          {push.supported && !healthy && push.permission !== 'denied' && (
             <button
               type="button"
               onClick={() => void push.enable()}
-              disabled={push.busy || push.permission === 'denied'}
+              disabled={push.busy}
               className="min-h-9 rounded-lg bg-accent px-3 text-xs font-semibold text-accent-fg disabled:opacity-50"
             >
-              Enable
+              {push.enabled ? 'Retry' : 'Enable'}
             </button>
           )}
-          {push.supported && push.enabled && (
+          {variant === 'settings' && push.supported && push.enabled && (
             <button
               type="button"
               onClick={() => void push.disable()}
@@ -45,7 +49,7 @@ export function PushBanner({ className = '' }: PushBannerProps) {
               Disable
             </button>
           )}
-          {push.supported && (
+          {variant === 'settings' && push.supported && push.subscribed && (
             <button
               type="button"
               onClick={() => void push.test()}
@@ -55,11 +59,11 @@ export function PushBanner({ className = '' }: PushBannerProps) {
               Send test
             </button>
           )}
-          {push.showOffer && (
+          {variant === 'banner' && !healthy && (
             <button
               type="button"
               aria-label="Dismiss notification prompt"
-              onClick={() => void push.dismissOffer()}
+              onClick={() => void push.dismissBanner()}
               className="inline-flex size-11 items-center justify-center rounded-lg text-muted hover:text-fg"
             >
               <X className="size-4" aria-hidden />
@@ -67,7 +71,7 @@ export function PushBanner({ className = '' }: PushBannerProps) {
           )}
         </div>
       </div>
-      {push.showOffer && (
+      {variant === 'banner' && !push.enabled && push.permission === 'default' && (
         <p className="mt-1 text-[12px] text-muted">
           Get notified on this device when a session needs you.
         </p>

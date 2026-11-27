@@ -139,14 +139,6 @@ function attentionBadge(row: SessionRow): { label: string; className: string } |
   return null;
 }
 
-function capabilityCount(row: SessionRow): { workers: number; reviewers: number } {
-  const reviewers = new Set(row.reviewer_session_ids ?? []);
-  const children = row.subagent_session_ids ?? [];
-  let workers = 0;
-  for (const id of children) if (!reviewers.has(id)) workers += 1;
-  return { workers, reviewers: reviewers.size };
-}
-
 function pendingCount(row: SessionRow): number {
   return row.detail === false
     ? row.pending_elicitation_count
@@ -187,7 +179,18 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
 
   const tone = statusTone(session);
   const badge = attentionBadge(session);
-  const { workers, reviewers } = capabilityCount(session);
+  const reviewerIds = session.reviewer_session_ids ?? [];
+  const reviewerSet = new Set(reviewerIds);
+  const hasWorkers = (session.subagent_session_ids ?? []).some(id => !reviewerSet.has(id));
+  const workers = session.verdict?.working_children ?? 0;
+  const activeReviewers = useSessionStore(state => {
+    let count = 0;
+    for (const id of reviewerIds) {
+      if (state.sessionsById[id]?.verdict?.working === true) count += 1;
+    }
+    return count;
+  });
+  const reviewWorking = session.verdict?.review_working === true;
   const questions = pendingCount(session);
   const queued = queuedCount(session);
   const activity = sessionActivityLabel(session);
@@ -206,6 +209,12 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
         label: openDestination === 'resume' ? 'Resume session' : 'Open conversation',
         run: () => navigateSession(),
       });
+    }
+    if (hasWorkers && workers === 0) {
+      list.push({ id: 'subagents', label: 'Sub-agents', run: () => navigate({ name: 'workspace', subagentParentId: session.id }) });
+    }
+    if (reviewerIds.length > 0 && activeReviewers === 0 && !reviewWorking) {
+      list.push({ id: 'reviewers', label: 'Reviewers', run: () => navigate({ name: 'workspace', subagentParentId: session.id, childKind: 'reviewer' }) });
     }
     if (can.move_session === true) {
       list.push({
@@ -294,7 +303,7 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
         navigate({ name: 'conversation', sessionId: session.id });
       }
     }
-  }, [can.change_workspace, can.container_settings, can.destroy, can.move_session, can.rename, can.restart, can.suspend, canOpen, dispatchAction, navigate, openDestination, session.id, session.title, session.workspace_id]);
+  }, [can.change_workspace, can.container_settings, can.destroy, can.move_session, can.rename, can.restart, can.suspend, canOpen, dispatchAction, hasWorkers, navigate, openDestination, reviewerIds.length, activeReviewers, reviewWorking, session.id, session.title, session.workspace_id, workers]);
 
   const open = () => {
     if (openDestination === 'resume') {
@@ -379,7 +388,7 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
         )}
       </div>
 
-      {(questions > 0 || queued > 0 || workers > 0 || reviewers > 0) && (
+      {(questions > 0 || queued > 0 || workers > 0 || activeReviewers > 0 || reviewWorking) && (
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           {questions > 0 && (
             <span
@@ -398,7 +407,7 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
           {workers > 0 && (
             <button
               type="button"
-              onClick={() => navigate({ name: 'workspace', subagentParentId: session.id })}
+              onClick={() => hasWorkers ? navigate({ name: 'workspace', subagentParentId: session.id }) : open()}
               className="inline-flex min-h-11 items-center gap-1 rounded-full border border-line bg-raised px-2.5 text-[12px] font-medium text-fg hover:border-accent"
             >
               <Bot className="size-3.5" aria-hidden />
@@ -406,7 +415,7 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
               <ChevronRight className="size-3" aria-hidden />
             </button>
           )}
-          {reviewers > 0 && (
+          {(activeReviewers > 0 || reviewWorking) && (
             <button
               type="button"
               onClick={() =>
@@ -415,7 +424,7 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
               className="inline-flex min-h-11 items-center gap-1 rounded-full border border-line bg-raised px-2.5 text-[12px] font-medium text-fg hover:border-accent"
             >
               <Users className="size-3.5" aria-hidden />
-              {reviewers} reviewer{reviewers === 1 ? '' : 's'}
+              {activeReviewers > 0 ? `${activeReviewers} reviewer${activeReviewers === 1 ? '' : 's'}` : 'Reviewing'}
               <ChevronRight className="size-3" aria-hidden />
             </button>
           )}

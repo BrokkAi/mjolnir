@@ -308,7 +308,7 @@ pub(super) async fn prepare(
         .filter(|r| r.submitted)
         .and_then(|r| r.reset_at_ms)
         .map(|t| t / 1000);
-    let model = mj_core::acp::AcceptedSessionConfig::from_configuration(
+    let model = mj_core::acp::EffectiveSessionConfig::from_operational(
         &snapshot.operational.config,
         &snapshot.operational.config_options,
     )
@@ -386,108 +386,123 @@ pub(super) async fn prepare(
             append_bounded(&mut fallback.notice, &format!(" {error}"));
             return Ok(Plan::Wait(fallback));
         }
-        let candidates = match (&model, state.quota_report_backend()) {
-            (Some(_), Some(backend)) => match backend.session_profile_candidates().await {
-                Ok(candidates) => Some(candidates.offered),
-                Err(error) => {
-                    tracing::warn!(session=id, %error, "quota Move candidates unavailable");
-                    None
-                }
-            },
-            _ => None,
-        };
-        if let (Some(model), Some(candidates)) = (model, candidates) {
-            let config = state.owner().controller().config.clone();
-            let source = fallback.profile_id.clone();
-            // The reason reads after "because" in the destination's notice.
-            let reason = match reset
-                .and_then(|s| s.checked_mul(1000))
-                .and_then(local_reset)
-            {
-                Some(time) => format!(
-                    "the quota for profile {source} resets at {time}, more than five hours away"
-                ),
-                None => format!("the quota for profile {source} has no known reset time"),
-            };
-            let placement = if owned_child {
-                mj_controller::profile_scheduler::Placement::Orchestrator
-            } else if child {
-                mj_controller::profile_scheduler::Placement::Child
-            } else {
-                mj_controller::profile_scheduler::Placement::TopLevel
-            };
-            let category: &'static str = if owned_child {
-                "orchestrator"
-            } else if child {
-                match state
-                    .owner()
-                    .controller()
-                    .state
-                    .subagents
-                    .get(id)
-                    .map(|record| record.kind)
-                {
-                    Some(mj_core::subagent::SubagentKind::Oracle) => "oracle",
-                    Some(mj_core::subagent::SubagentKind::Reviewer) => "reviewer",
-                    _ => "straightforward",
-                }
-            } else {
-                "primary"
-            };
-            let power_ranking = state.power_ranking.snapshot();
-            let mut refused = false;
-            let mut remaining = wrap_destinations(
-                eligible_destinations(&config, &source, harness, &model, candidates, now_ms / 1000),
-                &model,
-            );
-            while !remaining.is_empty() {
-                let reservation = state.quota_telemetry.draw_and_reserve(
-                    &mut remaining,
-                    placement,
-                    Some(category),
-                    None,
-                    &config.quota.prefer,
-                    &power_ranking,
-                    now_ms / 1000,
-                )?;
-                let Some(reservation) = reservation else {
-                    break;
-                };
-                let candidate = remaining.remove(0).candidate;
-                match state
-                    .prepare_quota_move(id, &candidate.profile_id, &fallback)
-                    .await
-                {
-                    Ok(request) => {
-                        return Ok(Plan::Move {
-                            request: Box::new(request),
-                            destination: candidate.profile_id,
-                            reservation: Some(reservation),
-                            reason,
-                            fallback,
-                        });
-                    }
+        if let Some(model) = model {
+            let candidates = match state.quota_report_backend() {
+                Some(backend) => match backend.session_profile_candidates().await {
+                    Ok(candidates) => Some(candidates.offered),
                     Err(error) => {
-                        drop(reservation);
-                        refused = true;
-                        preparation_refused(
-                            &mut fallback.notice,
-                            id,
-                            &candidate.profile_id,
-                            &error,
-                            &format!("quota-move-prepare-{id}-{}", turn.completed_ordinal),
-                        );
+                        tracing::warn!(session=id, %error, "quota Move candidates unavailable");
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(candidates) = candidates {
+                let config = state.owner().controller().config.clone();
+                let source = fallback.profile_id.clone();
+                // The reason reads after "because" in the destination's notice.
+                let reason = match reset
+                    .and_then(|s| s.checked_mul(1000))
+                    .and_then(local_reset)
+                {
+                    Some(time) => format!(
+                        "the quota for profile {source} resets at {time}, more than five hours away"
+                    ),
+                    None => format!("the quota for profile {source} has no known reset time"),
+                };
+                let placement = if owned_child {
+                    mj_controller::profile_scheduler::Placement::Orchestrator
+                } else if child {
+                    mj_controller::profile_scheduler::Placement::Child
+                } else {
+                    mj_controller::profile_scheduler::Placement::TopLevel
+                };
+                let category: &'static str = if owned_child {
+                    "orchestrator"
+                } else if child {
+                    match state
+                        .owner()
+                        .controller()
+                        .state
+                        .subagents
+                        .get(id)
+                        .map(|record| record.kind)
+                    {
+                        Some(mj_core::subagent::SubagentKind::Oracle) => "oracle",
+                        Some(mj_core::subagent::SubagentKind::Reviewer) => "reviewer",
+                        _ => "straightforward",
+                    }
+                } else {
+                    "primary"
+                };
+                let power_ranking = state.power_ranking.snapshot();
+                let mut refused = false;
+                let mut remaining = wrap_destinations(
+                    eligible_destinations(
+                        &config,
+                        &source,
+                        harness,
+                        &model,
+                        candidates,
+                        now_ms / 1000,
+                    ),
+                    &model,
+                );
+                while !remaining.is_empty() {
+                    let reservation = state.quota_telemetry.draw_and_reserve(
+                        &mut remaining,
+                        placement,
+                        Some(category),
+                        None,
+                        &config.quota.prefer,
+                        &power_ranking,
+                        now_ms / 1000,
+                    )?;
+                    let Some(reservation) = reservation else {
+                        break;
+                    };
+                    let candidate = remaining.remove(0).candidate;
+                    match state
+                        .prepare_quota_move(id, &candidate.profile_id, &fallback)
+                        .await
+                    {
+                        Ok(request) => {
+                            return Ok(Plan::Move {
+                                request: Box::new(request),
+                                destination: candidate.profile_id,
+                                reservation: Some(reservation),
+                                reason,
+                                fallback,
+                            });
+                        }
+                        Err(error) => {
+                            drop(reservation);
+                            refused = true;
+                            preparation_refused(
+                                &mut fallback.notice,
+                                id,
+                                &candidate.profile_id,
+                                &error,
+                                &format!("quota-move-prepare-{id}-{}", turn.completed_ordinal),
+                            );
+                        }
                     }
                 }
+                if !refused {
+                    append_bounded(
+                        &mut fallback.notice,
+                        &format!(
+                            " No other enabled profile of this harness with quota or paid credits left can take over this session with model {model}."
+                        ),
+                    );
+                }
             }
-            if !refused {
-                append_bounded(
-                    &mut fallback.notice,
-                    &format!(
-                        " No other enabled profile of this harness with quota or paid credits left can take over this session with model {model}."
-                    ),
-                );
-            }
+        } else {
+            tracing::warn!(session = id, "quota Move skipped: session model is unknown");
+            append_bounded(
+                &mut fallback.notice,
+                " Automatic Move was skipped because the session's current model is unknown.",
+            );
         }
     }
     if child {
@@ -909,18 +924,26 @@ mod tests {
     use mj_controller::controller::test_support::{IsolatedTest, test_name};
     use mj_core::config::{HarnessKind, HarnessProfile};
 
+    // Hard-won: default models were omitted from accepted overrides, silently preventing quota Move.
     #[tokio::test]
     async fn quota_for_an_owned_child_selects_the_in_place_move() {
-        quota_child_move(true).await;
+        quota_child_move(true, true).await;
     }
 
     #[tokio::test]
     async fn quota_for_a_borrowed_child_selects_the_in_place_move() {
-        quota_child_move(false).await;
+        quota_child_move(false, true).await;
     }
 
-    async fn quota_child_move(owned: bool) {
-        let name = if owned {
+    #[tokio::test]
+    async fn quota_move_reports_an_unknown_model() {
+        quota_child_move(true, false).await;
+    }
+
+    async fn quota_child_move(owned: bool, has_model: bool) {
+        let name = if !has_model {
+            "quota_move_reports_an_unknown_model"
+        } else if owned {
             "quota_for_an_owned_child_selects_the_in_place_move"
         } else {
             "quota_for_a_borrowed_child_selects_the_in_place_move"
@@ -1016,10 +1039,22 @@ mod tests {
             .operational
             .native_session_id = Some("native-owner".into());
         let snapshot = view.snapshot.as_mut().unwrap();
+        snapshot.operational.config.clear();
         snapshot
             .operational
             .config
-            .insert("model".into(), "destination-model".into());
+            .insert("mode".into(), "agent".into());
+        if has_model {
+            snapshot.operational.config_options = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "model", "name": "Model", "type": "select",
+                    "currentValue": "destination-model",
+                    "options": [{"value": "destination-model", "name": "Destination"}]
+                }))
+                .unwrap(),
+            ]
+            .into();
+        }
         let now = mj_core::clock::epoch_millis();
         let turn = snapshot.materialized.last_turn_outcome.as_mut().unwrap();
         turn.completed_at_ms = now;
@@ -1031,6 +1066,13 @@ mod tests {
             login_fingerprint: None,
         });
         let plan = prepare(&state, "owner-session", &view).await.unwrap();
+        if !has_model {
+            assert!(
+                matches!(&plan, Plan::Wait(fallback) if fallback.notice.contains("Automatic Move was skipped because the session's current model is unknown.")),
+                "{plan:?}"
+            );
+            return;
+        }
         if let Plan::Wait(ref fallback) = plan {
             let result = state
                 .prepare_quota_move("owner-session", "destination", fallback)

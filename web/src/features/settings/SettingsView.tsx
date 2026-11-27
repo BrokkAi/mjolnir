@@ -24,6 +24,7 @@ import type {
 import { useSessionStore } from '../../stores/useSessionStore';
 import { useUiStore, type Theme } from '../../stores/useUiStore';
 import { GitIdentityCard } from './GitIdentityCard';
+import { PushBanner } from '../push/PushBanner';
 
 /** Props the shell passes. Keep this shape when replacing the placeholder. */
 export type SettingsViewProps = { path: string[] };
@@ -904,6 +905,7 @@ export default function SettingsView({ path }: SettingsViewProps) {
             </button>
           </section>
           <GitIdentityCard />
+          <PushBanner variant="settings" />
         </>
       )}
 
