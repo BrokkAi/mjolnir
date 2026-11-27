@@ -39,7 +39,7 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 ## Progress
 
 
-- [ ] Slice 1: the replica survives every launch (seed-if-absent, memory out of every staged overlay, worker record in the checkpoint).
+- [ ] Slice 1: seed only an absent replica, keep memory out of staged overlays, and capture its baseline in the checkpoint. Implemented; targeted reload, staging and checkpoint tests, package Clippy, and workspace check passed. At merge, switch seed materialization to `mj_core::project_memory::render_memory_tree(seed, &snapshot, false)` from Slice 2, which preserves empty documents.
 - [ ] Slice 2: canonical becomes one atomically replaced file with a read-only rendered directory; checkpoint sync and project-store merges commit through it.
 - [ ] Slice 3: `Snapshot` and `Deliver`, and the turn-start, turn-end and attach triggers.
 - [ ] Isolated-instance acceptance on a release build (in-place Move needs release: dev builds overflow a Tokio stack during harness preparation, a pre-existing issue).
@@ -51,6 +51,8 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 
 - From the previous attempt: checkpoints already capture the replica (`mj-checkpoint/src/checkpoint/capture.rs`) and ordinary resume runs profile staging and archive restore in concurrent lanes (`mj-controller/src/controller/resume.rs`), so today a restored session's replica depends on which lane finishes last. Slice 1 removes the dependency because staging no longer writes the replica.
 - From the previous attempt: `RelayRequest` and `ProjectMemoryLaunchConfig` use `deny_unknown_fields`, and some restart paths keep an older worker binary while rewriting its `launch.json`. New launch fields therefore break older workers; derive new paths from existing fields instead.
+- The existing `ProjectMemoryStore::replace_tree` rejects empty documents even though canonical snapshots can contain them. Slice 2’s shared tree-to-directory renderer must replace the seed materialization call at merge.
+- Native checkpoint archives contain files, not directories. Capture adds a hidden marker for an empty replica or baseline so restore preserves the distinction between an absent tree and an empty one.
 - From the previous attempt: in-place Moves cannot be exercised end to end on dev builds because of a pre-existing Tokio stack overflow in harness preparation (`mj-harness-install/src/harness_install.rs` Node probe); use release builds for that acceptance step.
 
 
@@ -68,7 +70,7 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 ## Outcomes & Retrospective
 
 
-Not started.
+Slice 1 preserves existing replica edits and deletions across in-place reload and carries the baseline through checkpoint restore. Slices 2 and 3 and isolated-instance acceptance remain.
 
 
 ## Context and Orientation
@@ -86,7 +88,7 @@ Protocol: `RELAY_PROTOCOL_VERSION` in `mj-core/src/relay.rs`; per-version notes 
 ## Plan of Work
 
 
-Slice 1: the replica survives every launch. Staging stops writing the replica and baseline into any staged profile or reload candidate. It stages a canonical seed instead, at a location derived from existing fields (`baseline_root.with_file_name(".hel-memory-seed")`, computed by one helper in `mj-core/src/worker_launch.rs`), and installs it directly, never through the overlay; no launch field is added. A worker function `ensure_project_memory_replica`, run at worker startup and when applying an in-place reload, copies the seed into replica and record only when the replica is absent, and always removes the seed. When the replica exists but the record does not (sessions and checkpoints from older builds), it builds the record from the legacy baseline directory. Checkpoint capture archives the record beside the replica, so a restore brings both back. `staged_memory_index` reads the seed. The in-place reload test pins the original defect: an unsynced edit and an unsynced deletion survive a reload, marked `// Hard-won:` with the fix commit. This slice ends the destruction even before any sync change.
+Slice 1: the replica survives every launch. Staging stops writing the replica and baseline into any staged profile or reload candidate. It stages a canonical seed instead, at a location derived from existing fields (`baseline_root.with_file_name(".hel-memory-seed")`, computed by one helper in `mj-core/src/worker_launch.rs`), and installs it directly, never through the overlay; no launch field is added. A worker function `ensure_project_memory_replica`, run at worker startup and when applying an in-place reload, copies the seed into replica and record only when the replica is absent, and always removes the seed. For this slice, the existing baseline directory is the record; if the replica exists but the baseline is absent, the worker copies the replica into the baseline. Slice 3 replaces this directory-based record with the record file described below. Checkpoint capture archives the baseline beside the replica, so a restore brings both back. `staged_memory_index` reads the seed. The in-place reload test pins the original defect: an unsynced edit and an unsynced deletion survive a reload, marked `// Hard-won:` with the fix commit. This slice ends the destruction even before any sync change.
 
 Slice 2: canonical becomes one file. Per project, canonical is `<data dir>/projects/<key>/memory.json` = `{ version, tree, absorbed: { session id: snapshot id } }`, written by temp file, fsync and rename under a short cross-process file lock, conditional on `version` and on the committing session's `absorbed` entry being unchanged since it was read. A commit replaces the tree and that session's entry together. After every commit, and at daemon start, the daemon renders the tree into the existing `memory/` directory, read-only, and never reads that directory back; the first daemon start after upgrade migrates an existing directory into the file. Staging's seed reads the file. The existing checkpoint sync commits through the file with today's protocol for workers that predate slice 3. `merge_canonical_stores` becomes two file commits, destination then redirect. Editing any session's replica is the supported way to change memory by hand; the user declined a dedicated editing command.
 
@@ -114,6 +116,8 @@ Acceptance in an isolated instance (`--instance memsync`, with MJ_CONFIG_DIR and
 ## Limitations
 
 
+Legacy SSH host-bare sessions whose whole profile home is a symlink have a pre-existing gap: `stage_worker_files_for` calls `unlink_host_bare_profile_home` on `RefreshProfileOnly`, leaving the old replica and baseline under the symlink target and seeding the new home from canonical. No migration is included in Slice 1.
+
 A background writer landing within milliseconds of a delivery's replica write can be overwritten. Restoring a checkpoint captured while a handout was pending, after the original timeline moved on, re-merges that handout against newer canonical and can bring back a note deleted since; checkpoints sync before capture, so this needs a failed pre-capture sync first. Older workers keep checkpoint-only synchronization until their next worker restart.
 
 
@@ -124,3 +128,6 @@ Relay: `ProjectMemorySnapshot` gains `{ absorbed, head_version }` and its reply 
 
 
 Revision note (2026-11-26): initial plan for the restart, from the advisor session's design (session 91233b0e) and the user's direction to simplify through assumptions.
+
+
+Revision note (2026-11-27): record Slice 1 implementation, empty-directory checkpoint handling, and the pre-existing legacy SSH host-bare symlink gap.

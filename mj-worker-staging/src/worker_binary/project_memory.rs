@@ -82,28 +82,46 @@ pub fn canonical_memory_root(project_key: &str) -> PathBuf {
         .join("memory")
 }
 
-pub fn stage_memory_replica<'a>(
-    memory: &'a ProjectMemoryLaunchConfig,
-    target_profile_home: &Path,
-    profile_stage: &Path,
-) -> Result<[&'a Path; 2]> {
-    let canonical = mj_core::project_memory::resolve_canonical_root(&canonical_memory_root(
-        &memory.project_key,
-    ))?;
-    std::fs::create_dir_all(&canonical)?;
-    let replica = memory.root.strip_prefix(target_profile_home)?;
-    let baseline = memory.baseline_root.strip_prefix(target_profile_home)?;
-    copy_profile_entry(&canonical, &profile_stage.join(replica))?;
-    copy_profile_entry(&canonical, &profile_stage.join(baseline))?;
-    Ok([replica, baseline])
+pub fn stage_memory_seed(memory: &ProjectMemoryLaunchConfig, seed: &Path) -> Result<()> {
+    let snapshot =
+        mj_core::project_memory::read_canonical(&canonical_memory_root(&memory.project_key))?;
+    // An empty snapshot still needs a directory to transfer to the worker.
+    std::fs::create_dir_all(seed)?;
+    // TODO: Switch to render_memory_tree(seed, &snapshot, false) when Slice 2 lands.
+    mj_core::project_memory::ProjectMemoryStore::new(seed).replace_tree(&snapshot)?;
+    Ok(())
 }
 
 /// Read the canonical-memory snapshot already copied into this launch's stage.
-pub fn staged_memory_index(
-    memory: &ProjectMemoryLaunchConfig,
-    target_profile_home: &Path,
-    profile_stage: &Path,
-) -> Result<Option<String>> {
-    let root = profile_stage.join(memory.root.strip_prefix(target_profile_home)?);
-    mj_core::project_memory::ProjectMemoryStore::new(root).startup_index()
+pub fn staged_memory_index(seed: &Path) -> Result<Option<String>> {
+    mj_core::project_memory::ProjectMemoryStore::new(seed).startup_index()
+}
+
+/// Transfer the seed independently of the profile overlay.
+pub fn install_memory_seed(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    seed: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let mut archive = tar::Builder::new(Vec::new());
+    archive.append_dir_all(".", seed)?;
+    let bytes = archive.into_inner()?;
+    let command = targets::command_on_locator(
+        mj_core::targets::SshTrafficClass::Bulk,
+        locator,
+        session_id,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "umask 077; rm -rf -- \"$1\"; mkdir -p -- \"$1\"; exec tar -xf - -C \"$1\"".into(),
+            "mj-memory-seed".into(),
+            destination.to_string_lossy().into_owned(),
+        ],
+        "install project memory seed",
+    )?;
+    let output = executor.execute_with_stdin(&command, &mut bytes.as_slice())?;
+    targets::checked_command_output(&command, output)?;
+    Ok(())
 }

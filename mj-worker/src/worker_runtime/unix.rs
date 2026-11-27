@@ -1860,6 +1860,9 @@ pub async fn run_daemon_owned(
             config.parked_move.as_ref(),
         )?
     };
+    if let Some(memory) = &config.project_memory {
+        super::project_memory::ensure_project_memory_replica(memory)?;
+    }
     if let Some(operation_id) = config.accepted_reload_operation_id.as_deref() {
         durable_relay.reconcile_committed_reload(operation_id)?;
     }

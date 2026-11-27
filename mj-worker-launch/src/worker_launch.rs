@@ -236,7 +236,7 @@ pub fn stage_worker_files_for(
         .target_runtime_settings(config)?
         .launch_environment()?;
     let aws_source = crate::aws_credentials::source(profile, backend, &target_environment)?;
-    let (mut launch, project_memory, target_profile_home) = session_launch_config_with_source(
+    let (mut launch, _project_memory, target_profile_home) = session_launch_config_with_source(
         config,
         state,
         session_id,
@@ -259,6 +259,11 @@ pub fn stage_worker_files_for(
         launch.accepted_reload_operation_id = Some(operation_id.clone());
     }
     let staging = tempfile::tempdir().context("create worker staging directory")?;
+    let seed_stage = staging.path().join("project-memory-seed");
+    if let Some(memory) = &launch.project_memory {
+        stage_memory_seed(memory, &seed_stage)?;
+    }
+    let project_memory = launch.project_memory.clone();
     let launch_path = staging.path().join("launch.json");
     launch.write(&launch_path)?;
     let ownership_path = staging.path().join("ownership.json");
@@ -359,29 +364,23 @@ pub fn stage_worker_files_for(
     if profile.kind == mj_core::config::HarnessKind::Claude {
         configure_claude_mailbox_hook(&profile_stage, worker_root)?;
     }
-    let mut shared_paths: Vec<&Path> = shared_profile_paths(profile.kind);
+    let shared_paths: Vec<&Path> = shared_profile_paths(profile.kind);
     // A session without project memory gets no replica, no baseline and
     // no history server: nothing of the workspace's memory reaches it.
-    if let Some(project_memory) = &project_memory {
-        shared_paths.extend(stage_memory_replica(
-            project_memory,
-            Path::new(&target_profile_home),
+    if let Some(project_memory) = &project_memory
+        && project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile
+    {
+        configure_kimi_history_mcp(
             &profile_stage,
-        )?);
-        if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
-            configure_kimi_history_mcp(
-                &profile_stage,
-                worker_root,
-                project_memory.history_socket.as_deref(),
-            )?;
-        }
+            worker_root,
+            project_memory.history_socket.as_deref(),
+        )?;
     }
     if mj_core::session_instructions::delivered_by_staging(profile.kind) {
         let index = if let Some(memory) = &project_memory {
-            let index =
-                staged_memory_index(memory, Path::new(&target_profile_home), &profile_stage)
-                    .map(|contents| contents.unwrap_or_default())
-                    .map_err(|error| format!("{error:#}"));
+            let index = staged_memory_index(&seed_stage)
+                .map(|contents| contents.unwrap_or_default())
+                .map_err(|error| format!("{error:#}"));
             if let Err(reason) = &index {
                 executor.notify_notice(&format!(
                     "Warning: Project memory index {} unavailable: {reason}",
@@ -446,6 +445,15 @@ pub fn stage_worker_files_for(
                 shared_paths: &shared_paths,
             },
         )?;
+        if let Some(memory) = &project_memory {
+            install_memory_seed(
+                executor,
+                backend,
+                session_id,
+                &seed_stage,
+                &mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root),
+            )?;
+        }
         return Ok((Some(launch), staged_profile));
     }
     if preparation != WorkerFilePreparation::Install {
@@ -491,6 +499,15 @@ pub fn stage_worker_files_for(
                 shared_paths: &shared_paths,
             },
         )?;
+        if let Some(memory) = &project_memory {
+            install_memory_seed(
+                executor,
+                backend,
+                session_id,
+                &seed_stage,
+                &mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root),
+            )?;
+        }
         if upgrade_retained_worker {
             let worker = WorkerInstall::for_target(backend, executor)?;
             install_worker_binary(executor, backend, session_id, &worker, "hel")?;
@@ -512,6 +529,15 @@ pub fn stage_worker_files_for(
         shared_login.as_ref(),
         &shared_paths,
     )?;
+    if let Some(memory) = &project_memory {
+        install_memory_seed(
+            executor,
+            backend,
+            session_id,
+            &seed_stage,
+            &mj_core::worker_launch::project_memory_seed_root(&memory.baseline_root),
+        )?;
+    }
     if session.build_cache.is_some() {
         install_build_cache_shim(session, backend, &launch, executor)
             .context("install shared machine build cache configuration")?;

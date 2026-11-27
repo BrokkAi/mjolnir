@@ -171,7 +171,7 @@ fn directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_overlay(source: &Path, destination: &Path) -> Result<()> {
+pub(super) fn copy_overlay(source: &Path, destination: &Path) -> Result<()> {
     directory(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -271,6 +271,15 @@ pub fn apply_committed_reload(
         }
     }
     copy_overlay(&candidate.join("profile"), home)?;
+    #[cfg(unix)]
+    let mut launch =
+        mj_core::worker_launch::WorkerLaunchConfig::read(&candidate.join("launch.json"))?;
+    #[cfg(unix)]
+    super::resolve_relative_harness_home(&mut launch, &std::env::current_dir()?);
+    #[cfg(unix)]
+    if let Some(memory) = &launch.project_memory {
+        super::project_memory::ensure_project_memory_replica(memory)?;
+    }
     if let Some(login) = &manifest.shared_login {
         let relative = relative(&login.relative_marker)?;
         if let Some(parent) = relative.parent() {
@@ -1254,7 +1263,9 @@ mod tests {
         std::fs::write(home.join("config.toml"), "source").unwrap();
         std::fs::write(candidate.join("profile/config.toml"), "destination").unwrap();
         std::fs::write(candidate.join("profile/skills/user/SKILL.md"), "new skill").unwrap();
-        std::fs::write(candidate.join("launch.json"), "destination launch").unwrap();
+        crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap())
+            .write(&candidate.join("launch.json"))
+            .unwrap();
         std::fs::write(candidate.join("ownership.json"), "destination ownership").unwrap();
         std::fs::write(root.join("shared-auth"), "shared login").unwrap();
         let manifest = ReloadCandidateManifest {
@@ -1283,6 +1294,55 @@ mod tests {
             candidate_id: "candidate".into(),
             git_setup_name: Some("harness-git-candidate".into()),
         }
+    }
+
+    // Hard-won: PENDING: in-place Move restaged canonical memory over unsynced replica edits
+    #[test]
+    fn reload_commit_preserves_unsynced_project_memory_edit_and_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pending = fixture(root);
+        let home = root.join("home");
+        let candidate = root.join("reload-candidates/candidate");
+        let replica = home.join("projects/replica/memory");
+        let baseline = home.join("projects/replica/.hel-memory-baseline");
+        let seed = mj_core::worker_launch::project_memory_seed_root(&baseline);
+        for path in [&replica, &baseline, &seed] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let old = "canonical memory before local edits\n".repeat(4096);
+        let edited = "local unsynced changes survive\n".repeat(4096);
+        for path in [&baseline, &seed] {
+            std::fs::write(path.join("note.md"), &old).unwrap();
+            std::fs::write(path.join("deleted.md"), "deleted locally").unwrap();
+        }
+        std::fs::write(replica.join("note.md"), &edited).unwrap();
+        let mut launch = crate::worker_runtime::relay_tests::launch_config(home.to_str().unwrap());
+        launch.project_memory = Some(mj_core::worker_launch::ProjectMemoryLaunchConfig {
+            history_socket: None,
+            project_key: "key".into(),
+            root: replica.clone(),
+            baseline_root: baseline.clone(),
+            repository_roots: Default::default(),
+            mcp_delivery: Default::default(),
+        });
+        launch.write(&candidate.join("launch.json")).unwrap();
+        commit_pending_reload(root, &pending).unwrap();
+        apply_committed_reload(root, &pending).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(replica.join("note.md")).unwrap(),
+            edited
+        );
+        assert!(!replica.join("deleted.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(baseline.join("note.md")).unwrap(),
+            old
+        );
+        assert_eq!(
+            std::fs::read_to_string(baseline.join("deleted.md")).unwrap(),
+            "deleted locally"
+        );
+        assert!(!seed.exists());
     }
 
     #[test]
@@ -1450,6 +1510,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
             let pending = fixture(root);
+            let expected_launch =
+                std::fs::read(root.join("reload-candidates/candidate/launch.json")).unwrap();
             std::fs::create_dir_all(root.join("reload-candidates/orphan")).unwrap();
             std::fs::write(root.join("github-token"), "old secret").unwrap();
             commit_pending_reload(root, &pending).unwrap();
@@ -1489,7 +1551,7 @@ mod tests {
             );
             assert_eq!(
                 std::fs::read(root.join("launch.json")).unwrap(),
-                b"destination launch"
+                expected_launch
             );
             assert_eq!(
                 std::fs::read(root.join("ownership.json")).unwrap(),
