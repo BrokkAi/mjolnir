@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { jsonResponse, mockFetch } from '../../../test-utils';
 import { PushBanner } from '../PushBanner';
 
-function browser(permission: NotificationPermission, enabled: boolean, subscribed = false, dismissed = false) {
+function browser(permission: NotificationPermission, enabled: boolean, subscribed = false, dismissed = false, error: string | null = null) {
   vi.stubGlobal('isSecureContext', true);
   vi.stubGlobal('Notification', { permission });
   vi.stubGlobal('PushManager', class {});
@@ -17,7 +17,7 @@ function browser(permission: NotificationPermission, enabled: boolean, subscribe
     configurable: true,
     value: { getRegistration: async () => ({ active: {}, pushManager: { getSubscription: async () => subscribed ? { endpoint: 'https://push.test/endpoint' } : null } }) },
   });
-  mockFetch({ '/api/v1/push/status': () => jsonResponse({ subscribed, error: null }) });
+  mockFetch({ '/api/v1/push/status': () => jsonResponse({ subscribed, error }) });
   return api;
 }
 
@@ -68,6 +68,22 @@ describe('push banner', () => {
       await waitFor(() => expect(screen.queryByLabelText('Push notifications')).not.toBeInTheDocument());
     },
   );
+
+  it('dismisses delivery errors permanently while retaining them in settings', async () => {
+    const api = browser('granted', true, true, false, 'Delivery failed');
+    const view = render(<PushBanner />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Delivery failed');
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss notification prompt' }));
+    await waitFor(() => expect(api.dismiss).toHaveBeenCalled());
+    expect(view.container).toBeEmptyDOMElement();
+    view.unmount();
+    const remount = render(<PushBanner />);
+    render(<PushBanner variant="settings" />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Delivery failed');
+    expect(remount.container).toBeEmptyDOMElement();
+    expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Dismiss notification prompt' })).not.toBeInTheDocument();
+  });
 
   it('honors an existing MjPush dismissal', async () => {
     const api = browser('default', false, false, true);

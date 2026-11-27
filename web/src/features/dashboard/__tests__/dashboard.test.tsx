@@ -79,8 +79,8 @@ describe('Workspaces dashboard', () => {
     hydrate([
       liveRow('idle', { title: 'Idle parent', subagent_session_ids: ['child', 'review'], reviewer_session_ids: ['review'], verdict: { ...base.verdict, working_descendants: 0, working_children: 0 } }),
       liveRow('child', { subagent_parent_id: 'idle', active: false }),
-      liveRow('review', { subagent_parent_id: 'idle', active: false }),
-      liveRow('busy', { title: 'Busy parent', verdict: { ...base.verdict, working_descendants: 2 } }),
+      liveRow('review', { subagent_parent_id: 'idle', active: true, verdict: { ...base.verdict, working: false } }),
+      liveRow('busy', { title: 'Busy parent', verdict: { ...base.verdict, working_descendants: 3, working_children: 2 } }),
     ]);
     mockFetch({});
     render(<DashboardView />);
@@ -96,20 +96,30 @@ describe('Workspaces dashboard', () => {
     expect(useUiStore.getState().route).toEqual({ name: 'workspace', subagentParentId: 'busy' });
   });
 
-  it('counts active reviewers and uses the parent verdict when reviewer rows are absent', () => {
+  it('counts working reviewers without inflating the worker pill or counting parked reviewers', () => {
     const base = liveRow('parent');
     hydrate([
-      liveRow('parent', { title: 'Parent', reviewer_session_ids: ['r1', 'r2'] }),
-      liveRow('r1', { subagent_parent_id: 'parent', active: true }),
-      liveRow('r2', { subagent_parent_id: 'parent', active: false }),
+      liveRow('parent', { title: 'Parent', subagent_session_ids: ['r1', 'r2'], reviewer_session_ids: ['r1', 'r2'], verdict: { ...base.verdict, working_descendants: 1, working_children: 0 } }),
+      liveRow('r1', { subagent_parent_id: 'parent', active: true, verdict: { ...base.verdict, working: true } }),
+      liveRow('r2', { subagent_parent_id: 'parent', active: true, verdict: { ...base.verdict, working: false } }),
       liveRow('missing', { title: 'Missing reviewers', reviewer_session_ids: ['r3', 'r4'], verdict: { ...base.verdict, review_working: true } }),
+      liveRow('historical', { title: 'Historical reviewers', reviewer_session_ids: ['r5'], verdict: { ...base.verdict, review_working: true } }),
+      liveRow('r5', { subagent_parent_id: 'historical', active: true, verdict: { ...base.verdict, working: false } }),
     ]);
     mockFetch({});
     render(<DashboardView />);
     const parent = within(screen.getByTestId('session-card-parent'));
-    fireEvent.click(parent.getByRole('button', { name: /1 reviewer/ }));
+    expect(parent.queryByRole('button', { name: /sub-agent/ })).not.toBeInTheDocument();
+    fireEvent.click(parent.getByRole('button', { name: '1 reviewer' }));
     expect(useUiStore.getState().route).toEqual({ name: 'workspace', subagentParentId: 'parent', childKind: 'reviewer' });
-    expect(within(screen.getByTestId('session-card-missing')).getByRole('button', { name: /2 reviewers/ })).toBeInTheDocument();
+    for (const id of ['missing', 'historical']) {
+      const card = within(screen.getByTestId(`session-card-${id}`));
+      expect(card.getByRole('button', { name: 'Reviewing' })).toBeInTheDocument();
+      expect(card.queryByRole('button', { name: /[0-9]+ reviewers?/ })).not.toBeInTheDocument();
+      fireEvent.click(card.getByRole('button', { name: /Actions for/ }));
+      expect(card.queryByRole('menuitem', { name: 'Reviewers' })).not.toBeInTheDocument();
+      fireEvent.click(card.getByRole('button', { name: /Actions for/ }));
+    }
   });
 
   it('opens a stopped sub-agent from its card as a conversation, not a resume', () => {

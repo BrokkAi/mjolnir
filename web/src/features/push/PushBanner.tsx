@@ -12,9 +12,8 @@ export interface PushBannerProps {
 export function PushBanner({ className = '', variant = 'banner' }: PushBannerProps) {
   const push = useWebPush();
   const healthy = push.enabled && push.subscribed && !push.error;
-  const dismissible = !push.enabled || (!push.subscribed && !push.error);
   const Icon = healthy ? BellRing : Bell;
-  if (variant === 'banner' && (push.loading || healthy || (dismissible && push.bannerDismissed))) return null;
+  if (variant === 'banner' && (push.loading || healthy || push.bannerDismissed)) return null;
   return (
     <section
       aria-label="Push notifications"
@@ -60,7 +59,7 @@ export function PushBanner({ className = '', variant = 'banner' }: PushBannerPro
               Send test
             </button>
           )}
-          {variant === 'banner' && dismissible && (
+          {variant === 'banner' && !healthy && (
             <button
               type="button"
               aria-label="Dismiss notification prompt"

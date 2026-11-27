@@ -132,7 +132,7 @@ test('dashboard switches workspaces and opens the sub-agent virtual workspace', 
       sessions: [
         liveSession('a1', { title: 'Alpha', workspace_id: 'w1' }),
         liveSession('a2', { title: 'Beta', workspace_id: 'w2' }),
-        liveSession('p1', { title: 'Parent', workspace_id: 'w1', subagent_session_ids: ['c1'], verdict: { working_descendants: 1 } }),
+        liveSession('p1', { title: 'Parent', workspace_id: 'w1', subagent_session_ids: ['c1'], verdict: { working_children: 1 } }),
         liveSession('c1', { title: 'Child', workspace_id: 'w1', subagent_parent_id: 'p1' }),
       ],
     }),
