@@ -1630,7 +1630,16 @@ pub fn merge_canonical_stores(old: &Path, new: &Path) -> Result<Vec<String>> {
         destination_state.tree = merged.tree;
         destination_state.version = destination_state.tree.version();
         write_canonical_locked(&destination, &destination_state)?;
-        render_memory_tree(&destination, &destination_state.tree, true)?;
+        // As for ordinary commits, the rename is the commit and the rendered
+        // view is derived. A render failure must not stop the redirect, or a
+        // retry would merge the source again over later destination edits.
+        if let Err(error) = render_memory_tree(&destination, &destination_state.tree, true) {
+            tracing::warn!(
+                project = %project_key(&destination),
+                %error,
+                "project memory render failed after the store merge"
+            );
+        }
         let parent = source
             .parent()
             .context("old memory project directory is missing")?;
