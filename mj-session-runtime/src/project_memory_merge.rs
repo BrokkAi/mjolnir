@@ -269,11 +269,7 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
 }
 
 fn set_file_content(tree: &mut ProjectMemorySnapshot, path: &str, content: &str) {
-    if content.trim().is_empty() {
-        tree.files.remove(path);
-    } else {
-        tree.files.insert(path.to_owned(), content.to_owned());
-    }
+    tree.files.insert(path.to_owned(), content.to_owned());
 }
 
 fn validate_model_output(content: &str) -> Result<()> {
@@ -564,7 +560,7 @@ mod tests {
     async fn cancellation_awaits_a_started_canonical_swap_and_reports_its_result() {
         for fails in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let path = root.path().to_path_buf();
+            let path = root.path().join("memory");
             let tree = snapshot(&[("/MEMORY.md", "committed before checkpoint returns\n")]);
             let swapped = tree.clone();
             let cancel = CancellationToken::new();
@@ -606,7 +602,7 @@ mod tests {
             } else {
                 assert_eq!(result.unwrap(), SwapOutcome::Swapped);
                 assert_eq!(
-                    mj_core::project_memory::read_canonical(root.path()).unwrap(),
+                    mj_core::project_memory::read_canonical(&root.path().join("memory")).unwrap(),
                     tree
                 );
             }
@@ -623,11 +619,11 @@ mod tests {
     async fn unavailable_utility_model_stores_replica_wins_text() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = StaticResolver::unavailable();
 
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -644,17 +640,38 @@ mod tests {
             result.resolutions[0].method,
             ConflictResolutionMethod::ReplicaWins
         );
+
+        let empty_dir = tempfile::tempdir().unwrap();
+        let empty_root = empty_dir.path().join("memory");
+        install_initial(&empty_root, &canonical);
+        let empty_replica = snapshot(&[("/MEMORY.md", "")]);
+        let outcome = merge_and_swap_canonical(
+            &empty_root,
+            &base,
+            &empty_replica,
+            &resolver,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let CanonicalSyncOutcome::Swapped(result) = outcome else {
+            panic!("canonical sync unexpectedly exhausted retries");
+        };
+        assert_eq!(
+            result.tree.files.get("/MEMORY.md").map(String::as_str),
+            Some("")
+        );
     }
 
     #[tokio::test]
     async fn invalid_model_output_stores_replica_wins_text() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = StaticResolver::output("<<<<<<< canonical\ninvalid\n>>>>>>> replica\n");
 
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -712,14 +729,14 @@ mod tests {
     async fn canonical_change_retries_and_preserves_both_sessions_changes() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = ConcurrentAdditionResolver {
-            root: root.path().to_path_buf(),
+            root: root.path().join("memory"),
             calls: AtomicUsize::new(0),
         };
 
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -770,14 +787,14 @@ mod tests {
     async fn exhausted_compare_and_swap_attempts_return_ok_outcome() {
         let root = tempfile::tempdir().unwrap();
         let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
+        install_initial(&root.path().join("memory"), &canonical);
         let resolver = AlwaysChangingResolver {
-            root: root.path().to_path_buf(),
+            root: root.path().join("memory"),
             calls: AtomicUsize::new(0),
         };
 
         let outcome = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &base,
             &replica,
             &resolver,
@@ -882,7 +899,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let baseline = snapshot(&[("/MEMORY.md", "A\n")]);
         let replica = snapshot(&[("/MEMORY.md", "A\nX\n")]);
-        install_initial(root.path(), &baseline);
+        install_initial(&root.path().join("memory"), &baseline);
         let mut worker = FakeWorker {
             supports_replace: true,
             baseline: baseline.clone(),
@@ -892,7 +909,7 @@ mod tests {
         let resolver = StaticResolver::unavailable();
 
         let first = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &worker.baseline,
             &worker.replica,
             &resolver,
@@ -914,13 +931,17 @@ mod tests {
 
         // Another session deletes X from canonical after the first sync.
         assert_eq!(
-            mj_core::project_memory::swap_canonical(root.path(), &first.tree.version(), &baseline)
-                .unwrap(),
+            mj_core::project_memory::swap_canonical(
+                &root.path().join("memory"),
+                &first.tree.version(),
+                &baseline
+            )
+            .unwrap(),
             SwapOutcome::Swapped
         );
 
         let second = merge_and_swap_canonical(
-            root.path(),
+            &root.path().join("memory"),
             &worker.baseline,
             &worker.replica,
             &resolver,
@@ -947,7 +968,7 @@ mod tests {
             Some(WorkerInstallOutcome::Replaced)
         );
         assert_eq!(
-            mj_core::project_memory::read_canonical(root.path()).unwrap(),
+            mj_core::project_memory::read_canonical(&root.path().join("memory")).unwrap(),
             baseline
         );
     }

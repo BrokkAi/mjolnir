@@ -39,8 +39,8 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 ## Progress
 
 
-- [ ] Slice 1: seed only an absent replica, keep memory out of staged overlays, and capture its baseline in the checkpoint. Implemented; targeted reload, staging and checkpoint tests, package Clippy, and workspace check passed. At merge, switch seed materialization to `mj_core::project_memory::render_memory_tree(seed, &snapshot, false)` from Slice 2, which preserves empty documents.
-- [ ] Slice 2: canonical becomes one atomically replaced file with a read-only rendered directory; checkpoint sync and project-store merges commit through it.
+- [x] (2026-11-27) Slice 1: seed only an absent replica, keep memory out of staged overlays, and capture its baseline in the checkpoint; seed materialization uses Slice 2's `render_memory_tree`.
+- [x] (2026-11-27 01:48Z) Slice 2: canonical uses an atomically replaced file and a read-only rendered directory; checkpoint sync and project-store merges commit through it.
 - [ ] Slice 3: `Snapshot` and `Deliver`, and the turn-start, turn-end and attach triggers.
 - [ ] Isolated-instance acceptance on a release build (in-place Move needs release: dev builds overflow a Tokio stack during harness preparation, a pre-existing issue).
 - [ ] Review, commit, push.
@@ -56,6 +56,11 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 - From the previous attempt: in-place Moves cannot be exercised end to end on dev builds because of a pre-existing Tokio stack overflow in harness preparation (`mj-harness-install/src/harness_install.rs` Node probe); use release builds for that acceptance step.
 
 
+- Legacy trees can contain empty documents and hidden entries. Empty documents are valid tree entries and survive merge, commit, and rendering. Migration leaves hidden entries in the rendered directory without importing them; existing redirect metadata is beside that directory. The shared `render_memory_tree(root, tree, read_only)` also materializes the staging seed.
+- The shared renderer uses confined directory and file handles for cleanup and permission changes; a planted symlink cannot redirect its writes or chmod operations.
+- The old checkpoint tests used the temporary directory itself as the memory root. The canonical file belongs beside the memory root, so the tests now give each case a `memory` child to keep files isolated.
+
+
 ## Decision Log
 
 
@@ -67,10 +72,14 @@ The replica has two writers: the agent, and the worker's `Deliver` handler. Stag
 - Decision: no command for editing canonical directly; the rendered directory is read-only and editing any session's replica is the supported path. Rationale: the user's choice; a replica edit reaches canonical within one turn. Date: 2026-11-26.
 
 
+- Decision: retain `ProjectMemorySnapshot::version()` as the file version. Compare the committing session's `absorbed` entry separately under the same lock, allowing other sessions to acknowledge unchanged trees without false conflicts; the commit retains all their entries. Date: 2026-11-27.
+- Decision: preserve the existing sibling redirect file. Project merges lock source and destination in path order, recheck redirects, commit destination, then atomically publish the redirect; missing source acknowledgements are copied to destination, where an existing destination acknowledgement takes precedence. Date: 2026-11-27.
+
+
 ## Outcomes & Retrospective
 
 
-Slice 1 preserves existing replica edits and deletions across in-place reload and carries the baseline through checkpoint restore. Slices 2 and 3 and isolated-instance acceptance remain.
+Slice 1 preserves existing replica edits and deletions across in-place reload and carries the baseline through checkpoint restore. Slice 2 provides `read_canonical` for staging and `read_canonical_state`/`commit_canonical` for the turn protocol. Slice 3, acceptance and review remain.
 
 
 ## Context and Orientation

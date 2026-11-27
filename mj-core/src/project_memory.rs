@@ -8,8 +8,9 @@ use crate::hex::lower_hex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -137,7 +138,7 @@ pub fn merge_trees(
             }
         };
 
-        if let Some(content) = merged.filter(|content| !content.trim().is_empty()) {
+        if let Some(content) = merged {
             tree.files.insert(path, content);
         }
     }
@@ -516,38 +517,155 @@ pub enum SwapOutcome {
     Changed,
 }
 
-/// Read the canonical tree, following project-merge redirects.
-pub fn read_canonical(canonical_root: &Path) -> Result<ProjectMemorySnapshot> {
-    let root = resolve_canonical_root(canonical_root)?;
-    ProjectMemoryStore::new(root).snapshot()
+/// The durable canonical tree and acknowledgements owned by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalMemory {
+    pub version: TreeVersion,
+    pub tree: ProjectMemorySnapshot,
+    pub absorbed: BTreeMap<String, String>,
 }
 
-/// Replace the canonical tree with `tree` only if it still has `expected`.
-/// The per-project lock is held only for the compare and the write.
-pub fn swap_canonical(
+impl CanonicalMemory {
+    fn new(tree: ProjectMemorySnapshot) -> Self {
+        Self {
+            version: tree.version(),
+            tree,
+            absorbed: BTreeMap::new(),
+        }
+    }
+}
+
+fn canonical_file(root: &Path) -> Result<PathBuf> {
+    Ok(root
+        .parent()
+        .context("memory store has no project directory")?
+        .join("memory.json"))
+}
+
+fn lock_canonical(root: &Path) -> Result<crate::file_lock::FileLock> {
+    let parent = root
+        .parent()
+        .context("memory store has no project directory")?;
+    fs::create_dir_all(parent)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(parent.join(".memory.lock"))?;
+    Ok(crate::file_lock::FileLock::acquire_cancellable(
+        file,
+        &|| false,
+    )?)
+}
+
+// Called with the project lock held. The old directory is consulted once only,
+// while the file is absent. Redirect metadata is beside the directory.
+fn load_canonical_locked(root: &Path) -> Result<CanonicalMemory> {
+    let path = canonical_file(root)?;
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let state: CanonicalMemory = serde_json::from_slice(&bytes)
+                .with_context(|| format!("decode {}", path.display()))?;
+            anyhow::ensure!(
+                state.version == state.tree.version(),
+                "project memory version does not match tree in {}",
+                path.display()
+            );
+            Ok(state)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let state = CanonicalMemory::new(ProjectMemoryStore::new(root).snapshot()?);
+            write_canonical_locked(root, &state)?;
+            Ok(state)
+        }
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn write_canonical_locked(root: &Path, state: &CanonicalMemory) -> Result<()> {
+    write_canonical_before_rename(root, state, || Ok(()))
+}
+
+fn write_canonical_before_rename(
+    root: &Path,
+    state: &CanonicalMemory,
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let path = canonical_file(root)?;
+    let parent = path.parent().context("canonical file has no parent")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(&serde_json::to_vec(state)?)?;
+    temporary.as_file().sync_all()?;
+    before_rename()?;
+    temporary.persist(&path).map_err(|error| error.error)?;
+    crate::config::sync_directory(parent)
+}
+
+/// Read the durable state, following project-merge redirects.
+pub fn read_canonical_state(canonical_root: &Path) -> Result<CanonicalMemory> {
+    loop {
+        let root = resolve_canonical_root(canonical_root)?;
+        let _lock = lock_canonical(&root)?;
+        if resolve_canonical_root(canonical_root)? != root {
+            continue;
+        }
+        return load_canonical_locked(&root);
+    }
+}
+
+/// Read the canonical tree, following project-merge redirects.
+pub fn read_canonical(canonical_root: &Path) -> Result<ProjectMemorySnapshot> {
+    Ok(read_canonical_state(canonical_root)?.tree)
+}
+
+/// Commit a tree and optionally acknowledge a snapshot for one session.
+/// A stale tree or session acknowledgement must be read and merged again.
+pub fn commit_canonical(
     canonical_root: &Path,
+    expected: &CanonicalMemory,
+    session_id: &str,
+    tree: &ProjectMemorySnapshot,
+    absorbed: Option<&str>,
+) -> Result<SwapOutcome> {
+    validate_tree(tree)?;
+    loop {
+        let root = resolve_canonical_root(canonical_root)?;
+        let _lock = lock_canonical(&root)?;
+        if resolve_canonical_root(canonical_root)? != root {
+            continue;
+        }
+        let mut current = load_canonical_locked(&root)?;
+        if current.version != expected.version
+            || current.absorbed.get(session_id) != expected.absorbed.get(session_id)
+        {
+            return Ok(SwapOutcome::Changed);
+        }
+        current.tree = tree.clone();
+        current.version = tree.version();
+        if let Some(snapshot) = absorbed {
+            current
+                .absorbed
+                .insert(session_id.to_owned(), snapshot.to_owned());
+        }
+        write_canonical_locked(&root, &current)?;
+        render_memory_tree(&root, tree, true)?;
+        return Ok(SwapOutcome::Swapped);
+    }
+}
+
+/// Checkpoint protocol has no acknowledgement and leaves all entries alone.
+pub fn swap_canonical(
+    root: &Path,
     expected: &TreeVersion,
     tree: &ProjectMemorySnapshot,
 ) -> Result<SwapOutcome> {
-    let mut locks = MEMORY_LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .expect("project memory lock registry poisoned");
-    let canonical_root = resolve_canonical_root(canonical_root)?;
-    let lock = locks
-        .entry(canonical_root.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let _guard = lock.lock().expect("project memory lock poisoned");
-    drop(locks);
-
-    let store = ProjectMemoryStore::new(canonical_root);
-    let current = store.snapshot()?;
-    if current.version() != expected.clone() {
+    let state = read_canonical_state(root)?;
+    if &state.version != expected {
         return Ok(SwapOutcome::Changed);
     }
-    store.replace_tree(tree)?;
-    Ok(SwapOutcome::Swapped)
+    commit_canonical(root, &state, "", tree, None)
 }
 
 /// Worker answer to a whole-tree replace request.
@@ -770,7 +888,6 @@ impl ProjectMemoryStore {
         let mut changed = false;
         for (path, content) in &snapshot.files {
             let relative = validate_virtual_path(path)?;
-            ensure_snapshot_document(content)?;
             let (parent, name) = document_location(&relative);
             let existing = match &root {
                 Some(root) => match root.open_dir(parent)? {
@@ -793,27 +910,17 @@ impl ProjectMemoryStore {
     /// Make the directory hold exactly `tree`: write changed documents and
     /// delete documents that `tree` omits. Returns whether anything changed.
     pub fn replace_tree(&self, tree: &ProjectMemorySnapshot) -> Result<bool> {
-        let mut desired = BTreeMap::<String, (PathBuf, &str)>::new();
-        let mut relative_paths = BTreeSet::new();
-        for (path, content) in &tree.files {
-            let relative = validate_virtual_path(path)?;
-            ensure_snapshot_document(content)?;
-            anyhow::ensure!(
-                relative_paths.insert(relative.clone()),
-                "project memory snapshot contains duplicate paths"
-            );
-            desired.insert(path.clone(), (relative, content));
-        }
-        for relative in &relative_paths {
-            let mut parent = relative.parent();
-            while let Some(path) = parent {
-                anyhow::ensure!(
-                    !relative_paths.contains(path),
-                    "project memory snapshot contains both a document and its parent"
-                );
-                parent = path.parent();
-            }
-        }
+        validate_tree(tree)?;
+        let desired = tree
+            .files
+            .iter()
+            .map(|(path, content)| {
+                Ok((
+                    path.clone(),
+                    (validate_virtual_path(path)?, content.as_str()),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
 
         // Every read, delete, and write below resolves from this one handle,
         // so a link planted in the tree mid-sync cannot redirect them (#1419).
@@ -862,6 +969,28 @@ impl ProjectMemoryStore {
         }
         Ok(changed)
     }
+}
+
+fn validate_tree(tree: &ProjectMemorySnapshot) -> Result<()> {
+    let mut relative_paths = BTreeSet::new();
+    for path in tree.files.keys() {
+        let relative = validate_virtual_path(path)?;
+        anyhow::ensure!(
+            relative_paths.insert(relative),
+            "project memory snapshot contains duplicate paths"
+        );
+    }
+    for relative in &relative_paths {
+        let mut parent = relative.parent();
+        while let Some(path) = parent {
+            anyhow::ensure!(
+                !relative_paths.contains(path),
+                "project memory snapshot contains both a document and its parent"
+            );
+            parent = path.parent();
+        }
+    }
+    Ok(())
 }
 
 /// The directory holding a validated memory document, relative to the memory
@@ -962,21 +1091,155 @@ fn prune_empty_memory_directories(directory: &ConfinedDir, changed: &mut bool) -
     Ok(())
 }
 
-fn ensure_snapshot_document(content: &str) -> Result<()> {
-    anyhow::ensure!(
-        !content.trim().is_empty(),
-        "project memory snapshot contains an empty document"
-    );
+// Remove visible entries using handles that never follow a planted link. Hidden
+// legacy material is retained but never read into canonical after migration.
+fn clear_render(directory: &ConfinedDir) -> Result<()> {
+    set_render_directory_writable(directory)?;
+    for (name, kind) in directory.entries()? {
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        match kind {
+            EntryKind::Directory => {
+                let Some(child) = directory.open_dir(Path::new(&name))? else {
+                    continue;
+                };
+                clear_render(&child)?;
+                let empty = child.entries()?.is_empty();
+                drop(child);
+                if empty {
+                    directory.remove_dir(&name)?;
+                }
+            }
+            EntryKind::File => {
+                #[cfg(windows)]
+                set_render_file_writable(directory, &name)?;
+                directory.remove_file(&name)?;
+            }
+            EntryKind::Other => {}
+        }
+    }
     Ok(())
 }
 
-static MEMORY_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+#[cfg(unix)]
+fn set_render_directory_writable(directory: &ConfinedDir) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    directory.set_directory_permissions(fs::Permissions::from_mode(0o700))
+}
 
-/// Redirects are published while holding both store locks and the decision
-/// registry. A stale sync cannot decide to write the old store during a merge.
+#[cfg(not(unix))]
+fn set_render_directory_writable(_directory: &ConfinedDir) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_render_file_writable(directory: &ConfinedDir, name: &OsStr) -> Result<()> {
+    directory.set_file_readonly(name, false)
+}
+
+#[cfg(unix)]
+fn finish_render_directory(directory: &ConfinedDir) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, kind) in directory.entries()? {
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        match kind {
+            EntryKind::Directory => {
+                if let Some(child) = directory.open_dir(Path::new(&name))? {
+                    finish_render_directory(&child)?;
+                }
+            }
+            EntryKind::File => {
+                directory.set_file_permissions(&name, fs::Permissions::from_mode(0o444))?
+            }
+            EntryKind::Other => {}
+        }
+    }
+    directory.set_directory_permissions(fs::Permissions::from_mode(0o555))
+}
+
+#[cfg(not(unix))]
+fn finish_render_directory(directory: &ConfinedDir) -> Result<()> {
+    for (name, kind) in directory.entries()? {
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        match kind {
+            EntryKind::Directory => {
+                if let Some(child) = directory.open_dir(Path::new(&name))? {
+                    finish_render_directory(&child)?;
+                }
+            }
+            EntryKind::File => directory.set_file_readonly(&name, true)?,
+            EntryKind::Other => {}
+        }
+    }
+    Ok(())
+}
+
+/// Materialize a tree without reading documents from the destination. Existing
+/// hidden entries are left alone. Set `read_only` for the canonical view.
+pub fn render_memory_tree(
+    root: &Path,
+    tree: &ProjectMemorySnapshot,
+    read_only: bool,
+) -> Result<()> {
+    validate_tree(tree)?;
+    let directory = match ConfinedDir::open_root(root)? {
+        Some(directory) => directory,
+        None => ConfinedDir::create_root(root)?,
+    };
+    clear_render(&directory)?;
+    let mut handle = Some(directory);
+    for (path, content) in &tree.files {
+        write_document(root, &mut handle, &validate_virtual_path(path)?, content)?;
+    }
+    if read_only {
+        finish_render_directory(handle.as_ref().expect("render handle exists"))?;
+    }
+    Ok(())
+}
+
+/// Migrate each existing project once and repair rendered views at daemon start.
+pub fn initialize_canonical_memories(projects: &Path) -> Result<()> {
+    let entries = match fs::read_dir(projects) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let project = entry.path();
+        let original = project.join("memory");
+        if !original.try_exists()?
+            && !project.join("memory.json").try_exists()?
+            && !project.join("memory-redirect.json").try_exists()?
+        {
+            continue;
+        }
+        loop {
+            let root = resolve_canonical_root(&original)?;
+            let _lock = lock_canonical(&root)?;
+            if resolve_canonical_root(&original)? != root {
+                continue;
+            }
+            let state = load_canonical_locked(&root)?;
+            render_memory_tree(&root, &state.tree, true)?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Follow the existing project redirect metadata.
 pub fn resolve_canonical_root(root: &Path) -> Result<PathBuf> {
     let mut root = root.to_owned();
-    let mut visited = std::collections::BTreeSet::new();
+    let mut visited = BTreeSet::new();
     loop {
         ensure_memory_alias_unique(&mut visited, &root)?;
         let alias = root
@@ -1003,54 +1266,55 @@ fn ensure_memory_alias_unique(
     Ok(())
 }
 
+/// Merge the source before publishing its redirect. Both project locks are
+/// acquired in path order, and redirects are checked again after locking.
 pub fn merge_canonical_stores(old: &Path, new: &Path) -> Result<Vec<String>> {
-    let mut locks = MEMORY_LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .expect("project memory lock registry poisoned");
-    let old = resolve_canonical_root(old)?;
-    let new = resolve_canonical_root(new)?;
-    if old == new {
-        return Ok(Vec::new());
+    loop {
+        let source = resolve_canonical_root(old)?;
+        let destination = resolve_canonical_root(new)?;
+        if source == destination {
+            return Ok(Vec::new());
+        }
+        let (first, second) = if source < destination {
+            (&source, &destination)
+        } else {
+            (&destination, &source)
+        };
+        let _first = lock_canonical(first)?;
+        let _second = lock_canonical(second)?;
+        if resolve_canonical_root(old)? != source || resolve_canonical_root(new)? != destination {
+            continue;
+        }
+        let source_state = load_canonical_locked(&source)?;
+        let mut destination_state = load_canonical_locked(&destination)?;
+        let merged = merge_trees(
+            &ProjectMemorySnapshot::default(),
+            &destination_state.tree,
+            &source_state.tree,
+        );
+        for (session, snapshot) in source_state.absorbed {
+            destination_state
+                .absorbed
+                .entry(session)
+                .or_insert(snapshot);
+        }
+        destination_state.tree = merged.tree;
+        destination_state.version = destination_state.tree.version();
+        write_canonical_locked(&destination, &destination_state)?;
+        render_memory_tree(&destination, &destination_state.tree, true)?;
+        let parent = source
+            .parent()
+            .context("old memory project directory is missing")?;
+        crate::config::atomic_write(
+            &parent.join("memory-redirect.json"),
+            &serde_json::to_vec(&destination)?,
+        )?;
+        return Ok(merged
+            .conflicts
+            .into_iter()
+            .map(|conflict| conflict.path)
+            .collect());
     }
-    let old_lock = locks
-        .entry(old.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let new_lock = locks
-        .entry(new.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let (_first_guard, _second_guard) = if old < new {
-        (
-            old_lock.lock().expect("project memory lock poisoned"),
-            new_lock.lock().expect("project memory lock poisoned"),
-        )
-    } else {
-        (
-            new_lock.lock().expect("project memory lock poisoned"),
-            old_lock.lock().expect("project memory lock poisoned"),
-        )
-    };
-    let old_snapshot = ProjectMemoryStore::new(&old).snapshot()?;
-    let new_store = ProjectMemoryStore::new(&new);
-    let current = new_store.snapshot()?;
-    let merged = merge_trees(&ProjectMemorySnapshot::default(), &current, &old_snapshot);
-    new_store.replace_tree(&merged.tree)?;
-    let parent = old
-        .parent()
-        .context("old memory project directory is missing")?;
-    fs::create_dir_all(parent)?;
-    crate::config::atomic_write(
-        &parent.join("memory-redirect.json"),
-        &serde_json::to_vec(&new)?,
-    )?;
-    drop(locks);
-    Ok(merged
-        .conflicts
-        .into_iter()
-        .map(|conflict| conflict.path)
-        .collect())
 }
 
 pub fn truncate_startup_index(content: &str) -> String {
@@ -1457,6 +1721,7 @@ mod tests {
         };
         assert!(store.replace_tree(&write).is_err());
         assert!(store.install_snapshot(&write).is_err());
+        assert!(render_memory_tree(&root, &write, false).is_err());
 
         assert_eq!(fs::read_to_string(outside.join("a.md")).unwrap(), "victim");
         assert!(root.join("notes").is_symlink());
@@ -1509,17 +1774,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("project/memory");
         let store = ProjectMemoryStore::new(&root);
-        store
-            .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/memory.md".into(), "read version".into())]),
-            })
-            .unwrap();
+        let initial = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/memory.md".into(), "read version".into())]),
+        };
+        store.install_snapshot(&initial).unwrap();
         let expected = read_canonical(&root).unwrap().version();
-        store
-            .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/memory.md".into(), "changed later".into())]),
-            })
-            .unwrap();
+        let later = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/memory.md".into(), "changed later".into())]),
+        };
+        assert_eq!(
+            swap_canonical(&root, &expected, &later).unwrap(),
+            SwapOutcome::Swapped
+        );
         let replacement = ProjectMemorySnapshot {
             files: BTreeMap::from([("/replacement.md".into(), "must not write".into())]),
         };
@@ -1590,5 +1856,121 @@ mod tests {
                 .files
                 .contains_key("/late.md")
         );
+    }
+    #[test]
+    fn canonical_concurrent_sessions_retry_and_preserve_both_commits() {
+        use std::sync::{Arc, Barrier};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project/memory");
+        let initial = read_canonical_state(&root).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                let initial = initial.clone();
+                std::thread::spawn(move || {
+                    let mut expected = initial;
+                    barrier.wait();
+                    loop {
+                        let mut tree = expected.tree.clone();
+                        tree.files.insert(format!("/{id}.md"), id.to_owned());
+                        if commit_canonical(&root, &expected, id, &tree, Some(id)).unwrap()
+                            == SwapOutcome::Swapped
+                        {
+                            break;
+                        }
+                        expected = read_canonical_state(&root).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(state.tree.files.len(), 2);
+        assert_eq!(state.absorbed.get("a").unwrap(), "a");
+        assert_eq!(state.absorbed.get("b").unwrap(), "b");
+        // A different tree can have the same version when only this session's
+        // acknowledgement changed; the session check must still reject it.
+        assert_eq!(
+            commit_canonical(&root, &initial, "a", &initial.tree, Some("later")).unwrap(),
+            SwapOutcome::Changed
+        );
+        let before_ack = state.clone();
+        assert_eq!(
+            commit_canonical(&root, &state, "a", &state.tree, Some("new")).unwrap(),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(
+            commit_canonical(&root, &before_ack, "a", &state.tree, Some("stale")).unwrap(),
+            SwapOutcome::Changed
+        );
+    }
+
+    #[test]
+    fn canonical_interrupted_before_rename_preserves_previous_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project/memory");
+        let old = read_canonical_state(&root).unwrap();
+        let mut next = old.clone();
+        next.tree = file_snapshot(Some("new"));
+        next.version = next.tree.version();
+        assert!(
+            write_canonical_before_rename(&root, &next, || anyhow::bail!("interrupted")).is_err()
+        );
+        assert_eq!(read_canonical_state(&root).unwrap(), old);
+    }
+
+    #[test]
+    fn canonical_migration_and_render_never_read_stale_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects");
+        let root = projects.join("project/memory");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("MEMORY.md"), "legacy").unwrap();
+        fs::write(root.join("sub/note.md"), "note").unwrap();
+        fs::write(root.join("empty.md"), "").unwrap();
+        fs::write(root.join(".hidden"), "hidden").unwrap();
+        fs::write(root.join("sub/.hidden"), "nested hidden").unwrap();
+        let alias = projects.join("alias/memory");
+        fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        fs::write(
+            alias.parent().unwrap().join("memory-redirect.json"),
+            serde_json::to_vec(&root).unwrap(),
+        )
+        .unwrap();
+        let expected = ProjectMemoryStore::new(&root).snapshot().unwrap();
+        initialize_canonical_memories(&projects).unwrap();
+        assert_eq!(read_canonical(&root).unwrap(), expected);
+        assert_eq!(fs::read_to_string(root.join(".hidden")).unwrap(), "hidden");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(root.join("MEMORY.md"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o444
+            );
+            assert_eq!(
+                fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                0o555
+            );
+        }
+        set_render_directory_writable(&ConfinedDir::open_root(&root).unwrap().unwrap()).unwrap();
+        fs::remove_file(root.join("MEMORY.md")).unwrap();
+        fs::write(root.join("MEMORY.md"), "stale edit").unwrap();
+        assert_eq!(read_canonical(&root).unwrap(), expected);
+        initialize_canonical_memories(&projects).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("MEMORY.md")).unwrap(),
+            "legacy"
+        );
+        assert_eq!(read_canonical(&root).unwrap(), expected);
     }
 }
