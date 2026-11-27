@@ -139,14 +139,6 @@ function attentionBadge(row: SessionRow): { label: string; className: string } |
   return null;
 }
 
-function capabilityCount(row: SessionRow): { workers: number; reviewers: number } {
-  const reviewers = new Set(row.reviewer_session_ids ?? []);
-  const children = row.subagent_session_ids ?? [];
-  let workers = 0;
-  for (const id of children) if (!reviewers.has(id)) workers += 1;
-  return { workers, reviewers: reviewers.size };
-}
-
 function pendingCount(row: SessionRow): number {
   return row.detail === false
     ? row.pending_elicitation_count
@@ -187,7 +179,21 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
 
   const tone = statusTone(session);
   const badge = attentionBadge(session);
-  const { workers, reviewers } = capabilityCount(session);
+  const reviewerIds = session.reviewer_session_ids ?? [];
+  const reviewerSet = new Set(reviewerIds);
+  const hasWorkers = (session.subagent_session_ids ?? []).some(id => !reviewerSet.has(id));
+  const workers = session.verdict?.working_descendants ?? session.verdict?.working_children ?? 0;
+  const reviewers = useSessionStore(state => {
+    let present = false;
+    let active = 0;
+    for (const id of reviewerIds) {
+      const row = state.sessionsById[id];
+      if (!row) continue;
+      present = true;
+      if (row.verdict?.working || row.active) active += 1;
+    }
+    return present ? active : (session.verdict?.review_working ? reviewerIds.length : 0);
+  });
   const questions = pendingCount(session);
   const queued = queuedCount(session);
   const activity = sessionActivityLabel(session);
@@ -206,6 +212,12 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
         label: openDestination === 'resume' ? 'Resume session' : 'Open conversation',
         run: () => navigateSession(),
       });
+    }
+    if (hasWorkers && workers === 0) {
+      list.push({ id: 'subagents', label: 'Sub-agents', run: () => navigate({ name: 'workspace', subagentParentId: session.id }) });
+    }
+    if (reviewerIds.length > 0 && reviewers === 0) {
+      list.push({ id: 'reviewers', label: 'Reviewers', run: () => navigate({ name: 'workspace', subagentParentId: session.id, childKind: 'reviewer' }) });
     }
     if (can.move_session === true) {
       list.push({
@@ -294,7 +306,7 @@ export function SessionCard({ session, workspaceName }: SessionCardProps) {
         navigate({ name: 'conversation', sessionId: session.id });
       }
     }
-  }, [can.change_workspace, can.container_settings, can.destroy, can.move_session, can.rename, can.restart, can.suspend, canOpen, dispatchAction, navigate, openDestination, session.id, session.title, session.workspace_id]);
+  }, [can.change_workspace, can.container_settings, can.destroy, can.move_session, can.rename, can.restart, can.suspend, canOpen, dispatchAction, hasWorkers, navigate, openDestination, reviewerIds.length, reviewers, session.id, session.title, session.workspace_id, workers]);
 
   const open = () => {
     if (openDestination === 'resume') {

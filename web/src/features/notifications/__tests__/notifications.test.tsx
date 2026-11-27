@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe('Notifications inbox', () => {
-  it('lists only sessions needing attention, ordered by priority and newest first', () => {
+  it('lists only sessions needing attention, ordered newest first with priority breaking ties', () => {
     hydrate([
       liveRow('s1', {
         title: 'Needs a decision',
@@ -77,6 +77,7 @@ describe('Notifications inbox', () => {
         attention: 'important',
         notification_card: card({ badge: 'important', since_ms: NOW - 5_000 }),
       }),
+      liveRow('s6', { title: 'Tied question', attention: 'needs_input', last_message_at_ms: NOW - 500 }),
       liveRow('s4', {
         title: 'Muted session',
         attention: 'needs_input',
@@ -89,14 +90,29 @@ describe('Notifications inbox', () => {
 
     const items = screen.getAllByTestId(/^notification-/);
     expect(items.map(item => item.getAttribute('data-testid'))).toEqual([
+      'notification-s6',
+      'notification-s2',
       'notification-s1',
       'notification-s3',
-      'notification-s2',
     ]);
-    expect(screen.getByText('3 awaiting you')).toBeInTheDocument();
+    expect(screen.getByText('4 awaiting you')).toBeInTheDocument();
     expect(screen.queryByText('Just idle')).not.toBeInTheDocument();
     expect(screen.queryByText('Muted session')).not.toBeInTheDocument();
     expect(screen.getAllByText('Alpha').length).toBeGreaterThan(0);
+  });
+
+  it('orders a card by its latest stack entry instead of its oldest item', () => {
+    hydrate([
+      liveRow('older', { title: 'Older', attention: 'failed', last_message_at_ms: NOW - 5_000 }),
+      liveRow('stack', { title: 'New stack entry', notification_card: card({ since_ms: NOW - 120_000, entries: [
+        { completed_ordinal: 1, completed_at_ms: NOW - 120_000, kind: 'important', message: 'none' },
+        { completed_ordinal: 2, completed_at_ms: NOW - 1_000, kind: 'important', message: 'none' },
+      ] }) }),
+    ]);
+    mockFetch({});
+    render(<NotificationsView />);
+    expect(screen.getAllByTestId(/^notification-/).map(item => item.getAttribute('data-testid')))
+      .toEqual(['notification-stack', 'notification-older']);
   });
 
   it('dismisses the notification identity it showed and removes it optimistically', async () => {
