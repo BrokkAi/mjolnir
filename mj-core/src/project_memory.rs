@@ -997,9 +997,10 @@ impl ProjectMemoryStore {
         handout: &PreparedMemoryTree<'_>,
         incoming: &PreparedMemoryTree<'_>,
         mode: MemoryApplyMode,
-    ) -> Result<ProjectMemorySnapshot> {
+    ) -> Result<MemoryApplyResult> {
         let mut root = ConfinedDir::open_root(&self.root)?;
         let mut base = handout.tree.clone();
+        let mut preserved_edits = BTreeSet::new();
 
         // Replica-only entries, including hidden files and symlinks, are not
         // in either prepared tree and are never removed.
@@ -1108,11 +1109,6 @@ impl ProjectMemoryStore {
             let current = match delivery_destination(root.as_ref(), relative)? {
                 Destination::Obstructed => {
                     tracing::warn!(path = %relative.display(), "untracked entry blocks project-memory delivery");
-                    // The base for an obstruction is what the replica's snapshot
-                    // sees: absent. Base and replica agree, so canonical wins.
-                    if let Some(path) = handout.paths.get(relative) {
-                        base.files.remove(*path);
-                    }
                     continue;
                 }
                 Destination::Missing => None,
@@ -1128,17 +1124,13 @@ impl ProjectMemoryStore {
                 write_document(&self.root, &mut root, relative, content)
                     .with_context(|| format!("write memory document {}", relative.display()))?;
             } else if current.as_deref() != Some(*content) {
-                // An agent edit may be based on either handout or incoming. The
-                // handout is the common three-way base for merging both changes.
-                continue;
+                preserved_edits.insert(incoming.paths[relative].to_owned());
             }
-            if let Some(path) = handout.paths.get(relative) {
-                base.files.remove(*path);
-            }
-            base.files
-                .insert(incoming.paths[relative].to_owned(), (*content).to_owned());
         }
-        Ok(base)
+        Ok(MemoryApplyResult {
+            base,
+            preserved_edits,
+        })
     }
 
     /// Make the directory hold exactly `tree`: write changed documents and
@@ -1485,6 +1477,12 @@ fn finish_render_directory(directory: &ConfinedDir) -> Result<()> {
 pub enum MemoryApplyMode {
     Delivery,
     PreserveEdits,
+}
+
+/// Handout-based result before verification against the replica after apply.
+pub struct MemoryApplyResult {
+    pub base: ProjectMemorySnapshot,
+    pub preserved_edits: BTreeSet<String>,
 }
 
 /// A tree whose paths have been validated before a rendering decision.

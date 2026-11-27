@@ -1501,6 +1501,7 @@ pub async fn sync_turn_project_memory(
     use mj_core::project_memory::SwapOutcome;
     use mj_core::relay::ProjectMemoryDeliveryOutcome;
     let resolver = crate::project_memory_merge::UtilityModelConflictResolver::new(config);
+    let mut resolutions = crate::project_memory_merge::ConflictResolutionSession::new(&cancel);
     let mut dirty_round = false;
     'snapshot: loop {
         let root = target.canonical_root.clone();
@@ -1525,14 +1526,9 @@ pub async fn sync_turn_project_memory(
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let merged = crate::project_memory_merge::merge_turn_tree(
-                &base,
-                &canonical.tree,
-                &replica,
-                &resolver,
-                cancel.clone(),
-            )
-            .await?;
+            let merged = resolutions
+                .merge_turn_tree(&base, &canonical.tree, &replica, &resolver, &cancel)
+                .await?;
             if cancel.is_cancelled() {
                 return Ok(());
             }

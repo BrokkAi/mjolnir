@@ -87,7 +87,7 @@ impl Record {
                 &incoming,
                 mj_core::project_memory::MemoryApplyMode::PreserveEdits,
             )?;
-            self.base = base;
+            self.base = verified_base(memory, &tree, base)?;
             self.base_version = None;
             self.handout = None;
             self.incoming = None;
@@ -181,7 +181,7 @@ fn deliver_with_apply(
         &std::path::Path,
         &mj_core::project_memory::PreparedMemoryTree<'_>,
         &mj_core::project_memory::PreparedMemoryTree<'_>,
-    ) -> Result<ProjectMemorySnapshot>,
+    ) -> Result<mj_core::project_memory::MemoryApplyResult>,
 ) -> Result<mj_core::relay::ProjectMemoryDeliveryOutcome> {
     use mj_core::relay::ProjectMemoryDeliveryOutcome;
     let prepared = mj_core::project_memory::prepare_memory_tree(&tree)?;
@@ -206,13 +206,37 @@ fn deliver_with_apply(
         return Ok(ProjectMemoryDeliveryOutcome::Dirty);
     }
     persist_record(pending, memory)?;
-    let base = apply(&memory.root, &prepared_handout, &prepared)?;
+    let applied = apply(&memory.root, &prepared_handout, &prepared)?;
+    let base = verified_base(memory, &tree, applied)?;
     record.base_version = (base == tree).then_some(version);
     record.base = base;
     record.handout = None;
     record.incoming = None;
     record.save(memory)?;
     Ok(ProjectMemoryDeliveryOutcome::Delivered)
+}
+
+fn verified_base(
+    memory: &ProjectMemoryLaunchConfig,
+    incoming: &ProjectMemorySnapshot,
+    mut applied: mj_core::project_memory::MemoryApplyResult,
+) -> Result<ProjectMemorySnapshot> {
+    let replica = snapshot_documents(&memory.root)?;
+    for path in incoming.files.keys() {
+        // A deliberately preserved agent edit keeps the handout as its common
+        // three-way base. Every other incoming path uses the snapshot-visible
+        // value, so aliases, obstructions and other surprises cannot look like
+        // a deletion or claim that an incoming note was written when it wasn't.
+        if applied.preserved_edits.contains(path) {
+            continue;
+        }
+        if let Some(content) = replica.files.get(path) {
+            applied.base.files.insert(path.clone(), content.clone());
+        } else {
+            applied.base.files.remove(path);
+        }
+    }
+    Ok(applied.base)
 }
 
 /// The worker is the only seeder; a retained or restored replica always wins.
@@ -494,6 +518,48 @@ mod tests {
         assert_eq!(base, incoming);
         assert_eq!(replica, incoming);
         assert_eq!(merge_trees(&base, &incoming, &replica).tree, incoming);
+    }
+
+    // Hard-won: 7fbe96f3c: filesystem aliases let a base claim a note absent from the replica.
+    #[test]
+    fn delivery_verifies_replica_after_aliasing_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        let (_, id, _) = handout(&memory, &canonical);
+        let state = read_canonical_state(&canonical).unwrap();
+        let mut incoming = state.tree.clone();
+        incoming.files.insert("/Alias.md".into(), "first".into());
+        incoming.files.insert("/alias.md".into(), "second".into());
+        assert_eq!(
+            commit_canonical(&canonical, &state, "other", &incoming, None).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let outcome = deliver_with_apply(
+            &memory,
+            &id,
+            incoming.clone(),
+            incoming.version(),
+            &Default::default(),
+            |root, handout, tree| {
+                let result = ProjectMemoryStore::new(root).apply_delivery(
+                    handout,
+                    tree,
+                    mj_core::project_memory::MemoryApplyMode::Delivery,
+                )?;
+                // Simulate a filesystem where both writes address the same file.
+                std::fs::remove_file(root.join("Alias.md"))?;
+                Ok(result)
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, ProjectMemoryDeliveryOutcome::Delivered);
+        let record = Record::load(&memory).unwrap();
+        assert!(!record.base.files.contains_key("/Alias.md"));
+        assert_eq!(record.base.files["/alias.md"], "second");
+        let (base, next_id, replica) = handout(&memory, &canonical);
+        assert!(!replica.files.contains_key("/Alias.md"));
+        assert_eq!(commit(&canonical, &base, &next_id, &replica), incoming);
+        assert_eq!(read_canonical_state(&canonical).unwrap().tree, incoming);
     }
 
     // Hard-won: 052101acf: a symlink at an incoming path stopped recovery or deleted canonical memory.

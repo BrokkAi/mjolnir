@@ -149,71 +149,61 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Resolve a turn-boundary merge using the same replica-wins fallback as the
-/// checkpoint path when the utility model cannot resolve a conflict.
-pub async fn merge_turn_tree<R: ConflictResolver>(
-    base: &ProjectMemorySnapshot,
-    canonical: &ProjectMemorySnapshot,
-    replica: &ProjectMemorySnapshot,
-    resolver: &R,
-    cancel: CancellationToken,
-) -> Result<ProjectMemorySnapshot> {
-    let mut merged = mj_core::project_memory::merge_trees(base, canonical, replica);
-    let resolver_cancel = cancel.child_token();
-    let _cancel_on_drop = CancelOnDrop(resolver_cancel.clone());
-    let deadline = Instant::now() + CONFLICT_RESOLUTION_TIMEOUT;
-    for conflict in &merged.conflicts {
-        let resolved = tokio::select! {
-            () = cancel.cancelled() => bail!("project-memory synchronization was cancelled"),
-            result = timeout_at(deadline, resolver.resolve(conflict, resolver_cancel.clone())) => result,
-        };
-        let content = match resolved {
-            Ok(Ok(content)) if validate_model_output(&content).is_ok() => content,
-            _ => conflict.replica_wins.clone(),
-        };
-        set_file_content(&mut merged.tree, &conflict.path, &content);
-    }
-    Ok(merged.tree)
+/// One deadline and cache shared by every compare-and-swap attempt in a sync.
+pub struct ConflictResolutionSession {
+    resolver_cancel: CancelOnDrop,
+    deadline: Instant,
+    cached_resolutions: Vec<CachedResolution>,
 }
 
-/// Read, merge, resolve, and compare-and-swap the canonical tree. Filesystem
-/// calls run on Tokio's blocking pool; the model runs after the read and before
-/// the swap, with no canonical-memory lock held.
-pub async fn merge_and_swap_canonical<R: ConflictResolver>(
-    canonical_root: &Path,
-    baseline: &ProjectMemorySnapshot,
-    replica: &ProjectMemorySnapshot,
-    resolver: &R,
-    cancel: CancellationToken,
-) -> Result<CanonicalSyncOutcome> {
-    // Resolver deadlines may cancel model work without cancelling the sync.
-    let resolver_cancel = cancel.child_token();
-    let _cancel_on_drop = CancelOnDrop(resolver_cancel.clone());
-    let deadline = Instant::now() + CONFLICT_RESOLUTION_TIMEOUT;
-    let mut cached_resolutions = Vec::<CachedResolution>::new();
+impl ConflictResolutionSession {
+    pub fn new(cancel: &CancellationToken) -> Self {
+        Self {
+            resolver_cancel: CancelOnDrop(cancel.child_token()),
+            deadline: Instant::now() + CONFLICT_RESOLUTION_TIMEOUT,
+            cached_resolutions: Vec::new(),
+        }
+    }
 
-    for attempt in 1..=MAX_CANONICAL_SYNC_ATTEMPTS {
-        let canonical = tokio::select! {
-            biased;
-            () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
-            result = read_canonical_blocking(canonical_root.to_path_buf()) => result?,
-        };
-        let mut merged = mj_core::project_memory::merge_trees(baseline, &canonical, replica);
+    /// Resolve a turn merge, using the checkpoint path's deadline and fallback.
+    pub async fn merge_turn_tree<R: ConflictResolver>(
+        &mut self,
+        base: &ProjectMemorySnapshot,
+        canonical: &ProjectMemorySnapshot,
+        replica: &ProjectMemorySnapshot,
+        resolver: &R,
+        cancel: &CancellationToken,
+    ) -> Result<ProjectMemorySnapshot> {
+        Ok(self
+            .resolve_merge(base, canonical, replica, resolver, cancel)
+            .await?
+            .0)
+    }
+
+    async fn resolve_merge<R: ConflictResolver>(
+        &mut self,
+        base: &ProjectMemorySnapshot,
+        canonical: &ProjectMemorySnapshot,
+        replica: &ProjectMemorySnapshot,
+        resolver: &R,
+        cancel: &CancellationToken,
+    ) -> Result<(ProjectMemorySnapshot, Vec<ConflictResolutionRecord>)> {
+        let mut merged = mj_core::project_memory::merge_trees(base, canonical, replica);
         let mut resolutions = Vec::with_capacity(merged.conflicts.len());
-
         for conflict in &merged.conflicts {
-            let cached = cached_resolutions
+            let cached = self
+                .cached_resolutions
                 .iter()
                 .find(|cached| cached.conflict == *conflict)
                 .cloned();
             let resolution = if let Some(cached) = cached {
                 cached
             } else {
-                let model_content = if Instant::now() < deadline {
+                let model_content = if Instant::now() < self.deadline {
                     let resolved = tokio::select! {
                         biased;
-                        () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
-                        result = timeout_at(deadline, resolver.resolve(conflict, resolver_cancel.clone())) => result,
+                        () = cancel.cancelled() => bail!("project-memory synchronization was cancelled"),
+                        result = timeout_at(self.deadline, resolver.resolve(conflict, self.resolver_cancel.0.clone())) => result,
                     };
                     match resolved {
                         Ok(Ok(content)) => match validate_model_output(&content) {
@@ -236,7 +226,7 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                             None
                         }
                         Err(_) => {
-                            resolver_cancel.cancel();
+                            self.resolver_cancel.0.cancel();
                             tracing::warn!(
                                 path = %conflict.path,
                                 "project-memory conflict resolution reached its 60 second deadline; using replica text"
@@ -245,7 +235,7 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                         }
                     }
                 } else {
-                    resolver_cancel.cancel();
+                    self.resolver_cancel.0.cancel();
                     None
                 };
                 let resolution = match model_content {
@@ -260,7 +250,7 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                         method: ConflictResolutionMethod::ReplicaWins,
                     },
                 };
-                cached_resolutions.push(resolution.clone());
+                self.cached_resolutions.push(resolution.clone());
                 resolution
             };
 
@@ -270,20 +260,45 @@ pub async fn merge_and_swap_canonical<R: ConflictResolver>(
                 method: resolution.method,
             });
         }
+        Ok((merged.tree, resolutions))
+    }
+}
+
+/// Read, merge, resolve, and compare-and-swap the canonical tree. Filesystem
+/// calls run on Tokio's blocking pool; the model runs after the read and before
+/// the swap, with no canonical-memory lock held.
+pub async fn merge_and_swap_canonical<R: ConflictResolver>(
+    canonical_root: &Path,
+    baseline: &ProjectMemorySnapshot,
+    replica: &ProjectMemorySnapshot,
+    resolver: &R,
+    cancel: CancellationToken,
+) -> Result<CanonicalSyncOutcome> {
+    let mut resolutions = ConflictResolutionSession::new(&cancel);
+
+    for attempt in 1..=MAX_CANONICAL_SYNC_ATTEMPTS {
+        let canonical = tokio::select! {
+            biased;
+            () = cancel.cancelled() => bail!("project-memory synchronization for checkpoint was cancelled"),
+            result = read_canonical_blocking(canonical_root.to_path_buf()) => result?,
+        };
+        let (tree, records) = resolutions
+            .resolve_merge(baseline, &canonical, replica, resolver, &cancel)
+            .await?;
 
         let expected = canonical.version();
         match swap_canonical_blocking(
             canonical_root.to_path_buf(),
             expected,
-            merged.tree.clone(),
+            tree.clone(),
             &cancel,
         )
         .await?
         {
             SwapOutcome::Swapped => {
                 return Ok(CanonicalSyncOutcome::Swapped(CanonicalSync {
-                    tree: merged.tree,
-                    resolutions,
+                    tree,
+                    resolutions: records,
                     attempts: attempt,
                 }));
             }
@@ -656,15 +671,16 @@ mod tests {
         install_initial(&root.path().join("memory"), &canonical);
         let resolver = StaticResolver::unavailable();
 
-        let turn_tree = merge_turn_tree(
-            &base,
-            &canonical,
-            &replica,
-            &resolver,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
+        let turn_tree = ConflictResolutionSession::new(&CancellationToken::new())
+            .merge_turn_tree(
+                &base,
+                &canonical,
+                &replica,
+                &resolver,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert_eq!(turn_tree.files["/MEMORY.md"], "replica\n");
 
         let outcome = merge_and_swap_canonical(
@@ -690,15 +706,16 @@ mod tests {
         let empty_root = empty_dir.path().join("memory");
         install_initial(&empty_root, &canonical);
         let empty_replica = snapshot(&[("/MEMORY.md", "")]);
-        let turn_tree = merge_turn_tree(
-            &base,
-            &canonical,
-            &empty_replica,
-            &resolver,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
+        let turn_tree = ConflictResolutionSession::new(&CancellationToken::new())
+            .merge_turn_tree(
+                &base,
+                &canonical,
+                &empty_replica,
+                &resolver,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert!(!turn_tree.files.contains_key("/MEMORY.md"));
         let outcome = merge_and_swap_canonical(
             &empty_root,
@@ -808,6 +825,93 @@ mod tests {
         assert_eq!(resolver.calls.load(Ordering::Relaxed), 1);
         assert_eq!(result.tree.files["/MEMORY.md"], "resolved conflict\n");
         assert_eq!(result.tree.files["/other.md"], "concurrent change\n");
+    }
+
+    // Hard-won: 7fbe96f3c: a turn-sync version retry repeated the same model request.
+    #[tokio::test]
+    async fn turn_sync_version_retry_reuses_unchanged_conflict_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("memory");
+        let (base, canonical, replica) = conflicting_inputs();
+        install_initial(&path, &canonical);
+        let resolver = ConcurrentAdditionResolver {
+            root: path.clone(),
+            calls: AtomicUsize::new(0),
+        };
+        let cancel = CancellationToken::new();
+        let mut resolutions = ConflictResolutionSession::new(&cancel);
+        let first = mj_core::project_memory::read_canonical_state(&path).unwrap();
+        let merged = resolutions
+            .merge_turn_tree(&base, &first.tree, &replica, &resolver, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            mj_core::project_memory::commit_canonical(
+                &path,
+                &first,
+                "session",
+                &merged,
+                Some("handout")
+            )
+            .unwrap(),
+            SwapOutcome::Changed
+        );
+        let second = mj_core::project_memory::read_canonical_state(&path).unwrap();
+        let merged = resolutions
+            .merge_turn_tree(&base, &second.tree, &replica, &resolver, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            mj_core::project_memory::commit_canonical(
+                &path,
+                &second,
+                "session",
+                &merged,
+                Some("handout")
+            )
+            .unwrap(),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(resolver.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(merged.files["/MEMORY.md"], "resolved conflict\n");
+        assert_eq!(merged.files["/other.md"], "concurrent change\n");
+    }
+
+    // Hard-won: 7fbe96f3c: version retries restarted the conflict-resolution deadline.
+    #[tokio::test(start_paused = true)]
+    async fn turn_sync_version_retries_share_one_conflict_deadline() {
+        struct SlowResolver(AtomicUsize);
+        impl ConflictResolver for SlowResolver {
+            fn resolve<'a>(
+                &'a self,
+                _conflict: &'a ConflictedFile,
+                _cancel: CancellationToken,
+            ) -> ConflictResolutionFuture<'a> {
+                Box::pin(async move {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_secs(40)).await;
+                    Ok("model\n".into())
+                })
+            }
+        }
+        let (base, canonical, replica) = conflicting_inputs();
+        let resolver = SlowResolver(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+        let start = Instant::now();
+        let mut resolutions = ConflictResolutionSession::new(&cancel);
+        let first = resolutions
+            .merge_turn_tree(&base, &canonical, &replica, &resolver, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(first.files["/MEMORY.md"], "model\n");
+        let changed = snapshot(&[("/MEMORY.md", "new canonical\n")]);
+        let second = resolutions
+            .merge_turn_tree(&base, &changed, &replica, &resolver, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(second.files["/MEMORY.md"], "replica\n");
+        assert_eq!(resolver.0.load(Ordering::Relaxed), 2);
+        assert_eq!(Instant::now() - start, CONFLICT_RESOLUTION_TIMEOUT);
     }
 
     struct AlwaysChangingResolver {
