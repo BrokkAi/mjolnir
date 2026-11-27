@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 164;
+const SCHEMA_VERSION: i64 = 165;
 /// The schema revision this build reads and writes, for migration peers to compare.
 pub const STORE_SCHEMA_VERSION: i64 = SCHEMA_VERSION;
 

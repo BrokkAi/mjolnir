@@ -7515,6 +7515,80 @@ fn checkpoint_report_roots_follow_the_environment_binding_after_owned_child_regi
     );
 }
 
+// Hard-won: #1714: a Restart after a failed in-place Move re-recorded the
+// child's unchanged report directory; the `subagent_handbacks` upsert fired the
+// report trigger, whose `INSERT OR IGNORE` still raised the environment
+// ledger's UNIQUE constraint and left the session in Error.
+#[cfg(unix)]
+#[test]
+fn restart_after_a_failed_in_place_move_records_an_unchanged_report_directory_once() {
+    const NAME: &str =
+        "restart_after_a_failed_in_place_move_records_an_unchanged_report_directory_once";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    // This borrowed child republishes the parent environment the owned child
+    // below registers under.
+    let borrowed_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "123456789abcdef0123456789abcdef0";
+    let mut controller = failed_subagent_controller(&root.path().join(borrowed_id), borrowed_id);
+    seed_child_reports(&mut controller, borrowed_id, root.path());
+    let parent_id = controller.state.subagents[borrowed_id]
+        .parent_session_id
+        .clone();
+    let mut relation = failed_subagent_relation(child_id);
+    relation.parent_session_id = parent_id;
+    relation.request_key = "restart-after-failed-move".into();
+    let mut child = checkpoint_test_session(child_id);
+    let project = root.path().join("project-owned");
+    std::fs::create_dir(&project).unwrap();
+    child.target_template_id = "local".into();
+    child.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.path().join(child_id),
+    }));
+    child.project_directory = Some(project);
+    crate::database::register_subagent_with_startup(&child, &relation, vec![], None, None, true)
+        .unwrap();
+    controller.state = crate::database::load_state().unwrap();
+    let (backend, _) = controller.worker_placement(child_id).unwrap();
+    controller
+        .prepare_subagent_report_dir(child_id, &backend, &ProcessExecutor)
+        .unwrap();
+    let report = PathBuf::from(
+        crate::database::load_subagent_report(child_id)
+            .unwrap()
+            .report_dir
+            .unwrap(),
+    );
+    assert!(report.is_dir());
+    let mut failed = crate::controller::move_session::test_fixtures::source_recovery_operation(
+        &controller.state.sessions[child_id],
+    );
+    failed.in_place = true;
+    failed.phase = mj_core::state::MovePhase::Failed;
+    failed.error = Some("Directory not empty (os error 39)".into());
+    crate::database::save_move_operation(&failed).unwrap();
+    // The step Restart's in-place restore reaches after resetting the worker
+    // root: the report directory the failed Move left in place is prepared
+    // again. A retried restore may prepare it once more.
+    controller
+        .prepare_subagent_report_dir(child_id, &backend, &ProcessExecutor)
+        .unwrap();
+    controller
+        .prepare_subagent_report_dir(child_id, &backend, &ProcessExecutor)
+        .unwrap();
+    let environment = crate::database::session_environment(child_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        crate::database::environment_reports(&environment.id).unwrap(),
+        [(child_id.to_owned(), report.to_string_lossy().into_owned())],
+        "an unchanged report directory is one environment obligation"
+    );
+}
+
 /// Parking a quiescent session after a refused suspend stops its worker under
 /// the failed-launch bound and the shutdown-only view, yields admission around
 /// the stop, and requires the readmission before anything durable is written:

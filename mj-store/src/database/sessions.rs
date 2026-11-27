@@ -668,7 +668,27 @@ pub(super) fn record_subagent_report_dir_to(
     record_subagent_report_dir_with(&open(path)?, child_session_id, report_dir)
 }
 
+/// One writer owns both facts: the child's report directory and the
+/// environment's obligation to capture and remove that directory. Recording
+/// the same directory again is the same fact, so the environment row is
+/// present already and is left alone; the check and both writes share one
+/// transaction.
 fn record_subagent_report_dir_with(
+    connection: &rusqlite::Connection,
+    child_session_id: &str,
+    report_dir: &str,
+) -> Result<()> {
+    if connection.is_autocommit() {
+        let transaction = connection.unchecked_transaction()?;
+        record_subagent_report_dir_rows(&transaction, child_session_id, report_dir)?;
+        transaction.commit()?;
+    } else {
+        record_subagent_report_dir_rows(connection, child_session_id, report_dir)?;
+    }
+    Ok(())
+}
+
+fn record_subagent_report_dir_rows(
     connection: &rusqlite::Connection,
     child_session_id: &str,
     report_dir: &str,
@@ -679,6 +699,24 @@ fn record_subagent_report_dir_with(
              SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1
          )
          ON CONFLICT(child_session_id) DO UPDATE SET report_dir = excluded.report_dir",
+        params![child_session_id, report_dir],
+    )?;
+    // The environment ledger is keyed by exactly this fact. A report
+    // directory recorded again under the same environment is the row that is
+    // already there, so it is not inserted twice, and no conflict resolution
+    // is left for a trigger to raise.
+    connection.execute(
+        "INSERT INTO environment_reports(environment_id, child_session_id, report_dir)
+         SELECT b.environment_id, ?1, ?2
+           FROM environment_bindings b
+          WHERE b.session_id = ?1
+            AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1)
+            AND NOT EXISTS (
+                SELECT 1 FROM environment_reports r
+                 WHERE r.environment_id = b.environment_id
+                   AND r.child_session_id = ?1
+                   AND r.report_dir = ?2
+            )",
         params![child_session_id, report_dir],
     )?;
     Ok(())
