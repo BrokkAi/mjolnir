@@ -528,6 +528,25 @@ mod tests {
         assert_eq!(merge_trees(&base, &incoming, &replica).tree, incoming);
     }
 
+    // Hard-won: 4bbaf2968: an empty directory left by a deleted note blocked a canonical file at that path.
+    #[test]
+    fn delivery_replaces_an_empty_directory_at_the_incoming_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let (memory, canonical) = setup(temp.path());
+        std::fs::create_dir(memory.root.join("topic")).unwrap();
+        let (_, id, mut incoming) = handout(&memory, &canonical);
+        incoming.files.insert("/topic".into(), "canonical note".into());
+        assert_eq!(
+            apply(&memory, &id, incoming.clone()),
+            ProjectMemoryDeliveryOutcome::Delivered
+        );
+        assert_eq!(
+            std::fs::read_to_string(memory.root.join("topic")).unwrap(),
+            "canonical note"
+        );
+        assert_eq!(Record::load(&memory).unwrap().base, incoming);
+    }
+
     // Hard-won: 7fbe96f3c: filesystem aliases let a base claim a note absent from the replica.
     #[test]
     fn delivery_verifies_replica_after_aliasing_writes() {

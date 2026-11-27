@@ -1043,11 +1043,14 @@ impl ProjectMemoryStore {
             base.files.remove(handout.paths[relative]);
         }
 
-        // Only directories that held tracked handout files and now block an
-        // incoming file can be removed, and only while they are empty.
+        // Directories that block an incoming file can be removed only while
+        // they are empty: an empty directory at the incoming path itself (for
+        // example left behind when this session deleted its last note there),
+        // and directories that held tracked handout files.
         if let Some(root) = &root {
             let mut blocking = BTreeSet::new();
             for destination in incoming.files.keys() {
+                blocking.insert(destination.to_path_buf());
                 for previous in handout
                     .files
                     .keys()
