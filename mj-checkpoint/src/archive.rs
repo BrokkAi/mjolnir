@@ -1479,6 +1479,33 @@ fn plan_payload_parts(
         .collect()
 }
 
+/// Explain an oversized manifest: its size against the limit, how many
+/// payloads it lists, and the directory most of them sit in, which is where
+/// the files that made it too large come from.
+fn manifest_too_large_message(manifest_bytes: u64, payloads: &[PayloadDescriptor]) -> String {
+    let mut message = format!(
+        "the recovery copy lists {} files, so its manifest ({manifest_bytes} bytes) \
+         exceeds the {MAX_MANIFEST_BYTES}-byte limit",
+        payloads.len(),
+    );
+    // Archive paths are `/`-separated. The deepest directory holding at least
+    // half of the payloads names the source without listing every subfolder.
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for payload in payloads {
+        for (index, _) in payload.path.match_indices('/') {
+            *counts.entry(&payload.path[..index]).or_default() += 1;
+        }
+    }
+    let dominant = counts
+        .into_iter()
+        .filter(|(_, count)| count * 2 >= payloads.len())
+        .max_by_key(|(directory, _)| directory.matches('/').count());
+    if let Some((directory, count)) = dominant {
+        message.push_str(&format!("; {count} of them are under {directory}"));
+    }
+    message
+}
+
 fn write_zip(
     output: &mut File,
     spool_parent: &Path,
@@ -1489,7 +1516,8 @@ fn write_zip(
         serde_json::to_vec_pretty(manifest).context("serialize archive manifest")?;
     ensure!(
         manifest_bytes.len() as u64 <= MAX_MANIFEST_BYTES,
-        "archive manifest is too large"
+        "{}",
+        manifest_too_large_message(manifest_bytes.len() as u64, &manifest.payloads)
     );
     let mut writer = zip::ZipWriter::new(output);
     write_stream_entry(
