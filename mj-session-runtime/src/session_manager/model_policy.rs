@@ -10,7 +10,11 @@ pub struct SessionModelPolicy {
 impl SessionModelPolicy {
     fn offered(&self, state: &RelayOperationalState) -> Vec<mj_core::acp::SessionConfigChoice> {
         mj_core::worker_launch::ProfileConfig {
-            model: mj_core::acp::surface::config_current_value(&state.config_options, "model"),
+            model: mj_core::acp::EffectiveSessionConfig::from_operational(
+                &state.config,
+                &state.config_options,
+            )
+            .model,
             models: mj_core::acp::session_config_choices(&state.config_options, "model"),
             efforts: Vec::new(),
             observed_at: 0,

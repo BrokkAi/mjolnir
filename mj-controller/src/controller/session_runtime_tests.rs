@@ -567,13 +567,17 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
                 }))
                 .is_ok()
         );
+        let actor_target = leased_relay_target(relay_root.path());
+        let (_recovery_tx, recovery_rx) =
+            tokio::sync::watch::channel(actor_target.worker_recovery.clone());
         let actor = mj_core::runtime::spawn(run_session_actor(
-            leased_relay_target(relay_root.path()),
+            actor_target,
             commands_rx,
             releases_rx,
             retirement_rx,
             view_tx,
             updates,
+            recovery_rx,
         ));
         views
             .wait_for(|view| view.connected && view.snapshot.is_some())

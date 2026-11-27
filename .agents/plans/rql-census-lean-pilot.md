@@ -35,6 +35,7 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 - [ ] In the N/G smoke at codex3's reset, confirm that the Codex rollout capture finds the session's rollout inside a real pilot Podman container (`/var/lib/hel/profiles/<sid>/sessions/*/*/*/rollout-*.jsonl`), and that summarized exec events join on `CommandExecution.id`. Until then, a wrong path only leaves those events needing inspection.
 - [x] User decision on writers' in-place brief edits: allow, within the limits in the Decision Log (2026-11-21). Implemented: on the 60-session archived sample, 0 of 30 writer sessions now need inspection, and 4 edits are accepted.
 - [x] Pilot binaries re-frozen on 2026-11-22 at the installed 2.73.0+3f774fb7, enforced by `mjx` (Surprises & Discoveries). Earlier: frozen at merged, reviewed master `f0beee634` (`/mnt/optane/review-arms-pilot/bin/mj-f0beee634` and its worker). It includes the host-only Git source support, the noclobber and interrupt-safe cache locks, and the unpublish-before-delete mirror eviction. Re-freeze only if a pilot-relevant mj fix lands before launch.
+- [x] Stage 2a reviewer-only rerun with `--reviewer-diff-reading bounded-reads-v2` (user-approved 2026-11-25): 320/320 reviewers accepted (216 on codex4, the last 104 on `codex` by the user's choice on 2026-11-26), then judge and hand-check 445/445 on `claude3` (user-authorized) with the original judge settings. Run root `/mnt/optane/review-arms-pilot-stage2a-bounded` (readout `readout.json`); the frozen Stage 2a root is untouched. Results are under Outcomes & Retrospective.
 - [ ] Tracked, no deadline: the recovery wedge when frozen inputs change while a writer waits for input (override on 546ebd478). Two mj host-only edge cases, also overridden: a Move with sub-agents is refused only after its children stop, and a `--base` outside branches and tags is lost on dissociation (overrides on dfb55808a/2ac06cfcc).
 
 ## Surprises & Discoveries
@@ -88,7 +89,10 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 
 ## Outcomes & Retrospective
 
-(none yet)
+- 2026-11-26, Stage 2a corrected for diff truncation. The original Stage 2a reviewers read each diff with one command, and Codex cut 25 of 35 diffs. Rerunning every reviewer with bounded reads, which print each whole diff once, and reusing the frozen briefs gives these hand-checked catch rates (bounded vs. original): N .200 vs .229, G .300 vs .364, R .314 vs .357, R-loc .314 vs .314. Recovered facts: N .103 vs .118, G .272 vs .338, R .221 vs .272, R-loc .294 vs .235. Contrasts on catch: G−N +.100 (was +.136), R−G +.014 (was −.007), R-loc−R .000 (was −.043). Judge/hand-check agreement is 320/320 on reviewer catch and .9375 whole-record (originally .978).
+  - Part of the earlier lift came from reviewers working on cut diffs: N, G and R drop 3–6 points, and R-loc is unchanged.
+  - A brief still helps over no brief by about 10 points. RQL queries (R) and the locator (R-loc) add nothing measurable over the grep brief (G): every R-arm difference from G is within ±.015.
+  - Limits: 2 repos and 35 diffs, so the comparison is descriptive only. Writers still wrote from cut diffs (117 of 125 writer rollouts carry the marker), so this corrects only the reviewer side. `pilot_readout.py` reports no precision split, so catch rate is the only recall figure. Isolation `egress_source` reads "missing" in both readouts.
 
 ## Context and Orientation
 

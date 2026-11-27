@@ -4183,21 +4183,25 @@ fn live_agent_selection(
         .and_then(|projection| projection.sessions.get(&detail.relation.child_session_id))
         .filter(|view| view.connected)
         .and_then(|view| view.operational.as_ref());
-    let current = |key| {
-        live.and_then(|operational| {
-            mj_core::acp::surface::config_current_value(&operational.config_options, key)
-                .or_else(|| operational.config.get(key).cloned())
+    let current = live
+        .map(|operational| {
+            mj_core::acp::EffectiveSessionConfig::from_operational(
+                &operational.config,
+                &operational.config_options,
+            )
         })
-    };
+        .unwrap_or_default();
     mj_core::storage::UsageSelection {
-        model: current("model")
+        model: current
+            .model
             .or_else(|| detail.selection.model.clone())
             .or_else(|| {
                 (current_profile == Some(detail.relation.profile_id.as_str()))
                     .then(|| detail.relation.model.clone())
                     .flatten()
             }),
-        effort: current("effort")
+        effort: current
+            .effort
             .or_else(|| detail.selection.effort.clone())
             .or_else(|| {
                 (current_profile == Some(detail.relation.profile_id.as_str()))

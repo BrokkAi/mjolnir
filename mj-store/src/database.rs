@@ -31,7 +31,14 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 163;
+const SCHEMA_VERSION: i64 = 164;
+/// The schema revision this build reads and writes, for migration peers to compare.
+pub const STORE_SCHEMA_VERSION: i64 = SCHEMA_VERSION;
+
+mod memory_keys;
+pub use memory_keys::*;
+mod migrate;
+pub use migrate::*;
 
 pub mod web_push;
 pub use web_push::*;

@@ -33,6 +33,7 @@ mod ec2;
 mod go;
 mod hints;
 mod import;
+mod migrate;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -117,6 +118,12 @@ enum Command {
     DaemonRun,
     #[command(hide = true)]
     DaemonWaitExit(daemon::wait_exit::DaemonWaitExitArgs),
+    /// Move this Mjolnir store to another Unix host.
+    Migrate(migrate::MigrateArgs),
+    #[command(hide = true)]
+    MigrateReceive(migrate::MigrateReceiveArgs),
+    #[command(hide = true)]
+    MigratePin(migrate::MigratePinArgs),
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
     Acp(acp::AcpArgs),
@@ -614,6 +621,9 @@ fn main() -> Result<()> {
     if let Some(Command::DaemonWaitExit(args)) = cli.command {
         return daemon::wait_exit::run(args);
     }
+    if let Some(Command::MigratePin(args)) = cli.command {
+        return migrate::run_pin(args);
+    }
     // First, before any thread or child: every child inherits the limit.
     mj_core::subprocess::raise_open_file_limit();
     mj_core::worker_build::install(mj_build_id::identity());
@@ -624,6 +634,10 @@ fn main() -> Result<()> {
     // derives its directories from the instance environment, and the daemon
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
+    if let Some(Command::MigrateReceive(args)) = cli.command {
+        migrate::apply_receive_env(&args, cli.instance.as_deref())?;
+        return migrate::run_receive(args);
+    }
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
     if cli.command.is_none()
         && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -640,10 +654,14 @@ fn main() -> Result<()> {
         std::env::set_current_dir(&home)
             .with_context(|| format!("set background working directory to {}", home.display()))?;
     }
-    let log = Some(logging::ControllerLog::start(
-        command_name(cli.command.as_ref()),
-        process_kind(cli.command.as_ref()),
-    )?);
+    let log = if matches!(&cli.command, Some(Command::Migrate(args)) if args.dry_run) {
+        None
+    } else {
+        Some(logging::ControllerLog::start(
+            command_name(cli.command.as_ref()),
+            process_kind(cli.command.as_ref()),
+        )?)
+    };
     install_panic_logging();
     let daemon_run = matches!(cli.command, Some(Command::DaemonRun));
     let result = run(cli);
@@ -968,6 +986,9 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::DaemonWaitExit(_)) => "daemon-wait-exit",
+        Some(Command::Migrate(_)) => "migrate",
+        Some(Command::MigrateReceive(_)) => "migrate-receive",
+        Some(Command::MigratePin(_)) => "migrate-pin",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Ec2(_)) => "ec2",
@@ -1163,7 +1184,12 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::DaemonWaitExit(_)) => unreachable!("the waiter runs before Tokio starts"),
+        Some(Command::DaemonWaitExit(_) | Command::MigrateReceive(_) | Command::MigratePin(_)) => {
+            unreachable!("internal command runs before Tokio starts")
+        }
+        Some(Command::Migrate(args)) => migrate::run_migrate(args)
+            .await
+            .map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);

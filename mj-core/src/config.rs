@@ -26,6 +26,7 @@ mod github;
 mod harness;
 mod keys;
 mod layout;
+pub mod migration_paths;
 mod loading;
 mod machines;
 mod secrets;

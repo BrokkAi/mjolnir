@@ -92,6 +92,15 @@ impl AcpSessionSurface {
         &self.config_options
     }
 
+    pub(crate) fn set_effective_selectors(
+        &mut self,
+        model: Option<String>,
+        effort: Option<String>,
+    ) {
+        self.current_model = model;
+        self.current_effort = effort;
+    }
+
     pub fn set_session_modes(&mut self, modes: Option<SessionModeState>) {
         self.session_modes = modes;
         self.sync_plan_mode();

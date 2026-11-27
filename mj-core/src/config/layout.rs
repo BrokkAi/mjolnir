@@ -88,6 +88,8 @@ const DAEMON_LOG: &str = "daemon.log";
 const LOGS: &str = "logs";
 const DIAGNOSTICS: &str = "diagnostics";
 const JEV_DECISIONS: &str = "jev-decisions";
+/// Receiver staging for `mj migrate`; never carried to another host.
+const MIGRATE_STAGE: &str = ".mj-migrate-stage";
 const INSTANCES: &str = super::loading::INSTANCE_DIR;
 
 // Configuration directory names.
@@ -147,6 +149,15 @@ const DATA_ENTRIES: &[(&str, MigrateAction)] = &[
     (LOGS, MigrateAction::CopyOptional),
     (DIAGNOSTICS, MigrateAction::CopyOptional),
     (JEV_DECISIONS, MigrateAction::CopyOptional),
+    (MIGRATE_STAGE, MigrateAction::Skip),
+    // Legacy leftovers; current code no longer writes these diagnostics.
+    ("backups", MigrateAction::CopyOptional),
+    ("moves", MigrateAction::CopyOptional),
+    // Legacy caches and log, no longer written by current code.
+    ("git-brokers", MigrateAction::Skip),
+    ("git-seeds", MigrateAction::Skip),
+    ("update-check.json", MigrateAction::Skip),
+    ("node.log", MigrateAction::Skip),
 ];
 
 /// Top-level configuration entries.
@@ -210,7 +221,7 @@ pub fn classify_data_entry(relative: &Path) -> Classification {
         (SESSIONS, Some(name)) if name.ends_with(CHECKPOINT_ARCHIVE_SUFFIX) => {
             Classification::Known(MigrateAction::Copy)
         }
-        // `sessions/<session-id>/attachments`. Nothing else is written there.
+        // The tombstone prevents a late upload from recreating deleted attachments.
         (SESSIONS, Some(_)) => {
             let attachments = relative
                 .components()
@@ -220,9 +231,10 @@ pub fn classify_data_entry(relative: &Path) -> Classification {
                     _ => None,
                 });
             match attachments {
-                None | Some(crate::attachment::ATTACHMENT_DIR) => {
+                None | Some(crate::attachment::ATTACHMENT_DIR | "attachments.deleted") => {
                     Classification::Known(MigrateAction::Copy)
                 }
+                Some("attachments.lock") => Classification::Known(MigrateAction::Skip),
                 Some(_) => Classification::Unknown,
             }
         }
@@ -239,6 +251,48 @@ pub fn classify_config_entry(relative: &Path) -> Classification {
     match first {
         INSTANCES => Classification::NestedStore,
         name => lookup(CONFIG_ENTRIES, name),
+    }
+}
+
+#[cfg(test)]
+mod migration_classification_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_and_legacy_entries_keep_their_migration_semantics() {
+        for (path, expected) in [
+            (
+                "sessions/id/attachments.lock",
+                Classification::Known(MigrateAction::Skip),
+            ),
+            (
+                "sessions/id/attachments.deleted",
+                Classification::Known(MigrateAction::Copy),
+            ),
+            (
+                "backups/old",
+                Classification::Known(MigrateAction::CopyOptional),
+            ),
+            (
+                "moves/old",
+                Classification::Known(MigrateAction::CopyOptional),
+            ),
+            ("git-brokers/x", Classification::Known(MigrateAction::Skip)),
+            ("git-seeds/x", Classification::Known(MigrateAction::Skip)),
+            (
+                "update-check.json",
+                Classification::Known(MigrateAction::Skip),
+            ),
+            ("node.log", Classification::Known(MigrateAction::Skip)),
+            (
+                ".mj-migrate-stage/raw/data/mj.sqlite3",
+                Classification::Known(MigrateAction::Skip),
+            ),
+            ("sessions/id/user-file", Classification::Unknown),
+            ("user-file", Classification::Unknown),
+        ] {
+            assert_eq!(classify_data_entry(Path::new(path)), expected, "{path}");
+        }
     }
 }
 
@@ -275,6 +329,12 @@ impl DataLayout {
 
     pub fn database(&self) -> PathBuf {
         self.entry(DATABASE)
+    }
+    pub fn database_wal(&self) -> PathBuf {
+        self.entry(DATABASE_WAL)
+    }
+    pub fn database_shm(&self) -> PathBuf {
+        self.entry(DATABASE_SHM)
     }
     pub fn tool_details_dir(&self) -> PathBuf {
         self.entry(TOOL_DETAILS)
@@ -408,6 +468,10 @@ impl DataLayout {
     }
     pub fn jev_decisions_dir(&self) -> PathBuf {
         self.entry(JEV_DECISIONS)
+    }
+    /// Where `mj migrate-receive` stages an incoming store before publication.
+    pub fn migrate_stage(&self) -> PathBuf {
+        self.entry(MIGRATE_STAGE)
     }
     /// Named instances under the default data directory; each child is a
     /// complete store.

@@ -253,10 +253,26 @@ pub struct SupervisedChild {
 impl SupervisedChild {
     /// Spawn with null stdin/stdout and concurrently captured stderr.
     pub fn spawn(command: &mut tokio::process::Command) -> Result<Self> {
+        Ok(Self::spawn_with_stdio(command, false)?.0)
+    }
+
+    fn spawn_with_stdio(
+        command: &mut tokio::process::Command,
+        piped: bool,
+    ) -> Result<(
+        Self,
+        Option<tokio::process::ChildStdin>,
+        Option<tokio::process::ChildStdout>,
+    )> {
         use tokio::io::AsyncReadExt;
+        let (input, output) = if piped {
+            (Stdio::piped(), Stdio::piped())
+        } else {
+            (Stdio::null(), Stdio::null())
+        };
         command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdin(input)
+            .stdout(output)
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
@@ -268,6 +284,8 @@ impl SupervisedChild {
         let mut job = Some(ChildJob::attach(&child)?);
         let group = ProcessGroupGuard::new(child.id());
         let mut pipe = child.stderr.take().context("missing supervised stderr")?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
         let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = stderr.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -315,16 +333,25 @@ impl SupervisedChild {
             }
             finished.send_replace(Some(outcome));
         });
-        Ok(Self {
-            stop: Some(stop),
-            done,
-            stderr,
-        })
+        Ok((
+            Self {
+                stop: Some(stop),
+                done,
+                stderr,
+            },
+            stdin,
+            stdout,
+        ))
     }
 
     /// Captured diagnostics so far, including output received before exit.
     pub fn stderr(&self) -> Vec<u8> {
         self.stderr.lock().expect("stderr mutex poisoned").clone()
+    }
+
+    /// The exit outcome if the supervisor has already reaped the child.
+    pub fn try_exited(&self) -> Option<std::result::Result<ExitStatus, String>> {
+        self.done.borrow().clone()
     }
 
     /// Observe exit without cancelling the child if this wait is cancelled.
@@ -354,6 +381,55 @@ impl Drop for SupervisedChild {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
+    }
+}
+
+/// A [`SupervisedChild`] with piped stdin and stdout for full-duplex streaming.
+/// Stderr is drained concurrently, so a child that writes diagnostics while the
+/// caller streams through stdin and stdout cannot stall on a full pipe.
+/// Dropping this handle kills the child's process group.
+pub struct SupervisedPipeChild {
+    child: SupervisedChild,
+    stdin: Option<tokio::process::ChildStdin>,
+    stdout: Option<tokio::process::ChildStdout>,
+}
+
+impl SupervisedPipeChild {
+    pub fn spawn(command: &mut tokio::process::Command) -> Result<Self> {
+        let (child, stdin, stdout) = SupervisedChild::spawn_with_stdio(command, true)?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+        })
+    }
+
+    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.stdin.take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.stdout.take()
+    }
+
+    /// Captured diagnostics so far, including output received before exit.
+    pub fn stderr(&self) -> Vec<u8> {
+        self.child.stderr()
+    }
+
+    /// The exit outcome if the child has already exited and been reaped.
+    pub fn try_exited(&self) -> Option<std::result::Result<ExitStatus, String>> {
+        self.child.try_exited()
+    }
+
+    pub async fn wait(&mut self) -> Result<ExitStatus> {
+        self.child.wait().await
+    }
+
+    /// Kill the process group and reap the child before returning.
+    pub async fn terminate(&mut self) -> Result<ExitStatus> {
+        self.stdin = None;
+        self.child.terminate().await
     }
 }
 
@@ -1928,6 +2004,74 @@ sys.exit(23)
         })
         .await
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_pipe_child_streams_megabytes_both_ways_without_deadlock() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut command = tokio::process::Command::new("sh");
+        // Stderr output before and during echo would stall `cat` if it were not drained.
+        command.args(["-c", "head -c 262144 /dev/zero >&2; exec cat"]);
+        let mut child = super::SupervisedPipeChild::spawn(&mut command).unwrap();
+        let mut stdin = child.take_stdin().unwrap();
+        let mut stdout = child.take_stdout().unwrap();
+        let payload: Vec<u8> = (0..3 * 1024 * 1024 + 17).map(|i| (i % 251) as u8).collect();
+        let expected = payload.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            // Write everything before reading anything would deadlock; do both at once.
+            let writer = tokio::spawn(async move {
+                for chunk in payload.chunks(100_000) {
+                    stdin.write_all(chunk).await.unwrap();
+                }
+                stdin.shutdown().await.unwrap();
+            });
+            let mut received = Vec::new();
+            stdout.read_to_end(&mut received).await.unwrap();
+            writer.await.unwrap();
+            assert_eq!(received.len(), expected.len());
+            assert!(received == expected);
+            assert!(child.wait().await.unwrap().success());
+            assert_eq!(child.stderr().len(), 262144);
+            assert!(child.try_exited().is_some());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_pipe_child_terminate_and_drop_reap_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        for terminate in [true, false] {
+            let pid_file = temp.path().join(format!("pid-{terminate}"));
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .args(["-c", "sleep 60 & echo $! > \"$1\"; wait", "fixture"])
+                .arg(&pid_file);
+            let mut child = super::SupervisedPipeChild::spawn(&mut command).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let pid: i32 = loop {
+                    if let Ok(body) = std::fs::read_to_string(&pid_file)
+                        && let Ok(pid) = body.trim().parse()
+                    {
+                        break pid;
+                    }
+                    tokio::task::yield_now().await;
+                };
+                assert!(child.try_exited().is_none());
+                if terminate {
+                    assert!(!child.terminate().await.unwrap().success());
+                } else {
+                    drop(child);
+                }
+                while unsafe { libc::kill(pid, 0) } == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
     }
 
     #[cfg(unix)]
