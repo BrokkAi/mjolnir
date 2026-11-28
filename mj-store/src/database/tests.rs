@@ -10217,7 +10217,14 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         .unwrap()
         .unwrap();
     assert_eq!(found.turn.unwrap().command_id, prior.command_id);
-    assert_eq!(found.message_keys, ["parent-1", "parent-2"]);
+    assert_eq!(
+        found
+            .messages
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect::<Vec<_>>(),
+        ["parent-1", "parent-2"]
+    );
     let ordinary = turn(
         "subagent-input-new",
         7,
@@ -10254,6 +10261,19 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
             },
             9 => MaterializedSessionMutation {
                 last_turn_outcome: Some(ordinary.clone()),
+                transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                    stable_id: "agent:9".into(),
+                    position: 9,
+                    latest_content_event_ordinal: Some(9),
+                    created_at_ms: 9,
+                    last_changed_at_ms: 9,
+                    body: TranscriptBody::Agent {
+                        chunks: vec![
+                            serde_json::json!({"content":{"type":"text","text":"specific failure"}}),
+                        ],
+                        streaming: false,
+                    },
+                })],
                 ..Default::default()
             },
             10 => MaterializedSessionMutation {
@@ -10266,10 +10286,14 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
                     body: TranscriptBody::Message {
                         event: Box::new(mj_core::mailbox::MailboxEvent {
                             key: "parent-3".into(),
-                            source: "parent".into(),
+                            source: "session_message".into(),
                             wake: true,
                             created_at_ms: 10,
-                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                            body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                                from: mj_core::mailbox::Sender::Session {
+                                    id: "peer-id".into(),
+                                    title: "Peer".into(),
+                                },
                                 text: "third".into(),
                             },
                         }),
@@ -10297,9 +10321,19 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        found.turn.unwrap().command_id,
+        found.turn.as_ref().unwrap().command_id,
         ordinary.command_id,
         "an ordinary failed input remains the real turn"
+    );
+    assert_eq!(found.failure_message.as_deref(), Some("specific failure"));
+    assert_eq!(
+        mj_core::subagent::failed_turn(
+            found.turn.as_ref().unwrap(),
+            found.failure_message.as_deref()
+        )
+        .unwrap()
+        .1,
+        "specific failure"
     );
     let next_wake = turn(
         "mailbox-wake-next-12345",
@@ -10351,11 +10385,22 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         .unwrap()
         .unwrap();
     assert_eq!(found.turn.unwrap().command_id, ordinary.command_id);
-    assert_eq!(found.message_keys, ["parent-3", "parent-4"]);
+    assert_eq!(
+        found
+            .messages
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect::<Vec<_>>(),
+        ["parent-3", "parent-4"]
+    );
+    assert!(!found.messages[0].from_parent);
+    assert!(found.messages[1].from_parent);
+    assert!(found.messages[0].sender.contains("Peer"));
+    assert_eq!(found.messages[1].sender, "Message from parent");
     let connection = Connection::open(&database).unwrap();
     connection
         .execute(
-            "DELETE FROM materialized_transcript_items WHERE session_id=?1 AND position=8",
+            "DELETE FROM materialized_transcript_items WHERE session_id=?1 AND position IN (8, 9)",
             ["session-1"],
         )
         .unwrap();

@@ -1931,6 +1931,7 @@ impl ApiBackend {
                             report_answer: None,
                             unanswered_messages: None,
                             observed_handback: None,
+                            report_failure_message: None,
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
@@ -2533,14 +2534,13 @@ impl ApiBackend {
         let Some(turn) = progress.report_answer.as_ref().or(progress.answer.as_ref()) else {
             return Ok(ChildState::NoFailure);
         };
-        let Some((state, mut reason)) = mj_core::subagent::failed_turn(
-            turn,
-            if progress.report_answer.is_some() {
-                None
-            } else {
-                progress.failure_message.as_deref()
-            },
-        ) else {
+        let failure_message = if progress.report_answer.is_some() {
+            progress.report_failure_message.as_deref()
+        } else {
+            progress.failure_message.as_deref()
+        };
+        let Some((state, mut reason)) = mj_core::subagent::failed_turn(turn, failure_message)
+        else {
             return Ok(ChildState::NoFailure);
         };
         if let (Some(profile), Some(cause)) =
@@ -3749,7 +3749,8 @@ pub(crate) struct ChildProgress {
     pub finished_span: Option<(u64, u64)>,
     /// The earlier substantive answer, when the last wake had no response.
     report_answer: Option<mj_core::state::MaterializedTurnOutcome>,
-    unanswered_messages: Option<Vec<String>>,
+    unanswered_messages: Option<Vec<mj_controller::database::UnansweredMailboxMessage>>,
+    report_failure_message: Option<String>,
     /// Handback observed with the current turn, before historical reads.
     observed_handback: Option<mj_core::subagent::SubagentHandback>,
     /// Stable terminal-failure generation even when the turn has no span.
@@ -3838,6 +3839,7 @@ impl ChildProgress {
             report_answer: None,
             unanswered_messages: None,
             observed_handback: None,
+            report_failure_message: None,
             last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
@@ -3892,7 +3894,8 @@ async fn load_unanswered_wake_reports(
             let turn = progress.answer.as_ref()?;
             (mj_core::continuation::carries_mailbox_wake(&turn.command_id)
             && matches!(&turn.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
-                if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON))
+                if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
+            && !progress.observed_handback.as_ref().is_some_and(|handback| handback.answers(&turn.command_id)))
             .then(|| (id.clone(), turn.clone()))
         })
         .collect();
@@ -3920,8 +3923,9 @@ async fn load_unanswered_wake_reports(
                         ReportState::Delivered(h.message.clone())
                     });
                 progress.report_answer = Some(turn.clone());
+                progress.report_failure_message = report.failure_message.clone();
             }
-            progress.unanswered_messages = Some(report.message_keys.clone());
+            progress.unanswered_messages = Some(report.messages.clone());
         }
     }
     Ok(())
@@ -3948,6 +3952,7 @@ fn child_progress(
         report_answer: None,
         unanswered_messages: None,
         observed_handback: recorded.handback.clone(),
+        report_failure_message: None,
         finished_span: last.and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
@@ -4020,6 +4025,7 @@ pub(crate) fn load_child_progress(
         report_answer: None,
         unanswered_messages: None,
         observed_handback: recorded.handback.clone(),
+        report_failure_message: None,
         finished_span: last.as_ref().and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
@@ -4086,15 +4092,27 @@ fn wait_agent_entry(
             _ => {}
         }
     }
-    if let Some(keys) = &progress.unanswered_messages {
-        let names = if keys.is_empty() {
-            "the mailbox events".to_owned()
+    if let Some(messages) = &progress.unanswered_messages {
+        let names = if messages.is_empty() {
+            "Mailbox events from unknown senders".to_owned()
         } else {
-            keys.join(", ")
+            messages
+                .iter()
+                .map(|message| {
+                    let sender = if message.sender.trim().is_empty() {
+                        "Message from an unknown sender"
+                    } else {
+                        message.sender.as_str()
+                    };
+                    format!("{sender} ({})", message.key)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         };
-        let warning = format!(
-            "Your message(s) {names} got no response; the child may not have acted on them. Resend if needed."
-        );
+        let mut warning = format!("{names} got no response; the child may not have acted on them.");
+        if messages.iter().any(|message| message.from_parent) {
+            warning.push_str(" Resend your message if needed.");
+        }
         if let Some(summary) = agent["failure"]["summary"].as_str() {
             agent["failure"]["summary"] = format!("{summary} {warning}").into();
         } else if agent["failure"].is_object() {

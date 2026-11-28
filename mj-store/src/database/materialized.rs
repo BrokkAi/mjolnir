@@ -3,7 +3,15 @@ use super::*;
 /// The earlier report and message identities for an unanswered mailbox wake.
 pub struct UnansweredWakeReport {
     pub turn: Option<MaterializedTurnOutcome>,
-    pub message_keys: Vec<String>,
+    pub messages: Vec<UnansweredMailboxMessage>,
+    pub failure_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnansweredMailboxMessage {
+    pub key: String,
+    pub sender: String,
+    pub from_parent: bool,
 }
 
 /// Resolve an unanswered wake from existing turn and transcript records.
@@ -34,13 +42,28 @@ pub(super) fn load_unanswered_wake_report_from(
     let mut messages = tx.prepare(
         "SELECT body_json FROM materialized_transcript_items WHERE session_id=?1 AND position=?2 AND item_kind='message' ORDER BY stable_id",
     )?;
-    let mut keys_for = |ordinal| -> Result<Vec<String>> {
+    let mut keys_for = |ordinal| -> Result<Vec<UnansweredMailboxMessage>> {
         Ok(messages
             .query_map(params![session_id, ordinal], |row| row.get::<_, String>(0))?
             .map(|row| -> Result<_> {
                 let body: mj_core::transcript::TranscriptBody = serde_json::from_str(&row?)?;
                 Ok(match body {
-                    mj_core::transcript::TranscriptBody::Message { event } => Some(event.key),
+                    mj_core::transcript::TranscriptBody::Message { event } => {
+                        let from_parent = event.is_parent_message();
+                        let sender = if from_parent {
+                            "Message from parent".to_owned()
+                        } else {
+                            mj_core::mailbox::describe_mailbox_event(&event)
+                                .header
+                                .trim_end_matches(':')
+                                .to_owned()
+                        };
+                        Some(UnansweredMailboxMessage {
+                            from_parent,
+                            key: event.key,
+                            sender,
+                        })
+                    }
                     _ => None,
                 })
             })
@@ -86,24 +109,28 @@ pub(super) fn load_unanswered_wake_report_from(
         if !span_present {
             break;
         }
+        let failure_message =
+            last_materialized_agent_message_within(&tx, session_id, start, turn.completed_ordinal)?;
         return Ok(Some(UnansweredWakeReport {
             turn: Some(turn),
-            message_keys: ordered_message_keys(key_batches),
+            messages: ordered_messages(key_batches),
+            failure_message,
         }));
     }
     Ok(Some(UnansweredWakeReport {
         turn: None,
-        message_keys: ordered_message_keys(key_batches),
+        messages: ordered_messages(key_batches),
+        failure_message: None,
     }))
 }
 
-fn ordered_message_keys(batches: Vec<Vec<String>>) -> Vec<String> {
+fn ordered_messages(batches: Vec<Vec<UnansweredMailboxMessage>>) -> Vec<UnansweredMailboxMessage> {
     let mut seen = std::collections::BTreeSet::new();
     batches
         .into_iter()
         .rev()
         .flatten()
-        .filter(|key| seen.insert(key.clone()))
+        .filter(|message| seen.insert(message.key.clone()))
         .collect()
 }
 
