@@ -441,8 +441,11 @@ impl Policy {
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
         // The installed profile decides which Antigravity pools people see.
-        let surfaced = surface_quota_reports(&reports, &self.state.owner().controller().config);
-        let stamps = active_projection_stamps(&reports);
+        let owner = self.state.owner();
+        let config = &owner.controller().config;
+        let surfaced = surface_quota_reports(&reports, config);
+        let stamps = active_projection_stamps(&reports, config);
+        drop(owner);
         self.state.publish_quotas_with_stamps(
             mj_client::quota::QuotaSnapshot {
                 reports: surfaced,
@@ -806,11 +809,12 @@ fn reconcile_quota_publications(
 /// pools the installed profile uses; the stored report keeps every pool for
 /// selection and quota recovery.
 /// Active surfaced report eligible for burn-rate projection. Shared by
-/// telemetry refresh and `Policy::publish_quotas` so forecast stamps always
-/// match the exact reading displayed beside them.
+/// telemetry refresh and `Policy::publish_quotas` so forecast stamps and
+/// Antigravity pool filters always match the exact reading displayed beside them.
 pub(super) fn active_projection_report(
     id: &str,
     publication: &mj_controller::quota::QuotaReportPublication,
+    config: &mj_core::config::Config,
 ) -> Option<ProfileQuota> {
     let report = publication.effective_report(id)?;
     if report.windows.is_empty()
@@ -818,14 +822,21 @@ pub(super) fn active_projection_report(
     {
         return None;
     }
-    Some(mj_controller::quota::surface_quota_report(&report))
+    let mut surfaced = mj_controller::quota::surface_quota_report(&report);
+    if let Ok(profile) = config.named_profile(id) {
+        surfaced.retain_antigravity_pools(&profile.antigravity_pools());
+    }
+    (!surfaced.windows.is_empty()).then_some(surfaced)
 }
 
-fn active_projection_stamps(reports: &QuotaReportMap) -> BTreeMap<String, (String, u64)> {
+fn active_projection_stamps(
+    reports: &QuotaReportMap,
+    config: &mj_core::config::Config,
+) -> BTreeMap<String, (String, u64)> {
     reports
         .iter()
         .filter_map(|(id, publication)| {
-            let active = active_projection_report(id, publication)?;
+            let active = active_projection_report(id, publication, config)?;
             Some((
                 id.clone(),
                 (

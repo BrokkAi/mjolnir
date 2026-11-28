@@ -774,70 +774,45 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     raw_candidates: Vec<T>,
     ctx: &SchedulingContext<'_>,
 ) -> Vec<ScoredPool<T>> {
-    // 1. Pool-first deduplication.
-    let mut pools: std::collections::BTreeMap<(String, Option<String>), (f64, T)> =
-        std::collections::BTreeMap::new();
-
-    for item in raw_candidates {
-        let cand = item.as_ref();
-        if ctx.placement == Placement::Orchestrator && !cand.harness.supports_delegation_tools() {
-            continue;
-        }
-        let lookup = ctx
-            .power_ranking
-            .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
-        let entry_tasks_per_200 = match &cand.quota {
-            CandidateQuota::UsagePriced => lookup
-                .as_ref()
-                .and_then(|l| l.tasks_per_200_api.or(l.tasks_per_200_sub))
-                .unwrap_or(1.0),
-            _ => lookup
-                .as_ref()
-                .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
-                .unwrap_or(1.0),
-        };
-        let pool_key = (cand.profile_id.clone(), binding_window_scope(cand));
-        match pools.entry(pool_key) {
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert((entry_tasks_per_200, item));
-            }
-            std::collections::btree_map::Entry::Occupied(mut slot) => {
-                let (existing_tp200, existing_item) = slot.get();
-                let replace = entry_tasks_per_200 > *existing_tp200
-                    || (entry_tasks_per_200 == *existing_tp200
-                        && (cand.model.as_str(), cand.effort.as_deref())
-                            < (
-                                existing_item.as_ref().model.as_str(),
-                                existing_item.as_ref().effort.as_deref(),
-                            ));
-                if replace {
-                    slot.insert((entry_tasks_per_200, item));
-                }
-            }
-        }
-    }
-
     let category = ctx.category.unwrap_or("primary");
     let cat_stats = ctx.telemetry.category_stats(category);
     let canonical_category = canonical_observed_category(category).unwrap_or(category);
-    let pool_items: Vec<_> = pools
-        .into_values()
-        .map(|(_, item)| {
+
+    // 1. Price every eligible candidate before pool-first deduplication so
+    // live cost observations can beat benchmark throughput on paid pools.
+    let eligible: Vec<_> = raw_candidates
+        .into_iter()
+        .filter(|item| {
+            ctx.placement != Placement::Orchestrator
+                || item.as_ref().harness.supports_delegation_tools()
+        })
+        .map(|item| {
             let cand = item.as_ref();
             let lookup =
                 ctx.power_ranking
                     .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
+            let entry_tasks_per_200 = match &cand.quota {
+                CandidateQuota::UsagePriced => lookup
+                    .as_ref()
+                    .and_then(|l| l.tasks_per_200_api.or(l.tasks_per_200_sub))
+                    .unwrap_or(1.0),
+                _ => lookup
+                    .as_ref()
+                    .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
+                    .unwrap_or(1.0),
+            };
             let bench = lookup.as_ref().and_then(benchmark_task_usd);
             let obs =
                 ctx.telemetry
                     .cell_cost_observation(category, &cand.model, cand.effort.as_deref());
-            (item, lookup, bench, obs)
+            (item, lookup, entry_tasks_per_200, bench, obs)
         })
         .collect();
+
     let mut seen_cells = BTreeSet::new();
     let prior_scale = calibrated_prior_scale(
         cat_stats.mean_api_usd,
-        pool_items.iter().filter_map(|(item, _, bench, obs)| {
+        eligible.iter().filter_map(|(item, _, _, bench, obs)| {
             let bench = (*bench)?;
             let cand = item.as_ref();
             seen_cells
@@ -849,25 +824,14 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
         }),
     );
 
-    // 2. Price subscriptions in tasks per week and use the same units for peers.
-    let pool_items: Vec<_> = pool_items
-        .into_iter()
-        .map(|(item, lookup, bench, obs)| {
-            let prior_usd = cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd);
-            let estimate_usd = shrink_cell_cost_usd(obs.as_ref(), prior_usd);
-            let subscription = match &item.as_ref().quota {
-                CandidateQuota::Subscription {
-                    monthly_price_usd, ..
-                } => {
-                    let pricing = SubscriptionPricing::new(*monthly_price_usd, lookup.as_ref());
-                    let capacity = pricing.priced_capacity(estimate_usd, prior_usd, prior_scale);
-                    Some((pricing, capacity))
-                }
-                _ => None,
-            };
-            let paid_estimate = if bench.is_some()
-                || obs.as_ref().is_some_and(positive_cost_observation)
-            {
+    let mut pools: std::collections::BTreeMap<(String, Option<String>), _> =
+        std::collections::BTreeMap::new();
+    for (item, lookup, entry_tasks_per_200, bench, obs) in eligible {
+        let cand = item.as_ref();
+        let prior_usd = cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd);
+        let estimate_usd = shrink_cell_cost_usd(obs.as_ref(), prior_usd);
+        let paid_estimate =
+            if bench.is_some() || obs.as_ref().is_some_and(positive_cost_observation) {
                 estimate_usd
             } else {
                 lookup
@@ -879,8 +843,84 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                     })
                     .map_or(f64::INFINITY, |tasks| 200.0 / tasks)
             };
-            (item, lookup, estimate_usd, subscription, paid_estimate)
-        })
+        let is_paid_pool = match &cand.quota {
+            CandidateQuota::UsagePriced => true,
+            CandidateQuota::Subscription {
+                windows,
+                paid_credits,
+                ..
+            } => {
+                let evals = evaluate_applying_windows(windows, &cand.model, ctx.now_seconds);
+                (evals.is_empty() || evals.iter().any(|e| e.remaining_pct <= 0.0))
+                    && paid_weight(paid_credits.as_ref()).is_some()
+            }
+            CandidateQuota::Unknown => false,
+        };
+        let pool_key = (cand.profile_id.clone(), binding_window_scope(cand));
+        let candidate_entry = (
+            entry_tasks_per_200,
+            paid_estimate,
+            is_paid_pool,
+            item,
+            lookup,
+            prior_usd,
+            estimate_usd,
+        );
+        match pools.entry(pool_key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(candidate_entry);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let (existing_tp200, existing_paid, existing_is_paid, existing_item, _, _, _) =
+                    slot.get();
+                let cand_ref = candidate_entry.3.as_ref();
+                let existing_ref = existing_item.as_ref();
+                let replace = if is_paid_pool && *existing_is_paid {
+                    match paid_estimate.total_cmp(existing_paid) {
+                        std::cmp::Ordering::Less => true,
+                        std::cmp::Ordering::Greater => false,
+                        std::cmp::Ordering::Equal => {
+                            entry_tasks_per_200 > *existing_tp200
+                                || (entry_tasks_per_200 == *existing_tp200
+                                    && (cand_ref.model.as_str(), cand_ref.effort.as_deref())
+                                        < (
+                                            existing_ref.model.as_str(),
+                                            existing_ref.effort.as_deref(),
+                                        ))
+                        }
+                    }
+                } else {
+                    entry_tasks_per_200 > *existing_tp200
+                        || (entry_tasks_per_200 == *existing_tp200
+                            && (cand_ref.model.as_str(), cand_ref.effort.as_deref())
+                                < (existing_ref.model.as_str(), existing_ref.effort.as_deref()))
+                };
+                if replace {
+                    slot.insert(candidate_entry);
+                }
+            }
+        }
+    }
+
+    // 2. Price subscriptions in tasks per week and use the same units for peers.
+    let pool_items: Vec<_> = pools
+        .into_values()
+        .map(
+            |(_, paid_estimate, _, item, lookup, prior_usd, estimate_usd)| {
+                let subscription = match &item.as_ref().quota {
+                    CandidateQuota::Subscription {
+                        monthly_price_usd, ..
+                    } => {
+                        let pricing = SubscriptionPricing::new(*monthly_price_usd, lookup.as_ref());
+                        let capacity =
+                            pricing.priced_capacity(estimate_usd, prior_usd, prior_scale);
+                        Some((pricing, capacity))
+                    }
+                    _ => None,
+                };
+                (item, lookup, estimate_usd, subscription, paid_estimate)
+            },
+        )
         .collect();
     let mut log_sum = 0.0;
     let mut priced_count = 0;
@@ -2195,6 +2235,53 @@ mod tests {
         candidates.push(unknown);
         order_scheduled_candidates_by_draw(&mut candidates, &[1.0; 5], &ctx);
         assert_eq!(candidates[0].profile_id, "unknown");
+
+        // Same paid profile offering two models where live cost observations
+        // reverse benchmark throughput must keep the empirically cheaper model.
+        let mut learned_telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
+        learned_telemetry.cell_costs.insert(
+            crate::database::CellCostKey {
+                category: "subtle".into(),
+                model: "cheap-model".into(),
+                effort: Some("high".into()),
+            },
+            CellCostObservation {
+                total_api_usd: 500.0 * 2.0,
+                sample_count: 500,
+            },
+        );
+        learned_telemetry.cell_costs.insert(
+            crate::database::CellCostKey {
+                category: "subtle".into(),
+                model: "expensive-model".into(),
+                effort: Some("high".into()),
+            },
+            CellCostObservation {
+                total_api_usd: 500.0 * 0.05,
+                sample_count: 500,
+            },
+        );
+        let learned_ctx = SchedulingContext {
+            placement: Placement::Child,
+            category: Some("subtle"),
+            ranking_anchor: None,
+            telemetry: &learned_telemetry,
+            power_ranking: &ranking,
+            now_seconds: now,
+        };
+        let paid_entry = |model: &str| ScheduledCandidate {
+            profile_id: "dsh".into(),
+            harness: mj_core::config::HarnessKind::Dsh,
+            model: model.into(),
+            effort: Some("high".into()),
+            quota: CandidateQuota::UsagePriced,
+            may_consume_credits: false,
+            cache_identity: None,
+        };
+        let mut same_paid_profile = vec![paid_entry("cheap-model"), paid_entry("expensive-model")];
+        order_scheduled_candidates_by_draw(&mut same_paid_profile, &[0.5, 0.5], &learned_ctx);
+        assert_eq!(same_paid_profile.len(), 1);
+        assert_eq!(same_paid_profile[0].model, "expensive-model");
     }
 
     #[test]

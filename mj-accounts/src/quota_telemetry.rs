@@ -1238,11 +1238,12 @@ impl QuotaTelemetryStore {
                     .saturating_sub(RATIO_LOOKBACK_SECONDS),
             )?;
             for window in &report.windows {
-                let Some(remaining_percent) =
-                    window_used_pct(window).map(|used| (100.0 - used).round() as u8)
+                let Some(remaining_f64) =
+                    window_used_pct(window).map(|used| (100.0 - used).clamp(0.0, 100.0))
                 else {
                     continue;
                 };
+                let remaining_percent = remaining_f64.round() as u8;
                 let kind = WindowKind::from_window(window);
                 let observed_at = i64::try_from(report.refreshed_at_epoch_seconds)
                     .unwrap_or(now)
@@ -1298,9 +1299,7 @@ impl QuotaTelemetryStore {
                     .then_some(window.resets_at_epoch_seconds)
                     .flatten()
                     .filter(|reset| *reset > now && *reset > observed_at)
-                    .map(|reset| {
-                        remaining_percent as f64 / ((reset - observed_at) as f64 / 3600.0)
-                    });
+                    .map(|reset| remaining_f64 / ((reset - observed_at) as f64 / 3600.0));
                 let raw_pace = observed
                     .zip(sustainable)
                     .filter(|(_, s)| *s > 0.0)
@@ -1308,8 +1307,7 @@ impl QuotaTelemetryStore {
                 let raw_exhaustion = observed
                     .filter(|o| *o > 0.0 && raw_pace.is_some_and(|p| p > 1.0))
                     .map(|o| {
-                        observed_at
-                            .saturating_add((remaining_percent as f64 / o * 3600.0).round() as i64)
+                        observed_at.saturating_add((remaining_f64 / o * 3600.0).round() as i64)
                     });
                 let (pace, exhaustion) = if raw_exhaustion.is_some_and(|t| t <= now) {
                     (None, None)
@@ -1760,6 +1758,32 @@ mod tests {
         let stale_proj = &store.snapshot().projections[0];
         assert_eq!(stale_proj.projected_exhaustion_epoch_seconds, None);
         assert_eq!(stale_proj.pace_ratio, None);
+
+        // Count-based headroom below 0.5% (rounds to 0% for display) must keep
+        // fractional headroom in forecast math instead of dropping the warning.
+        let count_row = |time: i64, used: i64| {
+            let mut r = sample_report("p", time as u64, None, Some((0, Some(reset))));
+            r.windows[0].remaining_percent = None;
+            r.windows[0].used = Some(used);
+            r.windows[0].limit = Some(1000);
+            r
+        };
+        let count_history = vec![
+            count_row(OBSERVED_AT - 10 * 3600, 900),
+            count_row(OBSERVED_AT, 998),
+        ];
+        store
+            .refresh_projections_with_loader(
+                &[("p".into(), "acct-a".into(), count_history[1].clone())],
+                OBSERVED_AT,
+                |_, _, _| Ok(count_history.clone()),
+            )
+            .unwrap();
+        let frac = &store.snapshot().projections[0];
+        assert_eq!(frac.remaining_percent, 0);
+        assert!(frac.sustainable_pct_per_hour.unwrap() > 0.0);
+        assert!(frac.pace_ratio.unwrap() > 1.0);
+        assert!(frac.projected_exhaustion_epoch_seconds.is_some());
     }
 
     #[test]

@@ -275,6 +275,7 @@ fn spawn_quota_telemetry_refresh(
                 }
             };
             if trigger_refresh {
+                let config = state.owner().controller().config.clone();
                 let (profiles, projection_reports): (Vec<_>, Vec<_>) = {
                     let reports = reports.lock().unwrap_or_else(|e| e.into_inner());
                     let profiles = reports
@@ -284,7 +285,7 @@ fn spawn_quota_telemetry_refresh(
                     let projections = reports
                         .iter()
                         .filter_map(|(id, p)| {
-                            policy::active_projection_report(id, p)
+                            policy::active_projection_report(id, p, &config)
                                 .map(|r| (id.clone(), p.cache_identity.clone(), r))
                         })
                         .collect();
