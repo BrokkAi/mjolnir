@@ -55,19 +55,32 @@ impl QuotaWindow {
             .is_none_or(|scope| mj_core::config::model_matches_scope(model, scope))
     }
 
+    /// Whether this window spans a seven-day allowance, regardless of model scope.
+    pub fn has_weekly_period_duration(&self) -> bool {
+        match self.duration_seconds {
+            Some(seconds) => seconds == WEEKLY_PERIOD_SECONDS,
+            None => {
+                let label = if self.model_scope.is_some() {
+                    self.label
+                        .split_once(" (")
+                        .map_or(self.label.as_str(), |(label, _)| label)
+                } else {
+                    &self.label
+                };
+                matches!(
+                    label.to_ascii_lowercase().as_str(),
+                    "week" | "weekly" | "7d"
+                )
+            }
+        }
+    }
+
     /// Whether this is an unscoped seven-day allowance. A declared duration
     /// decides (exactly seven days, whatever the label); only a window with no
     /// duration falls back on a week label, so a monthly or model-scoped
     /// window is never read as a week.
     pub fn is_weekly_period(&self) -> bool {
-        self.model_scope.is_none()
-            && match self.duration_seconds {
-                Some(seconds) => seconds == WEEKLY_PERIOD_SECONDS,
-                None => matches!(
-                    self.label.to_ascii_lowercase().as_str(),
-                    "week" | "weekly" | "7d"
-                ),
-            }
+        self.model_scope.is_none() && self.has_weekly_period_duration()
     }
 
     /// Whether this allowance spans a week or longer, including model-scoped labels.
@@ -159,6 +172,25 @@ pub fn refused_login_message(profile_id: &str) -> String {
 }
 
 impl ProfileQuota {
+    /// The primary seven-day allowance used for weekly pace and tank summaries.
+    /// Prefers an unscoped weekly window; for Antigravity (which only reports
+    /// model-scoped pools), falls back to the `gemini`-scoped weekly window.
+    pub fn primary_weekly_window(&self) -> Option<&QuotaWindow> {
+        if let Some(window) = self.windows.iter().find(|window| window.is_weekly_period()) {
+            return Some(window);
+        }
+        if self.harness == HarnessKind::Antigravity {
+            return self.windows.iter().find(|window| {
+                window.has_weekly_period_duration()
+                    && window
+                        .model_scope
+                        .as_deref()
+                        .is_some_and(|scope| scope.eq_ignore_ascii_case("gemini"))
+            });
+        }
+        None
+    }
+
     /// What people see of an Antigravity report: only the windows of `pools`,
     /// the pools the profile uses. The stored report keeps every pool for
     /// selection and quota recovery. Other harnesses are unchanged.

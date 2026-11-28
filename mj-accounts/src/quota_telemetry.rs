@@ -672,7 +672,7 @@ fn weekly_usage_span(since_ms: i64, until_ms: i64) -> (i64, i64) {
     )
 }
 
-/// The unscoped weekly reading of a successful probe: the one interpretation
+/// The primary weekly reading of a successful probe: the one interpretation
 /// both the history reader's edge search and the measurement use. A reading
 /// whose own reset time has passed describes no live weekly window (the
 /// provider has not yet reported the next one), so it is not a reading.
@@ -680,10 +680,7 @@ fn weekly_reading(probe: &ProfileQuota) -> Option<SamplePoint> {
     if probe.error.is_some() {
         return None;
     }
-    let window = probe
-        .windows
-        .iter()
-        .find(|window| window.is_weekly_period())?;
+    let window = probe.primary_weekly_window()?;
     sample_for_window(probe, window)
 }
 
@@ -1251,6 +1248,7 @@ impl QuotaTelemetryStore {
                     .unwrap_or(0)
                     .saturating_sub(RATIO_LOOKBACK_SECONDS),
             )?;
+            let primary_weekly = report.primary_weekly_window();
             for window in &report.windows {
                 let Some(remaining_f64) =
                     window_used_pct(window).map(|used| (100.0 - used).clamp(0.0, 100.0))
@@ -1336,7 +1334,7 @@ impl QuotaTelemetryStore {
                         window_label: report.window_label(window),
                         is_short_window: kind == WindowKind::Short5h,
                         is_weekly_window: Some(
-                            window.is_weekly_period() && window.model_scope.is_none(),
+                            primary_weekly.is_some_and(|primary| std::ptr::eq(primary, window)),
                         ),
                         remaining_percent,
                         resets_at_epoch_seconds: window.resets_at_epoch_seconds,
@@ -2443,5 +2441,89 @@ mod tests {
             now - 7200,
         );
         assert_eq!(moved.snapshot().recent_placements["profile-b"].len(), 1);
+    }
+
+    #[test]
+    fn antigravity_primary_weekly_window_prefers_gemini_scope() {
+        let now = 1_795_860_635_i64;
+        let reset = now + 4 * 86_400;
+        let antigravity_probe = |ts: u64, gemini_rem: u8, claude_rem: u8| ProfileQuota {
+            monthly_price_usd: None,
+            paid_credits: None,
+            banked_resets: None,
+            profile_id: "gemini".into(),
+            harness: mj_core::config::HarnessKind::Antigravity,
+            windows: vec![
+                QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(claude_rem),
+                    duration_seconds: Some(WEEKLY_PERIOD_SECONDS),
+                    model_scope: Some("claude".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(reset),
+                },
+                QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(gemini_rem),
+                    duration_seconds: Some(WEEKLY_PERIOD_SECONDS),
+                    model_scope: Some("gemini".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(reset),
+                },
+                QuotaWindow {
+                    label: "5H".into(),
+                    remaining_percent: Some(95),
+                    duration_seconds: Some(18_000),
+                    model_scope: Some("gemini".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(now + 3 * 3600),
+                },
+            ],
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: ts,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        let history = vec![
+            antigravity_probe((now - 3600) as u64, 80, 90),
+            antigravity_probe(now as u64, 70, 50),
+        ];
+        assert!(has_weekly_reading(&history[0]));
+        let (usage, covered) =
+            weekly_consumption_with_coverage(&history, &[(now - 3600, now)]).unwrap();
+        assert_eq!(usage.basis_points, 1_000);
+        assert_eq!(covered, 3600);
+
+        let store = QuotaTelemetryStore::new();
+        store
+            .refresh_projections_with_loader(
+                &[("gemini".into(), "id-gemini".into(), history[1].clone())],
+                now,
+                |_, _, _| Ok(history.clone()),
+            )
+            .unwrap();
+        let projections = store.snapshot().projections;
+        let gemini_week = projections
+            .iter()
+            .find(|p| p.window_label == "Week (Ge)")
+            .expect("Week (Ge) projection");
+        let claude_week = projections
+            .iter()
+            .find(|p| p.window_label.starts_with("Week") && p.window_label != "Week (Ge)")
+            .expect("claude weekly projection");
+        let gemini_5h = projections
+            .iter()
+            .find(|p| p.window_label == "5H (Ge)")
+            .expect("5H (Ge) projection");
+        assert_eq!(gemini_week.is_weekly_window, Some(true));
+        assert_eq!(claude_week.is_weekly_window, Some(false));
+        assert_eq!(gemini_5h.is_weekly_window, Some(false));
     }
 }
