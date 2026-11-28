@@ -70,6 +70,18 @@ mj ec2 list
 === mj ec2 argv command (transcript row) ===
 mj ec2 destroy
 
+=== mj ec2 global option before action (transcript row) ===
+mj ec2 list
+
+=== mj image global options before action (transcript row) ===
+mj image status
+
+=== mj ui scoped global option before action (transcript row) ===
+mj ui show
+
+=== mj unknown option before action (transcript row) ===
+mj ec2
+
 === mj image shell command (transcript row) ===
 mj image build
 
