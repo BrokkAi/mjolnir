@@ -371,9 +371,15 @@ impl StandaloneSession {
         self.client.detach().await
     }
 
-    pub async fn sync(&mut self) -> Result<ManagedSessionSnapshot> {
-        self.sync_in_place().await?;
-        Ok(self.snapshot())
+    pub fn sync(
+        &mut self,
+    ) -> Pin<Box<impl Future<Output = Result<ManagedSessionSnapshot>> + Send + '_>> {
+        // Checkpoint capture calls this repeatedly; construct its relay future here
+        // so each call does not enlarge the capture poll frame.
+        Box::pin(async move {
+            self.sync_in_place().await?;
+            Ok(self.snapshot())
+        })
     }
 
     pub async fn release_in_place_move_dispatch_checked(
