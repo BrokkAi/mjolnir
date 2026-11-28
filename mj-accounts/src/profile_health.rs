@@ -348,8 +348,8 @@ fn provider_reset(diagnostic: &TurnDiagnostic, now: SystemTime) -> Option<System
     });
     reset.or_else(|| {
         let secs = i64::try_from(diagnostic.retry_after_seconds.filter(|s| *s > 0)?).ok()?;
-        let at = DateTime::<chrono::Utc>::from(now)
-            .checked_add_signed(chrono::TimeDelta::seconds(secs))?;
+        let delta = chrono::TimeDelta::try_seconds(secs)?;
+        let at = DateTime::<chrono::Utc>::from(now).checked_add_signed(delta)?;
         Some(SystemTime::from(at))
     })
 }
@@ -806,14 +806,19 @@ mod tests {
             now + BASE_BACKOFF
         );
 
-        // An out-of-range Retry-After exceeding Chrono's calendar bounds must
-        // fall back to normal backoff without panicking under the shared lock.
-        let mut huge_retry = diagnostic("429", None, Some(429));
-        huge_retry.retry_after_seconds = Some(10_000_000_000_000);
-        health.record("codex3", "sol", ProfileFault::RateLimited, &huge_retry, now);
-        assert_eq!(
-            health.unhealthy("codex3", "sol", now).unwrap().until,
-            now + BASE_BACKOFF
-        );
+        // Out-of-range Retry-After values (both calendar and TimeDelta bounds)
+        // must fall back to normal backoff without panicking under the lock.
+        for (profile, secs) in [
+            ("codex3", 10_000_000_000_000u64),
+            ("codex4", i64::MAX as u64),
+        ] {
+            let mut huge_retry = diagnostic("429", None, Some(429));
+            huge_retry.retry_after_seconds = Some(secs);
+            health.record(profile, "sol", ProfileFault::RateLimited, &huge_retry, now);
+            assert_eq!(
+                health.unhealthy(profile, "sol", now).unwrap().until,
+                now + BASE_BACKOFF
+            );
+        }
     }
 }

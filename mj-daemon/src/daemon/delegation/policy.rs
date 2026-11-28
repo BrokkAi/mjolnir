@@ -169,8 +169,8 @@ fn settle_fault_probes(
         QuotaUpdate::Report(outcome) => {
             let id = &outcome.report.profile_id;
             if let Some(&(_, failed_at)) = pending.get(id)
-                && (outcome.report.error.is_some()
-                    || outcome.report.refreshed_at_epoch_seconds > failed_at)
+                && (outcome.report.refreshed_at_epoch_seconds > failed_at
+                    || outcome.report.rate_limited_until_epoch_seconds.is_some())
             {
                 pending.remove(id);
             }
@@ -598,7 +598,6 @@ impl Policy {
         }
     }
     pub fn quota(&mut self, update: QuotaUpdate) {
-        settle_fault_probes(&mut self.pending_fault_probes, &self.probing, &update);
         match update {
             QuotaUpdate::ClaudeGrant {
                 request,
@@ -687,21 +686,33 @@ impl Policy {
                         profile_id,
                         "discarding quota result for an obsolete profile identity"
                     );
-                } else if outcome.report.error.is_none() {
-                    // A usage-priced profile has no allowance to run out of.
-                    let windows = if outcome.report.is_usage_priced() {
-                        Vec::new()
-                    } else {
-                        outcome.report.windows.clone()
-                    };
-                    mj_controller::profile_health::shared()
-                        .lock()
-                        .expect("profile health poisoned")
-                        .observe_quota(&profile_id, &windows, SystemTime::now());
+                } else {
+                    settle_fault_probes(
+                        &mut self.pending_fault_probes,
+                        &self.probing,
+                        &QuotaUpdate::Report(outcome.clone()),
+                    );
+                    if outcome.report.error.is_none() {
+                        // A usage-priced profile has no allowance to run out of.
+                        let windows = if outcome.report.is_usage_priced() {
+                            Vec::new()
+                        } else {
+                            outcome.report.windows.clone()
+                        };
+                        mj_controller::profile_health::shared()
+                            .lock()
+                            .expect("profile health poisoned")
+                            .observe_quota(&profile_id, &windows, SystemTime::now());
+                    }
                 }
             }
             // Reports end probing, so a finished cycle only counts (#1595).
-            QuotaUpdate::Finished { .. } => {
+            QuotaUpdate::Finished { generation } => {
+                settle_fault_probes(
+                    &mut self.pending_fault_probes,
+                    &self.probing,
+                    &QuotaUpdate::Finished { generation },
+                );
                 self.cycles += 1;
             }
         }

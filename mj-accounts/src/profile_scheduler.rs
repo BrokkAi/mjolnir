@@ -830,19 +830,27 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
         let cand = item.as_ref();
         let prior_usd = cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd);
         let estimate_usd = shrink_cell_cost_usd(obs.as_ref(), prior_usd);
-        let paid_estimate =
-            if bench.is_some() || obs.as_ref().is_some_and(positive_cost_observation) {
-                estimate_usd
-            } else {
-                lookup
-                    .as_ref()
-                    .and_then(|l| {
-                        l.tasks_per_200_api
-                            .filter(|x| x.is_finite() && *x > 0.0)
-                            .or_else(|| l.tasks_per_200_sub.filter(|x| x.is_finite() && *x > 0.0))
-                    })
-                    .map_or(f64::INFINITY, |tasks| 200.0 / tasks)
-            };
+        let api_bench = lookup
+            .as_ref()
+            .and_then(|l| l.tasks_per_200_api.filter(|x| x.is_finite() && *x > 0.0))
+            .map(|tasks| 200.0 / tasks);
+        let paid_estimate = if api_bench.is_some()
+            || bench.is_some()
+            || obs.as_ref().is_some_and(positive_cost_observation)
+        {
+            let paid_prior =
+                cell_prior_usd(api_bench.or(bench), prior_scale, cat_stats.mean_api_usd);
+            shrink_cell_cost_usd(obs.as_ref(), paid_prior)
+        } else {
+            lookup
+                .as_ref()
+                .and_then(|l| {
+                    l.tasks_per_200_api
+                        .filter(|x| x.is_finite() && *x > 0.0)
+                        .or_else(|| l.tasks_per_200_sub.filter(|x| x.is_finite() && *x > 0.0))
+                })
+                .map_or(f64::INFINITY, |tasks| 200.0 / tasks)
+        };
         let is_paid_pool = match &cand.quota {
             CandidateQuota::UsagePriced => true,
             CandidateQuota::Subscription {

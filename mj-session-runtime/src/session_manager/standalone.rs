@@ -1111,8 +1111,16 @@ impl StandaloneSession {
                         if let Some(diagnostic) = diagnostic
                             && let Some(fault) = crate::profile_health::ProfileFault::of(diagnostic)
                         {
+                            let recorded_at = u64::try_from(event.recorded_at_ms)
+                                .ok()
+                                .map(|millis| {
+                                    std::time::SystemTime::UNIX_EPOCH
+                                        + std::time::Duration::from_millis(millis)
+                                })
+                                .map_or(now, |recorded| recorded.min(now));
                             health_observations.push((
                                 command_id.clone(),
+                                recorded_at,
                                 crate::profile_health::TurnHealth::Failed(
                                     fault,
                                     diagnostic.clone(),
@@ -1124,6 +1132,7 @@ impl StandaloneSession {
                         if let Ok(millis) = u64::try_from(event.recorded_at_ms) {
                             health_observations.push((
                                 command_id.clone(),
+                                now,
                                 crate::profile_health::TurnHealth::Succeeded(
                                     std::time::SystemTime::UNIX_EPOCH
                                         + std::time::Duration::from_millis(millis),
@@ -1139,7 +1148,7 @@ impl StandaloneSession {
             }
             let session_id = self.materialized.session_id.clone();
             let profile_health = crate::profile_health::shared();
-            for (command_id, observation) in health_observations {
+            for (command_id, observed_at, observation) in health_observations {
                 // Skip the lookup for a success when no mark could change.
                 if matches!(observation, crate::profile_health::TurnHealth::Succeeded(_))
                     && !profile_health
@@ -1196,7 +1205,12 @@ impl StandaloneSession {
                     continue;
                 };
                 // The provider failure happened even if the following projection commit fails.
-                crate::profile_health::observe_shared(&profile_id, &model, observation, now);
+                crate::profile_health::observe_shared(
+                    &profile_id,
+                    &model,
+                    observation,
+                    observed_at,
+                );
             }
             let events = events.to_vec();
             let projection = self.materialized.clone();
