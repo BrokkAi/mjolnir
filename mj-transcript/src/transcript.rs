@@ -15,7 +15,7 @@ const TOOL_SUMMARY_MAX_NESTING: usize = 16;
 /// Stands for a command whose name is an expansion, such as `$E cargo test`.
 const UNNAMED_COMMAND_SUMMARY: &str = "…";
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 11;
+pub const TOOL_SUMMARY_VERSION: u8 = 12;
 
 const ERROR_LINE_BYTES: usize = 256;
 const EDIT_SNIPPET_BYTES: usize = 512;
@@ -1240,7 +1240,16 @@ fn allows_second_verb(basename: &str, first_verb: &str) -> bool {
         "mbx" => matches!(first_verb, "cache" | "explain" | "settings"),
         "mj" => matches!(
             first_verb,
-            "daemon" | "import" | "recover" | "review" | "setup" | "workspaces"
+            "daemon"
+                | "doctor"
+                | "ec2"
+                | "image"
+                | "import"
+                | "recover"
+                | "review"
+                | "setup"
+                | "ui"
+                | "workspaces"
         ),
         "rustup" => matches!(
             first_verb,
@@ -2739,6 +2748,38 @@ mod tests {
                 "npm registered namespace",
                 json!({"command": ["npm", "--prefix", "web", "run", "build"]}),
             ),
+            (
+                "mj ec2 shell command",
+                json!({"command": "mj --instance transcript-depth ec2 list --json"}),
+            ),
+            (
+                "mj ec2 argv command",
+                json!({"command": ["mj", "ec2", "destroy", "builder"]}),
+            ),
+            (
+                "mj image shell command",
+                json!({"command": "mj image build --target builder"}),
+            ),
+            (
+                "mj ui argv command",
+                json!({"command": ["mj", "-itranscript-depth", "ui", "show", "abc123"]}),
+            ),
+            (
+                "mj doctor shell command",
+                json!({"command": "mj doctor instructions --platform linux"}),
+            ),
+            (
+                "mj group without subcommand",
+                json!({"command": "mj doctor --json"}),
+            ),
+            (
+                "mj dynamic subcommand",
+                json!({"command": "mj ec2 \"$action\" builder"}),
+            ),
+            (
+                "mj positional argument",
+                json!({"command": "mj message --session abc123 'check the build'"}),
+            ),
         ] {
             append_tool_row(
                 &mut output,
@@ -2985,6 +3026,7 @@ mod tests {
                 4,
             ),
             ("cached ssh summary", "ssh builder 'git status'", "ssh", 5),
+            ("cached mj ec2 summary", "mj ec2 tune builder", "mj ec2", 11),
         ] {
             let cached = ToolCall::new("cached-wrapper", "Bash")
                 .kind(ToolKind::Execute)
