@@ -167,6 +167,7 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   const [providerError, setProviderError] = useState('');
   const [expandedProviders, setExpandedProviders] = useState<string[]>([]);
   const [bundleSearch, setBundleSearch] = useState('');
+  const [focusedBundleId, setFocusedBundleId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState<boolean | null>(null);
   const [targetId, setTargetId] = useState('');
   const [bundleId, setBundleId] = useState('');
@@ -412,6 +413,8 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   const recentBundleIds = useMemo(() => new Set([...Object.values(sessions).map(row => row.bundle_id), options?.default?.bundle_id].filter(Boolean)), [sessions, options]);
   const filteredBundles = bundleChoices.filter(bundle => `${bundle.id} ${bundle.label} ${bundle.repositories.join(' ')} ${bundle.search ?? ''}`.toLowerCase().includes(bundleSearch.toLowerCase()));
   const selectedBundle = bundleChoices.find(bundle => bundle.id === bundleId);
+  const tabBundleId = filteredBundles.find(bundle => bundle.id === focusedBundleId)?.id ??
+    filteredBundles.find(bundle => bundle.id === bundleId)?.id ?? filteredBundles[0]?.id;
 
   const completeMounts = useMemo(
     () => mounts.filter(mount => mount.source.trim() && mount.destination.trim()),
@@ -1076,8 +1079,22 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
               <button type="button" aria-label={`Delete bundle ${selectedBundle.id}`} onClick={() => void handleDeleteBundle(selectedBundle.id)} className="text-muted hover:text-danger"><Trash2 className="size-4" aria-hidden /></button>
             </div>}
             <input aria-label="Search bundles" placeholder="Filter bundles or repositories…" value={bundleSearch} onChange={event => setBundleSearch(event.target.value)} className="rounded-lg border border-line bg-bg px-3 py-2 text-sm text-fg" />
-            <div role="listbox" aria-label="Project bundles" className="max-h-60 overflow-y-auto overscroll-contain rounded-lg border border-line">
-              {filteredBundles.map(bundle => <button key={bundle.id} type="button" role="option" aria-selected={bundle.id === bundleId} onClick={() => setBundleId(bundle.id)} className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left last:border-b-0 hover:bg-raised">
+            <div role="listbox" aria-label="Project bundles" className="max-h-60 overflow-y-auto overscroll-contain rounded-lg border border-line"
+              onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedBundleId(null); }}>
+              {filteredBundles.map((bundle, index) => <button key={bundle.id} type="button" role="option" aria-selected={bundle.id === bundleId}
+                tabIndex={bundle.id === tabBundleId ? 0 : -1}
+                onFocus={() => setFocusedBundleId(bundle.id)}
+                onKeyDown={event => {
+                  let next = index;
+                  if (event.key === 'ArrowDown') next = Math.min(index + 1, filteredBundles.length - 1);
+                  else if (event.key === 'ArrowUp') next = Math.max(index - 1, 0);
+                  else if (event.key === 'Home') next = 0;
+                  else if (event.key === 'End') next = filteredBundles.length - 1;
+                  else return;
+                  event.preventDefault();
+                  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="option"]')[next]?.focus();
+                }}
+                onClick={() => setBundleId(bundle.id)} className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left last:border-b-0 hover:bg-raised">
                 <span className="min-w-0 flex-1"><span className="block truncate text-sm text-fg">{bundle.label} {recentBundleIds.has(bundle.id) && <span className="text-xs text-muted">Recent</span>}</span><span className="block truncate text-xs text-muted">{bundle.id} · {bundle.repositories.join(' · ')}</span></span>
                 {bundle.id === bundleId && <span aria-hidden>✓</span>}
               </button>)}

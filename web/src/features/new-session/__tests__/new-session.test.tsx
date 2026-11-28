@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   LaunchOptions,
@@ -148,10 +148,27 @@ describe('new session wizard', () => {
     expect(headings.indexOf('1 · Target')).toBeLessThan(headings.indexOf('2 · Project'));
     const list = screen.getByRole('listbox', { name: 'Project bundles' });
     expect(list).toHaveClass('max-h-60', 'overflow-y-auto');
-    expect(within(list).getAllByRole('option')[0]).toHaveTextContent('z-recent');
+    const bundleOptions = within(list).getAllByRole('option');
+    expect(bundleOptions[0]).toHaveTextContent('z-recent');
+    // Hard-won: c4cc5f0c3: every bundle was a separate Tab stop with no arrow navigation.
+    expect(bundleOptions.filter(option => option.tabIndex === 0)).toHaveLength(1);
+    await waitFor(() => expect(bundleOptions[1]).toHaveAttribute('aria-selected', 'true'));
+    expect(bundleOptions[1]).toHaveAttribute('tabindex', '0');
+    act(() => bundleOptions[1].focus());
+    fireEvent.keyDown(bundleOptions[1], { key: 'ArrowUp' });
+    expect(bundleOptions[0]).toHaveFocus();
+    expect(bundleOptions[0]).toHaveAttribute('tabindex', '0');
+    expect(bundleOptions[1]).toHaveAttribute('tabindex', '-1');
+    fireEvent.keyDown(bundleOptions[0], { key: 'ArrowDown' });
+    expect(bundleOptions[1]).toHaveFocus();
+    fireEvent.keyDown(bundleOptions[1], { key: 'Home' });
+    expect(bundleOptions[0]).toHaveFocus();
+    fireEvent.keyDown(bundleOptions[0], { key: 'End' });
+    expect(bundleOptions[1]).toHaveFocus();
     fireEvent.change(screen.getByLabelText('Search bundles'), { target: { value: '/SPECIAL' } });
     expect(within(list).getAllByRole('option')).toHaveLength(1);
     expect(within(list).getByRole('option')).toHaveTextContent('z-recent');
+    expect(within(list).getByRole('option')).toHaveAttribute('tabindex', '0');
     expect(screen.queryByLabelText('Repository source')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '+ Create bundle from repository' }));
     expect(screen.getByLabelText('Repository source')).toBeInTheDocument();
@@ -199,7 +216,7 @@ describe('new session wizard', () => {
     });
     render(<NewSessionView workspaceId="w1" />);
     expect(await screen.findByRole('alert')).toHaveTextContent('No provider returned for p1');
-    expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true'));
     expect(screen.queryByRole('button', { name: 'Auto (Anthropic)' })).not.toBeInTheDocument();
   });
 

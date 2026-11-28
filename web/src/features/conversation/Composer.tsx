@@ -869,18 +869,24 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
               Plan mode
             </button>
           )}
-          {[modelOption, effortOption].map((option, index) => option && (
-            <select
-              key={option.key}
-              aria-label={index === 0 ? 'Model' : 'Effort'}
-              value={String(option.current ?? '')}
-              disabled={!capabilities.set_config || transitioning || policyKeys.has(option.key) || option.choices.length <= 1 || configPending !== null}
-              onChange={event => void chooseConfig(option, event.target.value)}
-              className="min-h-7 max-w-44 truncate rounded-full border border-line bg-raised px-2.5 text-[11px] font-medium text-fg"
-            >
-              {option.choices.map(choice => <option key={String(choice.value)} value={String(choice.value)}>{choice.name || String(choice.value)}</option>)}
-            </select>
-          ))}
+          {[modelOption, effortOption].map((option, index) => {
+            if (!option) return null;
+            const currentValue = option.current == null ? '' : String(option.current);
+            const matchesChoice = option.choices.some(choice => String(choice.value) === currentValue);
+            return (
+              <select
+                key={option.key}
+                aria-label={index === 0 ? 'Model' : 'Effort'}
+                value={currentValue}
+                disabled={configPending !== null || !canType || !capabilities.set_config || policyKeys.has(option.key) || (option.choices.length <= 1 && matchesChoice)}
+                onChange={event => void chooseConfig(option, event.target.value)}
+                className="min-h-7 max-w-44 truncate rounded-full border border-line bg-raised px-2.5 text-[11px] font-medium text-fg"
+              >
+                {!matchesChoice && <option value={currentValue} disabled>{currentValue || `${option.label}…`}</option>}
+                {option.choices.map(choice => <option key={String(choice.value)} value={String(choice.value)}>{choice.name || String(choice.value)}</option>)}
+              </select>
+            );
+          })}
           {canConfig && (
             <button type="button" aria-label="More configuration" aria-expanded={configOpen}
               onClick={() => setConfigOpen(open => !open)}
