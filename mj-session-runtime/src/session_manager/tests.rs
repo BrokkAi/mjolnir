@@ -109,6 +109,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use sha2::Digest;
 
+#[cfg(unix)]
 fn run_session_actor(
     target: RelaySessionTarget,
     commands: mpsc::Receiver<ActorCommand>,

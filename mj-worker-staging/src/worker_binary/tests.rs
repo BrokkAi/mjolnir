@@ -6442,8 +6442,15 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
 
         // Stage and install as `prepare_worker_files` does on this machine.
         let canonical = canonical_memory_root(&memory.project_key);
-        std::fs::create_dir_all(&canonical).unwrap();
-        std::fs::write(canonical.join("MEMORY.md"), "- a remembered fact\n").unwrap();
+        let state = mj_core::project_memory::read_canonical_state(&canonical).unwrap();
+        let mut tree = state.tree.clone();
+        tree.files
+            .insert("/MEMORY.md".into(), "- a remembered fact\n".into());
+        assert_eq!(
+            mj_core::project_memory::commit_canonical(&canonical, &state, &session_id, &tree, None)
+                .unwrap(),
+            mj_core::project_memory::SwapOutcome::Swapped
+        );
         let stage = tempfile::tempdir().unwrap();
         stage_profile(&profile, stage.path()).unwrap();
         let seed_stage = tempfile::tempdir().unwrap();

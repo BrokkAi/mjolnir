@@ -1957,7 +1957,12 @@ async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
             panic!("recovery must dispatch a prompt");
         };
         assert!(request_id.starts_with("auth-retry-"));
-        assert_eq!(retry, mj_core::continuation::prompt_blocks());
+        let mut expected = vec![
+            mj_core::continuation::QUOTA_REPLAY_NOTE.into(),
+            "finish this task".into(),
+        ];
+        expected.extend(mj_core::continuation::prompt_blocks());
+        assert_eq!(retry, expected);
         assert_eq!(
             relay
                 .lock()

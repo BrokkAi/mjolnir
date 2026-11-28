@@ -976,8 +976,13 @@ mod tests {
         let (_, id, _) = handout(&memory, &canonical);
         let state = read_canonical_state(&canonical).unwrap();
         let mut incoming = state.tree.clone();
-        incoming.files.insert("/Alias.md".into(), "first".into());
-        incoming.files.insert("/alias.md".into(), "second".into());
+        // Distinct names keep this simulated alias portable to case-insensitive filesystems.
+        incoming
+            .files
+            .insert("/dropped-alias.md".into(), "first".into());
+        incoming
+            .files
+            .insert("/surviving-alias.md".into(), "second".into());
         assert_eq!(
             commit_canonical(&canonical, &state, "other", &incoming, None).unwrap(),
             SwapOutcome::Swapped
@@ -995,17 +1000,17 @@ mod tests {
                     mj_core::project_memory::MemoryApplyMode::Delivery,
                 )?;
                 // Simulate a filesystem where both writes address the same file.
-                std::fs::remove_file(root.join("Alias.md"))?;
+                std::fs::remove_file(root.join("dropped-alias.md"))?;
                 Ok(result)
             },
         )
         .unwrap();
         assert_eq!(outcome, ProjectMemoryDeliveryOutcome::Delivered);
         let record = Record::load(&memory).unwrap();
-        assert!(!record.base.files.contains_key("/Alias.md"));
-        assert_eq!(record.base.files["/alias.md"], "second");
+        assert!(!record.base.files.contains_key("/dropped-alias.md"));
+        assert_eq!(record.base.files["/surviving-alias.md"], "second");
         let (base, next_id, replica) = handout(&memory, &canonical);
-        assert!(!replica.files.contains_key("/Alias.md"));
+        assert!(!replica.files.contains_key("/dropped-alias.md"));
         assert_eq!(commit(&canonical, &base, &next_id, &replica), incoming);
         assert_eq!(read_canonical_state(&canonical).unwrap().tree, incoming);
     }

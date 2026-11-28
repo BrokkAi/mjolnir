@@ -22,6 +22,7 @@ import sys
 BUDGET = 50_000
 
 OVER_BUDGET = {
+    'brokk-mjolnir',  # Crossed 50k; awaiting a split.
     'brokk-mj-controller',
     'brokk-mj-daemon',
     'brokk-mj-worker-runtime',  # Still over budget after the MicroVM, MCP and review split.

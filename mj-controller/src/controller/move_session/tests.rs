@@ -1931,9 +1931,9 @@ mod staged_in_place_tests {
             assert!(snapshot.in_place_move_hold.is_none());
             assert!(!snapshot.handled_commands.contains_key("cmd-must-not-continue"));
             assert_eq!(snapshot.dispatches["cmd-existing-user"].state, mj_core::relay::RelayDispatchState::InFlight);
-            let context = snapshot.pending_prompt_context.unwrap();
-            assert!(context.text.contains(history), "{}", context.text);
-            assert_eq!(context.attached_command_id.as_deref(), Some("cmd-existing-user"));
+            assert!(snapshot.pending_prompt_context.is_none());
+            let context = snapshot.frozen_prompt_contexts.get("cmd-existing-user").expect("started command retains the handoff");
+            assert!(context.contains(history), "{context}");
             let requests = fs::read_to_string(relay_root.join("in-place-move-requests.log")).unwrap();
             assert!(!requests.contains("submit_front"));
             assert!(!requests.contains("discard_held_move_commands"));
