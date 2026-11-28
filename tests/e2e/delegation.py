@@ -51,6 +51,7 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--instance", required=True)
     parser.add_argument("--mailbox-regression-only", action="store_true")
+    parser.add_argument("--unanswered-wake-only", action="store_true")
     parser.add_argument("--restart-regression-only", action="store_true")
     parser.add_argument("--missing-child-cwd-only", action="store_true")
     parser.add_argument("--create-restart-only", action="store_true")
@@ -169,6 +170,16 @@ def main():
             '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.txt"), "a") as marker:\n'
             '            marker.write(text + "\\n")',
         )
+        if args.unanswered_wake_only:
+            script = script.replace(
+                '            marker.write(text + "\\n")',
+                '            marker.write(text + "\\n")\n'
+                '        if "Message from your parent agent:" in text and "unanswered wake fixture" in text:\n'
+                '            report_execution("idle")\n'
+                '            send({"jsonrpc":"2.0", "id":ident, "result":{"stopReason":"end_turn"}})\n'
+                '            continue',
+                1,
+            )
         # A held prompt ends with end_turn once `release` writes its file into
         # the session's private CODEX_HOME, or as cancelled on session/cancel.
         held = (
@@ -267,7 +278,7 @@ def main():
 
         # Keep the default fixture explicitly OpenAI-backed for its subagents.
         (lab.profile / "config.toml").write_text('model_provider = "openai"\n')
-        if quota_only or args.missing_child_cwd_only:
+        if quota_only or args.missing_child_cwd_only or args.unanswered_wake_only:
             (lab.profile / "auth.json").write_text(json.dumps({
                 "auth_mode": "chatgpt",
                 "tokens": {"access_token": "fixture-token"},
@@ -661,6 +672,56 @@ def main():
                     return
                 time.sleep(0.05)
             raise RuntimeError(f"mailbox event was not accepted: {session}, {text}")
+
+        # Hard-won: #1705: an empty mailbox wake hid the earlier child report.
+        if args.unanswered_wake_only:
+            prompt = "Return a short fixture report."
+            child = tool(parent, "spawn", {
+                "task_name": "unanswered-wake-child", "task_type": "straightforward",
+                "instructions": prompt,
+            })["child_session_id"]
+            wait_prompt(child, prompt)
+            requests = []
+            for suffix in ("one", "two"):
+                text = f"unanswered wake fixture {suffix}"
+                requests.append(tool(parent, "send_message", {
+                    "child_session_id": child, "message": text,
+                })["request_id"])
+                wait_mailbox_acceptance(child, text)
+            release(child, prompt)
+            deadline = time.monotonic() + WAIT_SECONDS
+            report = None
+            while time.monotonic() < deadline:
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    rows = database.execute(
+                        "SELECT event_json FROM mailbox_outbox WHERE target_session_id=? AND event_key LIKE 'subagent-finished-%'",
+                        (parent,),
+                    ).fetchall()
+                for (raw,) in rows:
+                    candidate = json.loads(raw)["body"]["report"]
+                    if candidate["child_session_id"] == child and (candidate.get("failure") or {}).get("kind") == "mailbox_unanswered":
+                        report = candidate
+                        break
+                if report:
+                    break
+                time.sleep(0.1)
+            assert report, f"no unanswered wake notice: {rows}"
+            assert report["state"] == "completed", report
+            assert "reliability reply:" in report["output"], report
+            warning = report["failure"]["summary"]
+            assert all(request in warning for request in requests), report
+            assert "may not have acted" in warning, report
+            cli("daemon", "restart")
+            listed = tool(parent, "list_agents")
+            entry = next(agent for agent in listed["agents"] if agent["child_session_id"] == child)
+            assert entry["state"] == "completed", entry
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                rows = database.execute(
+                    "SELECT event_json FROM mailbox_outbox WHERE target_session_id=? AND event_key LIKE 'subagent-finished-%'",
+                    (parent,),
+                ).fetchall()
+            assert any(json.loads(raw)["body"]["report"] == report for (raw,) in rows), rows
+            return
 
         # Hard-won: #1664: a removed worktree made parked-child wakes look retryable.
         if args.missing_child_cwd_only:
@@ -1619,7 +1680,16 @@ def main():
         )
     finally:
         try:
-            if (quota_only or args.missing_child_cwd_only) and cli is not None:
+            if args.unanswered_wake_only and cli is not None:
+                metadata = lab.data / "daemon.json"
+                pid = json.loads(metadata.read_text())["pid"] if metadata.exists() else None
+                cli("daemon", "stop", check=False)
+                if pid is not None:
+                    deadline = time.monotonic() + WAIT_SECONDS
+                    while reliability_lab.process_is_running(pid) and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    assert not reliability_lab.process_is_running(pid), f"test daemon {pid} survived stop"
+            elif (quota_only or args.missing_child_cwd_only) and cli is not None:
                 cli("daemon", "stop", check=False)
         finally:
             for server in (catalog_proxy, glide_proxy):

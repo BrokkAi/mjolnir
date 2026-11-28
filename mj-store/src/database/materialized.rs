@@ -1,5 +1,140 @@
 use super::*;
 
+/// The earlier report and message identities for an unanswered mailbox wake.
+pub struct UnansweredWakeReport {
+    pub turn: Option<MaterializedTurnOutcome>,
+    pub messages: Vec<UnansweredMailboxMessage>,
+    pub failure_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnansweredMailboxMessage {
+    pub key: String,
+    pub sender: String,
+    pub from_parent: bool,
+}
+
+/// A wake answered by the harness or by its handback tool. The store keeps
+/// only the newest handback, so one replaced by a later handback is unknown
+/// here and an otherwise empty wake remains unanswered (see #1717).
+pub fn wake_answered(
+    turn: &MaterializedTurnOutcome,
+    handback: Option<&mj_core::subagent::SubagentHandback>,
+) -> bool {
+    !matches!(&turn.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
+        if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
+        || handback.is_some_and(|handback| handback.answers(&turn.command_id))
+}
+
+/// Resolve an unanswered wake from existing turn and transcript records.
+/// Missing turn spans or message projections are unknown, not empty history.
+pub fn load_unanswered_wake_report(
+    session_id: &str,
+    wake: &MaterializedTurnOutcome,
+    handback: Option<&mj_core::subagent::SubagentHandback>,
+) -> Result<Option<UnansweredWakeReport>> {
+    load_unanswered_wake_report_from(&database_path(), session_id, wake, handback)
+}
+
+pub(super) fn load_unanswered_wake_report_from(
+    path: &Path,
+    session_id: &str,
+    wake: &MaterializedTurnOutcome,
+    handback: Option<&mj_core::subagent::SubagentHandback>,
+) -> Result<Option<UnansweredWakeReport>> {
+    if !mj_core::continuation::carries_mailbox_wake(&wake.command_id)
+        || wake_answered(wake, handback)
+    {
+        return Ok(None);
+    }
+    let Some(accepted) = wake.accepted_ordinal else {
+        return Ok(None);
+    };
+    let mut reader = open_reader(path)?;
+    let tx = reader.transaction()?;
+    let mut messages = tx.prepare(
+        "SELECT body_json FROM materialized_transcript_items WHERE session_id=?1 AND position=?2 AND item_kind='message' ORDER BY stable_id",
+    )?;
+    let mut keys_for = |ordinal| -> Result<Vec<UnansweredMailboxMessage>> {
+        Ok(messages
+            .query_map(params![session_id, ordinal], |row| row.get::<_, String>(0))?
+            .map(|row| -> Result<_> {
+                let body: mj_core::transcript::TranscriptBody = serde_json::from_str(&row?)?;
+                Ok(match body {
+                    mj_core::transcript::TranscriptBody::Message { event } => {
+                        let from_parent = event.is_parent_message();
+                        let sender = if from_parent {
+                            "Message from parent".to_owned()
+                        } else {
+                            mj_core::mailbox::describe_mailbox_event(&event)
+                                .header
+                                .trim_end_matches(':')
+                                .to_owned()
+                        };
+                        Some(UnansweredMailboxMessage {
+                            from_parent,
+                            key: event.key,
+                            sender,
+                        })
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    };
+    let mut key_batches = vec![keys_for(accepted)?];
+    let mut turns = tx.prepare("SELECT body FROM session_turn_usage WHERE session_id=?1 AND completed_ordinal<?2 ORDER BY completed_ordinal DESC")?;
+    let rows = turns.query_map(params![session_id, wake.completed_ordinal], |row| {
+        row.get::<_, String>(0)
+    })?;
+    for row in rows {
+        let turn = deserialize_turn_outcome(&row?)?;
+        if mj_core::continuation::carries_mailbox_wake(&turn.command_id)
+            && !wake_answered(&turn, handback)
+        {
+            if let Some(ordinal) = turn.accepted_ordinal {
+                key_batches.push(keys_for(ordinal)?);
+            }
+            continue;
+        }
+        let failure_message = turn
+            .turn_start_position
+            .map(|start| {
+                last_materialized_agent_message_within(
+                    &tx,
+                    session_id,
+                    start,
+                    turn.completed_ordinal,
+                )
+            })
+            .transpose()?
+            .flatten();
+        return Ok(Some(UnansweredWakeReport {
+            turn: Some(turn),
+            messages: ordered_messages(key_batches),
+            failure_message,
+        }));
+    }
+    Ok(Some(UnansweredWakeReport {
+        turn: None,
+        messages: ordered_messages(key_batches),
+        failure_message: None,
+    }))
+}
+
+fn ordered_messages(batches: Vec<Vec<UnansweredMailboxMessage>>) -> Vec<UnansweredMailboxMessage> {
+    let mut seen = std::collections::BTreeSet::new();
+    batches
+        .into_iter()
+        .rev()
+        .flatten()
+        .filter(|message| seen.insert(message.key.clone()))
+        .collect()
+}
+
 /// Load a session's whole projection, transcript and all.
 ///
 /// Crate-private on purpose. The cost of this call is everything that has ever

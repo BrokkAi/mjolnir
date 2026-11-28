@@ -2707,6 +2707,10 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
     let progress =
         |awaited: Option<u64>, answered: Option<u64>, failed: Option<(&'static str, &str)>| {
             ChildProgress {
+                report_answer: None,
+                unanswered_messages: None,
+                observed_handback: None,
+                report_failure_message: None,
                 finished_span: None,
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
@@ -2788,6 +2792,10 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         interruption_event_ordinals: Vec::new(),
     };
     let progress = ChildProgress {
+        report_answer: None,
+        unanswered_messages: None,
+        observed_handback: None,
+        report_failure_message: None,
         finished_span: None,
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
@@ -10026,4 +10034,125 @@ async fn session_checkout_probes_read_the_registered_target_during_drain() {
             .unwrap()
             .is_none()
     );
+}
+
+// Hard-won: #1705: an unanswered wake hid the child's report from its parent.
+#[test]
+fn unanswered_wake_notice_retains_the_report_and_names_the_messages() {
+    let mut record = mj_controller::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Running;
+    let summary = mj_core::state::MaterializedSessionSummary {
+        session_id: "child".into(),
+        applied_event_ordinal: 12,
+        last_activity_at_ms: None,
+        execution: MaterializedExecutionState::Idle,
+        session_title: None,
+        last_agent_message: None,
+        last_user_message: None,
+        last_agent_message_follows_last_user: false,
+        agent_message_latest_content_ordinals: Vec::new(),
+        interruption_event_ordinals: Vec::new(),
+    };
+    let mut progress = ChildProgress::settled(ReportState::Fallback);
+    progress.answer = Some(finished_turn("mailbox-wake-12345678"));
+    progress.report_answer = Some(finished_turn("subagent-input-original"));
+    progress.report_answer.as_mut().unwrap().work_facts = Some(observed_work());
+    let wake_facts = mj_core::work_facts::WorkFacts::unavailable("wake observation unavailable");
+    progress.answer.as_mut().unwrap().work_facts = Some(wake_facts.clone());
+    assert_eq!(finish_facts(&progress), wake_facts);
+    progress.unanswered_messages = Some(vec![
+        mj_controller::database::UnansweredMailboxMessage {
+            key: "parent-1".into(),
+            sender: "Message from parent".into(),
+            from_parent: true,
+        },
+        mj_controller::database::UnansweredMailboxMessage {
+            key: "peer-1".into(),
+            sender: "Message from session Peer".into(),
+            from_parent: false,
+        },
+    ]);
+    let (state, output, finished) = subagent_status(
+        Some(&record),
+        Some(&summary),
+        None,
+        Some("earlier report"),
+        false,
+        &progress,
+    );
+    let mut entry = wait_agent_entry("child", &state, output, finished, &progress, false);
+    entry["task_name"] = "audit".into();
+    let report: mj_core::mailbox::SubagentFinishedReport = serde_json::from_value(entry).unwrap();
+    let event = mj_core::mailbox::MailboxEvent {
+        key: "child-finish".into(),
+        source: "subagent".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+            report: Box::new(report),
+        },
+    };
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(rendered.contains("State: completed"), "{rendered}");
+    assert!(rendered.contains("earlier report"), "{rendered}");
+    assert!(
+        rendered.contains("Message from parent (parent-1)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Message from session Peer (peer-1)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Resend your message if needed"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("may not have acted"), "{rendered}");
+    progress.unanswered_messages.as_mut().unwrap().remove(0);
+    let peer_only = wait_agent_entry("child", "completed", None, true, &progress, false);
+    let warning = peer_only["failure"]["summary"].as_str().unwrap();
+    assert!(
+        warning.contains("Message from session Peer (peer-1)"),
+        "{warning}"
+    );
+    assert!(!warning.contains("Resend"), "{warning}");
+    progress.state = ChildState::Failed {
+        state: "failed",
+        reason: "provider unavailable".into(),
+        provider_failure: true,
+    };
+    let entry = wait_agent_entry(
+        "child",
+        "failed",
+        Some("provider unavailable".into()),
+        true,
+        &progress,
+        false,
+    );
+    let warning = entry["failure"]["summary"].as_str().unwrap();
+    assert!(warning.contains("provider unavailable"), "{warning}");
+    assert!(warning.contains("peer-1"), "{warning}");
+}
+
+// Hard-won: #1705: a tool handback during an empty wake was called unanswered.
+#[tokio::test]
+async fn unanswered_wake_handback_counts_as_an_answer() {
+    let mut progress = ChildProgress::settled(ReportState::Delivered("wake report".into()));
+    let mut wake = finished_turn("mailbox-wake-12345678");
+    wake.outcome = mj_core::state::TurnOutcomeKind::Completed {
+        stop_reason: mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into(),
+    };
+    progress.observed_handback = Some(mj_core::subagent::SubagentHandback {
+        command_id: wake.command_id.clone(),
+        message: "wake report".into(),
+        recorded_at_ms: 1,
+    });
+    progress.answer = Some(wake);
+    let mut children = vec![("child".to_owned(), None, progress)];
+    load_unanswered_wake_reports(&mut children).await.unwrap();
+    assert_eq!(
+        children[0].2.report,
+        ReportState::Delivered("wake report".into())
+    );
+    assert!(children[0].2.unanswered_messages.is_none());
 }
