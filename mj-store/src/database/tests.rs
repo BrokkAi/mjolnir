@@ -10213,7 +10213,7 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         )
         .unwrap();
     }
-    let found = load_unanswered_wake_report_from(&database, "session-1", &wake)
+    let found = load_unanswered_wake_report_from(&database, "session-1", &wake, None)
         .unwrap()
         .unwrap();
     assert_eq!(found.turn.unwrap().command_id, prior.command_id);
@@ -10233,7 +10233,7 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
     );
     assert!(
-        load_unanswered_wake_report_from(&database, "session-1", &ordinary)
+        load_unanswered_wake_report_from(&database, "session-1", &ordinary, None)
             .unwrap()
             .is_none()
     );
@@ -10301,6 +10301,19 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
                 })],
                 ..Default::default()
             },
+            11 => MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                    stable_id: "wake-marker:11".into(),
+                    position: 11,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: 11,
+                    last_changed_at_ms: 11,
+                    body: TranscriptBody::System {
+                        text: "Agent continued on its own".into(),
+                    },
+                })],
+                ..Default::default()
+            },
             12 => MaterializedSessionMutation {
                 last_turn_outcome: Some(later_wake.clone()),
                 ..Default::default()
@@ -10317,7 +10330,7 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         )
         .unwrap();
     }
-    let found = load_unanswered_wake_report_from(&database, "session-1", &later_wake)
+    let found = load_unanswered_wake_report_from(&database, "session-1", &later_wake, None)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -10381,7 +10394,7 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         )
         .unwrap();
     }
-    let found = load_unanswered_wake_report_from(&database, "session-1", &next_wake)
+    let found = load_unanswered_wake_report_from(&database, "session-1", &next_wake, None)
         .unwrap()
         .unwrap();
     assert_eq!(found.turn.unwrap().command_id, ordinary.command_id);
@@ -10397,6 +10410,121 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
     assert!(found.messages[1].from_parent);
     assert!(found.messages[0].sender.contains("Peer"));
     assert_eq!(found.messages[1].sender, "Message from parent");
+    let handback = mj_core::subagent::SubagentHandback {
+        command_id: later_wake.command_id.clone(),
+        message: "wake handback".into(),
+        recorded_at_ms: 12,
+    };
+    let found =
+        load_unanswered_wake_report_from(&database, "session-1", &next_wake, Some(&handback))
+            .unwrap()
+            .unwrap();
+    assert_eq!(found.turn.unwrap().command_id, later_wake.command_id);
+    assert_eq!(
+        found
+            .messages
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect::<Vec<_>>(),
+        ["parent-4"]
+    );
+
+    let mut failed_wake = turn("mailbox-wake-failed-12345", 16, 17, 18, "error");
+    failed_wake.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "provider unavailable".into(),
+        code: Some("provider_error".into()),
+        http_status: Some(503),
+        reset_at: None,
+        retry_after_seconds: None,
+        login_fingerprint: None,
+    });
+    let final_wake = turn(
+        "mailbox-wake-final-12345",
+        19,
+        20,
+        21,
+        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
+    );
+    for ordinal in 16..=21 {
+        let mutation = match ordinal {
+            17 => MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                    stable_id: "wake-marker:17".into(),
+                    position: 17,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: 17,
+                    last_changed_at_ms: 17,
+                    body: TranscriptBody::System {
+                        text: "Agent continued on its own".into(),
+                    },
+                })],
+                ..Default::default()
+            },
+            18 => MaterializedSessionMutation {
+                last_turn_outcome: Some(failed_wake.clone()),
+                ..Default::default()
+            },
+            19 => MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                    stable_id: "message:parent-5".into(),
+                    position: 19,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: 19,
+                    last_changed_at_ms: 19,
+                    body: TranscriptBody::Message {
+                        event: Box::new(mj_core::mailbox::MailboxEvent {
+                            key: "parent-5".into(),
+                            source: "parent".into(),
+                            wake: true,
+                            created_at_ms: 19,
+                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                                text: "fifth".into(),
+                            },
+                        }),
+                    },
+                })],
+                ..Default::default()
+            },
+            21 => MaterializedSessionMutation {
+                last_turn_outcome: Some(final_wake.clone()),
+                ..Default::default()
+            },
+            _ => MaterializedSessionMutation::default(),
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &event_digest(ordinal - 1),
+            &event_digest(ordinal),
+            &mutation,
+        )
+        .unwrap();
+    }
+    let found = load_unanswered_wake_report_from(&database, "session-1", &final_wake, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        found
+            .messages
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect::<Vec<_>>(),
+        ["parent-5"]
+    );
+    assert_eq!(
+        found.turn.as_ref().unwrap().command_id,
+        failed_wake.command_id
+    );
+    assert_eq!(
+        mj_core::subagent::failed_turn(
+            found.turn.as_ref().unwrap(),
+            found.failure_message.as_deref()
+        )
+        .unwrap()
+        .1,
+        "provider unavailable"
+    );
     let connection = Connection::open(&database).unwrap();
     connection
         .execute(
@@ -10405,12 +10533,12 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         )
         .unwrap();
     drop(connection);
+    let found = load_unanswered_wake_report_from(&database, "session-1", &later_wake, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.turn.unwrap().command_id, ordinary.command_id);
     assert!(
-        load_unanswered_wake_report_from(&database, "session-1", &later_wake)
-            .unwrap()
-            .unwrap()
-            .turn
-            .is_none(),
-        "a missing span is unknown, not an earlier report"
+        found.failure_message.is_none(),
+        "a missing span has no known explanation"
     );
 }

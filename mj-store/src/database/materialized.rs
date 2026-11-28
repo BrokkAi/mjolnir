@@ -14,23 +14,36 @@ pub struct UnansweredMailboxMessage {
     pub from_parent: bool,
 }
 
+/// A wake answered by the harness or by its handback tool. The store keeps
+/// only the newest handback, so one replaced by a later handback is unknown
+/// here and an otherwise empty wake remains unanswered (see #1717).
+pub fn wake_answered(
+    turn: &MaterializedTurnOutcome,
+    handback: Option<&mj_core::subagent::SubagentHandback>,
+) -> bool {
+    !matches!(&turn.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
+        if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
+        || handback.is_some_and(|handback| handback.answers(&turn.command_id))
+}
+
 /// Resolve an unanswered wake from existing turn and transcript records.
 /// Missing turn spans or message projections are unknown, not empty history.
 pub fn load_unanswered_wake_report(
     session_id: &str,
     wake: &MaterializedTurnOutcome,
+    handback: Option<&mj_core::subagent::SubagentHandback>,
 ) -> Result<Option<UnansweredWakeReport>> {
-    load_unanswered_wake_report_from(&database_path(), session_id, wake)
+    load_unanswered_wake_report_from(&database_path(), session_id, wake, handback)
 }
 
 pub(super) fn load_unanswered_wake_report_from(
     path: &Path,
     session_id: &str,
     wake: &MaterializedTurnOutcome,
+    handback: Option<&mj_core::subagent::SubagentHandback>,
 ) -> Result<Option<UnansweredWakeReport>> {
     if !mj_core::continuation::carries_mailbox_wake(&wake.command_id)
-        || !matches!(&wake.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
-            if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
+        || wake_answered(wake, handback)
     {
         return Ok(None);
     }
@@ -79,38 +92,26 @@ pub(super) fn load_unanswered_wake_report_from(
     })?;
     for row in rows {
         let turn = deserialize_turn_outcome(&row?)?;
-        if mj_core::continuation::carries_mailbox_wake(&turn.command_id) {
-            let Some(start) = turn.turn_start_position else {
-                break;
-            };
-            let has_output: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id=?1 AND position>=?2 AND position<=?3 AND item_kind IN ('agent','thought','tool'))",
-                params![session_id, start, turn.completed_ordinal], |row| row.get(0),
-            )?;
-            if !has_output {
-                if matches!(&turn.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
-                    if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
-                {
-                    if let Some(ordinal) = turn.accepted_ordinal {
-                        key_batches.push(keys_for(ordinal)?);
-                    }
-                    continue;
-                }
-                break;
+        if mj_core::continuation::carries_mailbox_wake(&turn.command_id)
+            && !wake_answered(&turn, handback)
+        {
+            if let Some(ordinal) = turn.accepted_ordinal {
+                key_batches.push(keys_for(ordinal)?);
             }
+            continue;
         }
-        let Some(start) = turn.turn_start_position else {
-            break;
-        };
-        let span_present: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id=?1 AND position>=?2 AND position<=?3)",
-            params![session_id, start, turn.completed_ordinal], |row| row.get(0),
-        )?;
-        if !span_present {
-            break;
-        }
-        let failure_message =
-            last_materialized_agent_message_within(&tx, session_id, start, turn.completed_ordinal)?;
+        let failure_message = turn
+            .turn_start_position
+            .map(|start| {
+                last_materialized_agent_message_within(
+                    &tx,
+                    session_id,
+                    start,
+                    turn.completed_ordinal,
+                )
+            })
+            .transpose()?
+            .flatten();
         return Ok(Some(UnansweredWakeReport {
             turn: Some(turn),
             messages: ordered_messages(key_batches),

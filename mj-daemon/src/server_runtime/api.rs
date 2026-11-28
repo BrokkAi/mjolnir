@@ -2534,6 +2534,12 @@ impl ApiBackend {
         let Some(turn) = progress.report_answer.as_ref().or(progress.answer.as_ref()) else {
             return Ok(ChildState::NoFailure);
         };
+        if mj_core::continuation::carries_mailbox_wake(&turn.command_id)
+            && matches!(progress.report, ReportState::Delivered(_))
+            && mj_controller::database::wake_answered(turn, progress.observed_handback.as_ref())
+        {
+            return Ok(ChildState::NoFailure);
+        }
         let failure_message = if progress.report_answer.is_some() {
             progress.report_failure_message.as_deref()
         } else {
@@ -3869,13 +3875,12 @@ impl ChildProgress {
     }
 
     fn report_span(&self) -> Option<(u64, u64)> {
-        self.report_answer
-            .as_ref()
-            .and_then(|turn| {
-                turn.turn_start_position
-                    .map(|start| (start, turn.completed_ordinal))
-            })
-            .or(self.finished_span)
+        match &self.report_answer {
+            Some(turn) => turn
+                .turn_start_position
+                .map(|start| (start, turn.completed_ordinal)),
+            None => self.finished_span,
+        }
     }
 }
 
@@ -3893,10 +3898,11 @@ async fn load_unanswered_wake_reports(
         .filter_map(|(id, _, progress)| {
             let turn = progress.answer.as_ref()?;
             (mj_core::continuation::carries_mailbox_wake(&turn.command_id)
-            && matches!(&turn.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
-                if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
-            && !progress.observed_handback.as_ref().is_some_and(|handback| handback.answers(&turn.command_id)))
-            .then(|| (id.clone(), turn.clone()))
+                && !mj_controller::database::wake_answered(
+                    turn,
+                    progress.observed_handback.as_ref(),
+                ))
+            .then(|| (id.clone(), turn.clone(), progress.observed_handback.clone()))
         })
         .collect();
     if candidates.is_empty() {
@@ -3905,8 +3911,12 @@ async fn load_unanswered_wake_reports(
     let reports = blocking("read unanswered mailbox wakes", move || {
         candidates
             .into_iter()
-            .map(|(id, wake)| {
-                let report = mj_controller::database::load_unanswered_wake_report(&id, &wake)?;
+            .map(|(id, wake, handback)| {
+                let report = mj_controller::database::load_unanswered_wake_report(
+                    &id,
+                    &wake,
+                    handback.as_ref(),
+                )?;
                 Ok((id, report))
             })
             .collect::<Result<BTreeMap<_, _>>>()

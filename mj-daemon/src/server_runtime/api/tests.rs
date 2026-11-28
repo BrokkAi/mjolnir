@@ -10116,6 +10116,22 @@ fn unanswered_wake_notice_retains_the_report_and_names_the_messages() {
         "{warning}"
     );
     assert!(!warning.contains("Resend"), "{warning}");
+    progress.state = ChildState::Failed {
+        state: "failed",
+        reason: "provider unavailable".into(),
+        provider_failure: true,
+    };
+    let entry = wait_agent_entry(
+        "child",
+        "failed",
+        Some("provider unavailable".into()),
+        true,
+        &progress,
+        false,
+    );
+    let warning = entry["failure"]["summary"].as_str().unwrap();
+    assert!(warning.contains("provider unavailable"), "{warning}");
+    assert!(warning.contains("peer-1"), "{warning}");
 }
 
 // Hard-won: #1705: a tool handback during an empty wake was called unanswered.
