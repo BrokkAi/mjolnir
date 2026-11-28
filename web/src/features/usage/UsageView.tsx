@@ -1,13 +1,34 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { getUsageReport } from '../../api/client';
-import type { SessionUsageReport } from '../../api/types';
+import type { ModelUsageEstimate, SessionUsageReport } from '../../api/types';
 import { useSessionStore } from '../../stores/useSessionStore';
 import { money, providerRows } from './usageMath';
 
 const HOUR = 3600000;
 const pins = (n: number) => n < 20 ? String.fromCodePoint(0x2460 + n) : `(${n + 1})`;
 const columns = 'grid min-w-[760px] grid-cols-[minmax(140px,1fr)_minmax(180px,2fr)_80px_100px_90px_minmax(160px,1fr)] items-center gap-3';
+
+function tokenSum(models: ModelUsageEstimate[], keys: string[]): number | null {
+  const values = models.flatMap(model => keys.flatMap(key => model.totals[key] ? [model.totals[key].tokens] : []));
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function tokenText(value: number | null, partial = false) {
+  return value === null ? '—' : `${value.toLocaleString()}${partial ? '+' : ''}`;
+}
+
+function cachedTitle(models: ModelUsageEstimate[]) {
+  return [['cached_read_tokens', 'Read'], ['cached_write_tokens', 'Write'], ['thought_tokens', 'Thought']]
+    .flatMap(([key, label]) => {
+      const value = tokenSum(models, [key]);
+      return value === null ? [] : [`${label}: ${value.toLocaleString()}`];
+    }).join(' · ') || undefined;
+}
+
+function costText(cost: SessionUsageReport['cost_usd_ticks'], partial: boolean) {
+  return 'Ok' in cost ? `${money(cost)}${partial ? '+' : ''}` : '?';
+}
 
 function Gauge({ pace, thin = false, payg = false }: { pace: number | null; thin?: boolean; payg?: boolean }) {
   const color = pace === null ? 'bg-muted' : pace < 80 ? 'bg-accent' : pace <= 105 ? 'bg-ok' : pace <= 130 ? 'bg-warn' : 'bg-danger';
@@ -215,13 +236,45 @@ export default function UsageView() {
           </section>
           <section className="rounded-lg border border-line bg-surface p-4">
             <h2 className="font-semibold">Sessions</h2>
-            {report.sessions.map(s => <article key={s.session_id} className="border-t border-line py-3 text-sm">
-              <div className="font-medium">{s.title} · {s.profile} {s.suspended && <span className="text-warn">Suspended</span>} · {money(s.cost_usd_ticks)}</div>
-              <div className="text-muted">Coverage: {s.coverage.full_turn_reports}/{s.coverage.recorded_turns} turns</div>
-              {s.models.map((m, i) => <div key={i} className="text-muted">
-                {m.model ?? 'Unknown'} · {Object.entries(m.totals).map(([key, v]) => `${key}: ${v.tokens.toLocaleString()}`).join(' · ')} · {money(m.cost_usd_ticks)} {m.unreported_turns ? `· ${m.unreported_turns} unreported` : ''}
-              </div>)}
-            </article>)}
+            <div className="mt-3 overflow-x-auto">
+              <table aria-label="Sessions" className="w-full border-collapse text-sm">
+                <thead><tr className="text-xs text-muted">
+                  <th scope="col" className="px-2 py-2 text-left">Session / Model</th>
+                  <th scope="col" className="px-2 py-2 text-left">Profile</th>
+                  {['Est $', 'Tokens', 'Input', 'Output', 'Cached'].map(label => <th key={label} scope="col" className="px-2 py-2 text-right tabular-nums">{label}</th>)}
+                  <th scope="col" className="px-2 py-2 text-left">Coverage</th>
+                </tr></thead>
+                <tbody>
+                  {report.sessions.length === 0 && <tr><td colSpan={8} className="border-t border-line px-2 py-3 text-muted">No sessions match these filters.</td></tr>}
+                  {report.sessions.map(s => {
+                    const partial = s.coverage.full_turn_reports < s.coverage.recorded_turns || (s.coverage.unfinished_turns ?? 0) > 0;
+                    const partialTokens = partial || s.models.some(m => !m.totals.total_tokens || (m.unreported_turns ?? 0) > 0);
+                    return <Fragment key={s.session_id}>
+                      <tr className="border-t border-line bg-raised/40">
+                        <th scope="row" className="px-2 py-2 text-left font-medium text-fg">{s.title} {s.suspended && <span className="rounded bg-raised px-1.5 py-0.5 text-xs text-warn">Suspended</span>}</th>
+                        <td className="px-2 py-2 text-left">{s.profile}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{costText(s.cost_usd_ticks, partial)}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['total_tokens']), partialTokens)}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['input_tokens']))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['output_tokens']))}</td>
+                        <td title={cachedTitle(s.models)} className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['cached_read_tokens', 'cached_write_tokens']))}</td>
+                        <td className="px-2 py-2 text-left text-xs text-muted">{s.subagent_count} sub · {s.coverage.full_turn_reports}/{s.coverage.recorded_turns} turns{(s.coverage.unfinished_turns ?? 0) > 0 ? ` · ${s.coverage.unfinished_turns} active` : ''}</td>
+                      </tr>
+                      {s.models.map((m, i) => <tr key={i} className="border-t border-line/40 text-xs text-muted">
+                        <th scope="row" className="py-2 pl-6 pr-2 text-left font-normal">{i === s.models.length - 1 ? '└─' : '├─'} {m.model ?? 'Unknown model'}</th>
+                        <td />
+                        <td className="px-2 py-2 text-right tabular-nums">{costText(m.cost_usd_ticks, (m.unreported_turns ?? 0) > 0)}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['total_tokens']))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['input_tokens']))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['output_tokens']))}</td>
+                        <td title={cachedTitle([m])} className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['cached_read_tokens', 'cached_write_tokens']))}</td>
+                        <td className="px-2 py-2 text-left text-xs text-muted">{[(m.unreported_turns ?? 0) > 0 ? `${m.unreported_turns} unreported` : '', (m.totals.thought_tokens?.tokens ?? 0) > 0 ? `thought: ${m.totals.thought_tokens.tokens.toLocaleString()}` : ''].filter(Boolean).join(' · ')}</td>
+                      </tr>)}
+                    </Fragment>;
+                  })}
+                </tbody>
+              </table>
+            </div>
           </section>
         </>}
       </div>

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import UsageView from '../UsageView';
 import { getUsageReport } from '../../../api/client';
@@ -60,4 +60,38 @@ it('keeps loaded window metadata while a selection loads and after failure', asy
   expect(await screen.findByRole('alert')).toHaveTextContent('offline');
   expect(screen.getByText('Last 24h')).toBeInTheDocument();
   expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});
+
+
+it('renders session and model usage in aligned table columns', async () => {
+  const token = (tokens: number) => ({ tokens, reported_turns: 1 });
+  vi.mocked(getUsageReport).mockResolvedValue({ ...report, sessions: [{
+    ...report.sessions[0], suspended: true, subagent_count: 2,
+    coverage: { recorded_turns: 4, full_turn_reports: 2, unfinished_turns: 1 },
+    cost_usd_ticks: { Ok: 82000000000 },
+    models: [
+      { model: 'Model A', cost_usd_ticks: { Ok: 82000000000 }, unreported_turns: 2,
+        totals: { total_tokens: token(1200), input_tokens: token(900), output_tokens: token(300), cached_read_tokens: token(200), cached_write_tokens: token(50), thought_tokens: token(20) } },
+      { model: null, cost_usd_ticks: { Err: null }, totals: { total_tokens: token(500), input_tokens: token(400) } },
+    ],
+  }] } as never);
+  render(<UsageView />);
+  const table = await screen.findByRole('table', { name: 'Sessions' });
+  expect(within(table).getAllByRole('columnheader').map(header => header.textContent)).toEqual(['Session / Model', 'Profile', 'Est $', 'Tokens', 'Input', 'Output', 'Cached', 'Coverage']);
+  const rows = within(table).getAllByRole('row');
+  expect(within(rows[1]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['a', '$8.20+', '1,700+', '1,300', '300', '250', '2 sub · 2/4 turns · 1 active']);
+  expect(within(rows[1]).getByText('Suspended')).toBeInTheDocument();
+  expect(within(rows[1]).getByTitle('Read: 200 · Write: 50 · Thought: 20')).toHaveTextContent('250');
+  expect(within(rows[2]).getByRole('rowheader')).toHaveTextContent('├─ Model A');
+  expect(within(rows[2]).getByRole('rowheader')).toHaveClass('pl-6');
+  expect(within(rows[2]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '$8.20+', '1,200', '900', '300', '250', '2 unreported · thought: 20']);
+  expect(within(rows[3]).getByRole('rowheader')).toHaveTextContent('└─ Unknown model');
+  expect(within(rows[3]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '?', '500', '400', '—', '—', '']);
+});
+
+it('shows an empty sessions table when no sessions match', async () => {
+  vi.mocked(getUsageReport).mockResolvedValue({ ...report, sessions: [] } as never);
+  render(<UsageView />);
+  const table = await screen.findByRole('table', { name: 'Sessions' });
+  expect(within(table).getByText('No sessions match these filters.')).toHaveAttribute('colspan', '8');
 });

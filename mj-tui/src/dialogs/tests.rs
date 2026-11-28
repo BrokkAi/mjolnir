@@ -1515,7 +1515,10 @@ fn golden_dashboard_dialogs() {
             .focus(crate::session_usage_report::UsageControl::Rows);
     }
     usage.handle_key(key(KeyCode::Home));
-    for _ in 0..16 {
+    // Down five times keeps the selection inside the rows list: one more Down
+    // past the last row moves focus to the action buttons, and End there
+    // would select an hour and reload the report.
+    for _ in 0..5 {
         usage.handle_key(key(KeyCode::Down));
     }
     append_dialog_render(

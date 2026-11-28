@@ -41,7 +41,6 @@ pub(crate) enum UsageControl {
 enum UsageRow {
     Session(String),
     Model(String, Option<String>),
-    Coverage(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,6 +444,168 @@ fn dollars(cost: CostUsdTicks, partial: bool) -> String {
         return format!("<$0.001{plus}");
     }
     format!("${:.3}{plus}", ticks as f64 / 10_000_000_000.0)
+}
+
+/// A token count with thousands separators, e.g. `1,100,000`.
+fn format_tokens(tokens: u64) -> String {
+    let digits = tokens.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// The shared column layout of the pinned sessions-table header, the session
+/// rows, and their model sub-rows, so all three align cell for cell.
+#[derive(Clone, Copy)]
+struct SessionTable {
+    session: usize,
+    profile: Option<usize>,
+    tokens: Option<usize>,
+    coverage: Option<usize>,
+}
+
+impl SessionTable {
+    const EST: usize = 9;
+    const GAP: usize = 2;
+
+    fn for_width(width: u16) -> Self {
+        let width = usize::from(width);
+        let (profile, tokens, coverage) = if width >= 84 {
+            (Some(12), Some(12), Some(18))
+        } else if width >= 60 {
+            (Some(10), Some(11), None)
+        } else {
+            (None, None, None)
+        };
+        let extra = [profile, tokens, coverage].into_iter().flatten().count();
+        let fixed = Self::EST
+            + [profile, tokens, coverage]
+                .into_iter()
+                .flatten()
+                .sum::<usize>()
+            + Self::GAP * (extra + 1);
+        Self {
+            // At the 84-column breakpoint this is already 25, so the
+            // 24-cell minimum needs no clamping.
+            session: width.saturating_sub(fixed),
+            profile,
+            tokens,
+            coverage,
+        }
+    }
+}
+
+enum CellAlign {
+    Left,
+    Right,
+}
+
+/// One cell of the sessions table, truncated to its column and padded with
+/// cells (not bytes) so wide titles never shift the columns after it.
+fn table_cell(text: &str, width: usize, align: CellAlign, options: Truncate) -> String {
+    let text = truncate_to_cells(text, width, options);
+    let fill = width.saturating_sub(Line::raw(text.as_str()).width());
+    match align {
+        CellAlign::Left => format!("{text}{:fill$}", ""),
+        CellAlign::Right => format!("{:fill$}{text}", ""),
+    }
+}
+
+/// One row of the unified sessions table, as text and styles per column.
+struct TableRow<'a> {
+    name: &'a str,
+    name_style: ratatui::style::Style,
+    rest_style: ratatui::style::Style,
+    profile: &'a str,
+    est: &'a str,
+    tokens: &'a str,
+    coverage: &'a str,
+}
+
+/// One row of the unified sessions table: header, session, or model sub-row.
+/// The name cell is plain-truncated so a model row's tree indent survives.
+fn table_line(table: &SessionTable, row: TableRow<'_>) -> Line<'static> {
+    let gap = || Span::raw(" ".repeat(SessionTable::GAP));
+    let mut spans = vec![Span::styled(
+        table_cell(row.name, table.session, CellAlign::Left, Truncate::PLAIN),
+        row.name_style,
+    )];
+    if let Some(width) = table.profile {
+        spans.push(gap());
+        spans.push(Span::styled(
+            table_cell(row.profile, width, CellAlign::Left, Truncate::PLAIN),
+            row.rest_style,
+        ));
+    }
+    spans.push(gap());
+    spans.push(Span::styled(
+        table_cell(
+            row.est,
+            SessionTable::EST,
+            CellAlign::Right,
+            Truncate::PLAIN,
+        ),
+        row.rest_style,
+    ));
+    if let Some(width) = table.tokens {
+        spans.push(gap());
+        spans.push(Span::styled(
+            table_cell(row.tokens, width, CellAlign::Right, Truncate::PLAIN),
+            row.rest_style,
+        ));
+    }
+    if let Some(width) = table.coverage {
+        spans.push(gap());
+        spans.push(Span::styled(
+            table_cell(row.coverage, width, CellAlign::Left, Truncate::PLAIN),
+            row.rest_style,
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The sessions table's pinned header row.
+fn table_header(table: &SessionTable) -> Line<'static> {
+    table_line(
+        table,
+        TableRow {
+            name: "Session / Model",
+            name_style: theme::muted(),
+            rest_style: theme::muted(),
+            profile: "Profile",
+            est: "Est $",
+            tokens: "Tokens",
+            coverage: "Coverage",
+        },
+    )
+}
+
+/// The Tokens cell of a session row: the sum of the models' `total_tokens`,
+/// `+` when any model reported none or has unreported turns, `—` when no
+/// model reported tokens at all.
+fn session_tokens(session: &mj_core::usage::SessionUsageEstimate) -> String {
+    let mut total = 0u64;
+    let mut reported = false;
+    let mut partial = false;
+    for model in &session.models {
+        match model.totals.get("total_tokens") {
+            Some(counter) => {
+                reported = true;
+                total = total.saturating_add(counter.tokens);
+                partial |= model.unreported_turns > 0;
+            }
+            None => partial = true,
+        }
+    }
+    if !reported {
+        return "—".into();
+    }
+    format!("{}{}", format_tokens(total), if partial { "+" } else { "" })
 }
 
 #[derive(Default)]
@@ -1161,110 +1322,137 @@ pub(crate) fn render(
                 )),
                 Rect::new(inner.x, inner.y + header_height - 1, inner.width, 1),
             );
-            let mut lines = Vec::new();
-            let mut row_map = Vec::new();
-            let mut row_keys = dialog.row_keys.borrow_mut();
-            row_keys.clear();
-            for session in &report.sessions {
-                let cost = format!(
-                    "{}{}",
-                    dollars(session.cost_usd_ticks, session.is_partial()),
-                    if session.suspended {
-                        " · suspended"
-                    } else {
-                        ""
-                    }
-                );
-                let name = format!("{}  [{}]", session.title, session.profile);
-                let name = truncate_to_cells(
-                    &name,
-                    usize::from(inner.width).saturating_sub(cost.len() + 2),
-                    Truncate::SUMMARY,
-                );
-                lines.push(Line::from(vec![
-                    Span::styled(name, theme::title(false)),
-                    Span::raw(format!("  {cost}")),
-                ]));
-                row_map.push(Some(row_keys.len()));
-                row_keys.push(UsageRow::Session(session.session_id.clone()));
-                for model in &session.models {
-                    let unreported = model.unreported_turns;
-                    let tokens = match (model.totals.get("total_tokens"), unreported) {
-                        (Some(v), 0) => format!("{} tokens", v.tokens),
-                        (Some(v), n) => format!(
-                            "{} tokens · {n} {} unreported",
-                            v.tokens,
-                            if n == 1 { "turn" } else { "turns" }
-                        ),
-                        (None, 0) => "tokens unknown".to_owned(),
-                        (None, n) => {
-                            format!("{n} {} unreported", if n == 1 { "turn" } else { "turns" })
-                        }
-                    };
-                    let detail = format!(
-                        "{}  {tokens}",
-                        dollars(model.cost_usd_ticks, unreported > 0)
-                    );
-                    let name = truncate_to_cells(
-                        model.model.as_deref().unwrap_or("Unknown model"),
-                        usize::from(inner.width)
-                            .saturating_sub(Line::raw(detail.as_str()).width() + 6),
-                        Truncate::PLAIN,
-                    );
-                    lines.push(Line::raw(format!("    {name}  {detail}",)));
-                    row_map.push(Some(row_keys.len()));
-                    row_keys.push(UsageRow::Model(
-                        session.session_id.clone(),
-                        model.model.clone(),
-                    ));
-                }
-                let coverage = &session.coverage;
-                lines.push(Line::styled(
-                    format!(
-                        "    {} sub-agents · {}/{} turns reported{}",
-                        session.subagent_count,
-                        coverage.full_turn_reports,
-                        coverage.recorded_turns,
-                        if coverage.unfinished_turns > 0 {
-                            format!(" · {} unfinished", coverage.unfinished_turns)
-                        } else {
-                            String::new()
-                        }
-                    ),
-                    theme::muted(),
-                ));
-                row_map.push(Some(row_keys.len()));
-                row_keys.push(UsageRow::Coverage(session.session_id.clone()));
-                lines.push(Line::default());
-                row_map.push(None);
-            }
-            let selected = dialog
-                .selected_key
-                .borrow()
-                .as_ref()
-                .and_then(|key| row_keys.iter().position(|row| row == key))
-                .unwrap_or_else(|| {
-                    dialog
-                        .selected_row
-                        .get()
-                        .min(row_keys.len().saturating_sub(1))
-                });
-            dialog.selected_row.set(selected);
-            *dialog.selected_key.borrow_mut() = row_keys.get(selected).cloned();
-            ChoiceList::render_with_rows(
-                frame,
-                rows_area,
-                &lines,
-                selected,
-                &row_map,
-                &[],
-                &mut form,
-                UsageControl::Rows,
-            );
-            if lines.is_empty() {
+            if report.sessions.is_empty() {
                 frame.render_widget(
                     Paragraph::new("No sessions match these filters.").style(theme::muted()),
                     rows_area,
+                );
+            } else {
+                let table = SessionTable::for_width(inner.width);
+                // The column header is pinned above the list; only the
+                // session and model rows scroll under it. A one-row area
+                // keeps the row and drops the header.
+                let list_area = if rows_area.height >= 2 {
+                    frame.render_widget(
+                        Paragraph::new(table_header(&table)),
+                        Rect::new(rows_area.x, rows_area.y, rows_area.width, 1),
+                    );
+                    Rect::new(
+                        rows_area.x,
+                        rows_area.y + 1,
+                        rows_area.width,
+                        rows_area.height - 1,
+                    )
+                } else {
+                    rows_area
+                };
+                let mut lines = Vec::new();
+                let mut row_map = Vec::new();
+                let mut row_keys = dialog.row_keys.borrow_mut();
+                row_keys.clear();
+                let multiple = report.sessions.len() > 1;
+                for (index, session) in report.sessions.iter().enumerate() {
+                    if multiple && index > 0 {
+                        lines.push(Line::default());
+                        row_map.push(None);
+                    }
+                    let mut title = session.title.clone();
+                    if session.suspended {
+                        title.push_str(" [suspended]");
+                    }
+                    let title = table_cell(&title, table.session, CellAlign::Left, Truncate::PLAIN);
+                    let mut coverage = format!(
+                        "{} sub · {}/{}",
+                        session.subagent_count,
+                        session.coverage.full_turn_reports,
+                        session.coverage.recorded_turns,
+                    );
+                    if session.coverage.unfinished_turns > 0 {
+                        coverage.push_str(&format!(" +{}", session.coverage.unfinished_turns));
+                    }
+                    // The title carries the suspended marker; when truncation
+                    // cut it off, the coverage column keeps it visible.
+                    if session.suspended
+                        && table.coverage.is_some()
+                        && !title.trim_end().ends_with("[suspended]")
+                    {
+                        coverage.push_str(" · susp");
+                    }
+                    lines.push(table_line(
+                        &table,
+                        TableRow {
+                            name: &title,
+                            name_style: theme::title(false),
+                            rest_style: ratatui::style::Style::default(),
+                            profile: &session.profile,
+                            est: &dollars(session.cost_usd_ticks, session.is_partial()),
+                            tokens: &session_tokens(session),
+                            coverage: &coverage,
+                        },
+                    ));
+                    row_map.push(Some(row_keys.len()));
+                    row_keys.push(UsageRow::Session(session.session_id.clone()));
+                    let count = session.models.len();
+                    for (model_index, model) in session.models.iter().enumerate() {
+                        let branch = if model_index + 1 == count {
+                            "  └─ "
+                        } else {
+                            "  ├─ "
+                        };
+                        let name = format!(
+                            "{branch}{}",
+                            model.model.as_deref().unwrap_or("Unknown model")
+                        );
+                        let tokens = model
+                            .totals
+                            .get("total_tokens")
+                            .map_or_else(|| "—".to_owned(), |t| format_tokens(t.tokens));
+                        let unreported = if model.unreported_turns > 0 {
+                            format!("{} unreported", model.unreported_turns)
+                        } else {
+                            String::new()
+                        };
+                        lines.push(table_line(
+                            &table,
+                            TableRow {
+                                name: &name,
+                                name_style: theme::muted(),
+                                rest_style: ratatui::style::Style::default(),
+                                profile: "",
+                                est: &dollars(model.cost_usd_ticks, model.unreported_turns > 0),
+                                tokens: &tokens,
+                                coverage: &unreported,
+                            },
+                        ));
+                        row_map.push(Some(row_keys.len()));
+                        row_keys.push(UsageRow::Model(
+                            session.session_id.clone(),
+                            model.model.clone(),
+                        ));
+                    }
+                }
+                let selected = dialog
+                    .selected_key
+                    .borrow()
+                    .as_ref()
+                    .and_then(|key| row_keys.iter().position(|row| row == key))
+                    .unwrap_or_else(|| {
+                        dialog
+                            .selected_row
+                            .get()
+                            .min(row_keys.len().saturating_sub(1))
+                    });
+                dialog.selected_row.set(selected);
+                *dialog.selected_key.borrow_mut() = row_keys.get(selected).cloned();
+                ChoiceList::render_with_rows(
+                    frame,
+                    list_area,
+                    &lines,
+                    selected,
+                    &row_map,
+                    &[],
+                    &mut form,
+                    UsageControl::Rows,
                 );
             }
         }
