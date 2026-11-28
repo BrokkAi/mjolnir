@@ -64,6 +64,42 @@ rustup toolchain list
 === npm registered namespace (transcript row) ===
 npm run build
 
+=== mj ec2 shell command (transcript row) ===
+mj ec2 list
+
+=== mj ec2 argv command (transcript row) ===
+mj ec2 destroy
+
+=== mj ec2 global option before action (transcript row) ===
+mj ec2 list
+
+=== mj image global options before action (transcript row) ===
+mj image status
+
+=== mj ui scoped global option before action (transcript row) ===
+mj ui show
+
+=== mj unknown option before action (transcript row) ===
+mj ec2
+
+=== mj image shell command (transcript row) ===
+mj image build
+
+=== mj ui argv command (transcript row) ===
+mj ui show
+
+=== mj doctor shell command (transcript row) ===
+mj doctor instructions
+
+=== mj group without subcommand (transcript row) ===
+mj doctor
+
+=== mj dynamic subcommand (transcript row) ===
+mj ec2
+
+=== mj positional argument (transcript row) ===
+mj message
+
 === shell and argv invocation depth (transcript rows) ===
 shell: git status
 argv: git status
@@ -226,6 +262,9 @@ nice timeout git status
 
 === cached ssh summary (transcript row) ===
 ssh builder git status
+
+=== cached mj ec2 summary (transcript row) ===
+mj ec2 tune
 
 === non-execute tool title (transcript row) ===
 Read

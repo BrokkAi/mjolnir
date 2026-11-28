@@ -15,7 +15,7 @@ const TOOL_SUMMARY_MAX_NESTING: usize = 16;
 /// Stands for a command whose name is an expansion, such as `$E cargo test`.
 const UNNAMED_COMMAND_SUMMARY: &str = "…";
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 11;
+pub const TOOL_SUMMARY_VERSION: u8 = 12;
 
 const ERROR_LINE_BYTES: usize = 256;
 const EDIT_SNIPPET_BYTES: usize = 512;
@@ -1021,8 +1021,7 @@ fn summarize_invocation_with_literals(
                 break 'invocations;
             }
             if argument.value == "--" || argument.value.starts_with('-') {
-                if let Some(consumed) = known_leading_option_arguments(&basename, arguments, index)
-                {
+                if let Some(consumed) = known_option_arguments(&basename, None, arguments, index) {
                     index += consumed;
                     continue;
                 }
@@ -1040,7 +1039,7 @@ fn summarize_invocation_with_literals(
                 if !argument.literal || !argument.value.starts_with('-') {
                     break;
                 }
-                let Some(consumed) = known_leading_option_arguments("ssh", arguments, index) else {
+                let Some(consumed) = known_option_arguments("ssh", None, arguments, index) else {
                     break 'invocations;
                 };
                 index += consumed;
@@ -1085,23 +1084,38 @@ fn summarize_invocation_with_literals(
         }
         words.push(first_verb.to_owned());
 
-        if allows_second_verb(&basename, first_verb)
-            && let Some(argument) = arguments.get(index + 1)
-            && argument.literal
-            && !argument.value.starts_with('-')
-            && argument.value != "--"
-        {
-            // `uv run` is followed by a program, which may be given as a path.
-            if basename == "uv" && first_verb == "run" {
-                let name = argument.value.rsplit('/').next().unwrap_or(&argument.value);
-                let Some(inner) = normalize_command_name(name) else {
-                    break;
-                };
-                executable = inner;
-                arguments = &arguments[index + 2..];
-                continue;
+        if allows_second_verb(&basename, first_verb) {
+            // Clap's global options may also precede a group's subcommand.
+            if basename == "mj" {
+                while let Some(argument) = arguments.get(index + 1) {
+                    if !argument.literal || !argument.value.starts_with('-') {
+                        break;
+                    }
+                    let Some(consumed) =
+                        known_option_arguments("mj", Some(first_verb), arguments, index + 1)
+                    else {
+                        break;
+                    };
+                    index += consumed;
+                }
             }
-            words.push(argument.value.clone());
+            if let Some(argument) = arguments.get(index + 1)
+                && argument.literal
+                && !argument.value.starts_with('-')
+                && argument.value != "--"
+            {
+                // `uv run` is followed by a program, which may be given as a path.
+                if basename == "uv" && first_verb == "run" {
+                    let name = argument.value.rsplit('/').next().unwrap_or(&argument.value);
+                    let Some(inner) = normalize_command_name(name) else {
+                        break;
+                    };
+                    executable = inner;
+                    arguments = &arguments[index + 2..];
+                    continue;
+                }
+                words.push(argument.value.clone());
+            }
         }
         break;
     }
@@ -1240,7 +1254,16 @@ fn allows_second_verb(basename: &str, first_verb: &str) -> bool {
         "mbx" => matches!(first_verb, "cache" | "explain" | "settings"),
         "mj" => matches!(
             first_verb,
-            "daemon" | "import" | "recover" | "review" | "setup" | "workspaces"
+            "daemon"
+                | "doctor"
+                | "ec2"
+                | "image"
+                | "import"
+                | "recover"
+                | "review"
+                | "setup"
+                | "ui"
+                | "workspaces"
         ),
         "rustup" => matches!(
             first_verb,
@@ -1250,8 +1273,9 @@ fn allows_second_verb(basename: &str, first_verb: &str) -> bool {
     }
 }
 
-fn known_leading_option_arguments(
+fn known_option_arguments(
     basename: &str,
+    group: Option<&str>,
     arguments: &[InvocationArgument],
     index: usize,
 ) -> Option<usize> {
@@ -1338,7 +1362,10 @@ fn known_leading_option_arguments(
         }
         "uv" => matches!(option_name, "--directory" | "--project" | "--python"),
         "rustup" => matches!(option_name, "--toolchain"),
-        "mj" => matches!(option_name, "-i" | "--instance" | "--workspace"),
+        "mj" => {
+            matches!(option_name, "-i" | "--instance")
+                || (group.is_none() && option_name == "--workspace")
+        }
         "tmux" => matches!(option_name, "-L" | "-S" | "-f" | "-c" | "-T"),
         "nice" => {
             matches!(option_name, "-n" | "--adjustment")
@@ -1390,6 +1417,7 @@ fn known_leading_option_arguments(
         ),
         "rustup" => matches!(option_name, "-q" | "--quiet" | "-v" | "--verbose"),
         "docker" | "podman" => matches!(option_name, "-D" | "--debug" | "--tls"),
+        "mj" => option_name == "--no-splash" || (group == Some("ui") && option_name == "--json"),
         "tmux" => matches!(
             option_name,
             "-2" | "-C" | "-CC" | "-D" | "-l" | "-N" | "-u" | "-v"
@@ -2739,7 +2767,56 @@ mod tests {
                 "npm registered namespace",
                 json!({"command": ["npm", "--prefix", "web", "run", "build"]}),
             ),
+            (
+                "mj ec2 shell command",
+                json!({"command": "mj --instance transcript-depth ec2 list --json"}),
+            ),
+            (
+                "mj ec2 argv command",
+                json!({"command": ["mj", "ec2", "destroy", "builder"]}),
+            ),
+            (
+                "mj ec2 global option before action",
+                json!({"command": "mj ec2 --instance transcript-depth list"}),
+            ),
+            (
+                "mj image global options before action",
+                json!({"command": ["mj", "image", "-itranscript-depth", "--no-splash", "status"]}),
+            ),
+            (
+                "mj ui scoped global option before action",
+                json!({"command": "mj ui --json show abc123"}),
+            ),
+            (
+                "mj unknown option before action",
+                json!({"command": "mj ec2 --mystery staging list"}),
+            ),
+            (
+                "mj image shell command",
+                json!({"command": "mj image build --target builder"}),
+            ),
+            (
+                "mj ui argv command",
+                json!({"command": ["mj", "-itranscript-depth", "ui", "show", "abc123"]}),
+            ),
+            (
+                "mj doctor shell command",
+                json!({"command": "mj doctor instructions --platform linux"}),
+            ),
+            (
+                "mj group without subcommand",
+                json!({"command": "mj doctor --json"}),
+            ),
+            (
+                "mj dynamic subcommand",
+                json!({"command": "mj ec2 \"$action\" builder"}),
+            ),
+            (
+                "mj positional argument",
+                json!({"command": "mj message --session abc123 'check the build'"}),
+            ),
         ] {
+            // Hard-won: 152a6e7b6: global options between the group and action hid the action.
             append_tool_row(
                 &mut output,
                 label,
@@ -2985,6 +3062,7 @@ mod tests {
                 4,
             ),
             ("cached ssh summary", "ssh builder 'git status'", "ssh", 5),
+            ("cached mj ec2 summary", "mj ec2 tune builder", "mj ec2", 11),
         ] {
             let cached = ToolCall::new("cached-wrapper", "Bash")
                 .kind(ToolKind::Execute)
