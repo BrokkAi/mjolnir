@@ -174,8 +174,11 @@ impl TurnDiagnostic {
     }
     /// Only apply to trusted failed-turn diagnostics, never chat or tool text.
     pub fn is_rate_limit(&self) -> bool {
+        if self.http_status == Some(429) {
+            return true;
+        }
         if matches!(self.code.as_deref(), Some("request" | AUTH_FAILURE_KIND))
-            || self.http_status.is_some_and(|s| s < 500 && s != 429)
+            || self.http_status.is_some_and(|s| s < 500)
         {
             return false;
         }
@@ -191,32 +194,34 @@ impl TurnDiagnostic {
                     | "resource_exhausted"
                     | "RESOURCE_EXHAUSTED"
             )
-        ) || self.http_status == Some(429)
-            || (self.http_status.is_none_or(|s| s == 429)
-                && !self.is_usage_limit()
-                && [
-                    "too many requests",
-                    "rate limit",
-                    "rate-limit",
-                    "ratelimit",
-                    "http 429",
-                    "status 429",
-                    "status: 429",
-                    "error 429",
-                    "code 429",
-                    "(429)",
-                    "throttl",
-                    "requests per minute",
-                    "tokens per minute",
-                    "concurrency limit",
-                    "concurrent request",
-                ]
-                .iter()
-                .any(|p| self.message.to_ascii_lowercase().contains(p)))
+        ) || (self.http_status.is_none()
+            && !self.is_usage_limit()
+            && [
+                "too many requests",
+                "rate limit",
+                "rate-limit",
+                "ratelimit",
+                "http 429",
+                "status 429",
+                "status: 429",
+                "error 429",
+                "code 429",
+                "(429)",
+                "throttl",
+                "requests per minute",
+                "tokens per minute",
+                "concurrency limit",
+                "concurrent request",
+            ]
+            .iter()
+            .any(|p| self.message.to_ascii_lowercase().contains(p)))
     }
 
     /// Only apply to trusted failed-turn diagnostics, never chat or tool text.
     pub fn is_overload(&self) -> bool {
+        if matches!(self.http_status, Some(500 | 502 | 503 | 504 | 529)) {
+            return true;
+        }
         if matches!(self.code.as_deref(), Some("request" | AUTH_FAILURE_KIND))
             || self.http_status.is_some_and(|s| s < 500)
         {
@@ -231,22 +236,21 @@ impl TurnDiagnostic {
                     | "capacity_exceeded"
                     | "server_overloaded"
             )
-        ) || matches!(self.http_status, Some(500 | 502 | 503 | 504 | 529))
-            || (self.http_status.is_none_or(|s| s >= 500)
-                && [
-                    "overloaded",
-                    "at capacity",
-                    "server is busy",
-                    "service unavailable",
-                    "http 529",
-                    "status 529",
-                    "status: 529",
-                    "http 503",
-                    "status 503",
-                    "status: 503",
-                ]
-                .iter()
-                .any(|p| self.message.to_ascii_lowercase().contains(p)))
+        ) || (self.http_status.is_none_or(|s| s >= 500)
+            && [
+                "overloaded",
+                "at capacity",
+                "server is busy",
+                "service unavailable",
+                "http 529",
+                "status 529",
+                "status: 529",
+                "http 503",
+                "status 503",
+                "status: 503",
+            ]
+            .iter()
+            .any(|p| self.message.to_ascii_lowercase().contains(p)))
     }
 }
 
@@ -449,6 +453,11 @@ mod tests {
         d.code = Some("request".into());
         d.message = "rate limit and overloaded".into();
         assert!(!d.is_overload() && !d.is_rate_limit());
+        // Explicit HTTP 429 or 5xx status wins even when categorized as `request`.
+        d.http_status = Some(429);
+        assert!(d.is_rate_limit() && !d.is_overload());
+        d.http_status = Some(503);
+        assert!(d.is_overload() && !d.is_rate_limit());
     }
 
     fn record(category: &str, actions: &[&str], title: &str) -> SessionFailure {

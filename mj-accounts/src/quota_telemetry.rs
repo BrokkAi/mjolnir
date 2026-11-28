@@ -1319,7 +1319,7 @@ impl QuotaTelemetryStore {
                     refreshed_at_epoch_seconds: report.refreshed_at_epoch_seconds,
                     projection: mj_core::usage::ProfileQuotaProjection {
                         profile_id: profile_id.clone(),
-                        window_label: window.label.clone(),
+                        window_label: report.window_label(window),
                         remaining_percent,
                         resets_at_epoch_seconds: window.resets_at_epoch_seconds,
                         observed_pct_per_hour: observed,
@@ -1784,6 +1784,19 @@ mod tests {
         assert!(frac.sustainable_pct_per_hour.unwrap() > 0.0);
         assert!(frac.pace_ratio.unwrap() > 1.0);
         assert!(frac.projected_exhaustion_epoch_seconds.is_some());
+
+        // Antigravity forecasts include the pool name from `ProfileQuota::window_label`.
+        let mut agy = sample_report("agy", OBSERVED_AT as u64, None, Some((20, Some(reset))));
+        agy.harness = mj_core::config::HarnessKind::Antigravity;
+        agy.windows[0].model_scope = Some("gemini".into());
+        store
+            .refresh_projections_with_loader(
+                &[("agy".into(), "acct-agy".into(), agy.clone())],
+                OBSERVED_AT,
+                |_, _, _| Ok(vec![agy.clone()]),
+            )
+            .unwrap();
+        assert_eq!(store.snapshot().projections[0].window_label, "Week (Ge)");
     }
 
     #[test]

@@ -37,10 +37,11 @@ pub(super) struct Policy {
     catalog_config: Option<mj_core::config::Config>,
     /// Profiles the poller is asking a provider about right now.
     probing: std::collections::BTreeSet<String>,
-    /// Profiles with an immediate fault-triggered probe scheduled at the given
-    /// batch generation, deduplicating concurrent 429 bursts without letting a
-    /// `Finished` from an earlier generation clear a newer probe prematurely.
-    pending_fault_probes: BTreeMap<String, u64>,
+    /// Profiles with an immediate fault-triggered probe scheduled as
+    /// `(batch_generation, failed_at_epoch_seconds)` so concurrent 429 bursts
+    /// deduplicate, an already-in-flight pre-fault probe queues one follow-up,
+    /// and a `Finished` from an earlier generation never clears a newer probe.
+    pending_fault_probes: BTreeMap<String, (u64, u64)>,
     /// Poll cycles the poller has finished.
     cycles: u64,
     credentials: CredentialSyncCoordinator,
@@ -160,25 +161,29 @@ fn coalesce_intent(
     }
 }
 fn settle_fault_probes(
-    pending: &mut BTreeMap<String, u64>,
+    pending: &mut BTreeMap<String, (u64, u64)>,
     probing: &std::collections::BTreeSet<String>,
     update: &QuotaUpdate,
 ) {
     match update {
         QuotaUpdate::Report(outcome) => {
-            pending.remove(&outcome.report.profile_id);
+            let id = &outcome.report.profile_id;
+            if let Some(&(_, failed_at)) = pending.get(id)
+                && (outcome.report.error.is_some()
+                    || outcome.report.refreshed_at_epoch_seconds > failed_at)
+            {
+                pending.remove(id);
+            }
         }
-        QuotaUpdate::Finished { generation } => {
-            pending.retain(|id, scheduled_gen| *scheduled_gen > *generation || probing.contains(id))
-        }
+        QuotaUpdate::Finished { generation } => pending
+            .retain(|id, (scheduled_gen, _)| *scheduled_gen > *generation || probing.contains(id)),
         _ => {}
     }
 }
 
 fn schedule_fault_probes(
     batch: &mut QuotaRefreshBatch,
-    pending: &mut BTreeMap<String, u64>,
-    probing: &std::collections::BTreeSet<String>,
+    pending: &mut BTreeMap<String, (u64, u64)>,
     next: &mut u64,
     reports: &QuotaReportMap,
     probes: BTreeMap<String, u64>,
@@ -186,10 +191,7 @@ fn schedule_fault_probes(
 ) -> bool {
     let mut scheduled = Vec::new();
     for (id, failed_at) in probes {
-        if !batch.profiles.iter().any(|p| p.profile_id == id)
-            || probing.contains(&id)
-            || pending.contains_key(&id)
-        {
+        if !batch.profiles.iter().any(|p| p.profile_id == id) || pending.contains_key(&id) {
             continue;
         }
         if let Some(publication) = reports.get(&id)
@@ -199,20 +201,20 @@ fn schedule_fault_probes(
             }) || publication
                 .report
                 .as_ref()
-                .is_some_and(|r| r.error.is_none() && r.refreshed_at_epoch_seconds >= failed_at))
+                .is_some_and(|r| r.error.is_none() && r.refreshed_at_epoch_seconds > failed_at))
         {
             continue;
         }
         *next += 1;
         batch.forced_probes.insert(id.clone(), *next);
-        scheduled.push(id);
+        scheduled.push((id, failed_at));
     }
     if scheduled.is_empty() {
         return false;
     }
     batch.generation = batch.generation.saturating_add(1);
-    for id in scheduled {
-        pending.insert(id, batch.generation);
+    for (id, failed_at) in scheduled {
+        pending.insert(id, (batch.generation, failed_at));
     }
     true
 }
@@ -386,7 +388,6 @@ impl Policy {
         if schedule_fault_probes(
             &mut self.batch,
             &mut self.pending_fault_probes,
-            &self.probing,
             &mut self.next_forced_probe,
             &reports,
             probes,
@@ -1362,14 +1363,12 @@ mod tests {
             ..Default::default()
         };
         let mut pending = Default::default();
-        let probing = Default::default();
         let mut next = 0;
         let mut reports = QuotaReportMap::new();
         for _ in 0..10 {
             schedule_fault_probes(
                 &mut batch,
                 &mut pending,
-                &probing,
                 &mut next,
                 &reports,
                 BTreeMap::from([("claude".into(), 10), ("unsupported".into(), 10)]),
@@ -1405,7 +1404,6 @@ mod tests {
         assert!(!schedule_fault_probes(
             &mut batch,
             &mut pending,
-            &probing,
             &mut next,
             &reports,
             probe(),
@@ -1414,20 +1412,20 @@ mod tests {
         let report = reports.get_mut("claude").unwrap().report.as_mut().unwrap();
         report.rate_limited_until_epoch_seconds = None;
         report.error = None;
-        report.refreshed_at_epoch_seconds = 10;
+        // Strictly newer report (> failed_at) suppresses a redundant probe.
+        report.refreshed_at_epoch_seconds = 11;
         assert!(!schedule_fault_probes(
             &mut batch,
             &mut pending,
-            &probing,
             &mut next,
             &reports,
             probe(),
             20
         ));
+        // Same-second failure (refreshed_at == failed_at) still queues a follow-up probe.
         assert!(schedule_fault_probes(
             &mut batch,
             &mut pending,
-            &probing,
             &mut next,
             &reports,
             BTreeMap::from([("claude".into(), 11)]),
@@ -1439,12 +1437,12 @@ mod tests {
     #[test]
     fn fault_probe_completion_releases_only_settled_profiles() {
         let mut pending = BTreeMap::from([
-            ("a".to_owned(), 1),
-            ("b".to_owned(), 1),
-            ("c".to_owned(), 2),
+            ("a".to_owned(), (1, 10)),
+            ("b".to_owned(), (1, 10)),
+            ("c".to_owned(), (2, 10)),
         ]);
         let probing = ["b".to_owned()].into_iter().collect();
-        let report = ProfileQuota {
+        let report = |refreshed_at| ProfileQuota {
             profile_id: "b".into(),
             harness: mj_core::config::HarnessKind::Claude,
             windows: vec![],
@@ -1453,13 +1451,13 @@ mod tests {
             banked_resets: None,
             extra: None,
             error: None,
-            refreshed_at_epoch_seconds: 0,
+            refreshed_at_epoch_seconds: refreshed_at,
             rate_limited_until_epoch_seconds: None,
             next_check_at_epoch_seconds: None,
         };
-        let outcome = mj_controller::quota::QuotaRefreshOutcome {
+        let outcome = |refreshed_at| mj_controller::quota::QuotaRefreshOutcome {
             cache_identity: String::new(),
-            report,
+            report: report(refreshed_at),
             credentials_changed: false,
         };
         // Finished(generation 1) settles `a`, keeps active `b`, and keeps newer-generation `c`.
@@ -1470,10 +1468,14 @@ mod tests {
         );
         assert_eq!(
             pending,
-            BTreeMap::from([("b".to_owned(), 1), ("c".to_owned(), 2)])
+            BTreeMap::from([("b".to_owned(), (1, 10)), ("c".to_owned(), (2, 10))])
         );
-        settle_fault_probes(&mut pending, &probing, &QuotaUpdate::Report(outcome));
-        assert_eq!(pending, BTreeMap::from([("c".to_owned(), 2)]));
+        // An in-flight pre-fault report (refreshed_at <= failed_at) must not clear `b`.
+        settle_fault_probes(&mut pending, &probing, &QuotaUpdate::Report(outcome(10)));
+        assert!(pending.contains_key("b"));
+        // Post-fault report (refreshed_at > failed_at) clears `b`.
+        settle_fault_probes(&mut pending, &probing, &QuotaUpdate::Report(outcome(11)));
+        assert_eq!(pending, BTreeMap::from([("c".to_owned(), (2, 10))]));
         settle_fault_probes(
             &mut pending,
             &probing,
