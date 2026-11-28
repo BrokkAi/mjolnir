@@ -226,8 +226,9 @@ export default function UsageView() {
                 const start = Math.floor(change.changed_at_ms / HOUR) * HOUR;
                 const postChange = hours.filter(h => h.start_ms >= start).map(h => h.start_ms);
                 const active = appliedSelection !== null && appliedSelection.length === postChange.length && postChange.every(h => appliedSelection.includes(h));
+                const isSelected = selected !== null && selected.length === postChange.length && postChange.every(h => selected.includes(h));
                 return <button key={change.id} aria-pressed={active} className={`block rounded px-1 py-1 text-left text-accent ${active ? 'bg-accent/15 font-semibold' : ''}`}
-                  onClick={() => { const clear = active || !postChange.length; setSelected(clear ? null : postChange); anchor.current = clear ? null : start; }}>
+                  onClick={() => { const clear = isSelected || !postChange.length; setSelected(clear ? null : postChange); anchor.current = clear ? null : start; }}>
                   {pins(i)} {new Date(change.changed_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} {change.summary}
                 </button>;
               })}
