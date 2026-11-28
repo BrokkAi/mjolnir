@@ -246,6 +246,10 @@ const ATTACHMENT_LEASE: Duration = Duration::from_secs(15);
 #[derive(Default)]
 struct QuotaBoard {
     snapshot: mj_core::snapshot_map::SharedSnapshot<mj_client::quota::QuotaSnapshot>,
+    /// Active `(cache_identity, refreshed_at_epoch_seconds)` per profile for
+    /// the published reports so stale or relinked forecasts are never paired
+    /// with a different quota reading.
+    report_stamps: BTreeMap<String, (String, u64)>,
     refresh: Option<tokio::sync::mpsc::UnboundedSender<QuotaRefreshIntent>>,
 }
 

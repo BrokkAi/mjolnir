@@ -28,7 +28,7 @@ pub(super) struct Policy {
     catalog: Arc<ProfileCatalog>,
     pub(super) reports: Arc<std::sync::Mutex<QuotaReportMap>>,
     rejected: Arc<std::sync::Mutex<mj_core::credentials::RejectedLogins>>,
-    quotas_tx: watch::Sender<QuotaReportMap>,
+    pub(super) quotas_tx: watch::Sender<QuotaReportMap>,
     profiles_tx: watch::Sender<QuotaRefreshBatch>,
     pub quota_rx: mpsc::Receiver<QuotaUpdate>,
     pub refresh_rx: mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>,
@@ -442,13 +442,17 @@ impl Policy {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
         // The installed profile decides which Antigravity pools people see.
         let surfaced = surface_quota_reports(&reports, &self.state.owner().controller().config);
-        self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
-            reports: surfaced,
-            // Filled under `RuntimeState::quota` lock inside `publish_quotas`.
-            quota_projections: Vec::new(),
-            probing: self.probing.clone(),
-            cycles: self.cycles,
-        });
+        let stamps = active_projection_stamps(&reports);
+        self.state.publish_quotas_with_stamps(
+            mj_client::quota::QuotaSnapshot {
+                reports: surfaced,
+                // Filled under `RuntimeState::quota` lock inside `publish_quotas_with_stamps`.
+                quota_projections: Vec::new(),
+                probing: self.probing.clone(),
+                cycles: self.cycles,
+            },
+            stamps,
+        );
     }
     pub fn observe(&mut self, id: &str, observation: &DelegationObservation) {
         let Some(session) = self.state.session_record(id) else {
@@ -801,6 +805,38 @@ fn reconcile_quota_publications(
 /// What people see of each report. An Antigravity profile shows only the
 /// pools the installed profile uses; the stored report keeps every pool for
 /// selection and quota recovery.
+/// Active surfaced report eligible for burn-rate projection. Shared by
+/// telemetry refresh and `Policy::publish_quotas` so forecast stamps always
+/// match the exact reading displayed beside them.
+pub(super) fn active_projection_report(
+    id: &str,
+    publication: &mj_controller::quota::QuotaReportPublication,
+) -> Option<ProfileQuota> {
+    let report = publication.effective_report(id)?;
+    if report.windows.is_empty()
+        || (report.error.is_some() && report.rate_limited_until_epoch_seconds.is_none())
+    {
+        return None;
+    }
+    Some(mj_controller::quota::surface_quota_report(&report))
+}
+
+fn active_projection_stamps(reports: &QuotaReportMap) -> BTreeMap<String, (String, u64)> {
+    reports
+        .iter()
+        .filter_map(|(id, publication)| {
+            let active = active_projection_report(id, publication)?;
+            Some((
+                id.clone(),
+                (
+                    publication.cache_identity.clone(),
+                    active.refreshed_at_epoch_seconds,
+                ),
+            ))
+        })
+        .collect()
+}
+
 fn surface_quota_reports(
     reports: &QuotaReportMap,
     config: &mj_core::config::Config,

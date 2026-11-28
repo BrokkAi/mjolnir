@@ -1002,6 +1002,63 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
     let before = state.revisions().borrow().to_owned();
     state.publish_quotas(snapshot);
     assert_eq!(*state.revisions().borrow(), before);
+
+    // Forecasts only surface when their (cache_identity, refreshed_at) matches
+    // the published reading; a fresh probe or relink immediately clears stale forecasts.
+    let now = 1_000_000i64;
+    let window = |remaining: u8| mj_client::quota::QuotaWindow {
+        label: "Week".into(),
+        remaining_percent: Some(remaining),
+        duration_seconds: Some(7 * 86_400),
+        model_scope: None,
+        used: None,
+        limit: None,
+        resets: None,
+        resets_at_epoch_seconds: Some(now + 24 * 3600),
+    };
+    let report = |ts: u64, remaining: u8| mj_client::quota::ProfileQuota {
+        monthly_price_usd: None,
+        paid_credits: None,
+        banked_resets: None,
+        profile_id: "codex".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        windows: vec![window(remaining)],
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: ts,
+        rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
+    };
+    let old = report(now as u64, 20);
+    let history = vec![report((now - 24 * 3600) as u64, 44), old.clone()];
+    state
+        .quota_telemetry
+        .refresh_projections_with_loader(
+            &[("codex".into(), "acct-1".into(), old.clone())],
+            now,
+            |_, _, _| Ok(history.clone()),
+        )
+        .unwrap();
+    state.publish_quotas_with_stamps(
+        QuotaSnapshot {
+            reports: BTreeMap::from([("codex".into(), old)]),
+            cycles: 5,
+            ..Default::default()
+        },
+        BTreeMap::from([("codex".into(), ("acct-1".into(), now as u64))]),
+    );
+    assert_eq!(state.published_quota_projections().len(), 1);
+    // Fresh probe balance with newer timestamp drops the old reading's forecast.
+    let fresh = report((now + 600) as u64, 100);
+    state.publish_quotas_with_stamps(
+        QuotaSnapshot {
+            reports: BTreeMap::from([("codex".into(), fresh)]),
+            cycles: 6,
+            ..Default::default()
+        },
+        BTreeMap::from([("codex".into(), ("acct-1".into(), (now + 600) as u64))]),
+    );
+    assert!(state.published_quota_projections().is_empty());
 }
 
 #[tokio::test]

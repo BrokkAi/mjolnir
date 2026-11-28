@@ -213,6 +213,10 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
+    fn published_quota_projections(&self) -> Vec<mj_core::usage::ProfileQuotaProjection> {
+        Vec::new()
+    }
+
     fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
         mj_controller::quota_telemetry::QuotaTelemetryStore::new()
     }
@@ -650,6 +654,10 @@ impl ExportRuntime for RuntimeState {
 
     fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
         self.quota_telemetry.snapshot()
+    }
+
+    fn published_quota_projections(&self) -> Vec<mj_core::usage::ProfileQuotaProjection> {
+        self.published_quota_projections()
     }
     fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
         self.quota_telemetry.clone()
@@ -4986,8 +4994,7 @@ impl SubagentBackend for ApiBackend {
             let models = mj_controller::profile_config::advertised_models();
             let projections: Vec<_> = self
                 .exports
-                .quota_telemetry()
-                .projections
+                .published_quota_projections()
                 .into_iter()
                 .filter(|p| {
                     query

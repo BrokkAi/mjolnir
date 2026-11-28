@@ -591,18 +591,25 @@ fn evaluate_applying_windows(
                     crate::quota_telemetry::WindowKind::Short5h => 5 * 3600,
                     crate::quota_telemetry::WindowKind::Long => 7 * 86_400,
                 });
-            let cycle_start = reset.saturating_add(
-                (now_seconds.saturating_sub(reset) / duration).saturating_mul(duration),
-            );
-            let next_reset = cycle_start.saturating_add(duration);
+            // Never extrapolate an unobserved subsequent reset when probes stay
+            // stale past an entire window (rolling 5h windows restart on first
+            // use, not at fixed multiples). Keep `cycle_start` at the observed
+            // reset so recent placements stay accounted for, and keep
+            // `t_left_hours > 0` so the runway gate stays active.
+            let next_reset = reset.saturating_add(duration);
+            let t_left_seconds = if now_seconds < next_reset {
+                next_reset.saturating_sub(now_seconds)
+            } else {
+                duration
+            };
             evals.push(WindowEval {
                 kind,
                 remaining_pct: 100.0,
                 h_w: (100.0 - RESERVE_FLOOR_PCT) / 100.0,
                 u_w: 1.0,
-                t_left_hours: next_reset.saturating_sub(now_seconds) as f64 / 3600.0,
+                t_left_hours: t_left_seconds as f64 / 3600.0,
                 reset_elapsed: true,
-                cycle_start: Some(cycle_start),
+                cycle_start: Some(reset),
                 model_scope: window.model_scope.clone(),
             });
             continue;
@@ -1884,15 +1891,15 @@ mod tests {
     }
 
     #[test]
-    fn multi_cycle_reset_excludes_prior_placements_and_counts_reset_second_burst() {
+    fn elapsed_reset_excludes_prior_placements_and_retains_burst_across_stale_window() {
         use crate::quota_telemetry::{QuotaTelemetrySnapshot, RecentPlacement};
         let now = 1_000_000;
-        let start = now - 300;
-        let mut window = week_window(0, start - 2 * 5 * 3600);
+        let reset = now - 300;
+        let mut window = week_window(0, reset);
         window.label = "5h".into();
         window.duration_seconds = Some(5 * 3600);
         let eval = evaluate_applying_windows(&[window.clone()], "gpt-6.1-sol", now);
-        assert_eq!(eval[0].cycle_start, Some(start));
+        assert_eq!(eval[0].cycle_start, Some(reset));
         assert!((eval[0].t_left_hours - (5.0 - 300.0 / 3600.0)).abs() < 1e-9);
         let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
         let mut telemetry = QuotaTelemetrySnapshot::default();
@@ -1905,7 +1912,7 @@ mod tests {
             },
             crate::quota_telemetry::WindowTelemetry {
                 five_hour_to_weekly_ratio: Some(1.0),
-                second_to_last_clean_ts: Some(start - 100),
+                second_to_last_clean_ts: Some(reset - 100),
                 ..Default::default()
             },
         );
@@ -1917,7 +1924,7 @@ mod tests {
         };
         telemetry
             .recent_placements
-            .insert("codex".into(), vec![placement(start - 1); 500]);
+            .insert("codex".into(), vec![placement(reset - 1); 500]);
         let cand = scheduled_sub(
             "codex",
             mj_core::config::HarnessKind::Codex,
@@ -1928,7 +1935,7 @@ mod tests {
             None,
             false,
         );
-        let tier = |telemetry: &QuotaTelemetrySnapshot| {
+        let tier = |cand: &ScheduledCandidate, telemetry: &QuotaTelemetrySnapshot| {
             prepare_scored_pools(
                 vec![cand.clone()],
                 &SchedulingContext {
@@ -1942,13 +1949,13 @@ mod tests {
             )[0]
             .tier
         };
-        assert_eq!(tier(&telemetry), 0);
+        assert_eq!(tier(&cand, &telemetry), 0);
         telemetry
             .recent_placements
             .get_mut("codex")
             .unwrap()
-            .extend(vec![placement(start); 500]);
-        assert_eq!(tier(&telemetry), 3);
+            .extend(vec![placement(reset); 500]);
+        assert_eq!(tier(&cand, &telemetry), 3);
         let mut paid = cand.clone();
         paid.profile_id = "paid".into();
         paid.quota = CandidateQuota::UsagePriced;
@@ -1960,7 +1967,7 @@ mod tests {
             power_ranking: ranking,
             now_seconds: now,
         };
-        let mut candidates = vec![cand, paid];
+        let mut candidates = vec![cand.clone(), paid.clone()];
         let decision =
             order_scheduled_candidates_by_draw_with_decision(&mut candidates, &[0.1, 1.0], &ctx)
                 .unwrap();
@@ -1969,6 +1976,46 @@ mod tests {
             decision.binding_window,
             Some(crate::quota_telemetry::WindowKind::Short5h)
         );
+
+        // When probes fail for longer than one full 5h window, never extrapolate
+        // an unobserved reset that would discard placements made shortly before
+        // the invented boundary.
+        let stale_reset = now - 5 * 3600 - 300;
+        let mut stale_window = week_window(0, stale_reset);
+        stale_window.label = "5h".into();
+        stale_window.duration_seconds = Some(5 * 3600);
+        let stale_eval = evaluate_applying_windows(&[stale_window.clone()], "gpt-6.1-sol", now);
+        assert_eq!(stale_eval[0].cycle_start, Some(stale_reset));
+        assert!((stale_eval[0].t_left_hours - 5.0).abs() < 1e-9);
+        let mut stale_telemetry = QuotaTelemetrySnapshot::default();
+        stale_telemetry.windows.insert(
+            crate::quota_telemetry::WindowKey {
+                profile_id: "codex".into(),
+                cache_identity: "id-codex".into(),
+                window_kind: crate::quota_telemetry::WindowKind::Short5h,
+                model_scope: None,
+            },
+            crate::quota_telemetry::WindowTelemetry {
+                five_hour_to_weekly_ratio: Some(1.0),
+                second_to_last_clean_ts: None,
+                ..Default::default()
+            },
+        );
+        // Placed 10m ago (before an extrapolated `stale_reset + 5h = now - 300`).
+        stale_telemetry
+            .recent_placements
+            .insert("codex".into(), vec![placement(now - 600); 500]);
+        let stale_cand = scheduled_sub(
+            "codex",
+            mj_core::config::HarnessKind::Codex,
+            "gpt-6.1-sol",
+            Some("high"),
+            Some(200),
+            vec![stale_window],
+            None,
+            false,
+        );
+        assert_eq!(tier(&stale_cand, &stale_telemetry), 3);
     }
 
     #[test]
