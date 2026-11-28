@@ -50,6 +50,8 @@ describe('ConversationView', () => {
     expect(idle[0].querySelector('span')).toBeNull();
     act(() => useSessionStore.setState(state => ({ sessionsById: { ...state.sessionsById, s1: { ...row, verdict: { ...row.verdict, working_children: 2 } } } })));
     expect(screen.getAllByRole('button', { name: 'Sub-agents and reviewers, 2 active' })[0]).toHaveTextContent('2');
+    act(() => useSessionStore.setState(state => ({ sessionsById: { ...state.sessionsById, s1: { ...row, detail: false, queued_prompt_count: 0, pending_elicitation_count: 0, pending_elicitation_ids: [], subagent_session_ids: [], reviewer_session_ids: [], verdict: { ...row.verdict, working_children: 2 } } } })));
+    expect(screen.getAllByRole('button', { name: 'Sub-agents and reviewers, 2 active' })[0]).toHaveTextContent('2');
   });
 
   it('renders the single-scrollport conversation without opening or closing it', () => {

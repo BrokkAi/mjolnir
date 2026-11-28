@@ -60,9 +60,9 @@ describe('Workspaces dashboard', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Targets' })[0]);
     fireEvent.click(screen.getAllByRole('button', { name: 'Sessions' })[1]);
     expect(useUiStore.getState().route).toEqual({ name: 'workspace', workspaceId: 'w2' });
-    expect(effectiveRoute({ name: 'workspace' }, true, true, readSelectedWorkspaceId())).toEqual({ name: 'workspace', workspaceId: 'w2' });
+    expect(effectiveRoute({ name: 'workspace' }, true, false, readSelectedWorkspaceId())).toEqual({ name: 'workspace', workspaceId: 'w2' });
     act(() => hydrate([], { workspaces: [{ id: 'w1', name: 'Alpha', last_opened_at: '2026-11-25T10:00:00Z' }] }));
-    expect(effectiveRoute({ name: 'workspace' }, true, true, null, true)).toEqual({ name: 'workspace' });
+    expect(effectiveRoute({ name: 'workspace' }, true, true, null)).toEqual({ name: 'notifications' });
     fireEvent.click(screen.getAllByRole('button', { name: 'Sessions' })[0]);
     expect(useUiStore.getState().route).toEqual({ name: 'workspace' });
     view.unmount();

@@ -169,11 +169,12 @@ export function ConversationHeader({
   const capabilities = session.capabilities;
   const transitioning = Boolean(session.transitioning || session.verdict.transition);
   const nativeSubagentCount = session.detail === false ? 0 : (session.native_subagents?.length ?? 0);
+  const activeSubagentCount = session.verdict?.working_children ?? 0;
   const hasAnySubagents =
+    activeSubagentCount > 0 ||
     (session.subagent_session_ids?.length ?? 0) +
     (session.reviewer_session_ids?.length ?? 0) +
     nativeSubagentCount > 0;
-  const activeSubagentCount = session.verdict?.working_children ?? 0;
   const detail =
     session.activity_details?.label || session.question_message || session.activity || '';
 

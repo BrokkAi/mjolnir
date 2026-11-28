@@ -666,6 +666,9 @@ describe('hash routing', () => {
     expect(isImplicitRoute('#workspace/w1')).toBe(false);
     expect(effectiveRoute({ name: 'workspace' }, true, true)).toEqual({ name: 'notifications' });
     expect(effectiveRoute({ name: 'workspace' }, true, false)).toEqual({ name: 'workspace' });
+    expect(effectiveRoute({ name: 'workspace' }, true, true, 'w1')).toEqual({ name: 'notifications' });
+    expect(effectiveRoute({ name: 'workspace' }, true, false, 'w1')).toEqual({ name: 'workspace', workspaceId: 'w1' });
+    expect(effectiveRoute({ name: 'workspace', workspaceId: 'w1' }, true, true, 'w2')).toEqual({ name: 'workspace', workspaceId: 'w1' });
     expect(effectiveRoute({ name: 'workspace', workspaceId: 'w1' }, false, true)).toEqual({
       name: 'workspace',
       workspaceId: 'w1',

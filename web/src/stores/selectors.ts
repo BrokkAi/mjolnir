@@ -64,15 +64,15 @@ export function selectedWorkspaceId(
  * The route to render. A hash that names no screen opens the notifications
  * inbox when something needs attention, else the active workspace.
  */
-export function effectiveRoute(route: Route, implicit: boolean, hasAttention: boolean, rememberedWorkspaceId?: string | null, hasRememberedWorkspace = false): Route {
-  if (implicit && route.name === 'workspace' && !route.workspaceId && rememberedWorkspaceId) {
-    return { name: 'workspace', workspaceId: rememberedWorkspaceId };
-  }
-  if (implicit && route.name === 'workspace' && !route.workspaceId && hasRememberedWorkspace) {
-    return { name: 'workspace' };
-  }
-  if (implicit && route.name === 'workspace' && !route.workspaceId && hasAttention) {
-    return { name: 'notifications' };
+export function effectiveRoute(
+  route: Route,
+  implicit: boolean,
+  hasAttention: boolean,
+  rememberedWorkspaceId?: string | null,
+): Route {
+  if (implicit && route.name === 'workspace' && !route.workspaceId) {
+    if (hasAttention) return { name: 'notifications' };
+    if (rememberedWorkspaceId) return { name: 'workspace', workspaceId: rememberedWorkspaceId };
   }
   return route;
 }

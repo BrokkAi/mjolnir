@@ -57,14 +57,6 @@ interface BundleChoice {
   search?: string;
 }
 
-function providerFor(harness: string): QuotaProvider {
-  const known: Record<string, QuotaProvider> = {
-    claude: 'Anthropic', codex: 'OpenAI', antigravity: 'Google', grok: 'XAI', kimi: 'Moonshot',
-    muse: { Other: 'Muse' }, opencode: { Other: 'OpenCode' }, dsh: { Other: 'DSH' },
-  };
-  return known[harness.toLowerCase()] ?? { Other: harness };
-}
-
 function providerLabel(provider: QuotaProvider): string {
   if (typeof provider !== 'string') return provider.Other;
   if (provider === 'XAI') return 'xAI';
@@ -166,6 +158,10 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
 
   const [profileId, setProfileId] = useState('');
   const [providers, setProviders] = useState<Record<string, QuotaProvider>>({});
+  const [providerLookupError, setProviderLookupError] = useState<string | null>(null);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
+  const [providersReloadNonce, setProvidersReloadNonce] = useState(0);
+  const [providerSelectRetryNonce, setProviderSelectRetryNonce] = useState(0);
   const [autoProvider, setAutoProvider] = useState<QuotaProvider | null>(null);
   const [resolvedTarget, setResolvedTarget] = useState<string | null>(null);
   const [providerError, setProviderError] = useState('');
@@ -248,13 +244,11 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
     let alive = true;
     void (async () => {
       try {
-        const [launch, catalog, providerMap] = await Promise.all([
+        const [launch, catalog] = await Promise.all([
           getLaunchOptions(controller.signal),
           getProjects(controller.signal),
-          getProfileProviders(controller.signal).catch(() => ({ providers: {} })),
         ]);
         if (!alive) return;
-        setProviders(providerMap.providers);
         setOptions(launch);
         setProjects(catalog);
       } catch (error) {
@@ -270,7 +264,27 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   }, []);
 
   useEffect(() => {
-    if (!options || initialized.current) return;
+    const controller = new AbortController();
+    getProfileProviders(controller.signal)
+      .then(result => {
+        if (controller.signal.aborted) return;
+        setProviders(result.providers);
+        setProviderLookupError(null);
+        setProvidersLoaded(true);
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        providerGeneration.current += 1;
+        setAutoProvider(null);
+        setProviders({});
+        setProviderLookupError(describe(error));
+        setProvidersLoaded(true);
+      });
+    return () => controller.abort();
+  }, [providersReloadNonce]);
+
+  useEffect(() => {
+    if (!options || !providersLoaded || initialized.current) return;
     initialized.current = true;
     const preferredProfile = options.default?.profile_id;
     const preferredTarget = options.default?.target_id;
@@ -282,13 +296,13 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
           : (options.profiles[0]?.id ?? ''),
     );
     const preferred = options.profiles.find(profile => profile.id === preferredProfile) ?? (!options.primary_configured ? options.profiles[0] : undefined);
-    if (preferred) setExpandedProviders([JSON.stringify(providers[preferred.id] ?? providerFor(preferred.harness))]);
+    if (preferred && providers[preferred.id]) setExpandedProviders([JSON.stringify(providers[preferred.id])]);
     setTargetId(
       preferredTarget && options.targets.some(target => target.id === preferredTarget)
         ? preferredTarget
         : (options.targets[0]?.id ?? ''),
     );
-  }, [options, providers]);
+  }, [options, providers, providersLoaded]);
 
   useEffect(() => {
     if (!autoProvider) return;
@@ -300,13 +314,13 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
       .then(id => { if (!controller.signal.aborted && providerGeneration.current === generation) { setProfileId(id); setResolvedTarget(targetId); } })
       .catch(error => { if (!controller.signal.aborted && providerGeneration.current === generation) setProviderError(describe(error)); });
     return () => controller.abort();
-  }, [autoProvider, targetId]);
+  }, [autoProvider, targetId, providerSelectRetryNonce]);
 
   useEffect(() => {
     if (!initialized.current || bundleId) return;
     const first = options?.default?.bundle_id ?? options?.bundles[0]?.id ?? projects?.projects[0]?.bundle_id ?? '';
     if (first) setBundleId(first);
-  }, [options, projects, bundleId]);
+  }, [options, projects, bundleId, providersLoaded]);
 
   const viewerTarget = useMemo<ViewerTarget | undefined>(
     () => meta?.targets.find(target => target.id === targetId),
@@ -326,7 +340,8 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   const providerGroups = useMemo(() => {
     const groups = new Map<string, { provider: QuotaProvider; profiles: LaunchProfile[] }>();
     for (const profile of options?.profiles ?? []) {
-      const provider = providers[profile.id] ?? providerFor(profile.harness);
+      const provider = providers[profile.id];
+      if (!provider) continue;
       const key = JSON.stringify(provider);
       const group = groups.get(key) ?? { provider, profiles: [] };
       group.profiles.push(profile);
@@ -334,6 +349,25 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
     }
     return [...groups.entries()];
   }, [options, providers]);
+  const ungroupedProfiles = (options?.profiles ?? []).filter(profile => !providers[profile.id]);
+  const providerNotice = providerLookupError ?? (providersLoaded && ungroupedProfiles.length
+    ? `No provider returned for ${ungroupedProfiles.map(profile => profile.id).join(', ')}.`
+    : null);
+
+  useEffect(() => {
+    if (!providersLoaded) return;
+    if (autoProvider && !providerGroups.some(([, group]) => JSON.stringify(group.provider) === JSON.stringify(autoProvider))) {
+      providerGeneration.current += 1;
+      setAutoProvider(null);
+    }
+  }, [autoProvider, providerGroups, providersLoaded]);
+
+  useEffect(() => {
+    if (autoProvider || !providers[profileId]) return;
+    const key = JSON.stringify(providers[profileId]);
+    setExpandedProviders(current => current.includes(key) ? current : [...current, key]);
+  }, [providers, profileId, autoProvider]);
+
   const launchProfile = useMemo(
     () => options?.profiles.find(profile => profile.id === profileId),
     [options, profileId],
@@ -1164,12 +1198,14 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
             const selected = autoProvider !== null && JSON.stringify(autoProvider) === key;
             const expanded = expandedProviders.includes(key);
             return <div key={key} className="rounded-lg border border-line">
-              <div className="flex items-center"><button type="button" aria-pressed={selected} onClick={() => { if (!selected) { providerGeneration.current += 1; setResolvedTarget(null); setAutoProvider(group.provider); } }} className="min-w-0 flex-1 p-2 text-left text-sm">Auto ({label}) {selected && (providerError ? '' : providerPending ? '· Resolving…' : `→ ${profileId}`)}</button>
+              <div className="flex items-center"><button type="button" aria-pressed={selected} onClick={() => { if (!selected) { providerGeneration.current += 1; setResolvedTarget(null); setAutoProvider(group.provider); } else if (providerError || providerPending) { providerGeneration.current += 1; setProviderSelectRetryNonce(value => value + 1); } }} className="min-w-0 flex-1 p-2 text-left text-sm">Auto ({label}) {selected && (providerError ? '' : providerPending ? '· Resolving…' : `→ ${profileId}`)}</button>
                 <button type="button" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${label} accounts`} aria-expanded={expanded} onClick={() => setExpandedProviders(current => expanded ? current.filter(value => value !== key) : [...current, key])} className="p-2 text-xs text-muted">{group.profiles.length} {group.profiles.length === 1 ? 'account' : 'accounts'} {expanded ? '▴' : '▾'}</button></div>
-              {selected && providerError && <p role="alert" className="px-2 pb-2 text-xs text-danger">Could not select an account: {providerError}</p>}
+              {selected && providerError && <div role="alert" className="flex items-center gap-2 px-2 pb-2 text-xs text-danger">Could not select an account: {providerError} <button type="button" onClick={() => { providerGeneration.current += 1; setProviderSelectRetryNonce(value => value + 1); }} className="underline">Retry</button></div>}
               {expanded && group.profiles.map(profile => <button key={profile.id} type="button" aria-pressed={!autoProvider && profileId === profile.id} onClick={() => { providerGeneration.current += 1; setAutoProvider(null); setProfileId(profile.id); }} className="block w-full border-t border-line px-4 py-2 text-left text-sm">{profile.id} ({profile.harness})</button>)}
             </div>;
           })}
+          {providerNotice && <div role="alert" className="text-xs text-danger">Could not load provider groups: {providerNotice} <button type="button" onClick={() => setProvidersReloadNonce(value => value + 1)} className="underline">Retry</button></div>}
+          {providersLoaded && ungroupedProfiles.map(profile => <button key={profile.id} type="button" aria-pressed={!autoProvider && profileId === profile.id} onClick={() => { providerGeneration.current += 1; setAutoProvider(null); setProfileId(profile.id); }} className="rounded-lg border border-line p-2 text-left text-sm">{profile.id} ({profile.harness})</button>)}
         </div>
         {autoPrimary ? <p className="text-xs text-muted">Load-balanced across configured primary models.</p> : !autoProvider && <AvailabilityBadge status={profileBadge.status} reason={profileBadge.reason} />}
         {launchProfile && <p className="text-xs text-muted">{launchProfile.harness} via {launchTarget?.host || launchTarget?.kind || targetId}</p>}

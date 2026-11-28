@@ -31,7 +31,7 @@ export function MobileHeader() {
   const rows = useSessionStore(state => state.sessionsById);
   const connection = useSessionStore(selectConnection);
   const attention = useAttentionCount();
-  const shown = effectiveRoute(route, implicit, attention > 0, validRemembered, remembered !== null);
+  const shown = effectiveRoute(route, implicit, attention > 0, validRemembered);
   const rowById = (id: string) => rows[id];
   const top = isTopLevelRoute(shown);
 

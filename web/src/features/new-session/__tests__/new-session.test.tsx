@@ -168,6 +168,62 @@ describe('new session wizard', () => {
     expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('reports a provider lookup failure, permits manual selection, and retries the lookup', async () => {
+    let requests = 0;
+    mockFetch({
+      '/api/v1/options': () => jsonResponse({ ...LAUNCH_OPTIONS, primary_configured: true, default: { target_id: 't1' } }),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/profiles/providers': () => ++requests === 1
+        ? new Response(JSON.stringify({ error: 'provider service unavailable' }), { status: 503 })
+        : jsonResponse({ providers: { p1: 'Anthropic' } }),
+      '/api/v1/preflight/new': () => jsonResponse(preflight()),
+    });
+    render(<NewSessionView workspaceId="w1" />);
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('Could not load provider groups: provider service unavailable');
+    expect(screen.queryByRole('button', { name: /Auto \(Anthropic\)/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'p1 (claude)' }));
+    expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('button', { name: 'Auto (Anthropic)' });
+    expect(requests).toBe(2);
+    expect(await screen.findByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps profiles missing from the provider map available for manual selection', async () => {
+    mockFetch({
+      '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: {} }),
+      '/api/v1/preflight/new': () => jsonResponse(preflight()),
+    });
+    render(<NewSessionView workspaceId="w1" />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('No provider returned for p1');
+    expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('button', { name: 'Auto (Anthropic)' })).not.toBeInTheDocument();
+  });
+
+  it('retries a failed provider Auto selection without switching accounts', async () => {
+    let selections = 0;
+    mockFetch({
+      '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
+      '/api/v1/profiles/select': () => ++selections === 1
+        ? new Response(JSON.stringify({ error: 'quota unavailable' }), { status: 503 })
+        : jsonResponse('p1'),
+      '/api/v1/preflight/new': () => jsonResponse(preflight()),
+    });
+    render(<NewSessionView workspaceId="w1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto (Anthropic)' }));
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('quota unavailable');
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('button', { name: 'Auto (Anthropic) → p1' });
+    expect(selections).toBe(2);
+    await waitFor(() => expect(launchButton()).toBeEnabled());
+  });
+
   it('formats fractional GiB without gluing the whole and fraction digits together', () => {
     expect([4, 4.5, 0.5, 1.25].map(gib => formatGiB(gib * GIB))).toEqual(['4', '4.5', '0.5', '1.25']);
   });
@@ -178,6 +234,7 @@ describe('new session wizard', () => {
     mockFetch({
       '/api/v1/options': () =>
         jsonResponse({ ...LAUNCH_OPTIONS, primary_configured: true, default: { target_id: 't1' } }),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': (_url, init) => {
         preflightBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -202,6 +259,7 @@ describe('new session wizard', () => {
   it('lazy-loads launch options and projects only when the view mounts', async () => {
     const { urls } = mockFetch({
       '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': () => jsonResponse(preflight()),
       '/api/v1/actions': () => new Response('', { status: 202 }),
@@ -222,6 +280,7 @@ describe('new session wizard', () => {
     const bodies: Record<string, unknown>[] = [];
     mockFetch({
       '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': () => jsonResponse(preflight()),
       '/api/v1/actions': (_url, init) => {
@@ -264,6 +323,7 @@ describe('new session wizard', () => {
     const bodies: Record<string, unknown>[] = [];
     mockFetch({
       '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': () =>
         jsonResponse(preflight({ dirty_repositories: ['repo-a', 'repo-b'] })),

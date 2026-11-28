@@ -89,7 +89,7 @@ export function RouteOutlet() {
   const attention = useAttentionCount();
   // Until the first snapshot lands, an empty hash must not flash the wrong default.
   const loaded = useSessionStore(state => state.meta !== null);
-  const shown = effectiveRoute(route, implicit, loaded && attention > 0, validRemembered, remembered !== null);
+  const shown = effectiveRoute(route, implicit, loaded && attention > 0, validRemembered);
 
   let view;
   switch (shown.name) {

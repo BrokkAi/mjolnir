@@ -1,6 +1,7 @@
 import { Bell, LayoutGrid, LogOut, Gauge, Monitor, Moon, Server, Settings, Sun } from 'lucide-react';
 import type { ComponentType } from 'react';
 import { useSessionStore } from '../../stores/useSessionStore';
+import { effectiveRoute } from '../../stores/selectors';
 import { useUiStore, type Route, type Theme } from '../../stores/useUiStore';
 import { useAttentionCount } from './useSessionSelectors';
 
@@ -73,7 +74,7 @@ export function NavContent() {
   const version = useSessionStore(state => state.meta?.server_version);
   const attention = useAttentionCount();
   // An implicit route is the default screen; highlight whichever the shell shows.
-  const active = implicit && route.name === 'workspace' && !remembered && attention > 0 ? 'notifications' : route.name;
+  const active = effectiveRoute(route, implicit, attention > 0, validRemembered).name;
 
   return (
     <div className="flex h-full flex-col gap-4 p-3">

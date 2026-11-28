@@ -17,7 +17,7 @@ export function BottomNav() {
   const navigate = useUiStore(state => state.navigate);
   const attention = useAttentionCount();
   const signedIn = useSessionStore(state => state.auth === 'signed_in');
-  const shown = effectiveRoute(route, implicit, attention > 0, validRemembered, remembered !== null);
+  const shown = effectiveRoute(route, implicit, attention > 0, validRemembered);
   if (!signedIn || !isTopLevelRoute(shown)) return null;
 
   return (

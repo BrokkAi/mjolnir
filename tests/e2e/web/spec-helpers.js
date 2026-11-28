@@ -37,7 +37,7 @@ function installCommonRoutes(server, { transcripts = {}, extra } = {}) {
   }));
   server.handle('PUT', /^\/api\/v1\/sessions\/[^/]+\/draft$/, () => ({}));
   server.handle('POST', '/api/v1/actions', () => ({}));
-  server.handle('GET', '/api/v1/profiles/providers', () => ({ json: { providers: {} } }));
+  server.handle('GET', '/api/v1/profiles/providers', () => ({ json: { providers: { p1: { Other: 'fake' } } } }));
   server.handle('POST', '/api/v1/profiles/select', () => ({ json: 'p1' }));
   server.handle('GET', /^\/api\/v1\/sessions\/[^/]+\/notification-message$/, ({ url }) => ({
     json: {
