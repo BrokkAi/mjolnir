@@ -2347,9 +2347,6 @@ fn spawn_role_sync(
                     tracing::warn!(%error, "could not persist role assignments");
                     error.to_string()
                 });
-                if let Some(ack) = request.ack {
-                    let _ = ack.send(outcome.clone());
-                }
                 if outcome.is_err()
                     && let Some(owner) = owner.upgrade()
                 {
@@ -2360,6 +2357,9 @@ fn spawn_role_sync(
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .invalidate_role_snapshot(&request.snapshot);
+                }
+                if let Some(ack) = request.ack {
+                    let _ = ack.send(outcome.clone());
                 }
                 // `request.admission` drops here, after SQLite answered.
             })

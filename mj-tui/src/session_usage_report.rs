@@ -407,7 +407,7 @@ impl DashboardState {
                 dialog.selected_row.set(index);
             }
             Some(Interaction::Select(UsageControl::Providers, index)) => {
-                if matches!(event, Event::Mouse(_))
+                if matches!(event, Event::Mouse(m) if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)))
                     && let Some(key) = dialog.provider_keys.borrow().get(index).cloned()
                     && !dialog.expanded_providers.remove(&key)
                 {
@@ -461,6 +461,8 @@ struct Role {
     cost: u64,
     unknown_cost: bool,
     tokens: u64,
+    sub_cost: u64,
+    sub_tokens: u64,
     models: BTreeMap<String, u64>,
     unreported: u64,
 }
@@ -516,7 +518,7 @@ fn pace(quota: &[mj_core::usage::ProfileQuotaUsage], duration: u64) -> (Option<u
     )
 }
 
-fn forecast(pace: u64, projections: &[(f64, i64, f64)], now: i64) -> String {
+fn forecast(pace: u64, projections: &[(f64, Option<i64>, f64)], now: i64) -> String {
     if pace == 0 {
         return "idle".into();
     }
@@ -534,12 +536,17 @@ fn forecast(pace: u64, projections: &[(f64, i64, f64)], now: i64) -> String {
             let mut t = now as f64;
             while t < end as f64 {
                 for account in &mut accounts {
-                    while account.1 as f64 <= t {
+                    while account.1.is_some_and(|reset| reset as f64 <= t) {
                         account.0 = 100.0 * account.2;
-                        account.1 += 604_800;
+                        account.1 = account.1.map(|reset| reset + 604_800);
                     }
                 }
-                let next = accounts.iter().map(|a| a.1).min().unwrap_or(end).min(end) as f64;
+                let next = accounts
+                    .iter()
+                    .filter_map(|a| a.1)
+                    .min()
+                    .unwrap_or(end)
+                    .min(end) as f64;
                 let mut hours = (next - t) / 3600.0;
                 while hours > 0.0 {
                     let active_weight: f64 =
@@ -612,6 +619,16 @@ fn meridian(pct: Option<u64>, width: usize, thin: bool) -> String {
         .collect()
 }
 
+fn is_weekly_projection(p: &mj_core::usage::ProfileQuotaProjection) -> bool {
+    p.is_weekly_window.unwrap_or_else(|| {
+        if p.is_short_window {
+            return false;
+        }
+        let label = p.window_label.to_ascii_lowercase();
+        matches!(label.trim(), "week" | "weekly" | "7d")
+    })
+}
+
 fn provider_rows(
     dashboard: &DashboardState,
     dialog: &SessionUsageDialog,
@@ -637,7 +654,7 @@ fn provider_rows(
     for p in report
         .quota_projections
         .iter()
-        .filter(|p| !p.is_short_window && !p.window_label.to_ascii_lowercase().starts_with("5h"))
+        .filter(|p| is_weekly_projection(p))
     {
         providers
             .entry(label(&p.profile_id))
@@ -660,15 +677,23 @@ fn provider_rows(
             .profile
             .as_deref()
             .map_or_else(|| "Unattributed profile".to_owned(), label);
-        let role = providers
-            .entry(key)
-            .or_default()
-            .roles
-            .entry(u.role)
-            .or_default();
+        let provider = providers.entry(key).or_default();
+        let is_subscription = u
+            .profile
+            .as_ref()
+            .is_some_and(|id| provider.profiles.contains(id));
+        let role = provider.roles.entry(u.role).or_default();
         for model in &u.models {
             role.cost = role.cost.saturating_add(model.cost_usd_ticks.unwrap_or(0));
             role.unknown_cost |= model.cost_usd_ticks.is_err();
+            if is_subscription {
+                role.sub_cost = role
+                    .sub_cost
+                    .saturating_add(model.cost_usd_ticks.unwrap_or(0));
+                role.sub_tokens = role
+                    .sub_tokens
+                    .saturating_add(model.totals.get("total_tokens").map_or(0, |t| t.tokens));
+            }
             role.tokens = role
                 .tokens
                 .saturating_add(model.totals.get("total_tokens").map_or(0, |t| t.tokens));
@@ -736,11 +761,7 @@ fn provider_rows(
             let projection = report
                 .quota_projections
                 .iter()
-                .filter(|p| {
-                    p.profile_id == *profile
-                        && !p.is_short_window
-                        && !p.window_label.to_ascii_lowercase().starts_with("5h")
-                })
+                .filter(|p| p.profile_id == *profile && is_weekly_projection(p))
                 .min_by_key(|p| p.window_label.len());
             if let Some(p) = projection {
                 let weight = if equal {
@@ -775,10 +796,12 @@ fn provider_rows(
         let now = mj_core::clock::epoch_seconds() as i64;
         let live: Vec<_> = weekly
             .iter()
-            .filter_map(|(p, w)| {
-                p.resets_at_epoch_seconds
-                    .filter(|r| *r > now)
-                    .map(|r| (f64::from(p.remaining_percent), r, *w))
+            .map(|(p, w)| {
+                (
+                    f64::from(p.remaining_percent),
+                    p.resets_at_epoch_seconds.filter(|r| *r > now),
+                    *w,
+                )
             })
             .collect();
         let note = pct.map_or_else(
@@ -855,7 +878,18 @@ fn provider_rows(
                 .iter()
                 .map(|(_, r)| if cost_sum > 0 { r.cost } else { r.tokens })
                 .collect();
-            if values.iter().all(|v| *v == 0) && pct.unwrap_or(0) > 0 {
+            let sub_cost_sum: u64 = roles.iter().map(|(_, r)| r.sub_cost).sum();
+            let sub_values: Vec<_> = roles
+                .iter()
+                .map(|(_, r)| {
+                    if sub_cost_sum > 0 {
+                        r.sub_cost
+                    } else {
+                        r.sub_tokens
+                    }
+                })
+                .collect();
+            if sub_values.iter().all(|v| *v == 0) && pct.unwrap_or(0) > 0 {
                 lines.push(Line::styled(
                     format!(
                         "  └─ {:<20} {} {:>5}% 100% share",
@@ -868,7 +902,12 @@ fn provider_rows(
                 map.push(None);
             } else {
                 let shares = allocations(&values, 100);
-                let paces = allocations(&values, pct.unwrap_or(0));
+                let paces = pct.map(|total| allocations(&sub_values, total));
+                let unknown_pace = if provider.quota.is_empty() && weekly.is_empty() {
+                    "payg"
+                } else {
+                    "?"
+                };
                 let count = roles.len();
                 for (i, (role, data)) in roles.drain(..).enumerate() {
                     let mut models: Vec<_> = data.models.into_iter().collect();
@@ -884,13 +923,17 @@ fn provider_rows(
                     } else {
                         String::new()
                     };
+                    let role_pace = paces.as_ref().map(|p| p[i]);
+                    let pace_cell = role_pace.map_or_else(
+                        || format!("{unknown_pace:>6}"),
+                        |value| format!("{value:>5}%"),
+                    );
                     lines.push(Line::styled(
                         format!(
-                            "  {} {:<20} {} {:>5}% {:>3}% share {:>8}  {model}{extra}",
+                            "  {} {:<20} {} {pace_cell} {:>3}% share {:>8}  {model}{extra}",
                             if i + 1 == count { "└─" } else { "├─" },
                             truncate_to_cells(role.label(), 20, Truncate::PLAIN),
-                            meridian(Some(paces[i]), gauge_width, true),
-                            paces[i],
+                            meridian(role_pace, gauge_width, true),
                             shares[i],
                             dollars(
                                 if data.unknown_cost {
@@ -1495,14 +1538,46 @@ mod tests {
         assert_eq!(pace(&[a, b], 604_800), (Some(100), true));
     }
 
+    // Hard-won: review-group-3e97d4ef: daily balances were treated as weekly.
+    #[test]
+    fn usage_weekly_projection_rejects_daily_and_scoped_legacy_windows() {
+        let mut projection = mj_core::usage::ProfileQuotaProjection {
+            profile_id: "p".into(),
+            window_label: "Daily".into(),
+            is_short_window: false,
+            is_weekly_window: Some(false),
+            remaining_percent: 20,
+            resets_at_epoch_seconds: None,
+            observed_pct_per_hour: None,
+            sustainable_pct_per_hour: None,
+            pace_ratio: None,
+            projected_exhaustion_epoch_seconds: None,
+        };
+        assert!(!is_weekly_projection(&projection));
+        projection.is_weekly_window = None;
+        assert!(!is_weekly_projection(&projection));
+        projection.window_label = "Week (model)".into();
+        assert!(!is_weekly_projection(&projection));
+        projection.window_label = "Week".into();
+        assert!(is_weekly_projection(&projection));
+    }
+
     #[test]
     fn usage_staggered_resets_change_pooled_forecast() {
         assert_eq!(
-            forecast(200, &[(30.0, 200_000, 1.0), (30.0, 200_000, 1.0)], 0),
+            forecast(
+                200,
+                &[(30.0, Some(200_000), 1.0), (30.0, Some(200_000), 1.0)],
+                0
+            ),
             "dry in 1d 1h"
         );
         assert_eq!(
-            forecast(110, &[(90.0, 86_400, 1.0), (90.0, 345_600, 1.0)], 0),
+            forecast(
+                110,
+                &[(90.0, Some(86_400), 1.0), (90.0, Some(345_600), 1.0)],
+                0
+            ),
             "tight · safe 7d"
         );
         assert_eq!(forecast(120, &[], 0), "over pace");
@@ -1514,13 +1589,21 @@ mod tests {
     #[test]
     fn usage_forecast_reports_exhaustion_at_a_safe_pace() {
         let now = 1_700_000_000;
-        let note = forecast(100, &[(10.0, now + 3 * 86_400, 1.0)], now);
+        let note = forecast(100, &[(10.0, Some(now + 3 * 86_400), 1.0)], now);
         assert!(
             note.starts_with("dry in"),
             "pace 100% with 10% left and a reset 3d away runs dry: {note}"
         );
-        let note = forecast(100, &[(0.0, now + 3 * 86_400, 1.0)], now);
+        let note = forecast(100, &[(0.0, Some(now + 3 * 86_400), 1.0)], now);
         assert_eq!(note, "dry now");
+        assert_ne!(
+            forecast(
+                100,
+                &[(0.0, Some(now + 86_400), 1.0), (100.0, None, 1.0)],
+                now
+            ),
+            "dry now"
+        );
     }
 
     #[test]

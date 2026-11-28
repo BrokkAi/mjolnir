@@ -3,9 +3,9 @@ import type { CostUsdTicks, ModelUsageEstimate, SessionUsageReport, ViewerProfil
 export const ticks = (cost: CostUsdTicks) => 'Ok' in cost ? cost.Ok : 0;
 export const money = (cost: CostUsdTicks) => 'Ok' in cost ? `$${(cost.Ok / 1e10).toFixed(2)}` : 'Unknown';
 
-export function providerName(id: string, profiles: ViewerProfile[]): string {
+export function providerName(id: string, profiles: ViewerProfile[], profileProviders?: Record<string, string>): string {
   const profile = profiles.find(p => p.id === id);
-  const provider = profile?.quota_provider?.trim();
+  const provider = profileProviders?.[id]?.trim();
   if (provider) return provider;
   const kind = profile?.harness_kind.toLowerCase() ?? '';
   const names: Record<string, string> = {
@@ -61,12 +61,11 @@ export interface ProviderRow {
   partial: boolean;
   tank: number | null;
   forecast: string;
-  roles: { name: string; share: number; pace: number; cost: number; unknownCost: boolean; models: ModelUsageEstimate[] }[];
+  roles: { name: string; share: number; pace: number | null; cost: number; unknownCost: boolean; models: ModelUsageEstimate[] }[];
 }
 
 export function providerRows(report: SessionUsageReport, profiles: ViewerProfile[], duration: number, now = Date.now() / 1000): ProviderRow[] {
   const ids = new Set([
-    ...report.profiles,
     ...(report.quota_usage ?? []).map(q => q.profile),
     ...(report.quota_projections ?? []).map(q => q.profile_id),
     ...(report.profile_role_usage ?? []).flatMap(r => r.profile ? [r.profile] : []),
@@ -74,16 +73,16 @@ export function providerRows(report: SessionUsageReport, profiles: ViewerProfile
   ]);
   const groups = new Map<string, string[]>();
   for (const id of ids) {
-    const name = providerName(id, profiles);
+    const name = providerName(id, profiles, report.profile_providers);
     groups.set(name, [...(groups.get(name) ?? []), id]);
   }
   return [...groups].map(([name, members]) => {
     const usage = (report.quota_usage ?? []).filter(q => members.includes(q.profile));
     const projections = (report.quota_projections ?? []).filter(p => members.includes(p.profile_id)
-      && !p.is_short_window && !p.window_label.toLowerCase().startsWith('5h'));
+      && (p.is_weekly_window !== undefined ? p.is_weekly_window : !p.is_short_window && /^(week|weekly|7d)(\s|$)/i.test(p.window_label)));
     const selected = members.flatMap(id => {
       const options = projections.filter(p => p.profile_id === id);
-      return options.length ? [options.find(p => /^(week|weekly|7d)(\s|$)/i.test(p.window_label)) ?? options[0]] : [];
+      return options.length ? [options[0]] : [];
     });
     const quotaMembers = members.filter(id => usage.some(q => q.profile === id) || selected.some(p => p.profile_id === id));
     const weights = new Map(members.map(id => [id, usage.find(q => q.profile === id)?.monthly_price_usd ?? 0]));
@@ -100,7 +99,7 @@ export function providerRows(report: SessionUsageReport, profiles: ViewerProfile
     const hasQuota = quotaMembers.length > 0;
     let forecast = pace === null ? (hasQuota ? 'unavailable' : 'usage-billed') : pace === 0 ? 'idle'
       : pace < 80 ? `slack · ~${100 - pace}% unused` : pace <= 105 ? 'on pace · safe' : 'over pace';
-    if (pace !== null && pace > 0 && tank !== null && selected.some(p => p.resets_at_epoch_seconds != null && p.resets_at_epoch_seconds > now)) {
+    if (pace !== null && pace > 0 && tank !== null && selected.length > 0) {
       let remaining = tank;
       let last = 0;
       let dry: number | null = null;
@@ -152,29 +151,34 @@ export function providerRows(report: SessionUsageReport, profiles: ViewerProfile
     const unknown = profileUsage.some(p => 'Err' in p.cost_usd_ticks);
     const isPartial = profileUsage.some(p => p.coverage.full_turn_reports < p.coverage.recorded_turns || (p.coverage.unfinished_turns ?? 0) > 0);
     const estimatedCost = unknown ? '?' : `$${(profileUsage.reduce((sum, p) => sum + ticks(p.cost_usd_ticks), 0) / 1e10).toFixed(2)}${isPartial ? '+' : ''}`;
-    const roleMap = new Map<string, { cost: number; tokens: number; unknownCost: boolean; models: ModelUsageEstimate[] }>();
+    const roleMap = new Map<string, { cost: number; tokens: number; subCost: number; subTokens: number; unknownCost: boolean; models: ModelUsageEstimate[] }>();
     for (const role of report.profile_role_usage ?? []) {
       if (!role.profile || !members.includes(role.profile)) continue;
-      const entry = roleMap.get(role.role) ?? { cost: 0, tokens: 0, unknownCost: false, models: [] };
+      const entry = roleMap.get(role.role) ?? { cost: 0, tokens: 0, subCost: 0, subTokens: 0, unknownCost: false, models: [] };
       for (const model of role.models) {
         entry.cost += ticks(model.cost_usd_ticks);
+        if (quotaMembers.includes(role.profile)) entry.subCost += ticks(model.cost_usd_ticks);
         entry.unknownCost ||= 'Err' in model.cost_usd_ticks || (model.unreported_turns ?? 0) > 0;
       }
       entry.models.push(...role.models);
-      entry.tokens += role.models.reduce((s, m) => s + (m.totals.total_tokens?.tokens ?? 0), 0);
+      const tokens = role.models.reduce((s, m) => s + (m.totals.total_tokens?.tokens ?? 0), 0);
+      entry.tokens += tokens;
+      if (quotaMembers.includes(role.profile)) entry.subTokens += tokens;
       roleMap.set(role.role, entry);
     }
     const entries = [...roleMap];
     const useCost = entries.some(([, r]) => r.cost > 0);
     const vals = entries.map(([, r]) => useCost ? r.cost : r.tokens);
     const shares = allocate(vals, 100);
-    const paces = allocate(vals, pace ?? 0);
+    const useSubCost = entries.some(([, r]) => r.subCost > 0);
+    const subVals = entries.map(([, r]) => useSubCost ? r.subCost : r.subTokens);
+    const paces = pace === null ? null : allocate(subVals, pace);
     const roles = entries.map(([role, r], i) => ({
-      name: roleLabels[role] ?? role.replaceAll('_', ' '), share: shares[i], pace: paces[i],
+      name: roleLabels[role] ?? role.replaceAll('_', ' '), share: shares[i], pace: paces === null ? null : paces[i],
       cost: r.cost, unknownCost: r.unknownCost, models: mergeModels(r.models),
     }));
-    if (!vals.some(v => v > 0) && pace && pace > 0) {
-      roles.splice(0, roles.length, { name: 'External / untracked', share: 100, pace, cost: 0, unknownCost: false, models: [] });
+    if (!subVals.some(v => v > 0) && pace !== null && pace > 0) {
+      roles.push({ name: 'External / untracked', share: vals.some(v => v > 0) ? 0 : 100, pace, cost: 0, unknownCost: false, models: [] });
     }
     return { name, pace, partial, tank, forecast, roles, hasQuota, accountCount: quotaMembers.length, estimatedCost };
   });

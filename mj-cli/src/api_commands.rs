@@ -6456,6 +6456,7 @@ mod tests {
                 profile_id: "claude".into(),
                 window_label: "Week".into(),
                 is_short_window: false,
+                is_weekly_window: None,
                 remaining_percent: 38,
                 resets_at_epoch_seconds: Some(now as i64 + 54 * 3600),
                 observed_pct_per_hour: Some(1.0),

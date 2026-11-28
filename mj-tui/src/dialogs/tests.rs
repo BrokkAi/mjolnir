@@ -1483,6 +1483,7 @@ fn golden_dashboard_dialogs() {
         profile_id: "codex4".into(),
         window_label: "Week".into(),
         is_short_window: false,
+        is_weekly_window: None,
         remaining_percent: 38,
         resets_at_epoch_seconds: Some(now + 54 * 3600 + 30),
         observed_pct_per_hour: Some(1.0),
@@ -2660,6 +2661,11 @@ fn usage_timeline_range_and_provider_interactions() {
         ProfileRoleUsageEstimate, RoleAssignmentChange, SessionUsageReport, UsageAgentRole,
     };
     let mut usage = dashboard_with_session(running_session());
+    let codex = usage.config.profiles["codex-1"].clone();
+    usage.config.profiles.insert("codex".into(), codex.clone());
+    usage.config.profiles.insert("payg-codex".into(), codex);
+    usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
+    usage.quota_providers.settle();
     usage.begin_session_usage_report(None);
     let first = usage.session_usage_request().unwrap().0;
     let hours: Vec<_> = (0..24)
@@ -2684,6 +2690,7 @@ fn usage_timeline_range_and_provider_interactions() {
             profile_id: "codex".into(),
             window_label: "5h".into(),
             is_short_window: true,
+            is_weekly_window: None,
             remaining_percent: 1,
             resets_at_epoch_seconds: None,
             observed_pct_per_hour: None,
@@ -2714,6 +2721,15 @@ fn usage_timeline_range_and_provider_interactions() {
                 usage.handle_mouse(event);
             }
         };
+    usage.handle_mouse(mouse_at(
+        MouseEventKind::ScrollDown,
+        (provider_x as u16, provider_y as u16),
+    ));
+    assert!(
+        drawn(&mut usage, 120, 36)
+            .iter()
+            .any(|line| line.contains('▸'))
+    );
     click(
         &mut usage,
         (provider_x as u16, provider_y as u16),
@@ -2763,6 +2779,44 @@ fn usage_timeline_range_and_provider_interactions() {
     assert!(expanded.iter().any(|line| line.contains("Reviewers")
         && line.contains("35%")
         && line.contains("25% share")));
+    // Hard-won: review-group-3e97d4ef: usage-billed turns stole subscription pace.
+    let mut mixed = report.clone();
+    mixed.profile_role_usage = [
+        ("codex", UsageAgentRole::Primary, 3),
+        ("payg-codex", UsageAgentRole::Reviewer, 1),
+    ]
+    .into_iter()
+    .map(|(profile, role, cost)| ProfileRoleUsageEstimate {
+        profile: Some(profile.into()),
+        role,
+        models: vec![ModelUsageEstimate {
+            cost_usd_ticks: Ok(cost),
+            ..Default::default()
+        }],
+        cost_usd_ticks: Ok(cost),
+    })
+    .collect();
+    usage.apply_session_usage_result(first, Ok(mixed.clone()));
+    let mixed_screen = drawn(&mut usage, 120, 36);
+    assert!(
+        mixed_screen
+            .iter()
+            .any(|line| line.contains("Primary agents") && line.contains("140%"))
+    );
+    assert!(mixed_screen.iter().any(|line| line.contains("Reviewers")
+        && line.contains("0%")
+        && line.contains("25% share")));
+    mixed.quota_usage.clear();
+    mixed.quota_projections.clear();
+    usage.apply_session_usage_result(first, Ok(mixed));
+    let payg_screen = drawn(&mut usage, 120, 36);
+    assert!(
+        payg_screen
+            .iter()
+            .any(|line| line.contains("Primary agents")
+                && line.contains("payg")
+                && line.contains('┄'))
+    );
     usage.handle_key(key(KeyCode::Left));
     usage.apply_session_usage_result(first, Ok(report.clone()));
     let screen = drawn(&mut usage, 120, 36);
@@ -2915,6 +2969,7 @@ fn usage_dry_forecast_at_a_safe_pace_is_styled_as_a_warning() {
             profile_id: "codex".into(),
             window_label: "Week".into(),
             is_short_window: false,
+            is_weekly_window: None,
             remaining_percent: 10,
             resets_at_epoch_seconds: Some(now + 3 * 86_400),
             observed_pct_per_hour: None,

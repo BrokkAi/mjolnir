@@ -27,6 +27,8 @@ export default function UsageView() {
   const [profile, setProfile] = useState('');
   const [suspended, setSuspended] = useState(false);
   const [selected, setSelected] = useState<number[] | null>(null);
+  const [appliedSelection, setAppliedSelection] = useState<number[] | null>(null);
+  const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
@@ -40,9 +42,11 @@ export default function UsageView() {
     const controller = new AbortController();
     const current = ++generation.current;
     setError('');
+    setLoading(true);
     getUsageReport({ profile: profile || undefined, include_suspended: suspended, hour_starts_ms: selected ?? undefined }, controller.signal)
-      .then(value => { if (current === generation.current) setReport(value); })
-      .catch(e => { if (!controller.signal.aborted && current === generation.current) setError(String(e)); });
+      .then(value => { if (current === generation.current) { setReport(value); setAppliedSelection(selected); } })
+      .catch(e => { if (!controller.signal.aborted && current === generation.current) setError(String(e)); })
+      .finally(() => { if (!controller.signal.aborted && current === generation.current) setLoading(false); });
     return () => controller.abort();
   }, [profile, suspended, selected, refresh]);
 
@@ -60,9 +64,9 @@ export default function UsageView() {
   const hours = report?.hours ?? [];
   const range = (a: number, b: number) => hours.map(h => h.start_ms)
     .filter(h => h >= Math.min(a, b) && h <= Math.max(a, b));
-  const duration = !report ? 0 : selected === null
+  const duration = !report ? 0 : appliedSelection === null
     ? Math.max(0, (report.until_ms - report.since_ms) / 1000)
-    : selected.reduce((s, h) => s + Math.max(0, Math.min(h + HOUR - 1, report.until_ms) - h + 1) / 1000, 0);
+    : appliedSelection.reduce((s, h) => s + Math.max(0, Math.min(h + HOUR - 1, report.until_ms) - h + 1) / 1000, 0);
   const rows = useMemo(() => report ? providerRows(report, profiles, duration) : [], [report, profiles, duration]);
   const selection = preview ?? selected;
 
@@ -103,7 +107,7 @@ export default function UsageView() {
 
   const max = Math.max(1, ...hours.map(h => h.known_cost_usd_ticks));
   return (
-    <main className="h-full overflow-auto bg-bg p-4 text-fg md:p-6">
+    <main aria-busy={loading} className="h-full overflow-auto bg-bg p-4 text-fg md:p-6">
       <div className="mx-auto max-w-6xl space-y-6">
         <h1 className="text-xl font-semibold">Usage Dashboard</h1>
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface p-3 text-sm">
@@ -114,7 +118,8 @@ export default function UsageView() {
             </select>
           </label>
           <label><input type="checkbox" checked={suspended} onChange={e => setSuspended(e.target.checked)} /> Include suspended sessions</label>
-          <span className="rounded bg-raised px-2 py-1">{selected === null ? 'Last 24h' : `${selected.length} selected hours`}</span>
+          <span className="rounded bg-raised px-2 py-1">{appliedSelection === null ? 'Last 24h' : `${appliedSelection.length} selected hours`}</span>
+          {loading && <span role="status">Loading…</span>}
           {selected !== null && <button onClick={() => setSelected(null)} className="text-accent">Show all 24h</button>}
           <button onClick={() => setRefresh(x => x + 1)} className="flex items-center gap-1 rounded border border-line px-2 py-1">
             <RefreshCw className="size-4" /> Refresh
@@ -143,7 +148,7 @@ export default function UsageView() {
               </button>
               {expanded.has(row.name) && row.roles.map(role => <div key={role.name} className={`${columns} mt-3 text-xs`}>
                 <span className="pl-4">{role.name}</span><Gauge pace={role.pace} thin />
-                <span>{role.pace}%</span><span>{role.share}% share</span><span>{role.unknownCost && role.cost === 0 ? '?' : `$${(role.cost / 1e10).toFixed(2)}${role.unknownCost ? '+' : ''}`}</span>
+                <span>{role.pace === null ? (row.hasQuota ? 'unknown' : 'payg') : `${role.pace}%`}</span><span>{role.share}% share</span><span>{role.unknownCost && role.cost === 0 ? '?' : `$${(role.cost / 1e10).toFixed(2)}${role.unknownCost ? '+' : ''}`}</span>
                 <span>{role.models.map(m => `${m.model ?? 'Unknown'}${m.unreported_turns ? ` (${m.unreported_turns} unreported)` : ''}`).join(', ')}</span>
               </div>)}
             </div>)}
@@ -200,7 +205,7 @@ export default function UsageView() {
               {report.role_changes.map((change, i) => {
                 const start = Math.floor(change.changed_at_ms / HOUR) * HOUR;
                 const postChange = hours.filter(h => h.start_ms >= start).map(h => h.start_ms);
-                const active = selected !== null && selected.length === postChange.length && postChange.every(h => selected.includes(h));
+                const active = appliedSelection !== null && appliedSelection.length === postChange.length && postChange.every(h => appliedSelection.includes(h));
                 return <button key={change.id} aria-pressed={active} className={`block rounded px-1 py-1 text-left text-accent ${active ? 'bg-accent/15 font-semibold' : ''}`}
                   onClick={() => { setSelected(postChange); anchor.current = start; }}>
                   {pins(i)} {new Date(change.changed_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} {change.summary}

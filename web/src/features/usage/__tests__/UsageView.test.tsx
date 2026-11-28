@@ -41,3 +41,23 @@ it('clears rolled-off selections and anchors before a shift selection', async ()
   fireEvent.pointerUp(screen.getAllByRole('button', { name: /^Hour / })[2], { shiftKey: true });
   await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([advancedHours[2].start_ms]));
 });
+
+it.each([['payg', []], ['unknown', [{ profile: 'a', consumed_basis_points: null, covered_seconds: 6048, monthly_price_usd: 100, partial: false }]]])('renders %s for expanded unmeasured roles', async (label, quota) => {
+  vi.mocked(getUsageReport).mockResolvedValue({ ...report, quota_usage: quota, profile_role_usage: [{ profile: 'a', role: 'primary', cost_usd_ticks: { Ok: 1 }, models: [{ model: 'm', cost_usd_ticks: { Ok: 1 }, totals: {} }] }] } as never);
+  render(<UsageView />); fireEvent.click(await screen.findByRole('button', { name: /▸ a/ }));
+  expect(screen.getAllByText(label)).toHaveLength(2);
+  expect(screen.getByText('Primary agents').parentElement).toHaveTextContent(label);
+});
+it('keeps loaded window metadata while a selection loads and after failure', async () => {
+  render(<UsageView />); await screen.findByText('Sessions');
+  let reject!: (reason: Error) => void;
+  vi.mocked(getUsageReport).mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
+  fireEvent.click(screen.getByRole('button', { name: /Changed/ }));
+  expect(await screen.findByRole('status')).toHaveTextContent('Loading…');
+  expect(screen.getByText('Last 24h')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Changed/ })).toHaveAttribute('aria-pressed', 'false');
+  reject(new Error('offline'));
+  expect(await screen.findByRole('alert')).toHaveTextContent('offline');
+  expect(screen.getByText('Last 24h')).toBeInTheDocument();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});

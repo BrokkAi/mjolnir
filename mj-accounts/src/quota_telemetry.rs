@@ -1335,6 +1335,9 @@ impl QuotaTelemetryStore {
                         profile_id: profile_id.clone(),
                         window_label: report.window_label(window),
                         is_short_window: kind == WindowKind::Short5h,
+                        is_weekly_window: Some(
+                            window.is_weekly_period() && window.model_scope.is_none(),
+                        ),
                         remaining_percent,
                         resets_at_epoch_seconds: window.resets_at_epoch_seconds,
                         observed_pct_per_hour: observed,
@@ -1690,6 +1693,7 @@ mod tests {
             .unwrap();
         let projection = &store.snapshot().projections[0];
         assert!(!projection.is_short_window);
+        assert_eq!(projection.is_weekly_window, Some(true));
         assert!((projection.observed_pct_per_hour.unwrap() - 1.0).abs() < 1e-9);
         assert!((projection.pace_ratio.unwrap() - 1.2).abs() < 1e-9);
 
@@ -1726,10 +1730,32 @@ mod tests {
             .map(|p| p.is_short_window)
             .collect();
         assert_eq!(kinds, vec![true, false]);
+        assert_eq!(
+            store
+                .snapshot()
+                .projections
+                .iter()
+                .map(|p| p.is_weekly_window)
+                .collect::<Vec<_>>(),
+            vec![Some(false), Some(true)]
+        );
+        let mut daily = sample_report("p", NOW as u64, None, Some((50, None)));
+        daily.windows[0].duration_seconds = Some(86_400);
+        daily.windows[0].label = "Daily".into();
+        store
+            .refresh_projections_with_loader(&[("p".into(), "id".into(), daily)], NOW, |_, _, _| {
+                Ok(Vec::new())
+            })
+            .unwrap();
+        assert_eq!(
+            store.snapshot().projections[0].is_weekly_window,
+            Some(false)
+        );
         store
             .refresh_projections_with_loader(&reports, NOW, |_, _, _| Ok(history.clone()))
             .unwrap();
         let projections = store.snapshot().projections;
+        assert_eq!(projections[1].is_weekly_window, Some(false));
         assert!((projections[0].observed_pct_per_hour.unwrap() - 1.0).abs() < 1e-9);
         assert!((projections[1].observed_pct_per_hour.unwrap() - 0.5).abs() < 1e-9);
     }

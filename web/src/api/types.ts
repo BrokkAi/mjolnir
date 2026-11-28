@@ -795,7 +795,6 @@ export interface ViewerProfile {
   availability: AvailabilityVerdict;
   capabilities_key: string;
   harness_kind: string;
-  quota_provider?: string;
   quota_pools?: string[];
   quota?: ViewerQuota;
 }
@@ -2008,12 +2007,13 @@ export interface SessionUsageReport {
   since_ms: number; until_ms: number;
   hours: { start_ms: number; known_cost_usd_ticks: number; has_unknown_cost: boolean }[];
   profiles: string[];
+  profile_providers?: Record<string, string>;
   sessions: { session_id: string; title: string; profile: string; suspended: boolean; subagent_count: number; models: ModelUsageEstimate[]; coverage: UsageCoverage; cost_usd_ticks: CostUsdTicks }[];
   agent_usage?: { role: string; models: ModelUsageEstimate[]; cost_usd_ticks: CostUsdTicks }[];
   profile_usage?: { profile: string | null; coverage: UsageCoverage; cost_usd_ticks: CostUsdTicks }[];
   profile_role_usage?: ProfileRoleUsageEstimate[];
   role_changes?: { id: number; changed_at_ms: number; summary: string }[];
   quota_usage?: { profile: string; consumed_basis_points: number | null; covered_seconds?: number; partial: boolean; monthly_price_usd: number | null }[];
-  quota_projections?: { profile_id: string; window_label: string; is_short_window?: boolean; remaining_percent: number; resets_at_epoch_seconds: number | null; observed_pct_per_hour: number | null; sustainable_pct_per_hour: number | null; pace_ratio: number | null; projected_exhaustion_epoch_seconds: number | null }[];
+  quota_projections?: { profile_id: string; window_label: string; is_short_window?: boolean; is_weekly_window?: boolean; remaining_percent: number; resets_at_epoch_seconds: number | null; observed_pct_per_hour: number | null; sustainable_pct_per_hour: number | null; pace_ratio: number | null; projected_exhaustion_epoch_seconds: number | null }[];
   cost_usd_ticks: CostUsdTicks;
 }

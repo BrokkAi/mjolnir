@@ -7424,6 +7424,43 @@ pub(crate) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     ))
 }
 
+// Hard-won: review-group-3e97d4ef: dashboard history failures falsely failed lifecycle reloads.
+#[tokio::test]
+async fn role_sync_reload_succeeds_on_failed_or_dropped_ack() {
+    const CHILD: &str = "MJ_TEST_ROLE_SYNC_RELOAD_FAILURE";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "role_sync_reload_succeeds_on_failed_or_dropped_ack",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "role-sync-reload")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let state = test_runtime_state_loading_the_store();
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::unbounded_channel::<super::owner::RoleSyncRequest>();
+    state.owner().set_role_sync(sender);
+    let task = mj_core::runtime::spawn(async move {
+        let request = receiver.recv().await.unwrap();
+        request
+            .ack
+            .unwrap()
+            .send(Err("write failed".into()))
+            .unwrap();
+        let request = receiver.recv().await.unwrap();
+        drop(request.ack);
+    });
+    assert!(state.reload_controller().await.is_ok());
+    assert!(state.reload_controller().await.is_ok());
+    task.await.unwrap();
+}
+
 // Hard-won: 1d746fab4: each sweep rebuilt reports for every historical parent.
 #[cfg(unix)]
 #[tokio::test]

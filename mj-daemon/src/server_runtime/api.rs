@@ -5006,6 +5006,16 @@ impl SubagentBackend for ApiBackend {
             mj_core::runtime::spawn_blocking(move || {
                 let mut report =
                     mj_controller::database::load_session_usage_report(&query, models)?;
+                report.profile_providers = config
+                    .profiles
+                    .iter()
+                    .map(|(id, profile)| {
+                        (
+                            id.clone(),
+                            profile.quota_provider().display_name().to_owned(),
+                        )
+                    })
+                    .collect();
                 report.quota_projections = projections;
                 // The store clipped the last selected interval to its snapshot time.
                 report.quota_usage = mj_controller::quota_telemetry::weekly_quota_usage(

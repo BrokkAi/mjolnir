@@ -76,9 +76,7 @@ impl RuntimeState {
         if let Some(ack) = ack {
             match ack.await {
                 Ok(Ok(())) => {}
-                // Say the role assignments were not persisted rather than
-                // reporting a reload whose marker is missing.
-                Ok(Err(error)) => return Err(anyhow!("role assignment sync failed: {error}")),
+                Ok(Err(error)) => tracing::warn!(%error, "role assignment sync failed"),
                 Err(_) => tracing::warn!("role assignment sync acknowledgement lost"),
             }
         }

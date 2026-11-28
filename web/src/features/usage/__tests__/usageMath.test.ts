@@ -6,7 +6,7 @@ function report(): SessionUsageReport { return { since_ms: 0, until_ms: 3600000,
 describe('provider pace', () => {
   it('weights covered rates by plan price and marks partial coverage', () => { const row = providerRows(report(), profiles, 7200)[0]; expect(row.pace).toBe(175); expect(row.partial).toBe(true); });
   it('excludes short windows and models reset safety across the week', () => { const r = report(); r.quota_projections = [{profile_id:'a', window_label:'5h', is_short_window:true, remaining_percent:0, resets_at_epoch_seconds:1, observed_pct_per_hour:null,sustainable_pct_per_hour:null,pace_ratio:null,projected_exhaustion_epoch_seconds:null}, {profile_id:'a',window_label:'Weekly',remaining_percent:100,resets_at_epoch_seconds:3600,observed_pct_per_hour:null,sustainable_pct_per_hour:null,pace_ratio:null,projected_exhaustion_epoch_seconds:null}]; const row = providerRows(r, profiles, 6048, 0)[0]; expect(row.tank).toBe(100); expect(row.forecast).toBe('dry in 4d 1h'); });
-  it('allocates rounded role pace and shares and displays external usage', () => { const r = report(); expect(providerRows(r, profiles, 6048)[0].roles[0].name).toBe('External / untracked'); r.profile_role_usage = ['primary','oracle','reviewer'].map(role => ({profile:'a', role, cost_usd_ticks:{Ok:1}, models:[{model:role, cost_usd_ticks:{Ok:1}, totals:{}}]})); const row = providerRows(r, profiles, 6048)[0]; expect(row.roles.reduce((n,x) => n+x.pace,0)).toBe(row.pace); expect(row.roles.reduce((n,x) => n+x.share,0)).toBe(100); });
+  it('allocates rounded role pace and shares and displays external usage', () => { const r = report(); expect(providerRows(r, profiles, 6048)[0].roles[0].name).toBe('External / untracked'); r.profile_role_usage = ['primary','oracle','reviewer'].map(role => ({profile:'a', role, cost_usd_ticks:{Ok:1}, models:[{model:role, cost_usd_ticks:{Ok:1}, totals:{}}]})); const row = providerRows(r, profiles, 6048)[0]; expect(row.roles.reduce((n,x) => n+(x.pace ?? 0),0)).toBe(row.pace); expect(row.roles.reduce((n,x) => n+x.share,0)).toBe(100); });
 });
 it('does not invent quota when an empty account resets', () => {
   const r = report();
@@ -30,7 +30,8 @@ it('merges the same model across provider accounts', () => {
 });
 it('groups by resolved quota provider before harness kind', () => {
   const r = report(); r.profiles = ['a', 'b', 'c'];
-  const accounts = [{ id: 'a', harness_kind: 'codex', quota_provider: ' DeepSeek ' }, { id: 'b', harness_kind: 'opencode', quota_provider: 'Anthropic' }, { id: 'c', harness_kind: 'opencode', quota_provider: 'Anthropic' }] as ViewerProfile[];
+  const accounts = [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'opencode' }, { id: 'c', harness_kind: 'opencode' }] as ViewerProfile[];
+  r.profile_providers = { a: ' DeepSeek ', b: 'Anthropic', c: 'Anthropic' };
   r.quota_usage = r.profiles.map(profile => ({ profile, consumed_basis_points: 100, covered_seconds: 6048, partial: false, monthly_price_usd: 100 }));
   expect(providerRows(r, accounts, 6048).map(row => [row.name, row.accountCount])).toEqual([['DeepSeek', 1], ['Anthropic', 2]]);
 });
@@ -54,4 +55,26 @@ it('forecasts exhaustion at an on-pace rate with a low tank', () => {
   const r = report(); r.profiles = ['a']; r.quota_usage = [r.quota_usage![0]];
   r.quota_projections = [{ profile_id: 'a', window_label: 'Weekly', remaining_percent: 10, resets_at_epoch_seconds: 3 * 86400, observed_pct_per_hour: null, sustainable_pct_per_hour: null, pace_ratio: null, projected_exhaustion_epoch_seconds: null }];
   const row = providerRows(r, profiles, 6048, 0)[0]; expect(row.pace).toBe(100); expect(row.forecast).toMatch(/^dry in /);
+});
+
+it('does not create provider rows from unfiltered dropdown profiles', () => {
+  const r = report(); r.quota_usage = [r.quota_usage![0]];
+  r.profile_providers = { a: 'OpenAI', b: 'Anthropic' };
+  expect(providerRows(r, profiles, 6048).map(row => row.name)).toEqual(['OpenAI']);
+});
+it('excludes explicitly nonweekly windows and drains an account without a reset', () => {
+  const r = report(); r.quota_usage = [r.quota_usage![0]];
+  const base = { profile_id: 'a', remaining_percent: 10, resets_at_epoch_seconds: null, observed_pct_per_hour: null, sustainable_pct_per_hour: null, pace_ratio: null, projected_exhaustion_epoch_seconds: null };
+  r.quota_projections = [{ ...base, window_label: 'Weekly', is_weekly_window: false, remaining_percent: 99 }, { ...base, window_label: 'Plan', is_weekly_window: true }];
+  const row = providerRows(r, profiles, 6048, 0)[0];
+  expect(row.tank).toBe(10); expect(row.forecast).toBe('dry in 16h 48m');
+  r.quota_projections = [{ ...base, window_label: 'Daily' }];
+  expect(providerRows(r, profiles, 6048, 0)[0].tank).toBeNull();
+});
+it('allocates subscription pace only to subscription roles', () => {
+  const r = report(); r.quota_usage = [r.quota_usage![0]];
+  r.profile_role_usage = ['a', 'b'].map((profile, i) => ({ profile, role: i ? 'oracle' : 'primary', cost_usd_ticks: { Ok: 1 }, models: [{ model: 'm', cost_usd_ticks: { Ok: i ? 9 : 1 }, totals: {} }] }));
+  expect(providerRows(r, profiles, 6048)[0].roles.map(role => role.pace)).toEqual([100, 0]);
+  r.profile_role_usage = r.profile_role_usage.slice(1);
+  expect(providerRows(r, profiles, 6048)[0].roles.map(role => [role.name, role.pace])).toEqual([['Oracles', 0], ['External / untracked', 100]]);
 });

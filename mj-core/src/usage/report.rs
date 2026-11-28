@@ -291,6 +291,8 @@ pub struct ProfileQuotaProjection {
     pub window_label: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_short_window: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_weekly_window: Option<bool>,
     pub remaining_percent: u8,
     pub resets_at_epoch_seconds: Option<i64>,
     pub observed_pct_per_hour: Option<f64>,
@@ -304,6 +306,7 @@ impl PartialEq for ProfileQuotaProjection {
         self.profile_id == other.profile_id
             && self.window_label == other.window_label
             && self.is_short_window == other.is_short_window
+            && self.is_weekly_window == other.is_weekly_window
             && self.remaining_percent == other.remaining_percent
             && self.resets_at_epoch_seconds == other.resets_at_epoch_seconds
             && self.observed_pct_per_hour.map(f64::to_bits)
@@ -343,6 +346,8 @@ pub struct SessionUsageReport {
     /// Includes retained parent and turn profile names even if no longer
     /// configured.
     pub profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profile_providers: BTreeMap<String, String>,
     pub sessions: Vec<SessionUsageEstimate>,
     /// Filtered model totals grouped by each session's retained role. Children
     /// destroyed before kind retention was introduced remain unclassified.
@@ -372,6 +377,7 @@ impl Default for SessionUsageReport {
             until_ms: 0,
             hours: Vec::new(),
             profiles: Vec::new(),
+            profile_providers: BTreeMap::new(),
             sessions: Vec::new(),
             agent_usage: Vec::new(),
             profile_usage: Vec::new(),
