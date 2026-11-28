@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   LaunchOptions,
@@ -10,7 +10,7 @@ import type {
 } from '../../../api/types';
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { useUiStore } from '../../../stores/useUiStore';
-import { jsonResponse, mockFetch, snapshot } from '../../../test-utils';
+import { jsonResponse, liveRow, mockFetch, snapshot } from '../../../test-utils';
 import { formatGiB } from '../../gib';
 import NewSessionView from '../NewSessionView';
 
@@ -122,6 +122,125 @@ afterEach(() => {
 });
 
 describe('new session wizard', () => {
+  it('orders and filters bundles and resolves provider auto for the current target', async () => {
+    const calls: Record<string, unknown>[] = [];
+    const preflights: Record<string, unknown>[] = [];
+    let releaseOld: (response: Response) => void = () => {};
+    const oldResponse = new Promise<Response>(resolve => { releaseOld = resolve; });
+    const options = {
+      ...LAUNCH_OPTIONS,
+      primary_configured: true,
+      profiles: [{ id: 'p1', harness: 'claude' }, { id: 'p2', harness: 'claude' }, { id: 'p3', harness: 'codex' }],
+      targets: [...LAUNCH_OPTIONS.targets, { ...LAUNCH_OPTIONS.targets[0], id: 't2' }],
+      bundles: [LAUNCH_OPTIONS.bundles[0], { id: 'z-recent', primary_repository: 'needle', repositories: [{ id: 'repo', github: 'owner/thing', destination: '/special' }] }],
+    };
+    useSessionStore.setState(state => ({ sessionsById: { ...state.sessionsById, recent: { ...liveRow('recent'), bundle_id: 'z-recent', last_activity_at_ms: 123 } } }));
+    mockFetch({
+      '/api/v1/options': () => jsonResponse(options),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic', p2: 'Anthropic', p3: 'OpenAI' } }),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/profiles/select': (_url, init) => { const body = JSON.parse(String(init?.body)); calls.push(body); return body.target_template_id === 't1' ? oldResponse : jsonResponse('p2'); },
+      '/api/v1/preflight/new': (_url, init) => { preflights.push(JSON.parse(String(init?.body))); return jsonResponse(preflight()); },
+    });
+    render(<NewSessionView workspaceId="w1" />);
+    await screen.findByRole('button', { name: 'Auto (OpenAI)' });
+    const headings = screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent);
+    expect(headings.indexOf('1 · Target')).toBeLessThan(headings.indexOf('2 · Project'));
+    const list = screen.getByRole('listbox', { name: 'Project bundles' });
+    expect(list).toHaveClass('max-h-60', 'overflow-y-auto');
+    const bundleOptions = within(list).getAllByRole('option');
+    expect(bundleOptions[0]).toHaveTextContent('z-recent');
+    // Hard-won: c4cc5f0c3: every bundle was a separate Tab stop with no arrow navigation.
+    expect(bundleOptions.filter(option => option.tabIndex === 0)).toHaveLength(1);
+    await waitFor(() => expect(bundleOptions[1]).toHaveAttribute('aria-selected', 'true'));
+    expect(bundleOptions[1]).toHaveAttribute('tabindex', '0');
+    act(() => bundleOptions[1].focus());
+    fireEvent.keyDown(bundleOptions[1], { key: 'ArrowUp' });
+    expect(bundleOptions[0]).toHaveFocus();
+    expect(bundleOptions[0]).toHaveAttribute('tabindex', '0');
+    expect(bundleOptions[1]).toHaveAttribute('tabindex', '-1');
+    fireEvent.keyDown(bundleOptions[0], { key: 'ArrowDown' });
+    expect(bundleOptions[1]).toHaveFocus();
+    fireEvent.keyDown(bundleOptions[1], { key: 'Home' });
+    expect(bundleOptions[0]).toHaveFocus();
+    fireEvent.keyDown(bundleOptions[0], { key: 'End' });
+    expect(bundleOptions[1]).toHaveFocus();
+    fireEvent.change(screen.getByLabelText('Search bundles'), { target: { value: '/SPECIAL' } });
+    expect(within(list).getAllByRole('option')).toHaveLength(1);
+    expect(within(list).getByRole('option')).toHaveTextContent('z-recent');
+    expect(within(list).getByRole('option')).toHaveAttribute('tabindex', '0');
+    expect(screen.queryByLabelText('Repository source')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '+ Create bundle from repository' }));
+    expect(screen.getByLabelText('Repository source')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Auto (Anthropic)' }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    fireEvent.change(screen.getByLabelText('Target'), { target: { value: 't2' } });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await screen.findByRole('button', { name: 'Auto (Anthropic) → p2' });
+    releaseOld(jsonResponse('p1'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Auto (Anthropic) → p2' })).toBeInTheDocument());
+    expect(calls[1]).toEqual({ provider: 'Anthropic', profile_id: null, target_template_id: 't2' });
+    await waitFor(() => expect(preflights).toContainEqual(expect.objectContaining({ profile_id: 'p2', target_id: 't2' })));
+    fireEvent.click(screen.getByRole('button', { name: 'p1 (claude)' }));
+    expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('reports a provider lookup failure, permits manual selection, and retries the lookup', async () => {
+    let requests = 0;
+    mockFetch({
+      '/api/v1/options': () => jsonResponse({ ...LAUNCH_OPTIONS, primary_configured: true, default: { target_id: 't1' } }),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/profiles/providers': () => ++requests === 1
+        ? new Response(JSON.stringify({ error: 'provider service unavailable' }), { status: 503 })
+        : jsonResponse({ providers: { p1: 'Anthropic' } }),
+      '/api/v1/preflight/new': () => jsonResponse(preflight()),
+    });
+    render(<NewSessionView workspaceId="w1" />);
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('Could not load provider groups: provider service unavailable');
+    expect(screen.queryByRole('button', { name: /Auto \(Anthropic\)/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'p1 (claude)' }));
+    expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('button', { name: 'Auto (Anthropic)' });
+    expect(requests).toBe(2);
+    expect(await screen.findByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps profiles missing from the provider map available for manual selection', async () => {
+    mockFetch({
+      '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: {} }),
+      '/api/v1/preflight/new': () => jsonResponse(preflight()),
+    });
+    render(<NewSessionView workspaceId="w1" />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('No provider returned for p1');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.queryByRole('button', { name: 'Auto (Anthropic)' })).not.toBeInTheDocument();
+  });
+
+  it('retries a failed provider Auto selection without switching accounts', async () => {
+    let selections = 0;
+    mockFetch({
+      '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
+      '/api/v1/profiles/select': () => ++selections === 1
+        ? new Response(JSON.stringify({ error: 'quota unavailable' }), { status: 503 })
+        : jsonResponse('p1'),
+      '/api/v1/preflight/new': () => jsonResponse(preflight()),
+    });
+    render(<NewSessionView workspaceId="w1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto (Anthropic)' }));
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('quota unavailable');
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('button', { name: 'Auto (Anthropic) → p1' });
+    expect(selections).toBe(2);
+    await waitFor(() => expect(launchButton()).toBeEnabled());
+  });
+
   it('formats fractional GiB without gluing the whole and fraction digits together', () => {
     expect([4, 4.5, 0.5, 1.25].map(gib => formatGiB(gib * GIB))).toEqual(['4', '4.5', '0.5', '1.25']);
   });
@@ -132,6 +251,7 @@ describe('new session wizard', () => {
     mockFetch({
       '/api/v1/options': () =>
         jsonResponse({ ...LAUNCH_OPTIONS, primary_configured: true, default: { target_id: 't1' } }),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': (_url, init) => {
         preflightBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -145,9 +265,7 @@ describe('new session wizard', () => {
 
     render(<NewSessionView workspaceId="w1" />);
     await waitFor(() => expect(launchButton()).toBeEnabled(), { timeout: 3000 });
-    const profile = screen.getByLabelText('Profile') as HTMLSelectElement;
-    expect(profile.value).toBe('');
-    expect(screen.getByRole('option', { name: 'Auto (Primary)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Auto (Primary)' })).toHaveAttribute('aria-pressed', 'true');
     expect(preflightBodies.at(-1)?.profile_id).toBe('');
 
     fireEvent.click(launchButton());
@@ -158,6 +276,7 @@ describe('new session wizard', () => {
   it('lazy-loads launch options and projects only when the view mounts', async () => {
     const { urls } = mockFetch({
       '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': () => jsonResponse(preflight()),
       '/api/v1/actions': () => new Response('', { status: 202 }),
@@ -169,7 +288,7 @@ describe('new session wizard', () => {
     await waitFor(() => expect(launchButton()).toBeEnabled(), { timeout: 3000 });
     expect(urls().filter(url => url === '/api/v1/options')).toHaveLength(1);
     expect(urls().filter(url => url === '/api/v1/projects')).toHaveLength(1);
-    expect((screen.getByLabelText('Profile') as HTMLSelectElement).value).toBe('p1');
+    expect(screen.getByRole('button', { name: 'p1 (claude)' })).toHaveAttribute('aria-pressed', 'true');
     expect((screen.getByLabelText('Target') as HTMLSelectElement).value).toBe('t1');
     expect(screen.getByText('App')).toBeInTheDocument();
   });
@@ -178,6 +297,7 @@ describe('new session wizard', () => {
     const bodies: Record<string, unknown>[] = [];
     mockFetch({
       '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': () => jsonResponse(preflight()),
       '/api/v1/actions': (_url, init) => {
@@ -220,6 +340,7 @@ describe('new session wizard', () => {
     const bodies: Record<string, unknown>[] = [];
     mockFetch({
       '/api/v1/options': () => jsonResponse(LAUNCH_OPTIONS),
+      '/api/v1/profiles/providers': () => jsonResponse({ providers: { p1: 'Anthropic' } }),
       '/api/v1/projects': () => jsonResponse(PROJECT_CATALOG),
       '/api/v1/preflight/new': () =>
         jsonResponse(preflight({ dirty_repositories: ['repo-a', 'repo-b'] })),

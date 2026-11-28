@@ -1469,6 +1469,7 @@ type FakeToolDetails =
 
 #[derive(Default)]
 struct FakeBackend {
+    profile_backend: bool,
     bundle_calls: Mutex<Option<mpsc::Sender<BundleCall>>>,
     purge_calls: Mutex<Option<mpsc::Sender<PurgeCall>>>,
     wiki_restore_requests: Mutex<Vec<mj_client::daemon::WikiRestoreRequest>>,
@@ -1562,6 +1563,12 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn dashboard_backend(&self) -> Option<Arc<dyn DashboardBackend>> {
+        self.profile_backend.then(|| {
+            Arc::new(terminal_operations::test_profile_backend::ProfileBackend)
+                as Arc<dyn DashboardBackend>
+        })
+    }
     fn resolve_suspend_blockers(
         &self,
         session_id: String,
@@ -2773,6 +2780,54 @@ async fn either_the_bearer_token_or_the_viewer_cookie_lists_sessions() {
         );
         let body = json_body(response).await;
         assert_eq!(body["sessions"][0]["id"], "session-1");
+    }
+}
+
+#[tokio::test]
+async fn viewer_cookie_reaches_profile_query_backend() {
+    let (app, _, _, _) = api_app(
+        Arc::new(FakeBackend {
+            profile_backend: true,
+            ..Default::default()
+        }),
+        |_| {},
+    );
+    let cookie = login_cookie(&app).await;
+    for (request, expected) in [
+        (
+            Request::get("/api/v1/profiles/providers")
+                .body(Body::empty())
+                .unwrap(),
+            serde_json::json!({"providers":{"codex-1":"OpenAI"}}),
+        ),
+        (
+            Request::post("/api/v1/profiles/select")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"provider":"OpenAI","profile_id":null,"target_template_id":null}"#,
+                ))
+                .unwrap(),
+            serde_json::json!("codex-1"),
+        ),
+    ] {
+        let (mut parts, body) = request.into_parts();
+        parts.headers.insert(COOKIE, cookie.parse().unwrap());
+        let response = app
+            .clone()
+            .oneshot(Request::from_parts(parts, body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        if let Some(providers) = body.get("providers") {
+            let providers: BTreeMap<String, mj_core::config::QuotaProvider> =
+                serde_json::from_value(providers.clone()).unwrap();
+            assert_eq!(
+                providers.get("codex-1"),
+                Some(&mj_core::config::QuotaProvider::OpenAI)
+            );
+        }
+        assert_eq!(body, expected);
     }
 }
 

@@ -666,6 +666,9 @@ describe('hash routing', () => {
     expect(isImplicitRoute('#workspace/w1')).toBe(false);
     expect(effectiveRoute({ name: 'workspace' }, true, true)).toEqual({ name: 'notifications' });
     expect(effectiveRoute({ name: 'workspace' }, true, false)).toEqual({ name: 'workspace' });
+    expect(effectiveRoute({ name: 'workspace' }, true, true, 'w1')).toEqual({ name: 'notifications' });
+    expect(effectiveRoute({ name: 'workspace' }, true, false, 'w1')).toEqual({ name: 'workspace', workspaceId: 'w1' });
+    expect(effectiveRoute({ name: 'workspace', workspaceId: 'w1' }, true, true, 'w2')).toEqual({ name: 'workspace', workspaceId: 'w1' });
     expect(effectiveRoute({ name: 'workspace', workspaceId: 'w1' }, false, true)).toEqual({
       name: 'workspace',
       workspaceId: 'w1',
@@ -682,6 +685,17 @@ describe('hash routing', () => {
     location.hash = '#targets';
     await flush();
     expect(useUiStore.getState().route).toEqual({ name: 'targets' });
+    remove();
+  });
+
+  it('keeps an explicit All workspaces selection after its hash change', async () => {
+    const remove = installUiListeners();
+    useUiStore.getState().navigate({ name: 'workspace', workspaceId: 'w1' });
+    await flush();
+    useUiStore.getState().navigate({ name: 'workspace' });
+    await flush();
+    expect(useUiStore.getState().implicitRoute).toBe(false);
+    expect(effectiveRoute(useUiStore.getState().route, useUiStore.getState().implicitRoute, true)).toEqual({ name: 'workspace' });
     remove();
   });
 

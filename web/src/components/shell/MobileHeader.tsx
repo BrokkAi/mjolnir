@@ -23,12 +23,15 @@ const DOT: Record<string, string> = {
 export function MobileHeader() {
   const route = useUiStore(state => state.route);
   const implicit = useUiStore(state => state.implicitRoute);
+  const remembered = useUiStore(state => state.selectedWorkspaceId);
+  const workspaces = useSessionStore(state => state.meta?.workspaces);
+  const validRemembered = workspaces?.some(workspace => workspace.id === remembered) ? remembered : null;
   const navigate = useUiStore(state => state.navigate);
   const setDrawerOpen = useUiStore(state => state.setDrawerOpen);
   const rows = useSessionStore(state => state.sessionsById);
   const connection = useSessionStore(selectConnection);
   const attention = useAttentionCount();
-  const shown = effectiveRoute(route, implicit, attention > 0);
+  const shown = effectiveRoute(route, implicit, attention > 0, validRemembered);
   const rowById = (id: string) => rows[id];
   const top = isTopLevelRoute(shown);
 

@@ -194,6 +194,8 @@ interface UiState {
   /** The hash named no screen; the shell chooses the default from session state. */
   implicitRoute: boolean;
   theme: Theme;
+  selectedWorkspaceId: string | null;
+  setSelectedWorkspaceId: (id: string | null) => void;
   drawerOpen: boolean;
   layers: BackLayer[];
   toasts: Toast[];
@@ -211,6 +213,7 @@ interface UiState {
   dismissToast: (id: number) => void;
 }
 
+let pendingNavigationHash: string | null = null;
 let nextLayerId = 0;
 let nextToastId = 0;
 /** History entries the app pushed for layers and has since removed itself; their `popstate` is ignored. */
@@ -222,10 +225,22 @@ function initialHash(): string {
   return typeof location === 'undefined' ? '' : location.hash;
 }
 
+export function readSelectedWorkspaceId(): string | null {
+  try { return localStorage.getItem('mj.web.selected_workspace'); } catch { return null; }
+}
+
 export const useUiStore = create<UiState>((set, get) => ({
   route: parseRoute(initialHash()),
   implicitRoute: isImplicitRoute(initialHash()),
   theme: readTheme(),
+  selectedWorkspaceId: readSelectedWorkspaceId(),
+  setSelectedWorkspaceId: id => {
+    try {
+      if (id === null) localStorage.removeItem('mj.web.selected_workspace');
+      else localStorage.setItem('mj.web.selected_workspace', id);
+    } catch { /* The choice remains available for this page. */ }
+    set({ selectedWorkspaceId: id });
+  },
   drawerOpen: false,
   layers: [],
   toasts: [],
@@ -240,7 +255,10 @@ export const useUiStore = create<UiState>((set, get) => ({
       for (const layer of get().layers) consumedLayers.add(layer.id);
     }
     set({ route, implicitRoute: false, drawerOpen: false, ...(changesHash ? { layers: [] } : {}) });
-    if (changesHash) location.hash = hash;
+    if (changesHash) {
+      pendingNavigationHash = hash;
+      location.hash = hash;
+    }
   },
 
   navigateToUrl: url => {
@@ -323,6 +341,11 @@ export function installUiListeners(): () => void {
       for (const layer of useUiStore.getState().layers) consumedLayers.add(layer.id);
       useUiStore.setState({ layers: [] });
     }
+    if (pendingNavigationHash === location.hash && routeHash(useUiStore.getState().route) === location.hash) {
+      pendingNavigationHash = null;
+      return;
+    }
+    pendingNavigationHash = null;
     syncRouteFromLocation();
   };
 
