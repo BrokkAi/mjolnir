@@ -1,5 +1,96 @@
 use super::*;
 
+/// The earlier report and message identities for an unanswered mailbox wake.
+pub struct UnansweredWakeReport {
+    pub turn: Option<MaterializedTurnOutcome>,
+    pub message_keys: Vec<String>,
+}
+
+/// Resolve an unanswered wake from existing turn and transcript records.
+/// Missing turn spans or message projections are unknown, not empty history.
+pub fn load_unanswered_wake_report(
+    session_id: &str,
+    wake: &MaterializedTurnOutcome,
+) -> Result<Option<UnansweredWakeReport>> {
+    load_unanswered_wake_report_from(&database_path(), session_id, wake)
+}
+
+pub(super) fn load_unanswered_wake_report_from(
+    path: &Path,
+    session_id: &str,
+    wake: &MaterializedTurnOutcome,
+) -> Result<Option<UnansweredWakeReport>> {
+    if !mj_core::continuation::carries_mailbox_wake(&wake.command_id)
+        || !matches!(&wake.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
+            if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
+    {
+        return Ok(None);
+    }
+    let Some(accepted) = wake.accepted_ordinal else {
+        return Ok(None);
+    };
+    let mut reader = open_reader(path)?;
+    let tx = reader.transaction()?;
+    let mut keys = tx.prepare(
+        "SELECT body_json FROM materialized_transcript_items WHERE session_id=?1 AND position=?2 AND item_kind='message' ORDER BY stable_id",
+    )?;
+    let keys = keys
+        .query_map(params![session_id, accepted], |row| row.get::<_, String>(0))?
+        .map(|row| -> Result<_> {
+            let body: mj_core::transcript::TranscriptBody = serde_json::from_str(&row?)?;
+            Ok(match body {
+                mj_core::transcript::TranscriptBody::Message { event } => Some(event.key),
+                _ => None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut turns = tx.prepare("SELECT body FROM session_turn_usage WHERE session_id=?1 AND completed_ordinal<?2 ORDER BY completed_ordinal DESC")?;
+    let rows = turns.query_map(params![session_id, wake.completed_ordinal], |row| {
+        row.get::<_, String>(0)
+    })?;
+    for row in rows {
+        let turn = deserialize_turn_outcome(&row?)?;
+        if mj_core::continuation::carries_mailbox_wake(&turn.command_id) {
+            let Some(start) = turn.turn_start_position else {
+                break;
+            };
+            let has_output: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id=?1 AND position>=?2 AND position<=?3 AND item_kind IN ('agent','thought','tool'))",
+                params![session_id, start, turn.completed_ordinal], |row| row.get(0),
+            )?;
+            if !has_output {
+                if matches!(&turn.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
+                    if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
+                {
+                    continue;
+                }
+                break;
+            }
+        }
+        let Some(start) = turn.turn_start_position else {
+            break;
+        };
+        let span_present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id=?1 AND position>=?2 AND position<=?3)",
+            params![session_id, start, turn.completed_ordinal], |row| row.get(0),
+        )?;
+        if !span_present {
+            break;
+        }
+        return Ok(Some(UnansweredWakeReport {
+            turn: Some(turn),
+            message_keys: keys,
+        }));
+    }
+    Ok(Some(UnansweredWakeReport {
+        turn: None,
+        message_keys: keys,
+    }))
+}
+
 /// Load a session's whole projection, transcript and all.
 ///
 /// Crate-private on purpose. The cost of this call is everything that has ever

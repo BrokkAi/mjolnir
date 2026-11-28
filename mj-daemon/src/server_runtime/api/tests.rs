@@ -2707,6 +2707,8 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
     let progress =
         |awaited: Option<u64>, answered: Option<u64>, failed: Option<(&'static str, &str)>| {
             ChildProgress {
+                report_answer: None,
+                unanswered_messages: None,
                 finished_span: None,
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
@@ -2788,6 +2790,8 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         interruption_event_ordinals: Vec::new(),
     };
     let progress = ChildProgress {
+        report_answer: None,
+        unanswered_messages: None,
         finished_span: None,
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
@@ -10026,4 +10030,52 @@ async fn session_checkout_probes_read_the_registered_target_during_drain() {
             .unwrap()
             .is_none()
     );
+}
+
+// Hard-won: #1705: an unanswered wake hid the child's report from its parent.
+#[test]
+fn unanswered_wake_notice_retains_the_report_and_names_the_messages() {
+    let mut record = mj_controller::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Running;
+    let summary = mj_core::state::MaterializedSessionSummary {
+        session_id: "child".into(),
+        applied_event_ordinal: 12,
+        last_activity_at_ms: None,
+        execution: MaterializedExecutionState::Idle,
+        session_title: None,
+        last_agent_message: None,
+        last_user_message: None,
+        last_agent_message_follows_last_user: false,
+        agent_message_latest_content_ordinals: Vec::new(),
+        interruption_event_ordinals: Vec::new(),
+    };
+    let mut progress = ChildProgress::settled(ReportState::Fallback);
+    progress.answer = Some(finished_turn("mailbox-wake-12345678"));
+    progress.report_answer = Some(finished_turn("subagent-input-original"));
+    progress.unanswered_messages = Some(vec!["parent-1".into(), "parent-2".into()]);
+    let (state, output, finished) = subagent_status(
+        Some(&record),
+        Some(&summary),
+        None,
+        Some("earlier report"),
+        false,
+        &progress,
+    );
+    let mut entry = wait_agent_entry("child", &state, output, finished, &progress, false);
+    entry["task_name"] = "audit".into();
+    let report: mj_core::mailbox::SubagentFinishedReport = serde_json::from_value(entry).unwrap();
+    let event = mj_core::mailbox::MailboxEvent {
+        key: "child-finish".into(),
+        source: "subagent".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+            report: Box::new(report),
+        },
+    };
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(rendered.contains("State: completed"), "{rendered}");
+    assert!(rendered.contains("earlier report"), "{rendered}");
+    assert!(rendered.contains("parent-1, parent-2"), "{rendered}");
+    assert!(rendered.contains("may not have acted"), "{rendered}");
 }

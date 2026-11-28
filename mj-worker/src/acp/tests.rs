@@ -10410,3 +10410,92 @@ fn claude_mcp_acp_registration_and_owned_mcp_contract() {
         );
     }
 }
+
+// Hard-won: #1705: a mailbox wake ended empty after a child had produced output.
+#[tokio::test]
+async fn kimi_fake_acp_preserves_turn_boundaries_around_an_empty_mailbox_wake() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let peer = mj_core::runtime::spawn(async move {
+        let (read, mut write) = tokio::io::split(server);
+        let mut lines = BufReader::new(read).lines();
+        let mut prompts = 0;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let Some(method) = request["method"].as_str() else {
+                continue;
+            };
+            let id = request["id"].clone();
+            let result = match method {
+                "initialize" => serde_json::json!({"protocolVersion":1}),
+                "session/new" => serde_json::json!({"sessionId":"scripted"}),
+                "session/prompt" => {
+                    prompts += 1;
+                    if prompts != 2 {
+                        let update = serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"scripted","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"child report"}}}});
+                        write
+                            .write_all(format!("{update}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                    serde_json::json!({"stopReason":"end_turn"})
+                }
+                _ => continue,
+            };
+            let response = serde_json::json!({"jsonrpc":"2.0","id":id,"result":result});
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        prompts
+    });
+    let (read, write) = tokio::io::split(client);
+    let transport = ByteStreams::new(write.compat_write(), read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut spec = reload_fallback_spec(HarnessKind::Kimi);
+    spec.resume_session = None;
+    let driver = mj_core::runtime::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    for (id, expected) in [
+        ("subagent-input-original", "EndTurn"),
+        ("mailbox-wake-12345678", PROMPT_UNANSWERED_STOP_REASON),
+        ("subagent-input-next", "EndTurn"),
+    ] {
+        request_tx
+            .send(CommandRequest::Prompt {
+                request_id: id.into(),
+                prompt: vec![ContentBlock::Text(TextContent::new("continue"))],
+            })
+            .await
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let RuntimeEvent::PromptFinished {
+                request_id,
+                stop_reason,
+                ..
+            } = event
+            {
+                assert_eq!((request_id.as_str(), stop_reason.as_str()), (id, expected));
+                break;
+            }
+        }
+    }
+    drop(request_tx);
+    driver.await.unwrap().unwrap();
+    assert_eq!(peer.await.unwrap(), 3);
+}

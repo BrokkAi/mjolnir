@@ -10113,3 +10113,187 @@ fn materialized_foreground_tool_settles_after_actor_reload() {
         (false, "in_progress".into())
     );
 }
+
+// Hard-won: #1705: an unanswered mailbox wake replaced the child's earlier report.
+#[test]
+fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("store.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let turn = |id: &str, accepted, start, end, reason: &str| MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        command_id: id.into(),
+        accepted_ordinal: Some(accepted),
+        turn_start_position: Some(start),
+        completed_ordinal: end,
+        completed_at_ms: end as i64,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: reason.into(),
+        },
+    };
+    let prior = turn("subagent-input-original", 1, 1, 3, "EndTurn");
+    let wake = turn(
+        "mailbox-wake-12345678",
+        4,
+        5,
+        6,
+        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
+    );
+    let agent = TranscriptItem {
+        stable_id: "agent:2".into(),
+        position: 2,
+        latest_content_event_ordinal: Some(2),
+        created_at_ms: 2,
+        last_changed_at_ms: 2,
+        body: TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content":{"type":"text","text":"earlier report"}})],
+            streaming: false,
+        },
+    };
+    let messages = ["parent-1", "parent-2"]
+        .into_iter()
+        .map(|key| {
+            TranscriptMutation::Upsert(TranscriptItem {
+                stable_id: format!("message:{key}"),
+                position: 4,
+                latest_content_event_ordinal: None,
+                created_at_ms: 4,
+                last_changed_at_ms: 4,
+                body: TranscriptBody::Message {
+                    event: Box::new(mj_core::mailbox::MailboxEvent {
+                        key: key.into(),
+                        source: "parent".into(),
+                        wake: true,
+                        created_at_ms: 4,
+                        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                            text: "please continue".into(),
+                        },
+                    }),
+                },
+            })
+        })
+        .collect();
+    let mutations = [
+        MaterializedSessionMutation::default(),
+        MaterializedSessionMutation {
+            transcript: vec![TranscriptMutation::Upsert(agent)],
+            ..Default::default()
+        },
+        MaterializedSessionMutation {
+            last_turn_outcome: Some(prior.clone()),
+            ..Default::default()
+        },
+        MaterializedSessionMutation {
+            transcript: messages,
+            ..Default::default()
+        },
+        MaterializedSessionMutation::default(),
+        MaterializedSessionMutation {
+            last_turn_outcome: Some(wake.clone()),
+            ..Default::default()
+        },
+    ];
+    for (index, mutation) in mutations.iter().enumerate() {
+        let ordinal = index as u64 + 1;
+        let previous = if ordinal == 1 {
+            RELAY_EVENT_GENESIS_DIGEST.to_owned()
+        } else {
+            event_digest(ordinal - 1)
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &previous,
+            &event_digest(ordinal),
+            mutation,
+        )
+        .unwrap();
+    }
+    let found = load_unanswered_wake_report_from(&database, "session-1", &wake)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.turn.unwrap().command_id, prior.command_id);
+    assert_eq!(found.message_keys, ["parent-1", "parent-2"]);
+    let ordinary = turn(
+        "subagent-input-new",
+        7,
+        8,
+        9,
+        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
+    );
+    assert!(
+        load_unanswered_wake_report_from(&database, "session-1", &ordinary)
+            .unwrap()
+            .is_none()
+    );
+    let later_wake = turn(
+        "mailbox-wake-later-12345",
+        10,
+        11,
+        12,
+        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
+    );
+    for ordinal in 7..=12 {
+        let mutation = match ordinal {
+            8 => MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                    stable_id: "user:8".into(),
+                    position: 8,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: 8,
+                    last_changed_at_ms: 8,
+                    body: TranscriptBody::User {
+                        content: vec![serde_json::json!({"type":"text","text":"new assignment"})],
+                    },
+                })],
+                ..Default::default()
+            },
+            9 => MaterializedSessionMutation {
+                last_turn_outcome: Some(ordinary.clone()),
+                ..Default::default()
+            },
+            12 => MaterializedSessionMutation {
+                last_turn_outcome: Some(later_wake.clone()),
+                ..Default::default()
+            },
+            _ => MaterializedSessionMutation::default(),
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &event_digest(ordinal - 1),
+            &event_digest(ordinal),
+            &mutation,
+        )
+        .unwrap();
+    }
+    let found = load_unanswered_wake_report_from(&database, "session-1", &later_wake)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        found.turn.unwrap().command_id,
+        ordinary.command_id,
+        "an ordinary failed input remains the real turn"
+    );
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "DELETE FROM materialized_transcript_items WHERE session_id=?1 AND position=8",
+            ["session-1"],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(
+        load_unanswered_wake_report_from(&database, "session-1", &later_wake)
+            .unwrap()
+            .unwrap()
+            .turn
+            .is_none(),
+        "a missing span is unknown, not an earlier report"
+    );
+}
