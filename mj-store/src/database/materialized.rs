@@ -31,22 +31,25 @@ pub(super) fn load_unanswered_wake_report_from(
     };
     let mut reader = open_reader(path)?;
     let tx = reader.transaction()?;
-    let mut keys = tx.prepare(
+    let mut messages = tx.prepare(
         "SELECT body_json FROM materialized_transcript_items WHERE session_id=?1 AND position=?2 AND item_kind='message' ORDER BY stable_id",
     )?;
-    let keys = keys
-        .query_map(params![session_id, accepted], |row| row.get::<_, String>(0))?
-        .map(|row| -> Result<_> {
-            let body: mj_core::transcript::TranscriptBody = serde_json::from_str(&row?)?;
-            Ok(match body {
-                mj_core::transcript::TranscriptBody::Message { event } => Some(event.key),
-                _ => None,
+    let mut keys_for = |ordinal| -> Result<Vec<String>> {
+        Ok(messages
+            .query_map(params![session_id, ordinal], |row| row.get::<_, String>(0))?
+            .map(|row| -> Result<_> {
+                let body: mj_core::transcript::TranscriptBody = serde_json::from_str(&row?)?;
+                Ok(match body {
+                    mj_core::transcript::TranscriptBody::Message { event } => Some(event.key),
+                    _ => None,
+                })
             })
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    };
+    let mut key_batches = vec![keys_for(accepted)?];
     let mut turns = tx.prepare("SELECT body FROM session_turn_usage WHERE session_id=?1 AND completed_ordinal<?2 ORDER BY completed_ordinal DESC")?;
     let rows = turns.query_map(params![session_id, wake.completed_ordinal], |row| {
         row.get::<_, String>(0)
@@ -65,6 +68,9 @@ pub(super) fn load_unanswered_wake_report_from(
                 if matches!(&turn.outcome, mj_core::state::TurnOutcomeKind::Completed { stop_reason }
                     if stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON)
                 {
+                    if let Some(ordinal) = turn.accepted_ordinal {
+                        key_batches.push(keys_for(ordinal)?);
+                    }
                     continue;
                 }
                 break;
@@ -82,13 +88,23 @@ pub(super) fn load_unanswered_wake_report_from(
         }
         return Ok(Some(UnansweredWakeReport {
             turn: Some(turn),
-            message_keys: keys,
+            message_keys: ordered_message_keys(key_batches),
         }));
     }
     Ok(Some(UnansweredWakeReport {
         turn: None,
-        message_keys: keys,
+        message_keys: ordered_message_keys(key_batches),
     }))
+}
+
+fn ordered_message_keys(batches: Vec<Vec<String>>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    batches
+        .into_iter()
+        .rev()
+        .flatten()
+        .filter(|key| seen.insert(key.clone()))
+        .collect()
 }
 
 /// Load a session's whole projection, transcript and all.

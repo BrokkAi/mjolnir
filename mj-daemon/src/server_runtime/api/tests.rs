@@ -2709,6 +2709,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
             ChildProgress {
                 report_answer: None,
                 unanswered_messages: None,
+                observed_handback: None,
                 finished_span: None,
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
@@ -2792,6 +2793,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     let progress = ChildProgress {
         report_answer: None,
         unanswered_messages: None,
+        observed_handback: None,
         finished_span: None,
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
@@ -10052,6 +10054,10 @@ fn unanswered_wake_notice_retains_the_report_and_names_the_messages() {
     let mut progress = ChildProgress::settled(ReportState::Fallback);
     progress.answer = Some(finished_turn("mailbox-wake-12345678"));
     progress.report_answer = Some(finished_turn("subagent-input-original"));
+    progress.report_answer.as_mut().unwrap().work_facts = Some(observed_work());
+    let wake_facts = mj_core::work_facts::WorkFacts::unavailable("wake observation unavailable");
+    progress.answer.as_mut().unwrap().work_facts = Some(wake_facts.clone());
+    assert_eq!(finish_facts(&progress), wake_facts);
     progress.unanswered_messages = Some(vec!["parent-1".into(), "parent-2".into()]);
     let (state, output, finished) = subagent_status(
         Some(&record),

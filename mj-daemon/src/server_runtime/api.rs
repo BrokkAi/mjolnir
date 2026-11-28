@@ -1930,6 +1930,7 @@ impl ApiBackend {
                             finished_span: None,
                             report_answer: None,
                             unanswered_messages: None,
+                            observed_handback: None,
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
@@ -3749,6 +3750,8 @@ pub(crate) struct ChildProgress {
     /// The earlier substantive answer, when the last wake had no response.
     report_answer: Option<mj_core::state::MaterializedTurnOutcome>,
     unanswered_messages: Option<Vec<String>>,
+    /// Handback observed with the current turn, before historical reads.
+    observed_handback: Option<mj_core::subagent::SubagentHandback>,
     /// Stable terminal-failure generation even when the turn has no span.
     pub last_completed_ordinal: Option<u64>,
     /// Where the child's report stands after its last finished turn.
@@ -3834,6 +3837,7 @@ impl ChildProgress {
             finished_span: None,
             report_answer: None,
             unanswered_messages: None,
+            observed_handback: None,
             last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
@@ -3900,16 +3904,16 @@ async fn load_unanswered_wake_reports(
             .into_iter()
             .map(|(id, wake)| {
                 let report = mj_controller::database::load_unanswered_wake_report(&id, &wake)?;
-                let handback = mj_controller::database::load_subagent_report(&id)?.handback;
-                Ok((id, (report, handback)))
+                Ok((id, report))
             })
             .collect::<Result<BTreeMap<_, _>>>()
     })
     .await?;
     for (id, _, progress) in children {
-        if let Some((Some(report), handback)) = reports.get(id) {
+        if let Some(Some(report)) = reports.get(id) {
             if let Some(turn) = &report.turn {
-                progress.report = handback
+                progress.report = progress
+                    .observed_handback
                     .as_ref()
                     .filter(|h| h.answers(&turn.command_id))
                     .map_or(ReportState::Fallback, |h| {
@@ -3943,6 +3947,7 @@ fn child_progress(
     ChildProgress {
         report_answer: None,
         unanswered_messages: None,
+        observed_handback: recorded.handback.clone(),
         finished_span: last.and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
@@ -4014,6 +4019,7 @@ pub(crate) fn load_child_progress(
     Ok(ChildProgress {
         report_answer: None,
         unanswered_messages: None,
+        observed_handback: recorded.handback.clone(),
         finished_span: last.as_ref().and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
@@ -4117,7 +4123,7 @@ fn work_facts_entry(facts: &mj_core::work_facts::WorkFacts, now_ms: u64) -> serd
 /// without them is from a worker that predates the capture; an ending that was
 /// not a completed prompt took no observation.
 fn finish_facts(progress: &ChildProgress) -> mj_core::work_facts::WorkFacts {
-    let Some(turn) = progress.report_answer.as_ref().or(progress.answer.as_ref()) else {
+    let Some(turn) = &progress.answer else {
         return mj_core::work_facts::WorkFacts::unavailable(
             "the child ended without a completed turn, so its worker did not observe it",
         );

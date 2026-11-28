@@ -10256,6 +10256,27 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
                 last_turn_outcome: Some(ordinary.clone()),
                 ..Default::default()
             },
+            10 => MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                    stable_id: "message:parent-3".into(),
+                    position: 10,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: 10,
+                    last_changed_at_ms: 10,
+                    body: TranscriptBody::Message {
+                        event: Box::new(mj_core::mailbox::MailboxEvent {
+                            key: "parent-3".into(),
+                            source: "parent".into(),
+                            wake: true,
+                            created_at_ms: 10,
+                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                                text: "third".into(),
+                            },
+                        }),
+                    },
+                })],
+                ..Default::default()
+            },
             12 => MaterializedSessionMutation {
                 last_turn_outcome: Some(later_wake.clone()),
                 ..Default::default()
@@ -10280,6 +10301,57 @@ fn unanswered_wake_reads_prior_turn_and_all_message_keys_from_the_store() {
         ordinary.command_id,
         "an ordinary failed input remains the real turn"
     );
+    let next_wake = turn(
+        "mailbox-wake-next-12345",
+        13,
+        14,
+        15,
+        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
+    );
+    for ordinal in 13..=15 {
+        let mutation = match ordinal {
+            13 => MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                    stable_id: "message:parent-4".into(),
+                    position: 13,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: 13,
+                    last_changed_at_ms: 13,
+                    body: TranscriptBody::Message {
+                        event: Box::new(mj_core::mailbox::MailboxEvent {
+                            key: "parent-4".into(),
+                            source: "parent".into(),
+                            wake: true,
+                            created_at_ms: 13,
+                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                                text: "fourth".into(),
+                            },
+                        }),
+                    },
+                })],
+                ..Default::default()
+            },
+            15 => MaterializedSessionMutation {
+                last_turn_outcome: Some(next_wake.clone()),
+                ..Default::default()
+            },
+            _ => MaterializedSessionMutation::default(),
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &event_digest(ordinal - 1),
+            &event_digest(ordinal),
+            &mutation,
+        )
+        .unwrap();
+    }
+    let found = load_unanswered_wake_report_from(&database, "session-1", &next_wake)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.turn.unwrap().command_id, ordinary.command_id);
+    assert_eq!(found.message_keys, ["parent-3", "parent-4"]);
     let connection = Connection::open(&database).unwrap();
     connection
         .execute(
