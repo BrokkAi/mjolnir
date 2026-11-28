@@ -114,7 +114,11 @@ export default function UsageView() {
       if (!current) return;
       if (event.type === 'pointerup') {
         if (current.start === current.end) choose(current.start, false, false);
-        else { setSelected(range(current.start, current.end)); anchor.current = current.start; }
+        else {
+          const values = range(current.start, current.end);
+          setSelected(values.length ? values : null);
+          anchor.current = values.length ? current.start : null;
+        }
       }
       drag.current = null;
       setPreview(null);
@@ -126,7 +130,7 @@ export default function UsageView() {
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
     };
-  }, [dragging, hours]);
+  }, [dragging, hours, selected]);
 
   function choose(hour: number, shift: boolean, toggle: boolean) {
     const base = selected ?? hours.map(h => h.start_ms);
@@ -193,7 +197,11 @@ export default function UsageView() {
                     onPointerUp={e => {
                       if (drag.current) {
                         if (drag.current.start === drag.current.end) choose(drag.current.start, false, false);
-                        else { setSelected(range(drag.current.start, drag.current.end)); anchor.current = drag.current.start; }
+                        else {
+                          const values = range(drag.current.start, drag.current.end);
+                          setSelected(values.length ? values : null);
+                          anchor.current = values.length ? drag.current.start : null;
+                        }
                         drag.current = null;
                         setDragging(false);
                         setPreview(null);

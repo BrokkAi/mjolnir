@@ -1507,6 +1507,78 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
+    let screen = drawn(&mut usage, 120, 36);
+    let locate = |text: &str| screen.iter().position(|line| line.contains(text)).unwrap();
+    assert!(locate("$0 ") < locate("Total "));
+    assert!(locate("Total ") < locate("Provider Pace"));
+    assert!(locate("Provider Pace") < locate("Write release notes"));
+    assert!(
+        screen
+            .iter()
+            .any(|line| line.contains("▸ Write release notes"))
+    );
+    let header_y = locate("▾ Provider Pace");
+    let header_x = screen[header_y].chars().position(|c| c == '▾').unwrap();
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        usage.handle_mouse(mouse_at(kind, (header_x as u16, header_y as u16)));
+    }
+    let collapsed = drawn(&mut usage, 120, 36);
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("▸ Provider Pace · Over 100%: OpenAI 140%"))
+    );
+    usage.handle_key(key(KeyCode::Right));
+    drawn(&mut usage, 120, 36);
+    if let Mode::SessionUsageReport(dialog) = &mut usage.mode {
+        dialog
+            .form
+            .get_mut()
+            .focus(crate::session_usage_report::UsageControl::Rows);
+    }
+    usage.handle_key(key(KeyCode::Home));
+    drawn(&mut usage, 120, 36);
+    usage.handle_key(key(KeyCode::Right));
+    assert!(
+        drawn(&mut usage, 120, 36)
+            .iter()
+            .any(|line| line.contains("▾ Write release notes"))
+    );
+    usage.handle_key(key(KeyCode::Left));
+    assert!(
+        drawn(&mut usage, 120, 36)
+            .iter()
+            .any(|line| line.contains("▸ Write release notes"))
+    );
+    usage.handle_key(key(KeyCode::Enter));
+    assert!(
+        drawn(&mut usage, 120, 36)
+            .iter()
+            .any(|line| line.contains("▾ Write release notes"))
+    );
+    usage.handle_key(key(KeyCode::Char(' ')));
+    let screen = drawn(&mut usage, 120, 36);
+    let session_y = screen
+        .iter()
+        .position(|line| line.contains("▸ Write release notes"))
+        .unwrap();
+    let session_x = screen[session_y].chars().position(|c| c == '▸').unwrap();
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        usage.handle_mouse(mouse_at(kind, (session_x as u16, session_y as u16)));
+    }
+    assert!(
+        drawn(&mut usage, 120, 36)
+            .iter()
+            .any(|line| line.contains("▾ Write release notes"))
+    );
+    usage.handle_key(key(KeyCode::Left));
+    drawn(&mut usage, 120, 36);
     // Hard-won: #1501: a wrapped fixed header clipped models and crowded out sessions.
     if let Mode::SessionUsageReport(dialog) = &mut usage.mode {
         dialog
@@ -1655,12 +1727,13 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
-    // A plain click stays on the hour. Ctrl adds a discontiguous hour.
+    // A plain click on the only selected hour returns to all hours.
     click(&mut usage, at(2), KeyModifiers::NONE);
     assert_eq!(
         usage.session_usage_request().unwrap().1.hour_starts_ms,
-        selected(&[2])
+        None
     );
+    click(&mut usage, at(2), KeyModifiers::NONE);
     click(&mut usage, at(7), KeyModifiers::CONTROL);
     let (multi_request, query) = usage.session_usage_request().unwrap();
     assert_eq!(query.hour_starts_ms, selected(&[2, 7]));
@@ -1705,11 +1778,11 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
-    // Deselecting the only selected hour is distinct from All.
+    // Deselecting the only selected hour returns to All.
     click(&mut usage, at(2), KeyModifiers::NONE);
     click(&mut usage, at(2), KeyModifiers::CONTROL);
     let (empty_request, query) = usage.session_usage_request().unwrap();
-    assert_eq!(query.hour_starts_ms, selected(&[]));
+    assert_eq!(query.hour_starts_ms, None);
     let mut empty_report = codex_report.clone();
     empty_report.cost_usd_ticks = Ok(0);
     empty_report.agent_usage.clear();
@@ -1726,7 +1799,7 @@ fn golden_dashboard_dialogs() {
     usage.apply_session_usage_result(empty_request, Ok(empty_report));
     append_dialog_render(
         &mut output,
-        "Usage no hours selected",
+        "Usage all hours after deselection",
         120,
         36,
         &drawn(&mut usage, 120, 36),
@@ -1810,7 +1883,7 @@ fn golden_dashboard_dialogs() {
         usage.session_usage_request().unwrap().1.hour_starts_ms,
         selected(&[1, 3])
     );
-    // Expiring the last member preserves an explicit empty selection.
+    // Expiring the last member returns to all hours.
     click(&mut usage, oldest, KeyModifiers::NONE);
     let (old_request, _) = usage.session_usage_request().unwrap();
     rolled.hours.remove(0);
@@ -1820,12 +1893,12 @@ fn golden_dashboard_dialogs() {
     usage.apply_session_usage_result(old_request, Ok(rolled.clone()));
     let (replacement, query) = usage.session_usage_request().unwrap();
     assert_ne!(replacement, old_request);
-    assert_eq!(query.hour_starts_ms, selected(&[]));
+    assert_eq!(query.hour_starts_ms, None);
     assert!(matches!(&usage.mode, Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
     usage.apply_session_usage_result(replacement, Ok(rolled));
     assert_eq!(usage.session_usage_request().unwrap().0, replacement);
     drawn(&mut usage, 120, 36);
-    click(&mut usage, oldest, KeyModifiers::CONTROL);
+    click(&mut usage, oldest, KeyModifiers::NONE);
     assert_eq!(
         usage.session_usage_request().unwrap().1.hour_starts_ms,
         selected(&[2])
@@ -2711,6 +2784,30 @@ fn usage_timeline_range_and_provider_interactions() {
     usage.apply_session_usage_result(first, Ok(report.clone()));
     let screen = drawn(&mut usage, 120, 36);
     assert!(screen.iter().any(|line| line.contains("▲①")));
+    let mut no_pace_report = report.clone();
+    no_pace_report.quota_usage[0].consumed_basis_points = Some(0);
+    usage.apply_session_usage_result(first, Ok(no_pace_report));
+    let screen = drawn(&mut usage, 120, 36);
+    let pace_y = screen
+        .iter()
+        .position(|line| line.contains("▾ Provider Pace"))
+        .unwrap();
+    let pace_x = screen[pace_y].chars().position(|c| c == '▾').unwrap();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        usage.handle_mouse(mouse_at(kind, (pace_x as u16, pace_y as u16)));
+    }
+    let collapsed = drawn(&mut usage, 120, 36);
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("No providers over 100%"))
+    );
+    usage.handle_key(key(KeyCode::Right));
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
     let provider_y = screen.iter().position(|line| line.contains('▸')).unwrap();
     let provider_x = screen[provider_y].chars().position(|c| c == '▸').unwrap();
     let click =

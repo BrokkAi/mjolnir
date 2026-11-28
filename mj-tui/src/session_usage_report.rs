@@ -62,7 +62,9 @@ pub(crate) struct SessionUsageDialog {
     hour_geometry: Cell<(Rect, u16)>,
     hour_press: Option<(usize, KeyModifiers, bool)>,
     expanded_providers: BTreeSet<String>,
-    provider_keys: RefCell<Vec<String>>,
+    provider_keys: RefCell<Vec<Option<String>>>,
+    pace_expanded: bool,
+    expanded_sessions: BTreeSet<String>,
     selected_key: RefCell<Option<UsageRow>>,
     row_keys: RefCell<Vec<UsageRow>>,
     selected_row: Cell<usize>,
@@ -91,6 +93,8 @@ impl DashboardState {
             hour_geometry: Cell::new((Rect::default(), 1)),
             hour_press: None,
             expanded_providers: BTreeSet::new(),
+            pace_expanded: true,
+            expanded_sessions: BTreeSet::new(),
             provider_keys: RefCell::new(Vec::new()),
             selected_key: RefCell::new(None),
             row_keys: RefCell::new(Vec::new()),
@@ -157,7 +161,14 @@ impl DashboardState {
                 if let Some(selected) = &mut dialog.query.hour_starts_ms {
                     let before = selected.len();
                     selected.retain(|hour| graph_hours.contains(hour));
-                    if selected.len() != before {
+                    if selected.is_empty() {
+                        dialog.query.hour_starts_ms = None;
+                        dialog.hour_anchor = None;
+                        dialog.hour_cursor = None;
+                    }
+                    if dialog.query.hour_starts_ms.as_ref().map_or(0, |s| s.len()) != before
+                        || dialog.query.hour_starts_ms.is_none()
+                    {
                         self.usage_request_generation =
                             self.usage_request_generation.wrapping_add(1);
                         dialog.generation = self.usage_request_generation;
@@ -243,6 +254,7 @@ impl DashboardState {
             }
         }
         let hours_focused = dialog.form.get_mut().is_focused(UsageControl::Hours);
+        let rows_focused = dialog.form.get_mut().is_focused(UsageControl::Rows);
         let providers_focused = dialog.form.get_mut().is_focused(UsageControl::Providers);
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
@@ -285,6 +297,47 @@ impl DashboardState {
             dialog.form.get_mut().focus(UsageControl::Providers);
             action = Some(Interaction::Activate(UsageControl::Providers));
         }
+        let selected_usage_row = dialog.selected_key.borrow().clone();
+        if let Event::Key(key) = event
+            && key.modifiers.is_empty()
+            && rows_focused
+            && matches!(
+                key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')
+            )
+            && let Some(row) = selected_usage_row
+        {
+            let id = match &row {
+                UsageRow::Session(id) | UsageRow::Model(id, _) => id.clone(),
+            };
+            let has_models = dialog
+                .report
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .is_some_and(|r| {
+                    r.sessions
+                        .iter()
+                        .any(|s| s.session_id == id && !s.models.is_empty())
+                });
+            if has_models {
+                match key.code {
+                    KeyCode::Left => {
+                        dialog.expanded_sessions.remove(&id);
+                        *dialog.selected_key.borrow_mut() = Some(UsageRow::Session(id));
+                    }
+                    KeyCode::Right => {
+                        dialog.expanded_sessions.insert(id);
+                    }
+                    _ if matches!(row, UsageRow::Session(_))
+                        && !dialog.expanded_sessions.remove(&id) =>
+                    {
+                        dialog.expanded_sessions.insert(id);
+                    }
+                    _ => {}
+                }
+            }
+            action = None;
+        }
         if dragged {
             action = None;
         }
@@ -316,7 +369,17 @@ impl DashboardState {
                     let modifiers = modifiers.unwrap_or(KeyModifiers::NONE);
                     let shift = modifiers.contains(KeyModifiers::SHIFT);
                     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-                    let selected = if shift {
+                    let single_click = !shift
+                        && !ctrl
+                        && matches!(event, Event::Mouse(m) if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)))
+                        && dialog
+                            .query
+                            .hour_starts_ms
+                            .as_ref()
+                            .is_some_and(|s| s.len() == 1 && s.contains(&hour));
+                    let selected = if single_click {
+                        BTreeSet::new()
+                    } else if shift {
                         let anchor = *dialog.hour_anchor.get_or_insert(hour);
                         let range = dialog.hours.iter().filter_map(|bar| {
                             (anchor.min(hour)..=anchor.max(hour))
@@ -348,7 +411,13 @@ impl DashboardState {
                     };
                     dialog.hour_cursor = Some(hour);
                     dialog.query.hour_start_ms = None;
-                    dialog.query.hour_starts_ms = Some(selected);
+                    if selected.is_empty() {
+                        dialog.query.hour_starts_ms = None;
+                        dialog.hour_anchor = None;
+                        dialog.hour_cursor = None;
+                    } else {
+                        dialog.query.hour_starts_ms = Some(selected);
+                    }
                     reload = true;
                 }
             }
@@ -383,16 +452,19 @@ impl DashboardState {
                 {
                     let start = hour_start_ms(change.changed_at_ms);
                     dialog.query.hour_start_ms = None;
-                    dialog.query.hour_starts_ms = Some(
-                        dialog
-                            .hours
-                            .iter()
-                            .filter(|hour| hour.start_ms >= start)
-                            .map(|hour| hour.start_ms)
-                            .collect(),
-                    );
-                    dialog.hour_anchor = Some(start);
-                    dialog.hour_cursor = dialog.hours.last().map(|hour| hour.start_ms);
+                    let selected: BTreeSet<_> = dialog
+                        .hours
+                        .iter()
+                        .filter(|hour| hour.start_ms >= start)
+                        .map(|hour| hour.start_ms)
+                        .collect();
+                    dialog.query.hour_starts_ms = (!selected.is_empty()).then_some(selected);
+                    dialog.hour_anchor = dialog.query.hour_starts_ms.as_ref().map(|_| start);
+                    dialog.hour_cursor = dialog
+                        .query
+                        .hour_starts_ms
+                        .as_ref()
+                        .and_then(|_| dialog.hours.last().map(|hour| hour.start_ms));
                     reload = true;
                 }
             }
@@ -404,21 +476,49 @@ impl DashboardState {
             Some(Interaction::Select(UsageControl::Rows, index)) => {
                 *dialog.selected_key.borrow_mut() = dialog.row_keys.borrow().get(index).cloned();
                 dialog.selected_row.set(index);
-            }
-            Some(Interaction::Select(UsageControl::Providers, index)) => {
                 if matches!(event, Event::Mouse(m) if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)))
-                    && let Some(key) = dialog.provider_keys.borrow().get(index).cloned()
-                    && !dialog.expanded_providers.remove(&key)
+                    && let Some(UsageRow::Session(id)) =
+                        dialog.row_keys.borrow().get(index).cloned()
+                    && dialog
+                        .report
+                        .as_ref()
+                        .and_then(|r| r.as_ref().ok())
+                        .is_some_and(|r| {
+                            r.sessions
+                                .iter()
+                                .any(|s| s.session_id == id && !s.models.is_empty())
+                        })
+                    && !dialog.expanded_sessions.remove(&id)
                 {
-                    dialog.expanded_providers.insert(key);
+                    dialog.expanded_sessions.insert(id);
+                }
+            }
+            Some(Interaction::Select(UsageControl::Providers, index)) if matches!(event, Event::Mouse(m) if matches!(m.kind, MouseEventKind::Up(MouseButton::Left))) => {
+                if let Some(key) = dialog.provider_keys.borrow().get(index).cloned() {
+                    if let Some(key) = key {
+                        if !dialog.expanded_providers.remove(&key) {
+                            dialog.expanded_providers.insert(key);
+                        }
+                    } else {
+                        dialog.pace_expanded = !dialog.pace_expanded;
+                    }
                 }
             }
             Some(Interaction::Activate(UsageControl::Providers)) => {
                 if let Some(index) = dialog.form.get_mut().selected(UsageControl::Providers)
                     && let Some(key) = dialog.provider_keys.borrow().get(index).cloned()
-                    && !dialog.expanded_providers.remove(&key)
                 {
-                    dialog.expanded_providers.insert(key);
+                    if let Some(key) = key {
+                        if !dialog.expanded_providers.remove(&key) {
+                            dialog.expanded_providers.insert(key);
+                        }
+                    } else {
+                        dialog.pace_expanded = match event {
+                            Event::Key(k) if k.code == KeyCode::Left => false,
+                            Event::Key(k) if k.code == KeyCode::Right => true,
+                            _ => !dialog.pace_expanded,
+                        };
+                    }
                 }
             }
             _ => {}
@@ -817,7 +917,7 @@ fn provider_rows(
     dialog: &SessionUsageDialog,
     report: &SessionUsageReport,
     width: u16,
-) -> (Vec<Line<'static>>, Vec<Option<usize>>, Vec<String>) {
+) -> (Vec<Line<'static>>, Vec<Option<usize>>, Vec<Option<String>>) {
     let label = |id: &str| {
         dashboard.config.profiles.get(id).map_or_else(
             || format!("{id} (unconfigured)"),
@@ -911,15 +1011,16 @@ fn provider_rows(
     let mut lines = vec![Line::styled(
         format!(
             "{:<26}{scale}   Pace      Tank    Est $   Forecast / Models",
-            "Provider Pace"
+            "▾ Provider Pace"
         ),
         theme::muted(),
     )];
-    let mut map = vec![None];
-    let mut keys = Vec::new();
+    let mut map = vec![Some(0)];
+    let mut keys = vec![None];
+    let mut over = Vec::new();
     for (name, provider) in providers {
         let index = keys.len();
-        keys.push(name.clone());
+        keys.push(Some(name.clone()));
         let mut quota = provider.quota.clone();
         for profile in &provider.profiles {
             if !quota.iter().any(|q| &q.profile == profile) {
@@ -930,6 +1031,9 @@ fn provider_rows(
             }
         }
         let (pct, partial) = pace(&quota, duration);
+        if let Some(p) = pct.filter(|p| *p > 100) {
+            over.push((p, name.clone(), partial));
+        }
         let equal = provider.profiles.iter().any(|profile| {
             provider
                 .quota
@@ -1134,6 +1238,36 @@ fn provider_rows(
             }
         }
     }
+    if !dialog.pace_expanded {
+        over.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut spans = vec![Span::styled("▸ Provider Pace · ", theme::actionable())];
+        if over.is_empty() {
+            spans.push(Span::styled("No providers over 100%", theme::muted()));
+        } else {
+            spans.push(Span::styled("Over 100%: ", theme::muted()));
+            for (i, (pct, name, partial)) in over.iter().enumerate() {
+                spans.push(Span::styled(
+                    format!(
+                        "{}{name} {}{pct}%",
+                        if i == 0 { "" } else { ", " },
+                        if *partial { "~" } else { "" }
+                    ),
+                    ratatui::style::Style::default().fg(if *pct > 130 {
+                        theme::palette().error
+                    } else {
+                        theme::palette().warning
+                    }),
+                ));
+            }
+        }
+        let mut remaining = usize::from(width);
+        for span in &mut spans {
+            let text = truncate_to_cells(&span.content, remaining, Truncate::PLAIN);
+            remaining = remaining.saturating_sub(Span::raw(text.clone()).width());
+            span.content = text.into();
+        }
+        return (vec![Line::from(spans)], vec![Some(0)], vec![None]);
+    }
     (lines, map, keys)
 }
 
@@ -1201,7 +1335,7 @@ pub(crate) fn render(
     );
     let window = match dialog.query.hour_starts_ms.as_ref() {
         None => "last 24 clock hours".to_owned(),
-        Some(hours) if hours.is_empty() => "no hours selected".to_owned(),
+        Some(hours) if hours.is_empty() => "last 24 clock hours".to_owned(),
         Some(hours) if hours.len() > 1 => format!("{} hours selected", hours.len()),
         Some(hours) => {
             let ms = *hours.first().expect("one selected hour");
@@ -1253,26 +1387,10 @@ pub(crate) fn render(
         .height
         .saturating_sub(header_height + bar_rows + row_gap + changes_height + footer_height + 1);
     let provider_height = (provider_lines.len() as u16).min(summary_budget);
-    let chart_y = inner.y + header_height + provider_height;
+    let chart_y = inner.y + header_height - 1;
+    let provider_y = chart_y + bar_rows + row_gap + changes_height + 1;
+    let provider_count = provider_keys.len();
     *dialog.provider_keys.borrow_mut() = provider_keys;
-    if provider_height > 0 {
-        let selected = form.selected(UsageControl::Providers).unwrap_or(0);
-        ChoiceList::render_with_rows(
-            frame,
-            Rect::new(
-                inner.x,
-                chart_y - provider_height,
-                inner.width,
-                provider_height,
-            ),
-            &provider_lines,
-            selected,
-            &provider_map,
-            &[],
-            &mut form,
-            UsageControl::Providers,
-        );
-    }
     render_hour_chart(
         frame,
         Rect::new(inner.x, chart_y, inner.width, bar_rows + 2),
@@ -1317,7 +1435,23 @@ pub(crate) fn render(
             UsageControl::Changes,
         );
     }
-    let rows_y = changes_y + changes_height;
+    if provider_height > 0 {
+        let selected = form
+            .selected(UsageControl::Providers)
+            .unwrap_or(0)
+            .min(provider_count.saturating_sub(1));
+        ChoiceList::render_with_rows(
+            frame,
+            Rect::new(inner.x, provider_y, inner.width, provider_height),
+            &provider_lines,
+            selected,
+            &provider_map,
+            &[],
+            &mut form,
+            UsageControl::Providers,
+        );
+    }
+    let rows_y = provider_y + provider_height;
     let rows_area = Rect::new(
         inner.x,
         rows_y,
@@ -1342,7 +1476,7 @@ pub(crate) fn render(
                     "Total {} · {window} · estimated API USD",
                     dollars(report.cost_usd_ticks, partial),
                 )),
-                Rect::new(inner.x, inner.y + header_height - 1, inner.width, 1),
+                Rect::new(inner.x, changes_y + changes_height, inner.width, 1),
             );
             if report.sessions.is_empty() {
                 frame.render_widget(
@@ -1372,12 +1506,7 @@ pub(crate) fn render(
                 let mut row_map = Vec::new();
                 let mut row_keys = dialog.row_keys.borrow_mut();
                 row_keys.clear();
-                let multiple = report.sessions.len() > 1;
-                for (index, session) in report.sessions.iter().enumerate() {
-                    if multiple && index > 0 {
-                        lines.push(Line::default());
-                        row_map.push(None);
-                    }
+                for session in &report.sessions {
                     let mut coverage = format!(
                         "{} sub · {}/{}",
                         session.subagent_count,
@@ -1387,7 +1516,17 @@ pub(crate) fn render(
                     if session.coverage.unfinished_turns > 0 {
                         coverage.push_str(&format!(" +{}", session.coverage.unfinished_turns));
                     }
-                    let mut title = session.title.clone();
+                    let mut title = format!(
+                        "{} {}",
+                        if session.models.is_empty() {
+                            " "
+                        } else if dialog.expanded_sessions.contains(&session.session_id) {
+                            "▾"
+                        } else {
+                            "▸"
+                        },
+                        session.title
+                    );
                     if table.profile.is_none() {
                         title.push_str(&format!(" [{}]", session.profile));
                     }
@@ -1421,7 +1560,12 @@ pub(crate) fn render(
                     row_map.push(Some(row_keys.len()));
                     row_keys.push(UsageRow::Session(session.session_id.clone()));
                     let count = session.models.len();
-                    for (model_index, model) in session.models.iter().enumerate() {
+                    for (model_index, model) in session
+                        .models
+                        .iter()
+                        .enumerate()
+                        .filter(|_| dialog.expanded_sessions.contains(&session.session_id))
+                    {
                         let branch = if model_index + 1 == count {
                             "  └─ "
                         } else {

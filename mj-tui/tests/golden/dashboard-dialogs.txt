@@ -785,12 +785,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │                                                                                                                  │
   │  $1                                                                                                              │
   │                                                                                                                  │
   │$0.5                                                                                                              │
   │                                                                                                                  │
   │  $0                                                                                                              │
+  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
@@ -823,10 +823,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total $11.200+ · last 24 clock hours · estimated API USD                                                          │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ Anthropic               ━━━━━━······│············   ~47%         ?  $8.200+  slack · ~53% unused                │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?   $3.000  over pace                          │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -835,17 +831,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total $11.200+ · last 24 clock hours · estimated API USD                                                          │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············   ~47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?   $3.000  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Write release notes                                      claude          $8.200+    1,100,000+  0 sub · 3/5       │
-  │  ├─ claude-opus-5-5                                                      $6.200             —                    │
-  │  └─ gpt-6.1-sol                                                         $2.000+     1,100,000  1 unreported      │
+  │▸ Write release notes                                    claude          $8.200+    1,100,000+  0 sub · 3/5       │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
   │                                                                                                                  │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ claude-opus-5-5                                                      $7.100             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
   │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
   │  Refresh     Close                                                                                               │
@@ -861,15 +861,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                │
   │☐ Include suspended sessions                                    │
   │                                                                │
-  │Total ? · last 24 clock hours · estimated API USD               │
-  │Provider Pace                Pace      Tank    Est $   Forecast │
-  │▸ Anthropic                   35%         ?  $8.200+  slack · ~6│
   │$50                 ▂                     ░ ▃                   │
   │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
   │                                                                │
-  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▾ Provider Pace              Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   35%         ?  $8.200+  slack · ~6│
+  │▸ Write release notes · 0 su…  claude       $8.200+   1,100,000+│
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
@@ -883,13 +883,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   ╭ × Usage Dashboard ─────────────────────────────────────────────╮
   │Profile All ▾                                                   │
   │☐ Include suspended sessions                                    │
-  │Total ? · last 24 clock hours · estimated API USD               │
-  │Provider Pace                Pace      Tank    Est $   Forecast │
-  │▸ Anthropic                  ~70%         ?  $8.200+  slack · ~3│
   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
-  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▾ Provider Pace              Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                  ~70%         ?  $8.200+  slack · ~3│
+  │▸ Write release notes · 0 su…  claude       $8.200+   1,100,000+│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
   ╰────────────────────────────────────────────────────────────────╯
@@ -904,14 +904,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                │
   │☐ Include suspended sessions                                    │
   │                                                                │
-  │Total ? · last 24 clock hours · estimated API USD               │
-  │Provider Pace                Pace      Tank    Est $   Forecast │
-  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
-  │▸ OpenAI                     140%         ?        ?  over pace │
-  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
-  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
-  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
-  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
   │$50                                       ░                     │
   │                                          ░ ▄                   │
   │$25                 █ ▂                 ▅ ░ █                   │
@@ -920,7 +912,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
   │                                                                │
-  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▾ Provider Pace              Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │▸ OpenAI                     140%         ?        ?  over pace │
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │▸ Write release notes · 0 su…  claude       $8.200+   1,100,000+│
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
@@ -936,12 +936,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · last 24 clock hours · estimated API USD                                                                 │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
-  │▸ Codex (resolving)       ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
-  │▸ Unattributed profile    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   payg         ∞        ?  usage-billed                       │
-  │▸ retired-account (uncon… ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   payg         ∞   $0.500  usage-billed                       │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -950,15 +944,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ Codex (resolving)       ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │▸ Unattributed profile    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   payg         ∞        ?  usage-billed                       │
+  │▸ retired-account (uncon… ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   payg         ∞   $0.500  usage-billed                       │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Write release notes                                      claude          $8.200+    1,100,000+  0 sub · 3/5       │
-  │  ├─ claude-opus-5-5                                                      $6.200             —                    │
-  │  └─ gpt-6.1-sol                                                         $2.000+     1,100,000  1 unreported      │
+  │▸ Write release notes                                    claude          $8.200+    1,100,000+  0 sub · 3/5       │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
   │                                                                                                                  │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ claude-opus-5-5                                                      $7.100             —                    │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
   │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
   │  Refresh     Close                                                                                               │
@@ -972,13 +972,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   ╭ × Usage Dashboard ─────────────────────────────────────────────╮
   │Profile All ▾                                                   │
   │☐ Include suspended sessions                                    │
-  │Total ? · last 24 clock hours · estimated API USD               │
-  │Provider Pace                Pace      Tank    Est $   Forecast │
-  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
-  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▾ Provider Pace              Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │▸ Write release notes · 0 su…  claude       $8.200+   1,100,000+│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
   ╰────────────────────────────────────────────────────────────────╯
@@ -993,11 +993,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · last 24 clock hours · estimated API USD                                                                 │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
-  │▸ codex4 (unconfigured)   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄      ?  38% left   $0.000  unmeasured                         │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1006,16 +1001,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │▸ codex4 (unconfigured)   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄      ?  38% left   $0.000  unmeasured                         │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Write release notes                                      claude          $8.200+    1,100,000+  0 sub · 3/5       │
-  │  ├─ claude-opus-5-5                                                      $6.200             —                    │
-  │  └─ gpt-6.1-sol                                                         $2.000+     1,100,000  1 unreported      │
+  │▸ Write release notes                                    claude          $8.200+    1,100,000+  0 sub · 3/5       │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
   │                                                                                                                  │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ claude-opus-5-5                                                      $7.100             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
   │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
   │  Refresh     Close                                                                                               │
@@ -1031,10 +1031,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · last 24 clock hours · estimated API USD                                                                 │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1043,17 +1039,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Write release notes                                      claude          $8.200+    1,100,000+  0 sub · 3/5       │
-  │  ├─ claude-opus-5-5                                                      $6.200             —                    │
-  │  └─ gpt-6.1-sol                                                         $2.000+     1,100,000  1 unreported      │
+  │▸ Write release notes                                    claude          $8.200+    1,100,000+  0 sub · 3/5       │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
   │                                                                                                                  │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ claude-opus-5-5                                                      $7.100             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
   │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
   │  Refresh     Close                                                                                               │
@@ -1069,10 +1069,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · last 24 clock hours · estimated API USD                                                                 │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1081,17 +1077,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │  ├─ claude-opus-5-5                                                      $6.200             —                    │
-  │  └─ gpt-6.1-sol                                                         $2.000+     1,100,000  1 unreported      │
+  │▸ Write release notes                                    claude          $8.200+    1,100,000+  0 sub · 3/5       │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
   │                                                                                                                  │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ claude-opus-5-5                                                      $7.100             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
-  │  └─ deepseek-flash                                                      $0.000+             —  2 unreported      │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
   │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
   │  Refresh     Close                                                                                               │
@@ -1107,15 +1107,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                │
   │☐ Include suspended sessions                                    │
   │                                                                │
-  │Total ? · last 24 clock hours · estimated API USD               │
-  │Provider Pace                Pace      Tank    Est $   Forecast │
-  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
   │$50                 ▂                     ░ ▃                   │
   │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
   │                                                                │
-  │  ├─ gpt-6.1-terra                           $1.000            —│
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▾ Provider Pace              Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │▸ Investigate recovery · 2 s…  codex              ?            —│
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
@@ -1131,15 +1131,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                │
   │☐ Include suspended sessions                                    │
   │                                                                │
-  │Total ? · last 24 clock hours · estimated API USD               │
-  │Provider Pace                Pace      Tank    Est $   Forecast │
-  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
   │$50                 ▂                     ░ ▃                   │
   │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
   │                                                                │
-  │  └─ deepseek-flash · 2 unre…               $0.000+            —│
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▾ Provider Pace              Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │▸ Investigate recovery · 2 s…  codex              ?            —│
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
@@ -1155,29 +1155,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │        ╭Profile──────╮                                                                                           │
   │☐ Includ│All          │sions                                                                                      │
   │        │claude       │                                                                                           │
-  │Total ? │claude-1     │ hours · estimated API USD                                                                 │
-  │Provider│claude-idle  │   0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ Anthro│codex        │   ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
-  │▸ OpenAI│codex-1      │   ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
-  │$50     │codex-2      │                                                         ░░░                               │
-  │        ╰─────────────╯                                                         ░░░ ▄▄▄                           │
-  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
-  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
-  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
-  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │$50     │claude-1     │                                                         ░░░                               │
+  │        │claude-idle  │                                                         ░░░ ▄▄▄                           │
+  │$25     │codex        │             ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │        │codex-1      │         ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0     │codex-2      │         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────╰─────────────╯─────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Write release notes                                      claude          $8.200+    1,100,000+  0 sub · 3/5       │
-  │  ├─ claude-opus-5-5                                                      $6.200             —                    │
-  │  └─ gpt-6.1-sol                                                         $2.000+     1,100,000  1 unreported      │
+  │▸ Write release notes                                    claude          $8.200+    1,100,000+  0 sub · 3/5       │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
   │                                                                                                                  │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ claude-opus-5-5                                                      $7.100             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
   │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
   │  Refresh     Close                                                                                               │
@@ -1193,9 +1193,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · last 24 clock hours · estimated API USD                                                                 │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1204,13 +1201,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
-  │  └─ deepseek-flash                                                      $0.000+             —  2 unreported      │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
@@ -1231,9 +1231,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · Mon Nov 24 18:00–19:00 · estimated API USD                                                              │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ OpenAI                  ━···········│············    ~9%         ?        ?  slack · ~91% unused                │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1242,13 +1239,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────━━━━────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · Mon Nov 24 18:00–19:00 · estimated API USD                                                              │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━···········│············    ~9%         ?        ?  slack · ~91% unused                │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
-  │  └─ deepseek-flash                                                      $0.000+             —  2 unreported      │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
@@ -1269,9 +1269,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · 2 hours selected · estimated API USD                                                                    │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1280,13 +1277,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────━━━━────────────────━━━━────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · 2 hours selected · estimated API USD                                                                    │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
-  │  └─ deepseek-flash                                                      $0.000+             —  2 unreported      │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
@@ -1307,9 +1307,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · 7 hours selected · estimated API USD                                                                    │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1318,13 +1315,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · 7 hours selected · estimated API USD                                                                    │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Investigate recovery                                     codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
-  │  └─ deepseek-flash                                                      $0.000+             —  2 unreported      │
+  │▸ Investigate recovery                                   codex                 ?             —  2 sub · 4/6       │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
@@ -1337,7 +1337,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
 
 
-=== Usage no hours selected (120x36) ===
+=== Usage all hours after deselection (120x36) ===
 
 
   ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -1345,9 +1345,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☐ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total $0.000 · no hours selected · estimated API USD                                                              │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ OpenAI                  ············│············     0%         ?   $0.000  idle                               │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1356,8 +1353,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total $0.000 · last 24 clock hours · estimated API USD                                                            │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ············│············     0%         ?   $0.000  idle                               │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Investigate recovery                                     codex            $0.000             —  2 sub · 0/0       │
+  │  Investigate recovery                                   codex            $0.000             —  2 sub · 0/0       │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
@@ -1383,9 +1383,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☒ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │Total ? · last 24 clock hours · estimated API USD                                                                 │
-  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
-  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1394,13 +1391,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
   │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │▾ Provider Pace           0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
   │Session / Model                                          Profile           Est $        Tokens  Coverage          │
-  │Investigate recovery [suspended]                         codex                 ?             —  2 sub · 4/6       │
-  │  ├─ gpt-6.1-sol                                                          $3.000             —                    │
-  │  ├─ gpt-6.1-terra                                                        $1.000             —                    │
-  │  ├─ gpt-6-luna                                                           $0.105             —                    │
-  │  ├─ custom-model                                                              ?             —                    │
-  │  └─ deepseek-flash                                                      $0.000+             —  2 unreported      │
+  │▸ Investigate recovery [suspended]                       codex                 ?             —  2 sub · 4/6       │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
@@ -1419,13 +1419,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   ╭ × Usage Dashboard ─────────────────────────────────────────────╮
   │Profile codex ▾                                                 │
   │☒ Include suspended sessions                                    │
-  │Total ? · last 24 clock hours · estimated API USD               │
-  │Provider Pace                Pace      Tank    Est $   Forecast │
-  │▸ OpenAI                     140%         ?        ?  over pace │
   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
-  │Investigate recovery [suspen…  codex              ?            —│
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▾ Provider Pace              Pace      Tank    Est $   Forecast │
+  │▸ OpenAI                     140%         ?        ?  over pace │
+  │▸ Investigate recovery [susp…  codex              ?            —│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
   ╰────────────────────────────────────────────────────────────────╯
@@ -1440,7 +1440,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                                                                                  │
   │☒ Include suspended sessions                                                                                      │
   │                                                                                                                  │
-  │                                                                                                                  │
   │$50                                                                             ░░░                               │
   │                                                                                ░░░ ▄▄▄                           │
   │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
@@ -1448,6 +1447,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
   │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
   │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
   │                                                                                                                  │
   │Usage load failed: test store unavailable                                                                         │
   │Use Refresh to retry.                                                                                             │
