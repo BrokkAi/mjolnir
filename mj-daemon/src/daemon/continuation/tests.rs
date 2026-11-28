@@ -197,6 +197,7 @@ async fn a_worker_quota_assessment_schedules_recovery_whatever_the_spent_allowan
         code: None,
         http_status: None,
         reset_at: None,
+        retry_after_seconds: None,
         login_fingerprint: None,
     });
     quota_assessed(&mut blocked);
@@ -2788,6 +2789,7 @@ async fn quota_prepare_ignores_stale_profile_for_all_session_kinds() {
         code: Some("usageLimitExceeded".into()),
         http_status: None,
         reset_at: Some(explicit_reset.to_string()),
+        retry_after_seconds: None,
         login_fingerprint: None,
     });
 

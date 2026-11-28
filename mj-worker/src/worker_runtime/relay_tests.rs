@@ -2246,6 +2246,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
                 code: Some(mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into()),
                 http_status: None,
                 reset_at: None,
+                retry_after_seconds: None,
                 login_fingerprint: None,
             }),
         },
@@ -11933,6 +11934,7 @@ fn quota_failed_wake_replays_actual_input_once_across_retries_and_restart() {
                 code: None,
                 http_status: None,
                 reset_at: None,
+                retry_after_seconds: None,
                 login_fingerprint: None,
             }
         };

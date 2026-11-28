@@ -8775,6 +8775,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
         code: Some("service".into()),
         http_status: None,
         reset_at: None,
+        retry_after_seconds: None,
         login_fingerprint: None,
     });
     snapshot.materialized.applied_event_ordinal = turn.completed_ordinal;
@@ -8926,6 +8927,7 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         code: Some("limit".into()),
         http_status: None,
         reset_at: None,
+        retry_after_seconds: None,
         login_fingerprint: None,
     };
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");

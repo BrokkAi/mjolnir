@@ -9,7 +9,7 @@
 //! Quota reports can extend active quota marks to the reported reset.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use crate::quota::QuotaWindow;
@@ -40,20 +40,16 @@ impl ProfileFault {
     /// (`limit` for a rate limit, `service` for a provider error); other
     /// bridges may report an HTTP status instead.
     pub fn of(diagnostic: &TurnDiagnostic) -> Option<Self> {
-        if diagnostic.is_usage_limit() {
+        if diagnostic.is_usage_limit() || diagnostic.http_status == Some(402) {
             return Some(Self::QuotaExhausted);
         }
-        match diagnostic.code.as_deref() {
-            Some("limit") => return Some(Self::RateLimited),
-            Some("service") => return Some(Self::ProviderError),
-            _ => {}
+        if diagnostic.is_rate_limit() {
+            return Some(Self::RateLimited);
         }
-        match diagnostic.http_status? {
-            429 => Some(Self::RateLimited),
-            402 => Some(Self::QuotaExhausted),
-            500 | 502 | 503 | 504 | 529 => Some(Self::ProviderError),
-            _ => None,
+        if diagnostic.is_overload() {
+            return Some(Self::ProviderError);
         }
+        None
     }
 
     fn describe(self) -> &'static str {
@@ -106,10 +102,60 @@ struct Mark {
 }
 
 /// The daemon's one record of profile health, keyed by profile and model.
-#[derive(Debug, Default)]
+pub type FaultObserver = Arc<dyn Fn(&str, ProfileFault, u64) -> bool + Send + Sync>;
+
+#[derive(Default)]
 pub struct ProfileHealth {
+    fault_observers: Vec<FaultObserver>,
     marks: BTreeMap<(String, String), Mark>,
     quota_windows: BTreeMap<String, Vec<QuotaWindow>>,
+}
+
+impl std::fmt::Debug for ProfileHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileHealth")
+            .field("marks", &self.marks)
+            .field("quota_windows", &self.quota_windows)
+            .field("fault_observers", &self.fault_observers.len())
+            .finish()
+    }
+}
+
+/// Record a turn and notify listeners after releasing the shared health lock.
+pub fn observe_shared(profile_id: &str, model: &str, turn: TurnHealth, now: SystemTime) {
+    let fault = match &turn {
+        TurnHealth::Failed(
+            fault @ (ProfileFault::RateLimited | ProfileFault::QuotaExhausted),
+            _,
+        ) => Some(*fault),
+        _ => None,
+    };
+    let observers = {
+        let mut health = shared().lock().expect("profile health poisoned");
+        health.observe(profile_id, model, turn, now);
+        if fault.is_some() {
+            health.fault_observers.clone()
+        } else {
+            Vec::new()
+        }
+    };
+    if let Some(fault) = fault {
+        let seconds = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let dead: Vec<_> = observers
+            .into_iter()
+            .filter(|observer| !observer(profile_id, fault, seconds))
+            .collect();
+        if !dead.is_empty() {
+            shared()
+                .lock()
+                .expect("profile health poisoned")
+                .fault_observers
+                .retain(|observer| !dead.iter().any(|d| Arc::ptr_eq(observer, d)));
+        }
+    }
 }
 
 static SHARED: OnceLock<Mutex<ProfileHealth>> = OnceLock::new();
@@ -120,6 +166,9 @@ pub fn shared() -> &'static Mutex<ProfileHealth> {
 }
 
 impl ProfileHealth {
+    pub fn register_fault_observer(&mut self, observer: FaultObserver) {
+        self.fault_observers.push(observer);
+    }
     /// Record a failed turn of `profile_id` running `model`. Failures that
     /// arrive while the profile is already marked do not lengthen the mark:
     /// several sessions that started before the mark all fail together, and
@@ -278,21 +327,31 @@ fn quota_reset(
 
 /// The provider's reset time, when it gave one in a supported form.
 fn provider_reset(diagnostic: &TurnDiagnostic, now: SystemTime) -> Option<SystemTime> {
-    let value = diagnostic.reset_at.as_deref()?.trim();
-    let at = if let Ok(number) = value.parse::<u64>() {
-        let millis = if number > 100_000_000_000 {
-            number
+    let reset = diagnostic.reset_at.as_deref().and_then(|value| {
+        let value = value.trim();
+        let at = if let Ok(number) = value.parse::<u64>() {
+            let millis = if number > 100_000_000_000 {
+                number
+            } else {
+                number.checked_mul(1000)?
+            };
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis))?
+        } else if let Ok(date) = DateTime::parse_from_rfc2822(value) {
+            SystemTime::from(date)
         } else {
-            number.checked_mul(1000)?
+            let local_now = DateTime::<chrono::Utc>::from(now)
+                .with_timezone(&Local)
+                .fixed_offset();
+            crate::quota::normalize_reset_at(value, local_now)?.into()
         };
-        SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
-    } else {
-        let local_now = DateTime::<chrono::Utc>::from(now)
-            .with_timezone(&Local)
-            .fixed_offset();
-        crate::quota::normalize_reset_at(value, local_now)?.into()
-    };
-    (at > now).then_some(at)
+        (at > now).then_some(at)
+    });
+    reset.or_else(|| {
+        diagnostic
+            .retry_after_seconds
+            .filter(|s| *s > 0)
+            .and_then(|s| now.checked_add(Duration::from_secs(s)))
+    })
 }
 
 #[cfg(test)]
@@ -305,8 +364,57 @@ mod tests {
             code: code.map(str::to_owned),
             http_status,
             reset_at: None,
+            retry_after_seconds: None,
             login_fingerprint: None,
         }
+    }
+
+    #[test]
+    fn retry_delays_and_observers_apply_to_failed_turns() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut d = diagnostic("too many requests", None, None);
+        assert_eq!(ProfileFault::of(&d), Some(ProfileFault::RateLimited));
+        d.retry_after_seconds = Some(123);
+        assert_eq!(
+            provider_reset(&d, now),
+            Some(now + Duration::from_secs(123))
+        );
+        d.reset_at = Some("Wed, 21 Oct 2026 07:28:00 GMT".into());
+        assert_eq!(
+            provider_reset(&d, now),
+            Some(SystemTime::from(
+                DateTime::parse_from_rfc2822(d.reset_at.as_ref().unwrap()).unwrap()
+            ))
+        );
+        d.message = "server is busy".into();
+        assert_eq!(ProfileFault::of(&d), Some(ProfileFault::ProviderError));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        shared()
+            .lock()
+            .unwrap()
+            .register_fault_observer(Arc::new(move |id, _, _| {
+                if id == "observer-test-profile" {
+                    assert!(shared().try_lock().is_ok());
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    false
+                } else {
+                    true
+                }
+            }));
+        observe_shared(
+            "observer-test-profile",
+            "model",
+            TurnHealth::Failed(ProfileFault::RateLimited, d.clone()),
+            now,
+        );
+        observe_shared(
+            "observer-test-profile",
+            "model",
+            TurnHealth::Failed(ProfileFault::RateLimited, d),
+            now,
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn quota_window(label: &str, remaining: u8, reset: Option<i64>) -> QuotaWindow {

@@ -1196,10 +1196,7 @@ impl StandaloneSession {
                     continue;
                 };
                 // The provider failure happened even if the following projection commit fails.
-                profile_health
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("profile health lock poisoned"))?
-                    .observe(&profile_id, &model, observation, now);
+                crate::profile_health::observe_shared(&profile_id, &model, observation, now);
             }
             let events = events.to_vec();
             let projection = self.materialized.clone();

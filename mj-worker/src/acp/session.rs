@@ -1223,6 +1223,7 @@ pub(super) async fn serve_session(
                                             code: Some(PROMPT_UNANSWERED_STOP_REASON.to_owned()),
                                             http_status: None,
                                             reset_at: None,
+                                            retry_after_seconds: None,
                                             login_fingerprint: None,
                                         });
                                         PROMPT_UNANSWERED_STOP_REASON.to_owned()
@@ -1344,6 +1345,7 @@ pub(super) async fn serve_session(
                                         code: Some(TURN_STALLED_STOP_REASON.to_owned()),
                                         http_status: None,
                                         reset_at: None,
+                                        retry_after_seconds: None,
                                         login_fingerprint: None,
                                     }),
                                 },

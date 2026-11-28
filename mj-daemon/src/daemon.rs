@@ -257,6 +257,10 @@ struct QuotaBoard {
 pub(crate) enum QuotaRefreshIntent {
     Force,
     ReconcileSources,
+    ProbeOnFault {
+        profile_id: String,
+        failed_at_epoch_seconds: u64,
+    },
     /// Probe these profiles once even though they sit outside the enabled
     /// batch (for `mj quota --with-disabled`); their reports stay served until
     /// their identities change. A forced probe answers now, off the profile's

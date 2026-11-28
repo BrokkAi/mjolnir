@@ -1061,6 +1061,7 @@ mod tests {
             code: Some("usageLimitExceeded".into()),
             http_status: None,
             reset_at: Some((now / 1000 + 10 * 3600).to_string()),
+            retry_after_seconds: None,
             login_fingerprint: None,
         });
         let plan = prepare(&state, "owner-session", &view).await.unwrap();
