@@ -182,10 +182,7 @@ impl ProfileQuota {
         if self.harness == HarnessKind::Antigravity {
             return self.windows.iter().find(|window| {
                 window.has_weekly_period_duration()
-                    && window
-                        .model_scope
-                        .as_deref()
-                        .is_some_and(|scope| scope.eq_ignore_ascii_case("gemini"))
+                    && antigravity_pool_of_window(window) == Some(AntigravityQuotaPool::Gemini)
             });
         }
         None

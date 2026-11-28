@@ -2447,83 +2447,86 @@ mod tests {
     fn antigravity_primary_weekly_window_prefers_gemini_scope() {
         let now = 1_795_860_635_i64;
         let reset = now + 4 * 86_400;
-        let antigravity_probe = |ts: u64, gemini_rem: u8, claude_rem: u8| ProfileQuota {
-            monthly_price_usd: None,
-            paid_credits: None,
-            banked_resets: None,
-            profile_id: "gemini".into(),
-            harness: mj_core::config::HarnessKind::Antigravity,
-            windows: vec![
-                QuotaWindow {
-                    label: "Week".into(),
-                    remaining_percent: Some(claude_rem),
-                    duration_seconds: Some(WEEKLY_PERIOD_SECONDS),
-                    model_scope: Some("claude".into()),
-                    used: None,
-                    limit: None,
-                    resets: None,
-                    resets_at_epoch_seconds: Some(reset),
-                },
-                QuotaWindow {
-                    label: "Week".into(),
-                    remaining_percent: Some(gemini_rem),
-                    duration_seconds: Some(WEEKLY_PERIOD_SECONDS),
-                    model_scope: Some("gemini".into()),
-                    used: None,
-                    limit: None,
-                    resets: None,
-                    resets_at_epoch_seconds: Some(reset),
-                },
-                QuotaWindow {
-                    label: "5H".into(),
-                    remaining_percent: Some(95),
-                    duration_seconds: Some(18_000),
-                    model_scope: Some("gemini".into()),
-                    used: None,
-                    limit: None,
-                    resets: None,
-                    resets_at_epoch_seconds: Some(now + 3 * 3600),
-                },
-            ],
-            extra: None,
-            error: None,
-            refreshed_at_epoch_seconds: ts,
-            rate_limited_until_epoch_seconds: None,
-            next_check_at_epoch_seconds: None,
-        };
-        let history = vec![
-            antigravity_probe((now - 3600) as u64, 80, 90),
-            antigravity_probe(now as u64, 70, 50),
-        ];
-        assert!(has_weekly_reading(&history[0]));
-        let (usage, covered) =
-            weekly_consumption_with_coverage(&history, &[(now - 3600, now)]).unwrap();
-        assert_eq!(usage.basis_points, 1_000);
-        assert_eq!(covered, 3600);
+        let antigravity_probe =
+            |ts: u64, gemini_scope: &str, gemini_rem: u8, claude_rem: u8| ProfileQuota {
+                monthly_price_usd: None,
+                paid_credits: None,
+                banked_resets: None,
+                profile_id: "gemini".into(),
+                harness: mj_core::config::HarnessKind::Antigravity,
+                windows: vec![
+                    QuotaWindow {
+                        label: "Week".into(),
+                        remaining_percent: Some(claude_rem),
+                        duration_seconds: Some(WEEKLY_PERIOD_SECONDS),
+                        model_scope: Some("claude".into()),
+                        used: None,
+                        limit: None,
+                        resets: None,
+                        resets_at_epoch_seconds: Some(reset),
+                    },
+                    QuotaWindow {
+                        label: "Week".into(),
+                        remaining_percent: Some(gemini_rem),
+                        duration_seconds: Some(WEEKLY_PERIOD_SECONDS),
+                        model_scope: Some(gemini_scope.into()),
+                        used: None,
+                        limit: None,
+                        resets: None,
+                        resets_at_epoch_seconds: Some(reset),
+                    },
+                    QuotaWindow {
+                        label: "5H".into(),
+                        remaining_percent: Some(95),
+                        duration_seconds: Some(18_000),
+                        model_scope: Some(gemini_scope.into()),
+                        used: None,
+                        limit: None,
+                        resets: None,
+                        resets_at_epoch_seconds: Some(now + 3 * 3600),
+                    },
+                ],
+                extra: None,
+                error: None,
+                refreshed_at_epoch_seconds: ts,
+                rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
+            };
+        for scope in ["gemini", "gemini,!argon"] {
+            let history = vec![
+                antigravity_probe((now - 3600) as u64, scope, 80, 90),
+                antigravity_probe(now as u64, scope, 70, 50),
+            ];
+            assert!(has_weekly_reading(&history[0]));
+            let (usage, covered) =
+                weekly_consumption_with_coverage(&history, &[(now - 3600, now)]).unwrap();
+            assert_eq!(usage.basis_points, 1_000);
+            assert_eq!(covered, 3600);
 
-        let store = QuotaTelemetryStore::new();
-        store
-            .refresh_projections_with_loader(
-                &[("gemini".into(), "id-gemini".into(), history[1].clone())],
-                now,
-                |_, _, _| Ok(history.clone()),
-            )
-            .unwrap();
-        let projections = store.snapshot().projections;
-        let gemini_week = projections
-            .iter()
-            .find(|p| p.window_label == "Week (Ge)")
-            .expect("Week (Ge) projection");
-        let claude_week = projections
-            .iter()
-            .find(|p| p.window_label.starts_with("Week") && p.window_label != "Week (Ge)")
-            .expect("claude weekly projection");
-        let gemini_5h = projections
-            .iter()
-            .find(|p| p.window_label == "5H (Ge)")
-            .expect("5H (Ge) projection");
-        assert_eq!(gemini_week.is_weekly_window, Some(true));
-        assert_eq!(claude_week.is_weekly_window, Some(false));
-        assert_eq!(gemini_5h.is_weekly_window, Some(false));
+            let store = QuotaTelemetryStore::new();
+            store
+                .refresh_projections_with_loader(
+                    &[("gemini".into(), "id-gemini".into(), history[1].clone())],
+                    now,
+                    |_, _, _| Ok(history.clone()),
+                )
+                .unwrap();
+            let projections = store.snapshot().projections;
+            let gemini_week = projections
+                .iter()
+                .find(|p| p.window_label == "Week (Ge)")
+                .expect("Week (Ge) projection");
+            let claude_week = projections
+                .iter()
+                .find(|p| p.window_label.starts_with("Week") && p.window_label != "Week (Ge)")
+                .expect("claude weekly projection");
+            let gemini_5h = projections
+                .iter()
+                .find(|p| p.window_label == "5H (Ge)")
+                .expect("5H (Ge) projection");
+            assert_eq!(gemini_week.is_weekly_window, Some(true));
+            assert_eq!(claude_week.is_weekly_window, Some(false));
+            assert_eq!(gemini_5h.is_weekly_window, Some(false));
+        }
     }
 }
