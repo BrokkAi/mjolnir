@@ -2006,3 +2006,23 @@ export function resolveSessionInterned(
   }
   return resolved as unknown as SessionRow;
 }
+
+export type CostUsdTicks = { Ok: number } | { Err: null };
+export interface UsageReportQuery { profile?: string; hour_start_ms?: number; hour_starts_ms?: number[]; include_suspended?: boolean }
+export interface UsageCoverage { recorded_turns: number; full_turn_reports: number; last_request_reports: number; unspecified_reports: number; missing_reports: number; unfinished_turns?: number; provider_cost_turns?: number; estimated_cost_turns?: number; missing_cost_turns?: number }
+export interface ModelUsageEstimate { model: string | null; totals: Record<string, { tokens: number; reported_turns: number }>; unreported_turns?: number; cost_usd_ticks: CostUsdTicks }
+export interface ProfileRoleUsageEstimate { profile: string | null; role: string; models: ModelUsageEstimate[]; cost_usd_ticks: CostUsdTicks }
+export interface SessionUsageReport {
+  since_ms: number; until_ms: number;
+  hours: { start_ms: number; known_cost_usd_ticks: number; has_unknown_cost: boolean }[];
+  profiles: string[];
+  profile_providers?: Record<string, string>;
+  sessions: { session_id: string; title: string; profile: string; suspended: boolean; subagent_count: number; models: ModelUsageEstimate[]; coverage: UsageCoverage; cost_usd_ticks: CostUsdTicks }[];
+  agent_usage?: { role: string; models: ModelUsageEstimate[]; cost_usd_ticks: CostUsdTicks }[];
+  profile_usage?: { profile: string | null; coverage: UsageCoverage; cost_usd_ticks: CostUsdTicks }[];
+  profile_role_usage?: ProfileRoleUsageEstimate[];
+  role_changes?: { id: number; changed_at_ms: number; summary: string }[];
+  quota_usage?: { profile: string; consumed_basis_points: number | null; covered_seconds?: number; partial: boolean; monthly_price_usd: number | null }[];
+  quota_projections?: { profile_id: string; window_label: string; is_short_window?: boolean; is_weekly_window?: boolean; remaining_percent: number; resets_at_epoch_seconds: number | null; observed_pct_per_hour: number | null; sustainable_pct_per_hour: number | null; pace_ratio: number | null; projected_exhaustion_epoch_seconds: number | null }[];
+  cost_usd_ticks: CostUsdTicks;
+}

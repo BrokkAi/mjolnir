@@ -191,3 +191,57 @@ muse (Muse Code, unknown): no quota report yet
 opencode (OpenCode, usage): probing now
 === mj quota --profile missing ===
 no enabled profile "missing"
+=== mj quota forecast ===
+claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h · checked 4m ago (Week: 1.6× pace, exhausts in 1d 4h)
+=== mj quota forecast --json ===
+{
+  "cycles": 7,
+  "profiles": [
+    {
+      "profile": "claude",
+      "harness": "claude",
+      "billing": "subscription",
+      "enabled": true,
+      "probing": false,
+      "report": {
+        "monthly_price_usd": 100,
+        "profile_id": "claude",
+        "harness": "claude",
+        "windows": [
+          {
+            "label": "5H",
+            "remaining_percent": 62,
+            "used": null,
+            "limit": null,
+            "resets": null,
+            "resets_at_epoch_seconds": 1800009660
+          },
+          {
+            "label": "Week",
+            "remaining_percent": null,
+            "used": 340,
+            "limit": 500,
+            "resets": null,
+            "resets_at_epoch_seconds": 1800273600
+          }
+        ],
+        "extra": null,
+        "error": null,
+        "refreshed_at_epoch_seconds": 1799999760
+      },
+      "detail": "5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h"
+    }
+  ],
+  "quota_projections": [
+    {
+      "profile_id": "claude",
+      "window_label": "Week",
+      "remaining_percent": 38,
+      "resets_at_epoch_seconds": 1800194400,
+      "observed_pct_per_hour": 1.0,
+      "sustainable_pct_per_hour": 0.625,
+      "pace_ratio": 1.6,
+      "projected_exhaustion_epoch_seconds": 1800100800
+    }
+  ]
+}

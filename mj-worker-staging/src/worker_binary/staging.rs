@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::remove_tree;
 
 /// Hand a Claude worker the profile's long-lived setup token, when it has one.
 ///
@@ -247,7 +248,7 @@ pub fn stage_managed_skills(
     scope: mj_core::skills::SkillsScope,
 ) -> Result<()> {
     let directory = profile_stage.join(mj_core::skills::mj_skill_directory(kind));
-    match std::fs::remove_dir_all(&directory) {
+    match remove_tree::remove_dir_all_checked(&directory) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => {

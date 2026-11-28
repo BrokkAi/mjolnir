@@ -52,10 +52,30 @@ impl RuntimeState {
             workspaces,
             Controller::load,
         );
+        let owner = Arc::downgrade(&state.owner);
+        let (sender, task) = spawn_role_sync(mj_controller::database::database_path(), owner);
+        state.owner().set_role_sync(sender);
+        *state
+            .role_sync_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(task);
         state.committed = mj_controller::database::database_writer_installed().then(|| {
             mj_controller::database::subscribe_committed_state().expect("installed database writer")
         });
         state
+    }
+
+    pub(super) async fn shutdown_role_sync(&self) -> Result<()> {
+        self.owner().close_role_sync();
+        let task = self
+            .role_sync_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            task.await.context("role assignment sync task panicked")?;
+        }
+        Ok(())
     }
 
     pub(super) fn new_with_controller_loader(
@@ -119,12 +139,13 @@ impl RuntimeState {
             workspaces_tx,
             workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
-            owner: Mutex::new(RuntimeStateOwner::new(controller, {
+            role_sync_task: Mutex::new(None),
+            owner: Arc::new(Mutex::new(RuntimeStateOwner::new(controller, {
                 let review_host = review_host.clone();
                 Arc::new(move |child: &str, reason| {
                     review_host.child_ended(child.to_owned(), reason)
                 })
-            })),
+            }))),
             report_backend: Mutex::new(None),
             rejected_logins: Default::default(),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
@@ -2296,5 +2317,223 @@ impl ChildReview {
     /// cannot rule out yet.
     pub(crate) fn holds(self) -> bool {
         self != Self::Closed
+    }
+}
+
+fn spawn_role_sync(
+    path: PathBuf,
+    owner: std::sync::Weak<Mutex<super::owner::RuntimeStateOwner>>,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<super::owner::RoleSyncRequest>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::unbounded_channel::<super::owner::RoleSyncRequest>();
+    let task = mj_core::runtime::spawn(async move {
+        while let Some(request) = receiver.recv().await {
+            let path = path.clone();
+            let owner = owner.clone();
+            let result = mj_core::runtime::spawn_blocking(move || {
+                // Held until SQLite answers: the guard drops at the end of
+                // this closure, after the write below has finished.
+                let _admission = request.admission;
+                let outcome = mj_controller::database::sync_role_assignment_snapshot_at(
+                    &path,
+                    &request.snapshot,
+                    request.observed_at_ms,
+                )
+                .map(|_| ())
+                .map_err(|error| {
+                    tracing::warn!(%error, "could not persist role assignments");
+                    error.to_string()
+                });
+                if outcome.is_err()
+                    && let Some(owner) = owner.upgrade()
+                {
+                    // A failed write must not swallow the transition: forget
+                    // the snapshot unless a newer one already replaced it, so
+                    // the next install retries persistence.
+                    owner
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .invalidate_role_snapshot(&request.snapshot);
+                }
+                if let Some(ack) = request.ack {
+                    let _ = ack.send(outcome.clone());
+                }
+                // `request.admission` drops here, after SQLite answered.
+            })
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "role assignment sync task failed");
+            }
+        }
+    });
+    (sender, task)
+}
+
+#[cfg(test)]
+mod role_sync_tests {
+    use super::*;
+    use mj_core::config::{RoleAssignmentSnapshot, SubagentChoice};
+
+    fn test_owner() -> Arc<Mutex<RuntimeStateOwner>> {
+        let controller = Controller {
+            config: Config::default(),
+            state: Default::default(),
+        };
+        Arc::new(Mutex::new(RuntimeStateOwner::new(
+            controller,
+            Arc::new(|_, _| {}),
+        )))
+    }
+
+    fn configured(model: &str) -> Config {
+        let mut config = Config::default();
+        config.subagents.primary = vec![SubagentChoice {
+            model: model.into(),
+            effort: None,
+        }];
+        config
+    }
+
+    #[tokio::test]
+    async fn role_sync_drains_in_owner_install_order_and_ack_is_durable() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("roles.sqlite");
+        let config = Config::default();
+        let snapshot = RoleAssignmentSnapshot::from_config(&config);
+        mj_controller::database::sync_role_assignment_snapshot_at(&path, &snapshot, 0)?;
+        let owner = test_owner();
+        let (sender, task) = spawn_role_sync(path.clone(), Arc::downgrade(&owner));
+        owner.lock().unwrap().set_role_sync(sender);
+        let first = configured("a");
+        let first_ack = owner.lock().unwrap().install_config(first.clone()).unwrap();
+        let second = {
+            let mut second = first;
+            second.subagents.primary[0].model = "b".into();
+            second
+        };
+        let second_ack = owner
+            .lock()
+            .unwrap()
+            .install_config(second.clone())
+            .unwrap();
+        assert!(
+            owner
+                .lock()
+                .unwrap()
+                .install_config(second.clone())
+                .is_none()
+        );
+        let barrier = owner.lock().unwrap().role_sync_barrier().unwrap();
+        first_ack.await?.unwrap();
+        assert!(
+            !mj_controller::database::load_role_assignment_changes_at(&path, 0, i64::MAX)?
+                .is_empty()
+        );
+        second_ack.await?.unwrap();
+        barrier.await?.unwrap();
+        let changes = mj_controller::database::load_role_assignment_changes_at(&path, 0, i64::MAX)?;
+        assert_eq!(
+            changes
+                .iter()
+                .map(|c| c.summary.as_str())
+                .collect::<Vec<_>>(),
+            ["Primary: off → a", "Primary: a → b"]
+        );
+        let third = {
+            let mut third = second;
+            third.subagents.primary[0].model = "c".into();
+            third
+        };
+        let pending = owner.lock().unwrap().install_config(third).unwrap();
+        owner.lock().unwrap().close_role_sync();
+        task.await?;
+        pending.await?.unwrap();
+        assert_eq!(
+            mj_controller::database::load_role_assignment_changes_at(&path, 0, i64::MAX)?
+                .last()
+                .unwrap()
+                .summary,
+            "Primary: b → c"
+        );
+        Ok(())
+    }
+
+    /// A queued role-change write holds daemon admission until SQLite answers,
+    /// so a handoff waits for the persistence it cannot redo. The upgrade gate
+    /// is process-wide, so the test runs in a child process where no other
+    /// test holds a label.
+    #[tokio::test]
+    async fn role_sync_write_holds_daemon_admission_until_persisted() {
+        const CHILD: &str = "MJ_ROLE_SYNC_ADMISSION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(
+                    module_path!(),
+                    "role_sync_write_holds_daemon_admission_until_persisted",
+                ),
+            )
+            .env(CHILD, "1")
+            .run();
+            return;
+        }
+        let owner = test_owner();
+        let (sender, mut requests) =
+            tokio::sync::mpsc::unbounded_channel::<super::owner::RoleSyncRequest>();
+        owner.lock().unwrap().set_role_sync(sender);
+        let ack = owner
+            .lock()
+            .unwrap()
+            .install_config(configured("a"))
+            .unwrap();
+        let request = requests.recv().await.unwrap();
+        assert!(
+            request.admission.is_some(),
+            "a queued write must hold admission"
+        );
+        let held = || {
+            mj_core::upgrade::active_labels()
+                .iter()
+                .any(|label| label == "role assignment sync")
+        };
+        assert!(held(), "the queued write is named while it is held");
+        drop(request);
+        assert!(!held(), "the hold ends when the request is dropped");
+        assert!(
+            ack.await.is_err(),
+            "a dropped request never acknowledges persistence"
+        );
+    }
+
+    /// A failed SQLite write answers `Err` on the ack and forgets the
+    /// snapshot, so the next install of the same configuration retries the
+    /// transition instead of believing it persisted.
+    #[tokio::test]
+    async fn role_sync_write_failure_is_acknowledged_and_retried() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // A regular file blocks directory creation, so opening the store fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory")?;
+        let path = blocker.join("roles.sqlite");
+        let owner = test_owner();
+        let (sender, task) = spawn_role_sync(path, Arc::downgrade(&owner));
+        owner.lock().unwrap().set_role_sync(sender);
+        let config = configured("a");
+        let ack = owner
+            .lock()
+            .unwrap()
+            .install_config(config.clone())
+            .unwrap();
+        let outcome = ack.await?;
+        assert!(outcome.is_err(), "a failed write reports on the ack");
+        assert!(
+            owner.lock().unwrap().install_config(config).is_some(),
+            "the failed transition is retried by the next install"
+        );
+        owner.lock().unwrap().close_role_sync();
+        task.await?;
+        Ok(())
     }
 }

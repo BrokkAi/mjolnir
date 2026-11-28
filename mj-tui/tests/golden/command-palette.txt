@@ -161,7 +161,7 @@ Enter open · /                                                                 
 │                │  Restart the Mjolnir daemon                                                        │                │
 │                │  Refresh targets and quotas                                        ctrl+b shift+r  │  ──────────────╯
 │                │  CPU by session                                                                    │  ─────── ▁   ▄ ╮
-│                │  Usage by session                                                                  │                │
+│                │  Usage Dashboard                                                                   │                │
 │                │  Recent messages                                                                   │  ──────────────╯
 │                │  Detach from this terminal                                               ctrl+b q  │  ─────── ▁   ▄ ╮
 │                │  Toggle transcript rendering                                             ctrl+b t  │                │
@@ -257,7 +257,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Restart the Mjolnir daemon                                                        │  ─────── ▁   ▄ ╮
 │                │  Refresh targets and quotas                                        ctrl+b shift+r  │                │
 │                │  CPU by session                                                                    │                │
-│                │  Usage by session                                                                  │                │
+│                │  Usage Dashboard                                                                   │                │
 │                │  Recent messages                                                                   │                │
 │                │  Detach from this terminal                                               ctrl+b q  │  ──────────────╯
 │                │  Toggle transcript rendering                                             ctrl+b t  │  ─────── ▁   ▄ ╮

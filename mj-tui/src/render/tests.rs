@@ -1444,6 +1444,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
         ]),
         probing: std::collections::BTreeSet::new(),
         cycles: 1,
+        ..Default::default()
     });
     let row = profiles_row(&mut dashboard);
     assert!(row.contains("Anthropic ~63%, OpenAI ~10%*"), "{row:?}");
@@ -1456,6 +1457,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
         ]),
         probing: ["codex-1".to_owned()].into(),
         cycles: 1,
+        ..Default::default()
     });
     let row = profiles_row(&mut dashboard);
     assert!(row.contains("Anthropic ~63%"), "{row:?}");

@@ -61,13 +61,13 @@ An image-baked `opencode` must be OpenCode 2, because each session imports its
 logins with `opencode auth import` before it starts.
 
 `dsh-acp` is the ACP frontend for the pinned official DSH runtime. Without it
-on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.8.1`, using
+on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.8.2`, using
 Node.js 24.9 or newer with npm and npx; the npm package bundles the release
 binaries and the pinned DSH runtime. An older `dsh-acp` on `PATH` is likewise
 skipped, so the image needs the same Node.js tools for the fallback unless its
-binary is 0.8.1 or newer. Mjolnir supplies the pinned Node runtime when the
+binary is 0.8.2 or newer. Mjolnir supplies the pinned Node runtime when the
 image has no compatible one. To bake it in, run
-`npm install -g @brokkai/dsh-acp@0.8.1`
+`npm install -g @brokkai/dsh-acp@0.8.2`
 (Node.js 24.9 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH` together with its
 pinned `@deepseek-ai/dsh@0.2.2-rc.5` runtime. The Linux binaries need glibc

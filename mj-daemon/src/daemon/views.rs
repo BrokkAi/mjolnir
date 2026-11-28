@@ -840,15 +840,57 @@ impl RuntimeState {
 
     /// Replace what the daemon says about quota, and wake every attached
     /// surface when it changed.
+    #[cfg(test)]
     pub(crate) fn publish_quotas(&self, snapshot: mj_client::quota::QuotaSnapshot) {
+        self.publish_quotas_with_stamps(snapshot, BTreeMap::new());
+    }
+
+    /// Replace what the daemon says about quota alongside the active
+    /// `(cache_identity, refreshed_at_epoch_seconds)` stamp of each surfaced
+    /// report, and attach only projections computed from those exact readings.
+    pub(crate) fn publish_quotas_with_stamps(
+        &self,
+        mut snapshot: mj_client::quota::QuotaSnapshot,
+        report_stamps: BTreeMap<String, (String, u64)>,
+    ) {
         {
             let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+            quota.report_stamps = report_stamps;
+            snapshot.quota_projections = self
+                .quota_telemetry
+                .projections_matching(&quota.report_stamps);
             if *quota.snapshot == snapshot {
                 return;
             }
             quota.snapshot = snapshot.into();
         }
         self.publish_revision();
+    }
+
+    pub(crate) fn publish_quota_projections(&self) {
+        let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+        let projections = self
+            .quota_telemetry
+            .projections_matching(&quota.report_stamps);
+        if quota.snapshot.quota_projections == projections {
+            return;
+        }
+        let mut snapshot = (*quota.snapshot).clone();
+        snapshot.quota_projections = projections;
+        quota.snapshot = snapshot.into();
+        drop(quota);
+        self.publish_revision();
+    }
+
+    pub(crate) fn published_quota_projections(
+        &self,
+    ) -> Vec<mj_core::usage::ProfileQuotaProjection> {
+        self.quota
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot
+            .quota_projections
+            .clone()
     }
 
     pub(super) fn reserve_move_destination(&self, session_id: &str, operation_id: &str) {

@@ -17,6 +17,10 @@ pub struct TurnDiagnostic {
     /// Provider-supplied reset value, without guessing a timezone or deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_at: Option<String>,
+    /// Provider-supplied retry delay in seconds (e.g. from HTTP `Retry-After`
+    /// or provider JSON `retryAfter`/`retry_after`), when numeric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
 }
 
 impl TurnDiagnostic {
@@ -26,6 +30,7 @@ impl TurnDiagnostic {
             code: Some(error.code.to_string()),
             http_status: None,
             reset_at: None,
+            retry_after_seconds: None,
             login_fingerprint: None,
         };
         if let Some(data) = &error.data {
@@ -41,6 +46,7 @@ impl TurnDiagnostic {
             code: None,
             http_status: None,
             reset_at: None,
+            retry_after_seconds: None,
             login_fingerprint: None,
         };
         diagnostic.enrich(error);
@@ -71,6 +77,67 @@ impl TurnDiagnostic {
                 serde_json::Value::Number(value) => Some(value.to_string()),
                 _ => None,
             });
+        self.enrich_retry_after(data);
+    }
+
+    fn enrich_retry_after(&mut self, data: &serde_json::Value) {
+        let details = data.get("details");
+        let error = data.get("error");
+        let keys = [
+            "retryAfter",
+            "retry_after",
+            "retryAfterSeconds",
+            "retry_after_seconds",
+            "retryAfterMs",
+            "retry_after_ms",
+        ];
+        for object in [details, error, Some(data)].into_iter().flatten() {
+            for key in keys {
+                if let Some(value) = object.get(key) {
+                    self.apply_retry_after(value, key.ends_with("Ms") || key.ends_with("_ms"));
+                }
+            }
+            if let Some(headers) = object.get("headers").and_then(serde_json::Value::as_object) {
+                for (key, value) in headers {
+                    if key.eq_ignore_ascii_case("retry-after") {
+                        self.apply_retry_after(value, false);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_retry_after(&mut self, value: &serde_json::Value, millis: bool) {
+        if let Some(n) = value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        {
+            if n > 0 && self.retry_after_seconds.is_none() {
+                self.retry_after_seconds = Some(if millis { n.div_ceil(1000) } else { n });
+            }
+            return;
+        }
+        let numeric = value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()));
+        if let Some(n) = numeric {
+            if n.is_finite() && n > 0.0 && self.retry_after_seconds.is_none() {
+                let seconds = if millis {
+                    (n / 1000.0).ceil()
+                } else {
+                    n.ceil()
+                };
+                if seconds <= u64::MAX as f64 {
+                    self.retry_after_seconds = Some(seconds as u64);
+                }
+            }
+        } else if self.reset_at.is_none() {
+            self.reset_at = value
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+        }
     }
 
     /// Recognize an explicit provider code for an exhausted usage limit.
@@ -104,6 +171,86 @@ impl TurnDiagnostic {
             && ["exceeded", "exhausted", "reached", "used up"]
                 .iter()
                 .any(|word| message.contains(word))
+    }
+    /// Only apply to trusted failed-turn diagnostics, never chat or tool text.
+    pub fn is_rate_limit(&self) -> bool {
+        if self.http_status == Some(429) {
+            return true;
+        }
+        if matches!(self.code.as_deref(), Some("request" | AUTH_FAILURE_KIND))
+            || self.http_status.is_some_and(|s| s < 500)
+        {
+            return false;
+        }
+        matches!(
+            self.code.as_deref(),
+            Some(
+                "limit"
+                    | "rate_limit"
+                    | "rate_limit_exceeded"
+                    | "rateLimitExceeded"
+                    | "too_many_requests"
+                    | "tooManyRequests"
+                    | "resource_exhausted"
+                    | "RESOURCE_EXHAUSTED"
+            )
+        ) || (self.http_status.is_none()
+            && !self.is_usage_limit()
+            && [
+                "too many requests",
+                "rate limit",
+                "rate-limit",
+                "ratelimit",
+                "http 429",
+                "status 429",
+                "status: 429",
+                "error 429",
+                "code 429",
+                "(429)",
+                "throttl",
+                "requests per minute",
+                "tokens per minute",
+                "concurrency limit",
+                "concurrent request",
+            ]
+            .iter()
+            .any(|p| self.message.to_ascii_lowercase().contains(p)))
+    }
+
+    /// Only apply to trusted failed-turn diagnostics, never chat or tool text.
+    pub fn is_overload(&self) -> bool {
+        if matches!(self.http_status, Some(500 | 502 | 503 | 504 | 529)) {
+            return true;
+        }
+        if matches!(self.code.as_deref(), Some("request" | AUTH_FAILURE_KIND))
+            || self.http_status.is_some_and(|s| s < 500)
+        {
+            return false;
+        }
+        matches!(
+            self.code.as_deref(),
+            Some(
+                "service"
+                    | "overloaded"
+                    | "overloaded_error"
+                    | "capacity_exceeded"
+                    | "server_overloaded"
+            )
+        ) || (self.http_status.is_none_or(|s| s >= 500)
+            && [
+                "overloaded",
+                "at capacity",
+                "server is busy",
+                "service unavailable",
+                "http 529",
+                "status 529",
+                "status: 529",
+                "http 503",
+                "status 503",
+                "status: 503",
+            ]
+            .iter()
+            .any(|p| self.message.to_ascii_lowercase().contains(p)))
     }
 }
 
@@ -181,15 +328,18 @@ impl TurnDiagnostic {
             code: Some(code.to_owned()),
             http_status: None,
             reset_at: None,
+            retry_after_seconds: None,
             login_fingerprint: None,
         };
-        if let Ok(body) = serde_json::from_str::<serde_json::Value>(&failure.title)
-            && let Some(message) = body
+        if let Ok(body) = serde_json::from_str::<serde_json::Value>(&failure.title) {
+            diagnostic.enrich_retry_after(&body);
+            if let Some(message) = body
                 .pointer("/error/message")
                 .or_else(|| body.get("message"))
                 .and_then(serde_json::Value::as_str)
-        {
-            diagnostic.message = message.to_owned();
+            {
+                diagnostic.message = message.to_owned();
+            }
             diagnostic.http_status = body
                 .get("status")
                 .and_then(serde_json::Value::as_u64)
@@ -272,6 +422,42 @@ mod tests {
             };
             assert!(!ordinary.is_usage_limit(), "{message}");
         }
+    }
+
+    #[test]
+    fn retry_metadata_and_failure_classification() {
+        for (body, seconds) in [
+            (serde_json::json!({"retryAfter": "45"}), 45),
+            (serde_json::json!({"details": {"retryAfterMs": 1001}}), 2),
+            (serde_json::json!({"headers": {"ReTrY-AfTeR": "1.2"}}), 2),
+        ] {
+            let mut d =
+                TurnDiagnostic::from_provider(&serde_json::json!({"message":"throttled"})).unwrap();
+            d.enrich_retry_after(&body);
+            assert_eq!(d.retry_after_seconds, Some(seconds));
+        }
+        let d = TurnDiagnostic::from_session_failure(&record(
+            "unknown",
+            &[],
+            r#"{"message":"too many requests","headers":{"retry-after":"Wed, 21 Oct 2026 07:28:00 GMT"}}"#,
+        ));
+        assert_eq!(d.reset_at.as_deref(), Some("Wed, 21 Oct 2026 07:28:00 GMT"));
+        assert!(d.is_rate_limit());
+        let mut d: TurnDiagnostic =
+            serde_json::from_str(r#"{"message":"server is busy"}"#).unwrap();
+        assert_eq!(d.retry_after_seconds, None);
+        assert!(d.is_overload());
+        d.http_status = Some(400);
+        assert!(!d.is_overload() && !d.is_rate_limit());
+        d.http_status = None;
+        d.code = Some("request".into());
+        d.message = "rate limit and overloaded".into();
+        assert!(!d.is_overload() && !d.is_rate_limit());
+        // Explicit HTTP 429 or 5xx status wins even when categorized as `request`.
+        d.http_status = Some(429);
+        assert!(d.is_rate_limit() && !d.is_overload());
+        d.http_status = Some(503);
+        assert!(d.is_overload() && !d.is_rate_limit());
     }
 
     fn record(category: &str, actions: &[&str], title: &str) -> SessionFailure {

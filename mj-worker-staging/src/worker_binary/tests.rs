@@ -343,6 +343,68 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     assert!(!root.exists());
 }
 
+/// A fresh bare target can arrive before its worker root exists. Staging the
+/// control worker there must create the root, because the daemon's staging
+/// fallback is what makes an absent `hel` recoverable.
+#[cfg(unix)]
+#[test]
+fn installing_a_worker_binary_creates_a_missing_worker_root() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_MISSING_WORKER_ROOT_INSTALL_CHILD";
+    const SESSION: &str = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::worker_build_id()
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "installing_a_worker_binary_creates_a_missing_worker_root",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("absent parents").join(SESSION);
+    assert!(
+        !root.exists(),
+        "the fixture must not create the worker root"
+    );
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let worker = WorkerInstall::for_target(&locator, &ProcessExecutor).unwrap();
+    store::install_worker_binary(
+        &ProcessExecutor,
+        &locator,
+        SESSION,
+        &worker,
+        targets::CONTROL_WORKER_NAME,
+    )
+    .unwrap();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    assert!(
+        control.is_file(),
+        "the control worker was not staged into a created worker root"
+    );
+    store::install_worker_binary(&ProcessExecutor, &locator, SESSION, &worker, "hel").unwrap();
+    assert!(root.join("hel").is_file());
+    assert!(
+        !control.exists(),
+        "installing hel removes the now-redundant staged control worker"
+    );
+}
+
 // Hard-won: #1573: a sub-agent suspend queued behind another upload of this
 // build held daemon admission for the whole wait, so a handoff waited 440 s on
 // it. The wait now releases admission and a handoff's cancellation ends it
@@ -6380,16 +6442,27 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
 
         // Stage and install as `prepare_worker_files` does on this machine.
         let canonical = canonical_memory_root(&memory.project_key);
-        std::fs::create_dir_all(&canonical).unwrap();
-        std::fs::write(canonical.join("MEMORY.md"), "- a remembered fact\n").unwrap();
+        let state = mj_core::project_memory::read_canonical_state(&canonical).unwrap();
+        let mut tree = state.tree.clone();
+        tree.files
+            .insert("/MEMORY.md".into(), "- a remembered fact\n".into());
+        assert_eq!(
+            mj_core::project_memory::commit_canonical(&canonical, &state, &session_id, &tree, None)
+                .unwrap(),
+            mj_core::project_memory::SwapOutcome::Swapped
+        );
         let stage = tempfile::tempdir().unwrap();
         stage_profile(&profile, stage.path()).unwrap();
-        stage_memory_replica(&memory, &target_home, stage.path()).unwrap();
+        let seed_stage = tempfile::tempdir().unwrap();
+        let seed = seed_stage.path().join("seed");
+        stage_memory_seed(&memory, &seed).unwrap();
         std::fs::create_dir_all(&worker_root).unwrap();
         for entry in std::fs::read_dir(stage.path()).unwrap() {
             let entry = entry.unwrap();
             copy_profile_entry(&entry.path(), &target_home.join(entry.file_name())).unwrap();
         }
+        // Seeding happens in the worker, after profile installation.
+        copy_profile_entry(&seed, &memory.root).unwrap();
         assert!(memory.root.join("MEMORY.md").is_file(), "{kind:?}");
 
         targets::close_plan(&locator, &session_id)
@@ -7070,13 +7143,9 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
                 "newer index with a note absent from the staged copy",
             )
             .unwrap();
-            let index = staged_memory_index(
-                launch.project_memory.as_ref().unwrap(),
-                Path::new(&launch.harness_home),
-                stage.path(),
-            )
-            .unwrap()
-            .unwrap();
+            let index = staged_memory_index(&stage.path().join("memory"))
+                .unwrap()
+                .unwrap();
             assert_eq!(index, original);
             std::fs::write(&memory, original).unwrap();
             append_composed_session_instructions(&launch, stage.path(), Ok(&index)).unwrap();

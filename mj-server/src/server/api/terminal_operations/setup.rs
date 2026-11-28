@@ -33,10 +33,6 @@ pub trait SetupOperations: Send + Sync {
         self: Arc<Self>,
         request: SaveSpinnerStyleRequest,
     ) -> BoxFuture<'static, AnyResult<()>>;
-    fn set_quota_preferences(
-        self: Arc<Self>,
-        request: SetQuotaPreferencesRequest,
-    ) -> BoxFuture<'static, AnyResult<()>>;
     fn check_availability(self: Arc<Self>) -> BoxFuture<'static, AnyResult<()>>;
     fn host_capacity(self: Arc<Self>) -> BoxFuture<'static, AnyResult<Vec<HostCapacityRow>>>;
     fn refresh_capacity(self: Arc<Self>) -> BoxFuture<'static, AnyResult<()>>;
@@ -170,16 +166,8 @@ async fn save_spinner_style(
     .map(Json)
 }
 
-async fn set_quota_preferences(
-    State(state): State<ServerState>,
-    Json(request): Json<SetQuotaPreferencesRequest>,
-) -> Result<Json<()>, ApiFailure> {
-    let backend = dashboard_backend(&state)?;
-    run_admitted_mutation(&state, "quota preferences", async move {
-        Ok(backend.set_quota_preferences(request).await?)
-    })
-    .await
-    .map(Json)
+async fn set_quota_preferences(Json(_request): Json<SetQuotaPreferencesRequest>) -> Json<()> {
+    Json(())
 }
 
 async fn check_availability(State(state): State<ServerState>) -> Result<Json<()>, ApiFailure> {

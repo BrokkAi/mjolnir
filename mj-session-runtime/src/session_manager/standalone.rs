@@ -52,6 +52,7 @@ pub struct StandaloneSession {
     pub operational: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
     pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub project_memory: Option<ProjectMemorySyncTarget>,
+    pub(super) memory_sync_trigger: bool,
     pub subagent_requests:
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
     pub subagent_completions:
@@ -112,6 +113,7 @@ impl StandaloneSession {
             operational: operational.into(),
             latest_credential_sync_signal: None,
             project_memory: target.project_memory.clone(),
+            memory_sync_trigger: true,
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
             subagent_queue: None,
@@ -369,9 +371,15 @@ impl StandaloneSession {
         self.client.detach().await
     }
 
-    pub async fn sync(&mut self) -> Result<ManagedSessionSnapshot> {
-        self.sync_in_place().await?;
-        Ok(self.snapshot())
+    pub fn sync(
+        &mut self,
+    ) -> Pin<Box<impl Future<Output = Result<ManagedSessionSnapshot>> + Send + '_>> {
+        // Checkpoint capture calls this repeatedly; construct its relay future here
+        // so each call does not enlarge the capture poll frame.
+        Box::pin(async move {
+            self.sync_in_place().await?;
+            Ok(self.snapshot())
+        })
     }
 
     pub async fn release_in_place_move_dispatch_checked(
@@ -1066,6 +1074,17 @@ impl StandaloneSession {
             through_ordinal,
             through_digest,
         } = page;
+        self.memory_sync_trigger |= events.iter().any(|event| {
+            event.ordinal > self.materialized.applied_event_ordinal
+                && matches!(
+                    &event.observation,
+                    mj_core::relay::RelayObservation::HarnessTurnSettled { .. }
+                        | mj_core::relay::RelayObservation::CommandCompleted {
+                            outcome: mj_core::relay::RelayCommandOutcome::Prompt { .. },
+                            ..
+                        }
+                )
+        });
         let event_count = events.len();
         let transaction_count = event_count.div_ceil(PROJECTION_TRANSACTION_EVENT_BUDGET);
         let started = Instant::now();
@@ -1098,8 +1117,16 @@ impl StandaloneSession {
                         if let Some(diagnostic) = diagnostic
                             && let Some(fault) = crate::profile_health::ProfileFault::of(diagnostic)
                         {
+                            let recorded_at = u64::try_from(event.recorded_at_ms)
+                                .ok()
+                                .map(|millis| {
+                                    std::time::SystemTime::UNIX_EPOCH
+                                        + std::time::Duration::from_millis(millis)
+                                })
+                                .map_or(now, |recorded| recorded.min(now));
                             health_observations.push((
                                 command_id.clone(),
+                                recorded_at,
                                 crate::profile_health::TurnHealth::Failed(
                                     fault,
                                     diagnostic.clone(),
@@ -1111,6 +1138,7 @@ impl StandaloneSession {
                         if let Ok(millis) = u64::try_from(event.recorded_at_ms) {
                             health_observations.push((
                                 command_id.clone(),
+                                now,
                                 crate::profile_health::TurnHealth::Succeeded(
                                     std::time::SystemTime::UNIX_EPOCH
                                         + std::time::Duration::from_millis(millis),
@@ -1126,7 +1154,7 @@ impl StandaloneSession {
             }
             let session_id = self.materialized.session_id.clone();
             let profile_health = crate::profile_health::shared();
-            for (command_id, observation) in health_observations {
+            for (command_id, observed_at, observation) in health_observations {
                 // Skip the lookup for a success when no mark could change.
                 if matches!(observation, crate::profile_health::TurnHealth::Succeeded(_))
                     && !profile_health
@@ -1183,10 +1211,12 @@ impl StandaloneSession {
                     continue;
                 };
                 // The provider failure happened even if the following projection commit fails.
-                profile_health
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("profile health lock poisoned"))?
-                    .observe(&profile_id, &model, observation, now);
+                crate::profile_health::observe_shared(
+                    &profile_id,
+                    &model,
+                    observation,
+                    observed_at,
+                );
             }
             let events = events.to_vec();
             let projection = self.materialized.clone();
@@ -1375,6 +1405,41 @@ impl StandaloneSession {
         result
     }
 
+    /// Wait behind any admitted delivery and retire its absorbed handout.
+    pub async fn fence_project_memory(
+        &mut self,
+        memory_relay: &CommandSpec,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let target = self
+            .project_memory
+            .as_ref()
+            .context("session has no project-memory endpoint")?;
+        let root = target.canonical_root.clone();
+        let canonical = tokio::select! {
+            () = cancel.cancelled() => anyhow::bail!("project-memory fence was cancelled"),
+            result = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => result.context("canonical read task failed")??,
+        };
+        let mut client = tokio::select! {
+            () = cancel.cancelled() => anyhow::bail!("project-memory fence was cancelled"),
+            result = RelayClient::connect(memory_relay, &self.materialized.session_id) => result.context("open project-memory fence relay")?,
+        };
+        let result = client
+            .fence_project_memory_snapshot(
+                canonical
+                    .absorbed
+                    .get(&self.materialized.session_id)
+                    .cloned(),
+                canonical.version,
+                &cancel,
+            )
+            .await;
+        if let Err(error) = client.detach().await {
+            tracing::warn!(session_id = %self.materialized.session_id, error = format!("{error:#}"), "could not close project-memory fence relay");
+        }
+        result
+    }
+
     async fn sync_project_memory_on(
         &mut self,
         client: &mut RelayClient,
@@ -1388,6 +1453,18 @@ impl StandaloneSession {
                 "worker protocol predates project-memory synchronization; preserving memory through checkpoints only"
             );
             self.project_memory = None;
+            return Ok(());
+        }
+        if client.protocol_version() >= mj_core::relay::RELAY_PROJECT_MEMORY_TURN_SYNC_PROTOCOL {
+            let completed = sync_turn_project_memory(
+                client,
+                target,
+                &self.materialized.session_id,
+                config,
+                cancel,
+            )
+            .await?;
+            anyhow::ensure!(completed, "worker was busy during project-memory snapshot");
             return Ok(());
         }
         let snapshot = tokio::select! {
@@ -1466,6 +1543,117 @@ impl StandaloneSession {
     }
 }
 
+/// Synchronize on the bulk connection. Once a commit or delivery starts, wait
+/// for it to finish even if a checkpoint preempts the surrounding sync.
+/// Returns false when cancelled or when a tool prevented the Snapshot.
+pub async fn sync_turn_project_memory(
+    client: &mut RelayClient,
+    target: &ProjectMemorySyncTarget,
+    session_id: &str,
+    config: &mj_core::config::Config,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<bool> {
+    use mj_core::project_memory::SwapOutcome;
+    use mj_core::relay::ProjectMemoryDeliveryOutcome;
+    let resolver = crate::project_memory_merge::UtilityModelConflictResolver::new(config);
+    let mut resolutions = crate::project_memory_merge::ConflictResolutionSession::new(&cancel);
+    let mut dirty_round = false;
+    'snapshot: loop {
+        let root = target.canonical_root.clone();
+        let mut canonical = tokio::select! {
+            () = cancel.cancelled() => return Ok(false),
+            state = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => state.context("canonical read task failed")??,
+        };
+        if cancel.is_cancelled() {
+            return Ok(false);
+        }
+        let snapshot = client
+            .project_memory_turn_snapshot(
+                canonical.absorbed.get(session_id).cloned(),
+                canonical.version.clone(),
+                &cancel,
+            )
+            .await?;
+        let (base, id, replica) = match snapshot {
+            crate::worker_client::ProjectMemoryTurnSnapshotResult::Busy => return Ok(false),
+            crate::worker_client::ProjectMemoryTurnSnapshotResult::InSync => return Ok(true),
+            crate::worker_client::ProjectMemoryTurnSnapshotResult::Snapshot { base, id, tree } => {
+                (base, id, tree)
+            }
+        };
+        loop {
+            if cancel.is_cancelled() {
+                return Ok(false);
+            }
+            let (merged, conflict_resolutions) = resolutions
+                .merge_turn_tree(&base, &canonical.tree, &replica, &resolver, &cancel)
+                .await?;
+            if cancel.is_cancelled() {
+                return Ok(false);
+            }
+            let root = target.canonical_root.clone();
+            let expected = canonical.clone();
+            let tree = merged.clone();
+            let session = session_id.to_owned();
+            let handout = id.clone();
+            let version = match mj_core::runtime::spawn_blocking(move || {
+                mj_core::project_memory::commit_canonical(
+                    &root,
+                    &expected,
+                    &session,
+                    &tree,
+                    Some(&handout),
+                )
+            })
+            .await
+            .context("canonical commit task failed")??
+            {
+                SwapOutcome::Swapped => merged.version(),
+                SwapOutcome::Changed => {
+                    let previous_absorbed = canonical.absorbed.get(session_id).cloned();
+                    let root = target.canonical_root.clone();
+                    canonical = tokio::select! {
+                        () = cancel.cancelled() => return Ok(false),
+                        state = mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical_state(&root)) => state.context("canonical read task failed")??,
+                    };
+                    if canonical.absorbed.get(session_id).cloned() != previous_absorbed {
+                        continue 'snapshot;
+                    }
+                    continue;
+                }
+            };
+            if cancel.is_cancelled() {
+                return Ok(false);
+            }
+            // Every delivery, including a pull-only round, follows a commit
+            // recording this handout as absorbed. A later Snapshot can fence it.
+            match client
+                .deliver_project_memory(id, merged.clone(), version, &cancel)
+                .await?
+            {
+                ProjectMemoryDeliveryOutcome::Dirty if !dirty_round => {
+                    dirty_round = true;
+                    continue 'snapshot;
+                }
+                ProjectMemoryDeliveryOutcome::Delivered => {
+                    if let Some(notice) = crate::project_memory_merge::replica_change_notice(
+                        merged,
+                        conflict_resolutions,
+                        &replica,
+                        WorkerInstallOutcome::Replaced,
+                    ) {
+                        enqueue_project_memory_notice(session_id, notice).await?;
+                    }
+                    return Ok(true);
+                }
+                ProjectMemoryDeliveryOutcome::Dirty
+                | ProjectMemoryDeliveryOutcome::Stale
+                | ProjectMemoryDeliveryOutcome::Busy => return Ok(true),
+            }
+        }
+    }
+}
+
 pub(super) async fn install_project_memory_and_notify<W: ProjectMemoryWorker>(
     worker: &mut W,
     session_id: &str,
@@ -1490,6 +1678,13 @@ pub(super) async fn install_project_memory_and_notify<W: ProjectMemoryWorker>(
         return Ok(());
     };
 
+    enqueue_project_memory_notice(session_id, notice).await
+}
+
+async fn enqueue_project_memory_notice(
+    session_id: &str,
+    notice: crate::project_memory_merge::ReplicaChangeNotice,
+) -> Result<()> {
     // Give each successful installation its own occurrence key so recurring
     // A -> B -> A -> B transitions are never suppressed by prior accepted rows;
     // mailbox delivery reuses this persisted key across all worker retries.

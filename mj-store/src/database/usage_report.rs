@@ -1,9 +1,10 @@
 //! One consistent store snapshot of parent usage and retained descendants.
 use super::*;
 use mj_core::usage::{
-    AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileUsageEstimate,
-    SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, USAGE_GRAPH_HOURS, UnknownCost,
-    UsageAgentRole, UsageScope, add_cost, descending_cost, graph_start_ms,
+    AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileRoleUsageEstimate,
+    ProfileUsageEstimate, SessionUsageEstimate, SessionUsageQuery, SessionUsageReport,
+    USAGE_GRAPH_HOURS, UnknownCost, UsageAgentRole, UsageScope, add_cost, descending_cost,
+    graph_start_ms,
 };
 
 use mj_core::usage::model_catalog;
@@ -67,6 +68,22 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
         now_ms,
         &model_catalog::ModelCatalogs::default(),
     )
+}
+
+/// Count a completed turn whose usage cannot price this model. The row keeps
+/// its known full-turn cost, so an unreported turn makes it a lower bound
+/// rather than unknown.
+fn record_unreported_turn(
+    groups: &mut BTreeMap<Option<String>, ModelUsageEstimate>,
+    model: Option<&str>,
+) {
+    let group = groups
+        .entry(model.map(str::to_owned))
+        .or_insert_with(|| ModelUsageEstimate {
+            model: model.map(str::to_owned),
+            ..Default::default()
+        });
+    group.unreported_turns += 1;
 }
 
 fn load_with(
@@ -169,6 +186,12 @@ fn load_with(
     ]);
     // Keyed by each turn's own retained profile, not its parent's.
     let mut profile_groups: BTreeMap<Option<String>, ProfileUsageEstimate> = BTreeMap::new();
+    let mut profile_role_groups: BTreeMap<
+        (Option<String>, UsageAgentRole),
+        BTreeMap<Option<String>, ModelUsageEstimate>,
+    > = BTreeMap::new();
+    report.role_changes =
+        super::role_changes::load_role_assignment_changes_tx(&tx, graph_start, now_ms)?;
     let mut turns = tx.prepare(REPORT_TURNS_SQL)?;
     let rows = turns.query_map(params![since_ms.min(graph_start), now_ms, wanted], |row| {
         Ok((
@@ -212,7 +235,16 @@ fn load_with(
         if in_rows {
             entry.estimate.coverage.recorded_turns += 1;
         }
-        match turn.usage {
+        let role = in_rows
+            .then(|| {
+                if member == entry.estimate.session_id {
+                    Ok(UsageAgentRole::Primary)
+                } else {
+                    child_usage_role(&member, category.as_deref(), kind.as_deref())
+                }
+            })
+            .transpose()?;
+        let unreported_model = match turn.usage {
             Some(usage) if usage.scope == UsageScope::Turn => {
                 if in_rows {
                     entry.estimate.coverage.full_turn_reports += 1;
@@ -220,15 +252,6 @@ fn load_with(
                 if let Some(group) = &mut profile_group {
                     group.coverage.full_turn_reports += 1;
                 }
-                let role = in_rows
-                    .then(|| {
-                        if member == entry.estimate.session_id {
-                            Ok(UsageAgentRole::Primary)
-                        } else {
-                            child_usage_role(&member, category.as_deref(), kind.as_deref())
-                        }
-                    })
-                    .transpose()?;
                 let mut attributed = BTreeMap::new();
                 super::usage::attribute(&usage, selection, &mut attributed)?;
                 for (mut selection, totals) in attributed {
@@ -258,7 +281,13 @@ fn load_with(
                             add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
                                 .context("profile cost overflow")?;
                     }
-                    for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
+                    for groups in [
+                        &mut entry.models,
+                        role_groups.entry(role).or_default(),
+                        profile_role_groups
+                            .entry((turn_profile.clone(), role))
+                            .or_default(),
+                    ] {
                         let group = groups.entry(selection.model.clone()).or_insert_with(|| {
                             ModelUsageEstimate {
                                 model: selection.model.clone(),
@@ -271,6 +300,7 @@ fn load_with(
                         super::usage::merge_totals(&mut group.totals, &totals)?;
                     }
                 }
+                None
             }
             Some(usage) if usage.scope == UsageScope::LastRequest => {
                 if in_rows {
@@ -279,6 +309,7 @@ fn load_with(
                 if let Some(group) = &mut profile_group {
                     group.coverage.last_request_reports += 1;
                 }
+                Some(selection.model)
             }
             Some(_) => {
                 if in_rows {
@@ -287,6 +318,7 @@ fn load_with(
                 if let Some(group) = &mut profile_group {
                     group.coverage.unspecified_reports += 1;
                 }
+                Some(selection.model)
             }
             None => {
                 if in_rows {
@@ -295,7 +327,22 @@ fn load_with(
                 if let Some(group) = &mut profile_group {
                     group.coverage.missing_reports += 1;
                 }
+                Some(selection.model)
             }
+        };
+        if let (Some(role), Some(model)) = (role, unreported_model) {
+            let model = model.map(|model| catalogs.priced_model(turn_profile.as_deref(), model));
+            if model.is_some() {
+                for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
+                    record_unreported_turn(groups, model.as_deref());
+                }
+            }
+            record_unreported_turn(
+                profile_role_groups
+                    .entry((turn_profile.clone(), role))
+                    .or_default(),
+                model.as_deref(),
+            );
         }
     }
     // A turn already running at the start of the window can still consume in it.
@@ -351,6 +398,28 @@ fn load_with(
     report.profile_usage.sort_by(|a, b| {
         descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
             .then_with(|| a.profile.cmp(&b.profile))
+    });
+    for ((profile, role), groups) in profile_role_groups {
+        let mut models: Vec<_> = groups.into_values().collect();
+        models.sort_by(|a, b| {
+            descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        let cost_usd_ticks = models
+            .iter()
+            .try_fold(Ok(0), |total, model| add_cost(total, model.cost_usd_ticks))
+            .context("profile role cost overflow")?;
+        report.profile_role_usage.push(ProfileRoleUsageEstimate {
+            profile,
+            role,
+            models,
+            cost_usd_ticks,
+        });
+    }
+    report.profile_role_usage.sort_by(|a, b| {
+        descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
+            .then_with(|| a.profile.cmp(&b.profile))
+            .then_with(|| a.role.cmp(&b.role))
     });
     for (role, groups) in role_groups {
         let mut models: Vec<_> = groups.into_values().collect();
@@ -734,6 +803,48 @@ mod tests {
                 .unwrap()
                 .cost_usd_ticks
         };
+        let change_connection = open(&path)?;
+        change_connection.execute(
+            "INSERT INTO role_assignment_changes(changed_at_ms, summary) VALUES (?1, 'earlier')",
+            [now - 2 * HOUR_MS],
+        )?;
+        drop(change_connection);
+        let one_hour = load_from(
+            &path,
+            &SessionUsageQuery {
+                hour_start_ms: Some(now),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(one_hour.role_changes.len(), 1);
+        assert_eq!(one_hour.role_changes[0].summary, "earlier");
+        let primary = one_hour
+            .profile_role_usage
+            .iter()
+            .find(|p| p.role == UsageAgentRole::Primary)
+            .unwrap();
+        assert_eq!(primary.profile.as_deref(), Some("codex"));
+        assert!(primary.models.iter().any(|m| m.unreported_turns == 2));
+        let reviewers = one_hour
+            .profile_role_usage
+            .iter()
+            .filter(|p| p.role == UsageAgentRole::Reviewer)
+            .map(|p| p.profile.as_deref())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(reviewers, BTreeSet::from([Some("codex"), Some("codex2")]));
+        assert!(
+            one_hour
+                .profile_role_usage
+                .iter()
+                .any(|p| p.role == UsageAgentRole::Subagent)
+        );
+        assert!(
+            one_hour
+                .profile_role_usage
+                .iter()
+                .any(|p| p.role == UsageAgentRole::Reviewer)
+        );
         let before_destroy = load_from(&path, &SessionUsageQuery::default(), now)?;
         assert_eq!(
             role_cost(&before_destroy, UsageAgentRole::Primary),
@@ -794,7 +905,16 @@ mod tests {
         // Custom-model has no rate, and gpt-6.1-sol's cache counters are unknown.
         assert_eq!(root.cost_usd_ticks, Err(UnknownCost));
         assert_eq!(priced(root), 72_050_000_000); // $7.10 + $0.105, with caches counted once.
-        assert_eq!(root.models.len(), 5);
+        // The unreported Astra turns now keep their own row instead of vanishing.
+        assert_eq!(root.models.len(), 6);
+        let astra = root
+            .models
+            .iter()
+            .find(|model| model.model.as_deref() == Some("gpt-6-astra"))
+            .unwrap();
+        assert_eq!(astra.unreported_turns, 2);
+        assert_eq!(astra.cost_usd_ticks, Ok(0));
+        assert!(astra.totals.is_empty());
         assert!(
             root.models
                 .iter()
@@ -1481,6 +1601,195 @@ mod tests {
             .find(|group| group.role == UsageAgentRole::Subagent)
             .expect("subagent group");
         assert_eq!(subagent.cost_usd_ticks, Ok(93_000_000_000));
+        Ok(())
+    }
+
+    // Store integration: a child whose only turns lack full usage still keeps
+    // its model visible, and its unknown cost does not poison the known totals.
+    #[test]
+    fn usage_report_keeps_unreported_child_model_without_poisoning_totals() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-unreported.sqlite");
+        let now = 86_400_000;
+        let mut state = State::default();
+        for id in ["root", "subtle-child"] {
+            let mut session = super::super::tests::session(id, "project");
+            session.last_profile = "claude4".into();
+            session.state = SessionState::Running;
+            state.sessions.insert(id.into(), session);
+        }
+        save_state_to(&path, &state)?;
+        let connection = open(&path)?;
+        connection.execute(
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name,kind,category)
+             VALUES ('subtle-child','root','work','worker','subtle')",
+            [],
+        )?;
+        let insert = |seq: u64, usage: serde_json::Value| -> Result<()> {
+            let command = format!("command-{seq}");
+            let body = serde_json::json!({"command_id":command,"completed_ordinal":seq,"completed_at_ms":now,
+                "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":usage});
+            let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+            connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES ('subtle-child',?1,?2,?3)", params![command, seq, serialize_turn_outcome(&turn)?])?;
+            let configuration =
+                serde_json::from_value(serde_json::json!({"model":"deepseek-flash"}))?;
+            super::super::usage::record_turn_selection(
+                &connection,
+                "subtle-child",
+                &command,
+                &configuration,
+            )?;
+            Ok(())
+        };
+        insert(1, serde_json::Value::Null)?;
+        insert(
+            2,
+            serde_json::json!({"scope":"unspecified","total_tokens":1_000,"input_tokens":900,"output_tokens":100}),
+        )?;
+        drop(connection);
+
+        let report = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let [root] = &report.sessions[..] else {
+            panic!("expected one root session: {:?}", report.sessions);
+        };
+        assert_eq!(root.coverage.recorded_turns, 2);
+        assert_eq!(root.coverage.missing_reports, 1);
+        assert_eq!(root.coverage.unspecified_reports, 1);
+        assert!(root.is_partial());
+        assert_eq!(root.models.len(), 1);
+        let model = &root.models[0];
+        assert_eq!(model.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(model.unreported_turns, 2);
+        assert_eq!(model.cost_usd_ticks, Ok(0));
+        assert!(model.totals.is_empty());
+        // An unreported turn is a lower bound, not an unknown total.
+        assert_eq!(root.cost_usd_ticks, Ok(0));
+        assert_eq!(report.cost_usd_ticks, Ok(0));
+        assert_eq!(report.hours.last().unwrap().known_cost_usd_ticks, 0);
+        assert!(!report.hours.last().unwrap().has_unknown_cost);
+        let subtle = report
+            .agent_usage
+            .iter()
+            .find(|group| group.role == UsageAgentRole::Subtle)
+            .unwrap();
+        assert_eq!(subtle.models, std::slice::from_ref(model));
+        assert_eq!(subtle.cost_usd_ticks, Ok(0));
+        Ok(())
+    }
+
+    // Store integration: a priced alias keeps its identity on unreported
+    // turns, so those turns merge into the full-report model row.
+    #[test]
+    fn usage_report_prices_unreported_alias_turns_as_the_catalog_model() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-unreported-alias.sqlite");
+        let now = 86_400_000;
+        let mut root = super::super::tests::session("root", "project");
+        root.last_profile = "claude4".into();
+        root.state = SessionState::Running;
+        save_session_to(&path, &root)?;
+        let connection = open(&path)?;
+        let insert = |seq: u64, usage: serde_json::Value| -> Result<()> {
+            let command = format!("command-{seq}");
+            let body = serde_json::json!({"command_id":command,"completed_ordinal":seq,"completed_at_ms":now,
+                "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":usage});
+            let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+            connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES ('root',?1,?2,?3)", params![command, seq, serialize_turn_outcome(&turn)?])?;
+            let configuration = serde_json::from_value(serde_json::json!({"model":"sonnet"}))?;
+            super::super::usage::record_turn_selection(
+                &connection,
+                "root",
+                &command,
+                &configuration,
+            )?;
+            Ok(())
+        };
+        insert(
+            1,
+            serde_json::json!({"scope":"turn","total_tokens":1_100_000,"input_tokens":1_000_000,
+                "output_tokens":100_000,"cached_read_tokens":100_000,"cached_write_tokens":0}),
+        )?;
+        insert(2, serde_json::Value::Null)?;
+        drop(connection);
+        let catalogs = model_catalog::ModelCatalogs(BTreeMap::from([(
+            "claude4".to_owned(),
+            serde_json::from_value(serde_json::json!([
+                {"value":"sonnet","name":"Sonnet 5.5","description":null}]))?,
+        )]));
+
+        let report = load_with(&path, &SessionUsageQuery::default(), now, &catalogs)?;
+        let [root] = &report.sessions[..] else {
+            panic!("expected one root session: {:?}", report.sessions);
+        };
+        assert_eq!(root.models.len(), 1);
+        let model = &root.models[0];
+        assert_eq!(model.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(model.unreported_turns, 1);
+        assert!(model.cost_usd_ticks.is_ok_and(|cost| cost > 0));
+        assert!(!model.totals.is_empty());
+        assert!(
+            root.models
+                .iter()
+                .all(|model| model.model.as_deref() != Some("sonnet"))
+        );
+        assert_eq!(root.cost_usd_ticks, model.cost_usd_ticks);
+        assert_eq!(report.cost_usd_ticks, model.cost_usd_ticks);
+        assert_eq!(root.coverage.full_turn_reports, 1);
+        assert_eq!(root.coverage.missing_reports, 1);
+        assert!(root.is_partial());
+        let primary = report
+            .agent_usage
+            .iter()
+            .find(|group| group.role == UsageAgentRole::Primary)
+            .unwrap();
+        assert_eq!(primary.models, std::slice::from_ref(model));
+        Ok(())
+    }
+
+    // An unreported turn with no selected model has no model row to attribute
+    // it to; it stays in coverage only.
+    #[test]
+    fn usage_report_does_not_add_unknown_model_for_unreported_turns_without_a_model() -> Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-unreported-no-model.sqlite");
+        let now = 86_400_000;
+        let mut root = super::super::tests::session("root", "project");
+        root.state = SessionState::Running;
+        save_session_to(&path, &root)?;
+        let connection = open(&path)?;
+        let body = serde_json::json!({"command_id":"missing","completed_ordinal":1,"completed_at_ms":now,
+            "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":null});
+        let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+        connection.execute(
+            "INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body)
+             VALUES ('root','missing',1,?1)",
+            [serialize_turn_outcome(&turn)?],
+        )?;
+        // The selection exists but names no model, as an internal turn does.
+        connection.execute(
+            "INSERT INTO session_turn_selections(session_id,command_id,profile)
+             VALUES ('root','missing','codex')",
+            [],
+        )?;
+        drop(connection);
+
+        let report = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let [root] = &report.sessions[..] else {
+            panic!("expected one root session: {:?}", report.sessions);
+        };
+        assert!(root.models.is_empty());
+        assert_eq!(root.cost_usd_ticks, Ok(0));
+        assert_eq!(root.coverage.missing_reports, 1);
+        assert!(root.is_partial());
+        assert_eq!(report.cost_usd_ticks, Ok(0));
+        let primary = report
+            .agent_usage
+            .iter()
+            .find(|group| group.role == UsageAgentRole::Primary)
+            .unwrap();
+        assert!(primary.models.is_empty());
+        assert_eq!(primary.cost_usd_ticks, Ok(0));
         Ok(())
     }
 }

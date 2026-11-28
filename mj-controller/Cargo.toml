@@ -8,6 +8,9 @@ description = "Daemon-side controller, session manager, and web server for Mjoln
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
+[features]
+migrate-cli = ["dep:clap"]
+
 [lib]
 name = "mj_controller"
 # The crate has no doc tests. Looking for them makes rustdoc compile the whole
@@ -36,6 +39,7 @@ mj-accounts.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+clap = { workspace = true, optional = true }
 flate2.workspace = true
 futures = "0.3"
 rayon.workspace = true

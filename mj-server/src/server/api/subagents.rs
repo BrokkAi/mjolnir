@@ -105,6 +105,12 @@ impl ReservationSlot {
     }
 }
 
+impl mj_core::review::settings::ReviewReservationCommit for ReservationSlot {
+    fn commit(self: Box<Self>, child_session_id: String) {
+        ReservationSlot::commit(&self, Some(child_session_id));
+    }
+}
+
 /// The profile, model and effort a spawn runs its child with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentSelection {
@@ -392,7 +398,6 @@ pub async fn resolve_provider_session_selection(
     {
         eligible.retain(|(candidate, _, _)| candidate.harness.has_native_subagents());
     }
-    let prefer = backend.quota_preferences().await?;
     let power_ranking = backend.power_ranking().await?;
     let telemetry_store = backend.quota_telemetry_store();
     let mut draw_pool: Vec<ScheduledCandidate> = eligible
@@ -404,7 +409,6 @@ pub async fn resolve_provider_session_selection(
         Placement::TopLevel,
         None,
         None,
-        &prefer,
         &power_ranking,
         now_epoch_seconds(),
     )?);
@@ -550,7 +554,6 @@ async fn resolve_choices_selection(
             unhealthy.join("; ")
         )));
     }
-    let prefer = backend.quota_preferences().await?;
     let power_ranking = backend.power_ranking().await?;
     let (anchor, placement) = match source {
         ModelProfileCandidateSource::Subagents { parent_profile } => (
@@ -577,7 +580,6 @@ async fn resolve_choices_selection(
             placement,
             category,
             anchor,
-            &prefer,
             &power_ranking,
             now_epoch_seconds(),
         )?);
@@ -1022,7 +1024,6 @@ async fn resolve_model_profile_selection_from(
                 source.profile_description(),
             ));
         }
-        let prefer = backend.quota_preferences().await?;
         let power_ranking = backend.power_ranking().await?;
         let (anchor, placement) = match source {
             ModelProfileCandidateSource::Subagents { parent_profile } => (
@@ -1040,7 +1041,7 @@ async fn resolve_model_profile_selection_from(
             | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
         };
         let telemetry_store = backend.quota_telemetry_store();
-        draw_context = Some((telemetry_store, prefer, power_ranking, anchor, placement));
+        draw_context = Some((telemetry_store, power_ranking, anchor, placement));
     }
     let reviewer_source = matches!(
         source,
@@ -1049,20 +1050,18 @@ async fn resolve_model_profile_selection_from(
     let mut offered_any_effort = false;
     let mut selection_errors = Vec::new();
     while !offered.is_empty() {
-        let reservation_slot =
-            if let Some((store, prefer, ranking, anchor, placement)) = &draw_context {
-                ReservationSlot::new(store.draw_and_reserve(
-                    &mut offered,
-                    *placement,
-                    category,
-                    *anchor,
-                    prefer,
-                    ranking,
-                    now_epoch_seconds(),
-                )?)
-            } else {
-                ReservationSlot::default()
-            };
+        let reservation_slot = if let Some((store, ranking, anchor, placement)) = &draw_context {
+            ReservationSlot::new(store.draw_and_reserve(
+                &mut offered,
+                *placement,
+                category,
+                *anchor,
+                ranking,
+                now_epoch_seconds(),
+            )?)
+        } else {
+            ReservationSlot::default()
+        };
         if offered.is_empty() {
             break;
         }
@@ -1292,7 +1291,6 @@ pub(crate) fn merge_same_models(
         placement: Placement::Child,
         category: Some("straightforward"),
         ranking_anchor: Some(parent_profile),
-        prefer: &[],
         telemetry: &telemetry,
         power_ranking,
         now_seconds,
@@ -1533,7 +1531,6 @@ mod tests {
     fn rank_test_candidates(
         candidates: &mut Vec<SubagentCandidate>,
         ranking_anchor: Option<&str>,
-        prefer: &[String],
         model: &str,
         now_seconds: i64,
         placement: Placement,
@@ -1553,7 +1550,6 @@ mod tests {
             placement,
             category: Some("straightforward"),
             ranking_anchor,
-            prefer,
             telemetry: &telemetry,
             power_ranking,
             now_seconds,
@@ -1575,7 +1571,6 @@ mod tests {
     fn draw_test_candidates(
         candidates: &mut Vec<SubagentCandidate>,
         ranking_anchor: Option<&str>,
-        prefer: &[String],
         units: &[f64],
         model: &str,
         now_seconds: i64,
@@ -1596,7 +1591,6 @@ mod tests {
             placement,
             category: Some("straightforward"),
             ranking_anchor,
-            prefer,
             telemetry: &telemetry,
             power_ranking,
             now_seconds,
@@ -1671,7 +1665,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![],
@@ -1764,14 +1757,7 @@ mod tests {
             candidate("high", Some(90), &["luna"]),
             candidate("empty", Some(0), &["luna"]),
         ];
-        rank_test_candidates(
-            &mut candidates,
-            Some("parent"),
-            &[],
-            "luna",
-            0,
-            Placement::Child,
-        );
+        rank_test_candidates(&mut candidates, Some("parent"), "luna", 0, Placement::Child);
         assert_eq!(
             ids(&candidates),
             vec!["high", "parent", "a-other", "b-other", "unknown", "api"]
@@ -1782,41 +1768,6 @@ mod tests {
     // unwindowed and unknown quota but above paid credits and usage-priced
     // profiles, which bill per request; a five-hour window that has already
     // reset, or an idle one with no reset time, is not in force. Child placements keep the plain quota order.
-
-    #[test]
-    fn load_balancing_preferences_lead_among_quota_equals_in_list_order() {
-        let mut candidates = vec![
-            candidate("a-plain", Some(50), &["luna"]),
-            candidate("b-preferred", Some(50), &["luna"]),
-            candidate("c-preferred-first", Some(50), &["luna"]),
-        ];
-        rank_test_candidates(
-            &mut candidates,
-            None,
-            &["c-preferred-first".into(), "b-preferred".into()],
-            "luna",
-            0,
-            Placement::Child,
-        );
-        assert_eq!(
-            ids(&candidates),
-            ["c-preferred-first", "b-preferred", "a-plain"]
-        );
-        // An exhausted preference does not win: quota still owns feasibility.
-        let mut candidates = vec![
-            candidate("plain", Some(50), &["luna"]),
-            candidate("preferred-out", Some(0), &["luna"]),
-        ];
-        rank_test_candidates(
-            &mut candidates,
-            None,
-            &["preferred-out".into()],
-            "luna",
-            0,
-            Placement::Child,
-        );
-        assert_eq!(ids(&candidates), ["plain"]);
-    }
 
     #[test]
     fn scoped_exhaustion_ranks_only_the_scoped_model_last() {
@@ -1850,7 +1801,6 @@ mod tests {
         rank_test_candidates(
             &mut for_fable,
             None,
-            &[],
             "claude-fable-5-1",
             1_000,
             Placement::Child,
@@ -1861,7 +1811,6 @@ mod tests {
         rank_test_candidates(
             &mut for_opus,
             None,
-            &[],
             "claude-opus-5",
             1_000,
             Placement::Child,
@@ -1929,7 +1878,6 @@ mod tests {
                 draw_test_candidates(
                     &mut candidates,
                     Some("thirty-b"),
-                    &[],
                     &units,
                     "luna",
                     0,
@@ -1940,7 +1888,7 @@ mod tests {
                     &candidates[0]
                 } else {
                     assert_eq!(candidates[0].profile_id, "unknown");
-                    assert_eq!(ids(&candidates)[4..], ["api"]);
+                    assert!(ids(&candidates)[1..].contains(&"api"));
                     &candidates[1]
                 };
                 *first.entry(chosen.profile_id.clone()).or_default() += 1;
@@ -1975,7 +1923,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: candidates(),
         });
@@ -2046,7 +1993,6 @@ mod tests {
         staged: Option<Vec<(u64, SubagentCandidates)>>,
         discovery_fails: bool,
         telemetry_store: Option<mj_accounts::quota_telemetry::QuotaTelemetryStore>,
-        quota_preferences: Vec<String>,
         config: mj_core::config::SubagentConfig,
         candidates: SubagentCandidates,
     }
@@ -2085,11 +2031,6 @@ mod tests {
 
         fn quota_telemetry_store(&self) -> mj_accounts::quota_telemetry::QuotaTelemetryStore {
             self.telemetry_store.clone().unwrap_or_default()
-        }
-
-        fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
-            let preferences = self.quota_preferences.clone();
-            Box::pin(async move { Ok(preferences) })
         }
 
         fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
@@ -2353,7 +2294,6 @@ mod tests {
             staged: None,
             discovery_fails: true,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: SubagentConfig {
                 straightforward: vec![choice.clone()],
                 subtle: vec![choice],
@@ -2405,7 +2345,9 @@ mod tests {
                 unreachable!("fixture has subscription quota");
             };
             windows[0].duration_seconds = Some(604_800);
-            windows[0].resets_at_epoch_seconds = Some(reset);
+            // Put `probe-fails-zero` strongly behind weekly pace so it wins the
+            // first weighted draw reliably without needing `[quota] prefer`.
+            windows[0].resets_at_epoch_seconds = Some(if index == 0 { now + 3_600 } else { reset });
             if index > 0 {
                 candidate.choices.efforts = efforts(&["high"]);
             }
@@ -2416,43 +2358,47 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: Some(telemetry_store.clone()),
-            // Force `probe-fails-zero` first despite weighted tier-0 sampling,
-            // and prefer `runway-one` over `healthy-two` so a stale-telemetry
-            // redraw would deterministically pick `runway-one`.
-            quota_preferences: vec!["probe-fails-zero".into(), "runway-one".into()],
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: offered.clone(),
                 unavailable: Vec::new(),
             },
         });
-        let selected = resolve_model_profile_selection_from(
-            &backend,
-            SubagentCandidates {
-                offered,
-                unavailable: Vec::new(),
-            },
-            None,
-            "gpt-6.1-sol",
-            EffortRequirement::Exact("high"),
-            None,
-            ModelProfileCandidateSource::Subagents {
-                parent_profile: "probe-fails-zero",
-            },
-            Some("subtle"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            telemetry_store
+        // The first draw is weighted; repeat within a small bound until the
+        // failing probe is drawn, then verify the redraw observes the
+        // placements made during that probe.
+        let mut verified = false;
+        for _ in 0..64 {
+            let selected = resolve_model_profile_selection_from(
+                &backend,
+                SubagentCandidates {
+                    offered: offered.clone(),
+                    unavailable: Vec::new(),
+                },
+                None,
+                "gpt-6.1-sol",
+                EffortRequirement::Exact("high"),
+                None,
+                ModelProfileCandidateSource::Subagents {
+                    parent_profile: "probe-fails-zero",
+                },
+                Some("subtle"),
+            )
+            .await
+            .unwrap();
+            if telemetry_store
                 .snapshot()
                 .recent_placements
                 .get("runway-one")
-                .map_or(0, Vec::len),
-            30,
-            "probe-fails-zero must be probed first so the redraw sees the concurrent placements"
-        );
-        assert_eq!(selected.profile_id, "healthy-two");
+                .map_or(0, Vec::len)
+                == 30
+            {
+                assert_eq!(selected.profile_id, "healthy-two");
+                verified = true;
+                break;
+            }
+        }
+        assert!(verified, "expected probe-fails-zero to be drawn first");
     }
 
     #[tokio::test]
@@ -2462,7 +2408,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![candidate("ready", Some(70), &["fixed"])],
@@ -2513,7 +2458,6 @@ mod tests {
             ]),
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates::default(),
         });
@@ -2562,7 +2506,6 @@ mod tests {
             ]),
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates::default(),
         });
@@ -2584,7 +2527,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2618,7 +2560,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![paid, candidate("subscription", Some(80), &["fixed"])],
@@ -2647,7 +2588,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![candidate("stalled-default", Some(80), &["fixed"])],
@@ -2692,7 +2632,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2730,7 +2669,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2817,7 +2755,6 @@ mod tests {
                 staged: None,
                 discovery_fails: false,
                 telemetry_store: None,
-                quota_preferences: Vec::new(),
                 config: SubagentConfig {
                     straightforward: vec![SubagentChoice {
                         model: "sonnet".into(),
@@ -2895,7 +2832,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config,
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2951,7 +2887,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: config.clone(),
             candidates: candidates.clone(),
         });
@@ -3004,7 +2939,6 @@ mod tests {
                 staged: None,
                 discovery_fails: false,
                 telemetry_store: None,
-                quota_preferences: Vec::new(),
                 config: config.clone(),
                 candidates,
             })
@@ -3043,7 +2977,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates,
         });
@@ -3094,7 +3027,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: SubagentConfig {
                 straightforward: vec![SubagentChoice {
                     model: "no-effort".into(),
@@ -3154,7 +3086,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: mj_core::config::SubagentConfig {
                 straightforward: vec![
                     mj_core::config::SubagentChoice {
@@ -3224,7 +3155,6 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
-            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![

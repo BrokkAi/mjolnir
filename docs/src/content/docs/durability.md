@@ -227,6 +227,12 @@ Session commands and confirmation screens are covered in
 | Target is lost | Resume can recover only through the newest verified controller-side archive |
 | Controller state loses track of a still-running managed target | `mj recover scan` can find the orphan and `mj recover adopt` can add it back |
 
+If provider-native history is gone and no matching recovery checkpoint exists,
+Resume leaves the session in `Error` and keeps the checkout and the Mjolnir
+transcript. Retrying `mj resume` does not recreate that history. Rescue the
+checkout into a fresh session as described in
+[Native history is missing, but the checkout survived](/troubleshooting/#native-history-is-missing-but-the-checkout-survived).
+
 Mjolnir is conservative about live restarts: it does not kill a worker merely
 because one connection failed. It distinguishes a dead worker, an unresponsive
 handshake, a worker still recovering its journal, and a live process whose

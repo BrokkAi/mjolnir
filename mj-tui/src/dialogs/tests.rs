@@ -1220,13 +1220,19 @@ fn golden_dashboard_dialogs() {
     usage.handle_key(key(KeyCode::Char('3')));
     append_dialog_render(
         &mut output,
-        "Usage by session loading",
+        "Usage Dashboard loading",
         120,
         36,
         &drawn(&mut usage, 120, 36),
     );
     let (first, query) = usage.session_usage_request().unwrap();
     assert_eq!(query, mj_core::usage::SessionUsageQuery::default());
+    let deepseek_flash = ModelUsageEstimate {
+        model: Some("deepseek-flash".into()),
+        unreported_turns: 2,
+        cost_usd_ticks: Ok(0),
+        ..Default::default()
+    };
     let mut report = SessionUsageReport {
         profiles: vec!["claude".into(), "codex".into()],
         cost_usd_ticks: Err(UnknownCost),
@@ -1244,8 +1250,15 @@ fn golden_dashboard_dialogs() {
                     },
                     ModelUsageEstimate {
                         model: Some("gpt-6.1-sol".into()),
+                        totals: std::collections::BTreeMap::from([(
+                            "total_tokens".into(),
+                            mj_core::storage::UsageCounterTotal {
+                                tokens: 1_100_000,
+                                reported_turns: 1,
+                            },
+                        )]),
+                        unreported_turns: 1,
                         cost_usd_ticks: Ok(20_000_000_000),
-                        ..Default::default()
                     },
                 ],
                 coverage: mj_core::storage::UsageCoverage {
@@ -1288,10 +1301,12 @@ fn golden_dashboard_dialogs() {
                         cost_usd_ticks: Err(UnknownCost),
                         ..Default::default()
                     },
+                    deepseek_flash.clone(),
                 ],
                 coverage: mj_core::storage::UsageCoverage {
-                    recorded_turns: 4,
+                    recorded_turns: 6,
                     full_turn_reports: 4,
+                    missing_reports: 2,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1319,7 +1334,11 @@ fn golden_dashboard_dialogs() {
             cost_usd_ticks: Ok(72_000_000_000),
         },
         role_model(UsageAgentRole::Orchestrator, split_sol(20_000_000_000)),
-        role_model(UsageAgentRole::Subtle, split_sol(15_000_000_000)),
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subtle,
+            models: vec![split_sol(15_000_000_000), deepseek_flash.clone()],
+            cost_usd_ticks: Ok(15_000_000_000),
+        },
         role_model(UsageAgentRole::Straightforward, split_sol(10_000_000_000)),
         role_model(UsageAgentRole::Oracle, split_sol(5_000_000_000)),
         role_model(UsageAgentRole::Reviewer, codex_models[2].clone()),
@@ -1345,18 +1364,21 @@ fn golden_dashboard_dialogs() {
         ProfileQuotaUsage {
             profile: "claude".into(),
             consumed_basis_points: Some(1000),
+            covered_seconds: Some(86_400),
             partial: false,
             monthly_price_usd: Some(200),
         },
         ProfileQuotaUsage {
             profile: "claude-idle".into(),
             consumed_basis_points: Some(0),
+            covered_seconds: Some(86_400),
             partial: false,
             monthly_price_usd: Some(100),
         },
         ProfileQuotaUsage {
             profile: "codex".into(),
             consumed_basis_points: Some(2000),
+            covered_seconds: Some(86_400),
             partial: false,
             monthly_price_usd: Some(200),
         },
@@ -1455,32 +1477,57 @@ fn golden_dashboard_dialogs() {
         &drawn(&mut usage, 70, 17),
     );
     usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
+    let now = mj_core::clock::epoch_seconds() as i64;
+    let mut forecast_report = report.clone();
+    forecast_report.quota_projections = vec![mj_core::usage::ProfileQuotaProjection {
+        profile_id: "codex4".into(),
+        window_label: "Week".into(),
+        is_short_window: false,
+        is_weekly_window: None,
+        remaining_percent: 38,
+        resets_at_epoch_seconds: Some(now + 54 * 3600 + 30),
+        observed_pct_per_hour: Some(1.0),
+        sustainable_pct_per_hour: Some(0.625),
+        pace_ratio: Some(1.6),
+        projected_exhaustion_epoch_seconds: Some(now + 28 * 3600 + 30),
+    }];
+    usage.apply_session_usage_result(first, Ok(forecast_report));
+    append_dialog_render(
+        &mut output,
+        "Usage quota forecast",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,
-        "Usage by session All with model costs",
+        "Usage Dashboard All with model costs",
         120,
         36,
         &drawn(&mut usage, 120, 36),
     );
     // Hard-won: #1501: a wrapped fixed header clipped models and crowded out sessions.
-    for _ in 0..3 {
-        usage.handle_key(key(KeyCode::Tab));
+    if let Mode::SessionUsageReport(dialog) = &mut usage.mode {
+        dialog
+            .form
+            .get_mut()
+            .focus(crate::session_usage_report::UsageControl::Rows);
     }
     usage.handle_key(key(KeyCode::Home));
-    for _ in 0..15 {
+    for _ in 0..16 {
         usage.handle_key(key(KeyCode::Down));
     }
     append_dialog_render(
         &mut output,
-        "Usage by session All with remaining agent roles",
+        "Usage Dashboard All with sessions",
         120,
         36,
         &drawn(&mut usage, 120, 36),
     );
     append_dialog_render(
         &mut output,
-        "Usage narrow last model total",
+        "Usage narrow session list",
         70,
         22,
         &drawn(&mut usage, 70, 22),
@@ -1494,8 +1541,11 @@ fn golden_dashboard_dialogs() {
         &drawn(&mut usage, 70, 22),
     );
     usage.handle_key(key(KeyCode::Home));
-    for _ in 0..3 {
-        usage.handle_key(key(KeyCode::BackTab));
+    if let Mode::SessionUsageReport(dialog) = &mut usage.mode {
+        dialog
+            .form
+            .get_mut()
+            .focus(crate::session_usage_report::UsageControl::Profile);
     }
     drawn(&mut usage, 120, 36);
     usage.handle_key(key(KeyCode::Enter));
@@ -1533,7 +1583,11 @@ fn golden_dashboard_dialogs() {
     codex_report.agent_usage = vec![
         role_model(UsageAgentRole::Primary, codex_models[1].clone()),
         role_model(UsageAgentRole::Orchestrator, split_sol(10_000_000_000)),
-        role_model(UsageAgentRole::Subtle, split_sol(10_000_000_000)),
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subtle,
+            models: vec![split_sol(10_000_000_000), deepseek_flash.clone()],
+            cost_usd_ticks: Ok(10_000_000_000),
+        },
         role_model(UsageAgentRole::Straightforward, split_sol(5_000_000_000)),
         role_model(UsageAgentRole::Oracle, split_sol(5_000_000_000)),
         AgentUsageEstimate {
@@ -1551,7 +1605,7 @@ fn golden_dashboard_dialogs() {
     // Hard-won: #1501: unknown totals hid the known per-model sums in both views.
     append_dialog_render(
         &mut output,
-        "Usage Codex with model totals",
+        "Usage Codex with session models",
         120,
         36,
         &drawn(&mut usage, 120, 36),
@@ -2597,4 +2651,340 @@ fn suspend_history_only_requires_second_confirmation_and_back_returns_to_blocker
             },
         }
     );
+}
+
+#[test]
+fn usage_timeline_range_and_provider_interactions() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use mj_core::usage::{
+        HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileQuotaProjection, ProfileQuotaUsage,
+        ProfileRoleUsageEstimate, RoleAssignmentChange, SessionUsageReport, UsageAgentRole,
+    };
+    let mut usage = dashboard_with_session(running_session());
+    let codex = usage.config.profiles["codex-1"].clone();
+    usage.config.profiles.insert("codex".into(), codex.clone());
+    usage.config.profiles.insert("payg-codex".into(), codex);
+    usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
+    usage.quota_providers.settle();
+    usage.begin_session_usage_report(None);
+    let first = usage.session_usage_request().unwrap().0;
+    let hours: Vec<_> = (0..24)
+        .map(|i| HourlyUsage {
+            start_ms: (490_000 + i) * HOUR_MS,
+            known_cost_usd_ticks: 10_000_000_000,
+            has_unknown_cost: false,
+        })
+        .collect();
+    let report = SessionUsageReport {
+        since_ms: hours[0].start_ms,
+        until_ms: hours[23].start_ms + HOUR_MS,
+        hours: hours.clone(),
+        quota_usage: vec![ProfileQuotaUsage {
+            profile: "codex".into(),
+            consumed_basis_points: Some(2000),
+            covered_seconds: Some(86_400),
+            partial: false,
+            monthly_price_usd: Some(100),
+        }],
+        quota_projections: vec![ProfileQuotaProjection {
+            profile_id: "codex".into(),
+            window_label: "5h".into(),
+            is_short_window: true,
+            is_weekly_window: None,
+            remaining_percent: 1,
+            resets_at_epoch_seconds: None,
+            observed_pct_per_hour: None,
+            sustainable_pct_per_hour: None,
+            pace_ratio: None,
+            projected_exhaustion_epoch_seconds: None,
+        }],
+        role_changes: vec![RoleAssignmentChange {
+            id: 1,
+            changed_at_ms: hours[8].start_ms + 1234,
+            summary: "Reviewers changed".into(),
+        }],
+        ..Default::default()
+    };
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    assert!(screen.iter().any(|line| line.contains("▲①")));
+    let provider_y = screen.iter().position(|line| line.contains('▸')).unwrap();
+    let provider_x = screen[provider_y].chars().position(|c| c == '▸').unwrap();
+    let click =
+        |usage: &mut DashboardState, p: (u16, u16), down: KeyModifiers, up: KeyModifiers| {
+            for (kind, mods) in [
+                (MouseEventKind::Down(MouseButton::Left), down),
+                (MouseEventKind::Up(MouseButton::Left), up),
+            ] {
+                let mut event = mouse_at(kind, p);
+                event.modifiers = mods;
+                usage.handle_mouse(event);
+            }
+        };
+    usage.handle_mouse(mouse_at(
+        MouseEventKind::ScrollDown,
+        (provider_x as u16, provider_y as u16),
+    ));
+    assert!(
+        drawn(&mut usage, 120, 36)
+            .iter()
+            .any(|line| line.contains('▸'))
+    );
+    click(
+        &mut usage,
+        (provider_x as u16, provider_y as u16),
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+    );
+    let screen = drawn(&mut usage, 120, 36);
+    assert!(
+        screen
+            .iter()
+            .any(|line| line.contains("External / untracked"))
+    );
+    assert!(!screen.iter().any(|line| line.contains("1% left")));
+    usage.handle_key(key(KeyCode::Left));
+    let screen = drawn(&mut usage, 120, 36);
+    assert!(
+        !screen
+            .iter()
+            .any(|line| line.contains("External / untracked"))
+    );
+    let mut with_roles = report.clone();
+    with_roles.profile_role_usage = [(UsageAgentRole::Primary, 3), (UsageAgentRole::Reviewer, 1)]
+        .into_iter()
+        .map(|(role, cost)| ProfileRoleUsageEstimate {
+            profile: Some("codex".into()),
+            role,
+            models: vec![ModelUsageEstimate {
+                model: Some("model-a".into()),
+                cost_usd_ticks: Ok(cost),
+                ..Default::default()
+            }],
+            cost_usd_ticks: Ok(cost),
+        })
+        .collect();
+    usage.apply_session_usage_result(first, Ok(with_roles));
+    drawn(&mut usage, 120, 36);
+    click(
+        &mut usage,
+        (provider_x as u16, provider_y as u16),
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+    );
+    let expanded = drawn(&mut usage, 120, 36);
+    assert!(expanded.iter().any(|line| line.contains("Primary agents")
+        && line.contains("105%")
+        && line.contains("75% share")));
+    assert!(expanded.iter().any(|line| line.contains("Reviewers")
+        && line.contains("35%")
+        && line.contains("25% share")));
+    // Hard-won: review-group-3e97d4ef: usage-billed turns stole subscription pace.
+    let mut mixed = report.clone();
+    mixed.profile_role_usage = [
+        ("codex", UsageAgentRole::Primary, 3),
+        ("payg-codex", UsageAgentRole::Reviewer, 1),
+    ]
+    .into_iter()
+    .map(|(profile, role, cost)| ProfileRoleUsageEstimate {
+        profile: Some(profile.into()),
+        role,
+        models: vec![ModelUsageEstimate {
+            cost_usd_ticks: Ok(cost),
+            ..Default::default()
+        }],
+        cost_usd_ticks: Ok(cost),
+    })
+    .collect();
+    usage.apply_session_usage_result(first, Ok(mixed.clone()));
+    let mixed_screen = drawn(&mut usage, 120, 36);
+    assert!(
+        mixed_screen
+            .iter()
+            .any(|line| line.contains("Primary agents") && line.contains("140%"))
+    );
+    assert!(mixed_screen.iter().any(|line| line.contains("Reviewers")
+        && line.contains("0%")
+        && line.contains("25% share")));
+    mixed.quota_usage.clear();
+    mixed.quota_projections.clear();
+    usage.apply_session_usage_result(first, Ok(mixed));
+    let payg_screen = drawn(&mut usage, 120, 36);
+    assert!(
+        payg_screen
+            .iter()
+            .any(|line| line.contains("Primary agents")
+                && line.contains("payg")
+                && line.contains('┄'))
+    );
+    usage.handle_key(key(KeyCode::Left));
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    let change_y = screen
+        .iter()
+        .position(|line| line.contains("Reviewers changed"))
+        .unwrap();
+    let change_x = screen[change_y].chars().position(|c| c == '①').unwrap();
+    click(
+        &mut usage,
+        (change_x as u16, change_y as u16),
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+    );
+    let (generation, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[8..].iter().map(|h| h.start_ms).collect()
+    );
+    usage.apply_session_usage_result(generation, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    let bar_y = screen.iter().position(|line| line.contains("$0 ")).unwrap();
+    let bar_x = screen[bar_y].chars().position(|c| c == '█').unwrap();
+    let pitch = 4;
+    let at = |i: usize| ((bar_x + i * pitch) as u16, bar_y as u16);
+    click(&mut usage, at(2), KeyModifiers::NONE, KeyModifiers::NONE);
+    let generation = usage.session_usage_request().unwrap().0;
+    usage.apply_session_usage_result(generation, Ok(report.clone()));
+    drawn(&mut usage, 120, 36);
+    click(&mut usage, at(5), KeyModifiers::SHIFT, KeyModifiers::NONE);
+    let (generation, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[2..=5].iter().map(|h| h.start_ms).collect()
+    );
+    usage.apply_session_usage_result(generation, Ok(report.clone()));
+    drawn(&mut usage, 120, 36);
+    let mut shifted = key(KeyCode::Right);
+    shifted.modifiers = KeyModifiers::SHIFT;
+    usage.handle_key(shifted);
+    let (generation, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[2..=6].iter().map(|h| h.start_ms).collect()
+    );
+    usage.apply_session_usage_result(generation, Ok(report));
+    drawn(&mut usage, 120, 36);
+    usage.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), at(3)));
+    usage.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), at(9)));
+    assert_eq!(usage.session_usage_request().unwrap().0, generation);
+    usage.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), at(9)));
+    let (after, query) = usage.session_usage_request().unwrap();
+    assert_eq!(after, generation + 1);
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[3..=9].iter().map(|h| h.start_ms).collect()
+    );
+}
+
+/// A drag across the hour chart only previews its range; releasing outside
+/// the chart discards the preview without touching the report query.
+// Hard-won: review-group-e0d8539b: the drag mutated the live query, and a release off the chart still committed it.
+#[test]
+fn usage_hour_drag_released_outside_the_chart_keeps_the_query() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use mj_core::usage::{HOUR_MS, HourlyUsage, SessionUsageReport};
+    let mut usage = dashboard_with_session(running_session());
+    usage.begin_session_usage_report(None);
+    let first = usage.session_usage_request().unwrap().0;
+    let hours: Vec<_> = (0..24)
+        .map(|i| HourlyUsage {
+            start_ms: (490_000 + i) * HOUR_MS,
+            known_cost_usd_ticks: 10_000_000_000,
+            has_unknown_cost: false,
+        })
+        .collect();
+    let report = SessionUsageReport {
+        since_ms: hours[0].start_ms,
+        until_ms: hours[23].start_ms + HOUR_MS,
+        hours: hours.clone(),
+        ..Default::default()
+    };
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    let bar_y = screen.iter().position(|line| line.contains("$0 ")).unwrap() as u16;
+    let bar_x = screen[usize::from(bar_y)]
+        .chars()
+        .position(|c| c == '█')
+        .unwrap() as u16;
+    let pitch = 4;
+    let at = |i: usize| (bar_x + i as u16 * pitch, bar_y);
+    usage.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), at(2)));
+    usage.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), at(2)));
+    let (generation, query) = usage.session_usage_request().unwrap();
+    let selected = query.hour_starts_ms.unwrap();
+    assert_eq!(selected, [hours[2].start_ms].into_iter().collect());
+    usage.apply_session_usage_result(generation, Ok(report));
+    drawn(&mut usage, 120, 36);
+
+    usage.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), at(3)));
+    usage.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), at(9)));
+    let (during, query) = usage.session_usage_request().unwrap();
+    assert_eq!(during, generation, "a drag must not reload the report");
+    assert_eq!(
+        query.hour_starts_ms.as_ref(),
+        Some(&selected),
+        "a drag previews its range without changing the query"
+    );
+    usage.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        (at(9).0, bar_y + 5),
+    ));
+    let (after, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        after, generation,
+        "a release outside the chart commits nothing"
+    );
+    assert_eq!(query.hour_starts_ms.as_ref(), Some(&selected));
+}
+
+/// Exhaustion ahead of the reset is a warning even at a "safe" weekly pace.
+// Hard-won: review-group-e0d8539b: "dry in ..." at pace ≤ 105% rendered like "on pace · safe".
+#[test]
+fn usage_dry_forecast_at_a_safe_pace_is_styled_as_a_warning() {
+    use mj_core::usage::{ProfileQuotaProjection, ProfileQuotaUsage, SessionUsageReport};
+    let mut usage = dashboard_with_session(running_session());
+    usage.begin_session_usage_report(None);
+    let first = usage.session_usage_request().unwrap().0;
+    let now = mj_core::clock::epoch_seconds() as i64;
+    let report = SessionUsageReport {
+        quota_usage: vec![
+            // Anthropic sorts ahead of OpenAI so OpenAI is not the selected
+            // row (row 0) whose selection highlight overrides cell foreground.
+            ProfileQuotaUsage {
+                profile: "claude".into(),
+                consumed_basis_points: Some(5_000),
+                covered_seconds: Some(604_800),
+                partial: false,
+                monthly_price_usd: Some(100),
+            },
+            ProfileQuotaUsage {
+                profile: "codex".into(),
+                consumed_basis_points: Some(10_000),
+                covered_seconds: Some(604_800),
+                partial: false,
+                monthly_price_usd: Some(100),
+            },
+        ],
+        quota_projections: vec![ProfileQuotaProjection {
+            profile_id: "codex".into(),
+            window_label: "Week".into(),
+            is_short_window: false,
+            is_weekly_window: None,
+            remaining_percent: 10,
+            resets_at_epoch_seconds: Some(now + 3 * 86_400),
+            observed_pct_per_hour: None,
+            sustainable_pct_per_hour: None,
+            pace_ratio: None,
+            projected_exhaustion_epoch_seconds: None,
+        }],
+        ..Default::default()
+    };
+    usage.apply_session_usage_result(first, Ok(report));
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut usage))
+        .expect("draw the surface");
+    let buffer = terminal.backend().buffer();
+    let (x, y) = point(&buffer_lines(buffer), "dry in");
+    assert_eq!(buffer[(x, y)].fg, mj_chat::theme::palette().warning);
 }

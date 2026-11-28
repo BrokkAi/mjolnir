@@ -168,7 +168,7 @@ pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.26.0";
 pub const MUSE_VERSION: &str = "1.4.25-R9361.1";
 pub const OPENCODE_VERSION: &str = "2.2.7";
-pub const DSH_ACP_VERSION: &str = "0.8.1";
+pub const DSH_ACP_VERSION: &str = "0.8.2";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 pub const ANTIGRAVITY_VERSION: &str = "1.5.15";
 
@@ -386,7 +386,10 @@ pub fn dsh_acp_version_supported(version_output: &str) -> bool {
 /// least [`DSH_ACP_VERSION`]; it mirrors [`dsh_acp_version_supported`]. The
 /// caller checks that the command exists first.
 pub fn dsh_acp_version_supported_script() -> String {
-    let (major, minor, patch) = dsh_acp_required_version();
+    dsh_acp_version_supported_script_for(dsh_acp_required_version())
+}
+
+fn dsh_acp_version_supported_script_for((major, minor, patch): (u64, u64, u64)) -> String {
     format!(
         "{{ reported=\"$(dsh-acp --version 2>/dev/null)\" || reported=; case \"$reported\" in 'dsh-acp '*.*.*) reported=\"${{reported#dsh-acp }}\" ;; *) reported= ;; esac; found_major=\"${{reported%%.*}}\"; rest=\"${{reported#*.}}\"; found_minor=\"${{rest%%.*}}\"; rest=\"${{rest#*.}}\"; found_patch=\"${{rest%%.*}}\"; case \"$found_major\" in ''|*[!0-9]*) found_major= ;; esac; case \"$found_minor\" in ''|*[!0-9]*) found_minor= ;; esac; case \"$found_patch\" in ''|*[!0-9]*) found_patch= ;; esac; [ -n \"$found_major\" ] && [ -n \"$found_minor\" ] && [ -n \"$found_patch\" ] && {{ [ \"$found_major\" -gt {major} ] || {{ [ \"$found_major\" -eq {major} ] && {{ [ \"$found_minor\" -gt {minor} ] || {{ [ \"$found_minor\" -eq {minor} ] && [ \"$found_patch\" -ge {patch} ]; }}; }}; }}; }}; }}",
     )
@@ -400,18 +403,27 @@ pub fn dsh_acp_version_supported_script() -> String {
 /// runtime — so this one script is the whole launch path for bare and
 /// container targets alike, and for the model discovery probe.
 pub fn dsh_acp_launch_script() -> String {
-    dsh_acp_launch_script_with_baked(true)
+    dsh_acp_launch_script_for_version(DSH_ACP_VERSION, true)
+        .expect("DSH_ACP_VERSION is numeric major.minor.patch")
 }
 
 /// Recognize persisted launch descriptions written before baked harness images.
 pub fn legacy_dsh_acp_launch_script() -> String {
-    dsh_acp_launch_script_with_baked(false)
+    dsh_acp_launch_script_for_version(DSH_ACP_VERSION, false)
+        .expect("DSH_ACP_VERSION is numeric major.minor.patch")
 }
 
-fn dsh_acp_launch_script_with_baked(include_baked: bool) -> String {
+fn dsh_acp_launch_script_for_version(version: &str, include_baked: bool) -> Option<String> {
+    let required @ (major, minor, patch) = parse_dsh_acp_version(version)?;
+    if version != format!("{major}.{minor}.{patch}") {
+        return None;
+    }
     let node_check = node_version_check_script(DSH_ACP_MINIMUM_NODE_VERSION);
     let baked_check = if include_baked {
-        let baked = baked_harness_install_dir(Path::new(BAKED_HARNESS_ROOT), HarnessKind::Dsh)
+        let baked = Path::new(BAKED_HARNESS_ROOT)
+            .join(MANAGED_HARNESSES_DIR)
+            .join(HarnessKind::Dsh.id())
+            .join(format!("dsh-acp-{version}"))
             .join(pin(HarnessKind::Dsh).entrypoint);
         let baked = crate::target_path::text(&baked);
         format!(
@@ -421,7 +433,7 @@ fn dsh_acp_launch_script_with_baked(include_baked: bool) -> String {
     } else {
         String::new()
     };
-    format!(
+    Some(format!(
         concat!(
             "if command -v dsh-acp >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && {node_check} && {version_supported}; then ",
             "set -- dsh-acp; ",
@@ -434,11 +446,11 @@ fn dsh_acp_launch_script_with_baked(include_baked: bool) -> String {
         baked_check = baked_check,
         node_check = node_check,
         node_minimum = DSH_ACP_MINIMUM_NODE_VERSION,
-        version_supported = dsh_acp_version_supported_script(),
+        version_supported = dsh_acp_version_supported_script_for(required),
         package = DSH_ACP_PACKAGE,
-        version = DSH_ACP_VERSION,
+        version = version,
         script = dsh_acp_script(),
-    )
+    ))
 }
 
 /// The shell launcher used by container targets when Mjolnir's worker has not
@@ -506,9 +518,27 @@ pub fn is_fallback_launch(
 ) -> bool {
     let (expected_command, expected_args) = fallback_launch(harness, policy);
     (command == Path::new(&expected_command) && args == expected_args)
-        || (harness == HarnessKind::Dsh
-            && command == Path::new("sh")
-            && args == ["-c".to_owned(), legacy_dsh_acp_launch_script()])
+        || (harness == HarnessKind::Dsh && is_dsh_fallback_launch(command, args))
+}
+
+/// Recognize generated DSH launch scripts from current and prior pin releases
+/// so upgraded workers replace saved launch descriptions with the new pin
+/// while leaving custom shell wrappers untouched.
+fn is_dsh_fallback_launch(command: &Path, args: &[String]) -> bool {
+    if command != Path::new("sh") || args.len() != 2 || args[0] != "-c" {
+        return false;
+    }
+    let marker = format!("set -- npx -y {DSH_ACP_PACKAGE}@");
+    let Some((_, rest)) = args[1].split_once(&marker) else {
+        return false;
+    };
+    let Some((version, _)) = rest.split_once(';') else {
+        return false;
+    };
+    [true, false].into_iter().any(|include_baked| {
+        dsh_acp_launch_script_for_version(version, include_baked)
+            .is_some_and(|expected| args[1] == expected)
+    })
 }
 
 /// The built-in npm launcher, selected on the worker before ACP startup.
@@ -664,8 +694,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "opencode",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.8.1",
-            display_version: "dsh-acp 0.8.1",
+            install_id: "dsh-acp-0.8.2",
+            display_version: "dsh-acp 0.8.2",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },
@@ -714,8 +744,11 @@ mod tests {
     fn dsh_fallback_recognizes_persisted_pre_baked_launch_scripts() {
         use crate::config::ExecutionPolicy;
         let legacy = legacy_dsh_acp_launch_script();
+        let previous_pin = dsh_acp_launch_script_for_version("0.8.1", true).unwrap();
+        let previous_legacy = dsh_acp_launch_script_for_version("0.8.1", false).unwrap();
         assert!(!legacy.contains(BAKED_HARNESS_ROOT));
         assert_ne!(legacy, dsh_acp_launch_script());
+        assert_ne!(previous_pin, dsh_acp_launch_script());
         for policy in [
             ExecutionPolicy::ConfiguredApprovals,
             ExecutionPolicy::Unconstrained,
@@ -727,17 +760,28 @@ mod tests {
                 Path::new(&command),
                 &args
             ));
-            assert!(is_fallback_launch(
-                HarnessKind::Dsh,
-                policy,
-                Path::new("sh"),
-                &["-c".into(), legacy.clone()]
-            ));
+            for saved in [&legacy, &previous_pin, &previous_legacy] {
+                assert!(is_fallback_launch(
+                    HarnessKind::Dsh,
+                    policy,
+                    Path::new("sh"),
+                    &["-c".into(), saved.clone()]
+                ));
+            }
             assert!(!is_fallback_launch(
                 HarnessKind::Dsh,
                 policy,
                 Path::new("sh"),
                 &["-c".into(), "exec custom-dsh".into()]
+            ));
+            assert!(!is_fallback_launch(
+                HarnessKind::Dsh,
+                policy,
+                Path::new("sh"),
+                &[
+                    "-c".into(),
+                    format!("set -- npx -y {DSH_ACP_PACKAGE}@0.8.1; exec custom-dsh")
+                ]
             ));
         }
     }
@@ -745,12 +789,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn dsh_acp_host_version_gate_compares_patch_in_rust_and_shell() {
-        // The pin is 0.8.1; 0.8.0 fails every turn longer than 180 s.
-        assert_eq!(DSH_ACP_VERSION, "0.8.1", "update the cases with the pin");
+        // The pin is 0.8.2; 0.8.1 omits native DSH per-turn usage.
+        assert_eq!(DSH_ACP_VERSION, "0.8.2", "update the cases with the pin");
         let cases = [
             ("dsh-acp 0.8.0", false),
-            ("dsh-acp 0.8.1", true),
+            ("dsh-acp 0.8.1", false),
             ("dsh-acp 0.8.2", true),
+            ("dsh-acp 0.8.3", true),
             ("dsh-acp 0.9.0", true),
             ("dsh-acp 1.0.0", true),
             ("dsh-acp 0.7.9", false),
@@ -759,7 +804,7 @@ mod tests {
             ("dsh-acp 0.9.0-rc.1", false),
             ("dsh-acp ", false),
             ("dsh-acp", false),
-            ("0.8.1", false),
+            ("0.8.2", false),
             ("other 0.9.0", false),
             ("", false),
             ("garbage", false),

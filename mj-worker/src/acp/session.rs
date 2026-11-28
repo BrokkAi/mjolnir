@@ -460,7 +460,9 @@ pub(super) async fn serve_session(
                 if spec.native_session_history == NativeSessionHistory::MayHaveHistory || has_goal {
                     return Err(error.context(format!(
                         "{harness} has no native history for session {existing}; the existing \
-                         conversation or goal cannot be resumed"
+                         conversation or goal cannot be resumed. The session, checkout, and \
+                         Mjolnir transcript were kept; read the transcript, export any work, and \
+                         start a fresh session instead of retrying Resume."
                     )));
                 }
                 emit_runtime_event(
@@ -1221,6 +1223,7 @@ pub(super) async fn serve_session(
                                             code: Some(PROMPT_UNANSWERED_STOP_REASON.to_owned()),
                                             http_status: None,
                                             reset_at: None,
+                                            retry_after_seconds: None,
                                             login_fingerprint: None,
                                         });
                                         PROMPT_UNANSWERED_STOP_REASON.to_owned()
@@ -1342,6 +1345,7 @@ pub(super) async fn serve_session(
                                         code: Some(TURN_STALLED_STOP_REASON.to_owned()),
                                         http_status: None,
                                         reset_at: None,
+                                        retry_after_seconds: None,
                                         login_fingerprint: None,
                                     }),
                                 },

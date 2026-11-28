@@ -3930,11 +3930,20 @@ fn render_quota_at(
         }
         bail!("no enabled profile {wanted:?}");
     }
+    let projections: Vec<_> = metadata
+        .quotas
+        .quota_projections
+        .iter()
+        .filter(|p| only.is_none_or(|id| p.profile_id == id))
+        .collect();
     if json {
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "cycles": metadata.quotas.cycles,
             "profiles": rows.iter().map(|(_, entry)| entry.clone()).collect::<Vec<_>>(),
         });
+        if !projections.is_empty() {
+            value["quota_projections"] = serde_json::to_value(&projections)?;
+        }
         return serde_json::to_string_pretty(&value).context("serialize quota reports");
     }
     if rows.is_empty() {
@@ -3942,7 +3951,42 @@ fn render_quota_at(
     }
     Ok(rows
         .iter()
-        .map(|(text, _)| text.clone())
+        .map(|(text, entry)| {
+            let id = entry
+                .get("profile_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| entry.get("profile").and_then(|v| v.as_str()));
+            let notes = projections
+                .iter()
+                .filter(|p| {
+                    Some(p.profile_id.as_str()) == id && p.pace_ratio.is_some_and(|v| v > 1.0)
+                })
+                .map(|p| {
+                    let secs = p
+                        .projected_exhaustion_epoch_seconds
+                        .unwrap_or(now as i64)
+                        .saturating_sub(now as i64);
+                    let hours = secs / 3600;
+                    let until = if hours >= 24 {
+                        format!("{}d {}h", hours / 24, hours % 24)
+                    } else if hours >= 1 {
+                        format!("{hours}h")
+                    } else {
+                        format!("{}m", (secs / 60).max(1))
+                    };
+                    format!(
+                        "{}: {:.1}× pace, exhausts in {until}",
+                        p.window_label,
+                        p.pace_ratio.unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if notes.is_empty() {
+                text.clone()
+            } else {
+                format!("{} ({})", text, notes.join("; "))
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -6384,6 +6428,7 @@ mod tests {
             .collect(),
             probing: ["opencode".to_owned()].into_iter().collect(),
             cycles: 7,
+            ..Default::default()
         };
         let metadata = mj_client::runtime_feed::RuntimeMetadata {
             config: config.into(),
@@ -6403,6 +6448,31 @@ mod tests {
             &render_quota_at(&metadata, Some("missing"), false, false, now)
                 .unwrap_err()
                 .to_string(),
+        );
+        let mut forecast_snapshot = (*metadata.quotas).clone();
+        forecast_snapshot
+            .quota_projections
+            .push(mj_core::usage::ProfileQuotaProjection {
+                profile_id: "claude".into(),
+                window_label: "Week".into(),
+                is_short_window: false,
+                is_weekly_window: None,
+                remaining_percent: 38,
+                resets_at_epoch_seconds: Some(now as i64 + 54 * 3600),
+                observed_pct_per_hour: Some(1.0),
+                sustainable_pct_per_hour: Some(0.625),
+                pace_ratio: Some(1.6),
+                projected_exhaustion_epoch_seconds: Some(now as i64 + 28 * 3600),
+            });
+        let mut forecast_metadata = metadata.clone();
+        forecast_metadata.quotas = forecast_snapshot.into();
+        output.push_str("\n=== mj quota forecast ===\n");
+        output.push_str(
+            &render_quota_at(&forecast_metadata, Some("claude"), false, false, now).unwrap(),
+        );
+        output.push_str("\n=== mj quota forecast --json ===\n");
+        output.push_str(
+            &render_quota_at(&forecast_metadata, Some("claude"), false, true, now).unwrap(),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-quota", &output);
     }

@@ -1898,7 +1898,7 @@ mod staged_in_place_tests {
             fixture.controller.apply_in_place_destination(&operation).unwrap();
             let backend = mj_core::targets::TargetLocator::LocalBare { worker_root: fixture.worker_root.to_string_lossy().into_owned() };
             let candidate = mj_core::relay::new_command_id("cancel-candidate").unwrap();
-            owner.scope_blocking(|| fixture.controller.prepare_worker_files_for(LATCH_RELAY_SESSION, &backend, fixture.worker_root.to_str().unwrap(), &executor, mj_worker_staging::worker_binary::WorkerFilePreparation::StageCandidate { operation_id: operation.operation_id.clone(), expected_store_id: store.clone(), candidate_id: candidate.clone() }, mj_worker_staging::worker_binary::LaunchHistory::Stored)).unwrap();
+            owner.scope_blocking(|| fixture.controller.prepare_worker_files_for(LATCH_RELAY_SESSION, &backend, fixture.worker_root.to_str().unwrap(), &executor, mj_worker_staging::worker_binary::WorkerFilePreparation::StageCandidate { operation_id: operation.operation_id.clone(), expected_store_id: store.clone(), candidate_id: candidate.clone(), worker_protocol: mj_core::relay::RELAY_PROTOCOL_VERSION }, mj_worker_staging::worker_binary::LaunchHistory::Stored)).unwrap();
             let launch = fixture.controller.current_worker_launch_config(LATCH_RELAY_SESSION, &backend).unwrap();
             let conn = relay.0.as_mut().unwrap().connection_mut();
             conn.client.restart_harness_in_place(&operation.operation_id, &store, Box::new(launch), Some(candidate)).await.unwrap();
@@ -1931,9 +1931,9 @@ mod staged_in_place_tests {
             assert!(snapshot.in_place_move_hold.is_none());
             assert!(!snapshot.handled_commands.contains_key("cmd-must-not-continue"));
             assert_eq!(snapshot.dispatches["cmd-existing-user"].state, mj_core::relay::RelayDispatchState::InFlight);
-            let context = snapshot.pending_prompt_context.unwrap();
-            assert!(context.text.contains(history), "{}", context.text);
-            assert_eq!(context.attached_command_id.as_deref(), Some("cmd-existing-user"));
+            assert!(snapshot.pending_prompt_context.is_none());
+            let context = snapshot.frozen_prompt_contexts.get("cmd-existing-user").expect("started command retains the handoff");
+            assert!(context.contains(history), "{context}");
             let requests = fs::read_to_string(relay_root.join("in-place-move-requests.log")).unwrap();
             assert!(!requests.contains("submit_front"));
             assert!(!requests.contains("discard_held_move_commands"));

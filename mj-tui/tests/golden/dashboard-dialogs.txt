@@ -758,7 +758,7 @@ action: None
 │                                     ╭Profiles──────────────────────────────────╮ one to open.                        │
 │                                     │Refresh                                   │─────────────────────────────────────╯
 │                                     │Settings…                                 │────────────────────────────── ▁   ▄ ╮
-│                                     │Usage by session…                         │                                     │
+│                                     │Usage Dashboard…                          │                                     │
 │                                     ╰──────────────────────────────────────────╯─────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
@@ -777,660 +777,698 @@ action: None
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
-=== Usage by session loading (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile All ▾                                                                                               │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │  $1                                                                                                        │    │
-│    │                                                                                                            │    │
-│    │$0.5                                                                                                        │    │
-│    │                                                                                                            │    │
-│    │  $0                                                                                                        │  ──╯
-│    │                                                                                                            │  ──╮
-│    │                                                                                                            │    │
-│    │Loading usage…                                                                                              │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+=== Usage Dashboard loading (120x36) ===
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile All ▾                                                                                                     │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │  $1                                                                                                              │
+  │                                                                                                                  │
+  │$0.5                                                                                                              │
+  │                                                                                                                  │
+  │  $0                                                                                                              │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Loading usage…                                                                                                    │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage known provider totals with partial coverage (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile All ▾                                                                                               │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total $11.200+ · last 24 clock hours · estimated API USD                                                    │    │
-│    │Anthropic $8.200+ · ~6.7% (partial) · OpenAI $3.000 · ~20.0%                                                │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Primary agents  $7.200+                                                                                     │  ▄ ╮
-│    │  claude-opus-5-5  $6.200+                                                                                  │    │
-│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Orchestrators  $2.000+                                                                                      │    │
-│    │  gpt-6.1-sol  $2.000+                                                                                      │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.500+                                                                                   │    │
-│    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Straightforward subagents  $1.000+                                                                          │    │
-│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │                                                                                                            │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile All ▾                                                                                                     │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total $11.200+ · last 24 clock hours · estimated API USD                                                          │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············   ~47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?   $3.000  over pace                          │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Write release notes [claude]  $8.200+                                                                             │
+  │    claude-opus-5-5  $6.200  tokens unknown                                                                       │
+  │    gpt-6.1-sol  $2.000+  1100000 tokens · 1 turn unreported                                                      │
+  │    0 sub-agents · 3/5 turns reported                                                                             │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    claude-opus-5-5  $7.100  tokens unknown                                                                       │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage unknown plan weight (70x22) ===
 
 
-   ╭ × Usage by session ──────────────────────────────────────────╮
-   │Profile All ▾                                                 │
-   │                                                              │
-   │☐ Include suspended sessions                                  │
-   │                                                              │
-   │Total ? · last 24 clock hours · estimated API USD             │
-   │Anthropic $8.200+ · ~5.0% unweighted · OpenAI ? · ~20.0%      │
-   │Weekly quota consumed in window · all account use             │
-   │$50                 ▂                     ░ ▃                 │
-   │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
-   │    16  18  20  22  00  02  04  06  08  10  12  14            │
-   │                                                              │
-   │Primary agents  $7.200+                                       │
-   │  claude-opus-5-5  $6.200+                                    │
-   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│
-   │Sub-agents included · profile filters turns · + partial · ░ un│
-   │  Refresh     Close                                           │
-   ╰──────────────────────────────────────────────────────────────╯
+  ╭ × Usage Dashboard ─────────────────────────────────────────────╮
+  │Profile All ▾                                                   │
+  │                                                                │
+  │☐ Include suspended sessions                                    │
+  │                                                                │
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │Provider Pace                Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   35%         ?  $8.200+  slack · ~6│
+  │$50                 ▂                     ░ ▃                   │
+  │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂             │
+  │    ────────────────────────────────────────────────            │
+  │    16  18  20  22  00  02  04  06  08  10  12  14              │
+  │                                                                │
+  │Write release notes [claude]  $8.200+                           │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
+  │Sub-agents included · profile filters turns · + partial · ░ unpr│
+  │  Refresh     Close                                             │
+  ╰────────────────────────────────────────────────────────────────╯
 
 
 
 === Usage missing idle account reading (70x17) ===
 
 
-   ╭ × Usage by session ──────────────────────────────────────────╮
-   │Profile All ▾                                                 │
-   │☐ Include suspended sessions                                  │
-   │Total ? · last 24 clock hours · estimated API USD             │
-   │Anthropic $8.200+ · quota n/a · OpenAI ? · ~20.0%             │
-   │Weekly quota consumed in window · all account use             │
-   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
-   │    16  18  20  22  00  02  04  06  08  10  12  14            │
-   │Primary agents  $7.200+                                       │
-   │  claude-opus-5-5  $6.200+                                    │
-   │Sub-agents included · profile filters turns · + partial · ░ un│
-   │  Refresh     Close                                           │
-   ╰──────────────────────────────────────────────────────────────╯
+  ╭ × Usage Dashboard ─────────────────────────────────────────────╮
+  │Profile All ▾                                                   │
+  │☐ Include suspended sessions                                    │
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │Provider Pace                Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                  ~70%         ?  $8.200+  slack · ~3│
+  │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
+  │    ────────────────────────────────────────────────            │
+  │    16  18  20  22  00  02  04  06  08  10  12  14              │
+  │Write release notes [claude]  $8.200+                           │
+  │Sub-agents included · profile filters turns · + partial · ░ unpr│
+  │  Refresh     Close                                             │
+  ╰────────────────────────────────────────────────────────────────╯
 
 
 
 === Usage many providers preserves details and chart footer (70x30) ===
-╭                                                                    ╮
-│                                                                    │
-╰  ╭ × Usage by session ──────────────────────────────────────────╮  ╯
-╭  │Profile All ▾                                                 │  ╮
-│  │                                                              │  │
-│  │☐ Include suspended sessions                                  │  │
-│  │                                                              │  │
-│  │Total ? · last 24 clock hours · estimated API USD             │  │
-╰  │Anthropic $8.200+ · ~6.7%                                     │  ╯
-╭  │retired-account-with-long-profile-name-00… $0.500 · quota n/a │  ╮
-│  │retired-account-with-long-profile-name-01… $0.500 · quota n/a │  │
-╰  │retired-account-with-long-profile-name-02… $0.500 · quota n/a │  ╯
-╭  │retired-account-with-long-profile-name-03… $0.500 · quota n/a │  ╮
-│  │retired-account-with-long-profile-name-04… $0.500 · quota n/a │  │
-╰  │… 8 more provider rows (enlarge terminal)                     │  ╯
-╭  │Weekly quota consumed in window · all account use             │  ╮
-│  │$50                                       ░                   │  │
-╰  │                                          ░ ▄                 │  ╯
-╭  │$25                 █ ▂                 ▅ ░ █                 │  ╮
-│  │                  ▂ █ █ ▆             ▃ █ ░ █ █ ▁             │  ▐
-╰  │ $0     ▂ ▆ ▄     █ █ █ █ ▇ ▃ ░     ▅ █ █ ░ █ █ █ ▆           │  ╯
-╭  │    16  18  20  22  00  02  04  06  08  10  12  14            │  ╮
-│  │                                                              │  │
-│  │Primary agents  $7.200+                                       │  │
-│  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│  │
-│  │Sub-agents included · profile filters turns · + partial · ░ un│  │
-│  │  Refresh     Close                                           │  │
-│  ╰──────────────────────────────────────────────────────────────╯  │
-╰                                                                    ╯
-E
+
+
+  ╭ × Usage Dashboard ─────────────────────────────────────────────╮
+  │Profile All ▾                                                   │
+  │                                                                │
+  │☐ Include suspended sessions                                    │
+  │                                                                │
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │Provider Pace                Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │▸ OpenAI                     140%         ?        ?  over pace │
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │▸ retired-account-with-l…    payg         ∞   $0.500  usage-bill│
+  │$50                                       ░                     │
+  │                                          ░ ▄                   │
+  │$25                 █ ▂                 ▅ ░ █                   │
+  │                  ▂ █ █ ▆             ▃ █ ░ █ █ ▁               │
+  │ $0     ▂ ▆ ▄     █ █ █ █ ▇ ▃ ░     ▅ █ █ ░ █ █ █ ▆             │
+  │    ────────────────────────────────────────────────            │
+  │    16  18  20  22  00  02  04  06  08  10  12  14              │
+  │                                                                │
+  │Write release notes [claude]  $8.200+                           │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
+  │Sub-agents included · profile filters turns · + partial · ░ unpr│
+  │  Refresh     Close                                             │
+  ╰────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage unresolved and retained provider labels (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile All ▾                                                                                               │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
-│    │Anthropic $8.200+ · ~6.7% · retired-account (unconfigured) $0.500 · quota n/a · Codex (resolving) ? · ~20.0%│    │
-│    │Unattributed profile ? · quota n/a                                                                          │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │  ──╯
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╮
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Primary agents  $7.200+                                                                                     │    │
-│    │  claude-opus-5-5  $6.200+                                                                                  │  ──╯
-│    │  gpt-6.1-terra  $1.000+                                                                                    │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Orchestrators  $2.000+                                                                                      │    │
-│    │  gpt-6.1-sol  $2.000+                                                                                      │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.500+                                                                                   │  ──╯
-│    │  gpt-6.1-sol  $1.500+                                                                                      │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Straightforward subagents  $1.000+                                                                          │    │
-│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile All ▾                                                                                                     │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ Codex (resolving)       ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │▸ Unattributed profile    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   payg         ∞        ?  usage-billed                       │
+  │▸ retired-account (uncon… ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   payg         ∞   $0.500  usage-billed                       │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Write release notes [claude]  $8.200+                                                                             │
+  │    claude-opus-5-5  $6.200  tokens unknown                                                                       │
+  │    gpt-6.1-sol  $2.000+  1100000 tokens · 1 turn unreported                                                      │
+  │    0 sub-agents · 3/5 turns reported                                                                             │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    claude-opus-5-5  $7.100  tokens unknown                                                                       │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage unresolved and retained providers (70x17) ===
 
 
-   ╭ × Usage by session ──────────────────────────────────────────╮
-   │Profile All ▾                                                 │
-   │☐ Include suspended sessions                                  │
-   │Total ? · last 24 clock hours · estimated API USD             │
-   │Anthropic $8.200+ · ~6.7%                                     │
-   │… 2 more provider rows (enlarge terminal)                     │
-   │Weekly quota consumed in window · all account use             │
-   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
-   │    16  18  20  22  00  02  04  06  08  10  12  14            │
-   │Primary agents  $7.200+                                       │
-   │Sub-agents included · profile filters turns · + partial · ░ un│
-   │  Refresh     Close                                           │
-   ╰──────────────────────────────────────────────────────────────╯
+  ╭ × Usage Dashboard ─────────────────────────────────────────────╮
+  │Profile All ▾                                                   │
+  │☐ Include suspended sessions                                    │
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │Provider Pace                Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
+  │    ────────────────────────────────────────────────            │
+  │    16  18  20  22  00  02  04  06  08  10  12  14              │
+  │Write release notes [claude]  $8.200+                           │
+  │Sub-agents included · profile filters turns · + partial · ░ unpr│
+  │  Refresh     Close                                             │
+  ╰────────────────────────────────────────────────────────────────╯
 
 
 
-=== Usage by session All with model costs (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile All ▾                                                                                               │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
-│    │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                                                               │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Primary agents  $7.200+                                                                                     │  ▄ ╮
-│    │  claude-opus-5-5  $6.200+                                                                                  │    │
-│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Orchestrators  $2.000+                                                                                      │    │
-│    │  gpt-6.1-sol  $2.000+                                                                                      │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.500+                                                                                   │    │
-│    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Straightforward subagents  $1.000+                                                                          │    │
-│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │                                                                                                            │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
-
-=== Usage by session All with remaining agent roles (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile All ▾                                                                                               │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
-│    │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                                                               │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Reviewers  $7.100+                                                                                          │  ▄ ╮
-│    │  claude-opus-5-5  $7.100+                                                                                  │    │
-│    │                                                                                                            │  ──╯
-│    │Other subagents  $0.105+                                                                                    │  ▄ ╮
-│    │  gpt-6-luna  $0.105+                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Unclassified subagents  ?                                                                                   │    │
-│    │  custom-model  ?                                                                                           │    │
-│    │                                                                                                            │  ──╯
-│    │Write release notes [claude]  $8.200+                                                                       │  ▄ ╮
-│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
-│    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
-│    │    0 sub-agents · 3/5 turns reported                                                                       │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
-
-=== Usage narrow last model total (70x22) ===
+=== Usage quota forecast (120x36) ===
 
 
-   ╭ × Usage by session ──────────────────────────────────────────╮
-   │Profile All ▾                                                 │
-   │                                                              │
-   │☐ Include suspended sessions                                  │
-   │                                                              │
-   │Total ? · last 24 clock hours · estimated API USD             │
-   │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                 │
-   │Weekly quota consumed in window · all account use             │
-   │$50                 ▂                     ░ ▃                 │
-   │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
-   │    16  18  20  22  00  02  04  06  08  10  12  14            │
-   │                                                              │
-   │                                                              │
-   │Unclassified subagents  ?                                     │
-   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│
-   │Sub-agents included · profile filters turns · + partial · ░ un│
-   │  Refresh     Close                                           │
-   ╰──────────────────────────────────────────────────────────────╯
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile All ▾                                                                                                     │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │▸ codex4 (unconfigured)   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄      ?  38% left   $0.000  unmeasured                         │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Write release notes [claude]  $8.200+                                                                             │
+  │    claude-opus-5-5  $6.200  tokens unknown                                                                       │
+  │    gpt-6.1-sol  $2.000+  1100000 tokens · 1 turn unreported                                                      │
+  │    0 sub-agents · 3/5 turns reported                                                                             │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    claude-opus-5-5  $7.100  tokens unknown                                                                       │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+=== Usage Dashboard All with model costs (120x36) ===
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile All ▾                                                                                                     │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Write release notes [claude]  $8.200+                                                                             │
+  │    claude-opus-5-5  $6.200  tokens unknown                                                                       │
+  │    gpt-6.1-sol  $2.000+  1100000 tokens · 1 turn unreported                                                      │
+  │    0 sub-agents · 3/5 turns reported                                                                             │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    claude-opus-5-5  $7.100  tokens unknown                                                                       │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+=== Usage Dashboard All with sessions (120x36) ===
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile All ▾                                                                                                     │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthropic               ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │    0 sub-agents · 3/5 turns reported                                                                             │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    claude-opus-5-5  $7.100  tokens unknown                                                                       │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │    deepseek-flash  $0.000+  2 turns unreported                                                                   │
+  │    2 sub-agents · 4/6 turns reported                                                                             │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+=== Usage narrow session list (70x22) ===
+
+
+  ╭ × Usage Dashboard ─────────────────────────────────────────────╮
+  │Profile All ▾                                                   │
+  │                                                                │
+  │☐ Include suspended sessions                                    │
+  │                                                                │
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │Provider Pace                Pace      Tank    Est $   Forecast │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │$50                 ▂                     ░ ▃                   │
+  │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂             │
+  │    ────────────────────────────────────────────────            │
+  │    16  18  20  22  00  02  04  06  08  10  12  14              │
+  │                                                                │
+  │    2 sub-agents · 4/6 turns reported                           │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
+  │Sub-agents included · profile filters turns · + partial · ░ unpr│
+  │  Refresh     Close                                             │
+  ╰────────────────────────────────────────────────────────────────╯
 
 
 
 === Usage narrow last session (70x22) ===
 
 
-   ╭ × Usage by session ──────────────────────────────────────────╮
-   │Profile All ▾                                                 │
-   │                                                              │
-   │☐ Include suspended sessions                                  │
-   │                                                              │
-   │Total ? · last 24 clock hours · estimated API USD             │
-   │Anthropic $8.200+ · ~6.7% · OpenAI ? · ~20.0%                 │
-   │Weekly quota consumed in window · all account use             │
-   │$50                 ▂                     ░ ▃                 │
-   │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
-   │    16  18  20  22  00  02  04  06  08  10  12  14            │
-   │                                                              │
-   │    custom-model  ?  tokens unknown                           │
-   │    2 sub-agents · 4/4 turns reported                         │
-   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · E│
-   │Sub-agents included · profile filters turns · + partial · ░ un│
-   │  Refresh     Close                                           │
-   ╰──────────────────────────────────────────────────────────────╯
+  ╭ × Usage Dashboard ─────────────────────────────────────────────╮
+  │Profile All ▾                                                   │
+  │                                                                │
+  │☐ Include suspended sessions                                    │
+  │                                                                │
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │▸ Anthropic                   47%         ?  $8.200+  slack · ~5│
+  │▸ OpenAI                     140%         ?        ?  over pace │
+  │$50                 ▂                     ░ ▃                   │
+  │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂             │
+  │    ────────────────────────────────────────────────            │
+  │    16  18  20  22  00  02  04  06  08  10  12  14              │
+  │                                                                │
+  │    2 sub-agents · 4/6 turns reported                           │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
+  │Sub-agents included · profile filters turns · + partial · ░ unpr│
+  │  Refresh     Close                                             │
+  ╰────────────────────────────────────────────────────────────────╯
 
 
 
 === Usage profile dropdown (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile All ▾                                                                                               │    │
-│ C  │        ╭Profile──────╮                                                                                     │    │
-│he  │☐ Includ│All          │sions                                                                                │    │
-│›   │        │claude       │                                                                                     │    │
-│    │Total ? │claude-1     │ hours · estimated API USD                                                           │    │
-│    │Anthropi│claude-idle  │7% · OpenAI ? · ~20.0%                                                               │    │
-│    │Weekly q│codex        │n window · all account use                                                           │    │
-│    │$50     │codex-1      │                                                         ░░░                         │    │
-│    │        │codex-2      │                                                         ░░░ ▄▄▄                     │    │
-│    │$25     ╰─────────────╯             ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Primary agents  $7.200+                                                                                     │  ▄ ╮
-│    │  claude-opus-5-5  $6.200+                                                                                  │    │
-│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Orchestrators  $2.000+                                                                                      │    │
-│    │  gpt-6.1-sol  $2.000+                                                                                      │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.500+                                                                                   │    │
-│    │  gpt-6.1-sol  $1.500+                                                                                      │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │Straightforward subagents  $1.000+                                                                          │    │
-│    │  gpt-6.1-sol  $1.000+                                                                                      │    │
-│    │                                                                                                            │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
 
-=== Usage Codex with model totals (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile codex ▾                                                                                             │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
-│    │OpenAI ? · ~20.0%                                                                                           │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile All ▾                                                                                                     │
+  │        ╭Profile──────╮                                                                                           │
+  │☐ Includ│All          │sions                                                                                      │
+  │        │claude       │                                                                                           │
+  │Total ? │claude-1     │ hours · estimated API USD                                                                 │
+  │Provider│claude-idle  │   0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ Anthro│codex        │   ━━━━━━······│············    47%         ?  $8.200+  slack · ~53% unused                │
+  │▸ OpenAI│codex-1      │   ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │$50     │codex-2      │                                                         ░░░                               │
+  │        ╰─────────────╯                                                         ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │    0 sub-agents · 3/5 turns reported                                                                             │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    claude-opus-5-5  $7.100  tokens unknown                                                                       │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │    deepseek-flash  $0.000+  2 turns unreported                                                                   │
+  │    2 sub-agents · 4/6 turns reported                                                                             │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+=== Usage Codex with session models (120x36) ===
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile codex ▾                                                                                                   │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │    deepseek-flash  $0.000+  2 turns unreported                                                                   │
+  │    2 sub-agents · 4/6 turns reported                                                                             │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage one hour selected (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile codex ▾                                                                                             │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · Mon Nov 24 18:00–19:00 · estimated API USD                                                        │    │
-│    │OpenAI ? · ~1.2% (partial)                                                                                  │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile codex ▾                                                                                                   │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · Mon Nov 24 18:00–19:00 · estimated API USD                                                              │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━···········│············    ~9%         ?        ?  slack · ~91% unused                │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────━━━━────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │    deepseek-flash  $0.000+  2 turns unreported                                                                   │
+  │    2 sub-agents · 4/6 turns reported                                                                             │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage discontiguous hours selected (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile codex ▾                                                                                             │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · 2 hours selected · estimated API USD                                                              │    │
-│    │OpenAI ? · ~20.0%                                                                                           │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile codex ▾                                                                                                   │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · 2 hours selected · estimated API USD                                                                    │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────━━━━────────────────━━━━────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │    deepseek-flash  $0.000+  2 turns unreported                                                                   │
+  │    2 sub-agents · 4/6 turns reported                                                                             │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage range added (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile codex ▾                                                                                             │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · 7 hours selected · estimated API USD                                                              │    │
-│    │OpenAI ? · ~20.0%                                                                                           │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Primary agents  $1.000                                                                                      │  ▄ ╮
-│    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │  ──╯
-│    │Orchestrators  $1.000                                                                                       │  ▄ ╮
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Subtle subagents  $1.000                                                                                    │    │
-│    │  gpt-6.1-sol  $1.000                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Straightforward subagents  $0.500                                                                           │  ▄ ╮
-│    │  gpt-6.1-sol  $0.500                                                                                       │    │
-│    │                                                                                                            │    │
-│    │Oracles  $0.500                                                                                             │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile codex ▾                                                                                                   │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · 7 hours selected · estimated API USD                                                                    │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ?                                                                                   │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │    deepseek-flash  $0.000+  2 turns unreported                                                                   │
+  │    2 sub-agents · 4/6 turns reported                                                                             │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage no hours selected (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile codex ▾                                                                                             │    │
-│ C  │                                                                                                            │    │
-│he  │☐ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total $0.000 · no hours selected · estimated API USD                                                        │    │
-│    │OpenAI $0.000 · ~0.0%                                                                                       │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Investigate recovery [codex]  $0.000                                                                        │  ▄ ╮
-│    │    2 sub-agents · 0/0 turns reported                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile codex ▾                                                                                                   │
+  │                                                                                                                  │
+  │☐ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total $0.000 · no hours selected · estimated API USD                                                              │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ············│············     0%         ?   $0.000  idle                               │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  $0.000                                                                              │
+  │    2 sub-agents · 0/0 turns reported                                                                             │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage weekly including suspended (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile codex ▾                                                                                             │    │
-│ C  │                                                                                                            │    │
-│he  │☒ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
-│    │OpenAI ? · ~20.0%                                                                                           │    │
-│    │Weekly quota consumed in window · all account use                                                           │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │  ──╯
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │  ──╮
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │    │
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │    │
-│    │                                                                                                            │  ──╯
-│    │Other subagents  $0.105                                                                                     │  ▄ ╮
-│    │  gpt-6-luna  $0.105                                                                                        │    │
-│    │                                                                                                            │  ──╯
-│    │Unclassified subagents  ?                                                                                   │  ▄ ╮
-│    │  custom-model  ?                                                                                           │    │
-│    │                                                                                                            │    │
-│    │Investigate recovery [codex]  ? · suspended                                                                 │    │
-│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
-│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
-│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │  ▄ ╮
-│    │    custom-model  ?  tokens unknown                                                                         │    │
-│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Ent
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile codex ▾                                                                                                   │
+  │                                                                                                                  │
+  │☒ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │Total ? · last 24 clock hours · estimated API USD                                                                 │
+  │Provider Pace             0%        100%      200%+   Pace      Tank    Est $   Forecast / Models                 │
+  │▸ OpenAI                  ━━━━━━━━━━━━┼━━━━━·······   140%         ?        ?  over pace                          │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Investigate recovery [codex]  ? · suspended                                                                       │
+  │    gpt-6.1-sol  $3.000  tokens unknown                                                                           │
+  │    gpt-6.1-terra  $1.000  tokens unknown                                                                         │
+  │    gpt-6-luna  $0.105  tokens unknown                                                                            │
+  │    custom-model  ?  tokens unknown                                                                               │
+  │    deepseek-flash  $0.000+  2 turns unreported                                                                   │
+  │    2 sub-agents · 4/6 turns reported                                                                             │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 
 === Usage short terminal (70x17) ===
 
 
-   ╭ × Usage by session ──────────────────────────────────────────╮
-   │Profile codex ▾                                               │
-   │☒ Include suspended sessions                                  │
-   │Total ? · last 24 clock hours · estimated API USD             │
-   │OpenAI ? · ~20.0%                                             │
-   │Weekly quota consumed in window · all account use             │
-   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
-   │    16  18  20  22  00  02  04  06  08  10  12  14            │
-   │                                                              │
-   │Investigate recovery [codex]  ? · suspended                   │
-   │Sub-agents included · profile filters turns · + partial · ░ un│
-   │  Refresh     Close                                           │
-   ╰──────────────────────────────────────────────────────────────╯
+  ╭ × Usage Dashboard ─────────────────────────────────────────────╮
+  │Profile codex ▾                                                 │
+  │☒ Include suspended sessions                                    │
+  │Total ? · last 24 clock hours · estimated API USD               │
+  │Provider Pace                Pace      Tank    Est $   Forecast │
+  │▸ OpenAI                     140%         ?        ?  over pace │
+  │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
+  │    ────────────────────────────────────────────────            │
+  │    16  18  20  22  00  02  04  06  08  10  12  14              │
+  │    2 sub-agents · 4/6 turns reported                           │
+  │Sub-agents included · profile filters turns · + partial · ░ unpr│
+  │  Refresh     Close                                             │
+  ╰────────────────────────────────────────────────────────────────╯
 
 
 
 === Usage report failure (120x36) ===
-╭ W                                                                                                                  ──╮
-│ d                                                                                                                    │
-╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile codex ▾                                                                                             │    │
-│ C  │                                                                                                            │    │
-│he  │☒ Include suspended sessions                                                                                │    │
-│›   │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │$50                                                                             ░░░                         │    │
-│    │                                                                                ░░░ ▄▄▄                     │    │
-│    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
-│    │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁             │    │
-│    │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆         │  ──╯
-│    │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15          │  ──╮
-│    │                                                                                                            │    │
-│    │Usage load failed: test store unavailable                                                                   │    │
-│    │Use Refresh to retry.                                                                                       │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                      │    │
-│    │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                           │    │
-│    │  Refresh     Close                                                                                         │    │
-│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
-╰──                                                                                                                  ──╯
-Usa
+
+
+  ╭ × Usage Dashboard ───────────────────────────────────────────────────────────────────────────────────────────────╮
+  │Profile codex ▾                                                                                                   │
+  │                                                                                                                  │
+  │☒ Include suspended sessions                                                                                      │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │$50                                                                             ░░░                               │
+  │                                                                                ░░░ ▄▄▄                           │
+  │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                           │
+  │                                ▂▂▂ ███ ███ ▆▆▆                         ▃▃▃ ███ ░░░ ███ ███ ▁▁▁                   │
+  │ $0         ▂▂▂ ▆▆▆ ▄▄▄         ███ ███ ███ ███ ▇▇▇ ▃▃▃ ░░░         ▅▅▅ ███ ███ ░░░ ███ ███ ███ ▆▆▆               │
+  │    ────────────────────────────────────────────────────────────────────────────────────────────────              │
+  │    16  17  18  19  20  21  22  23  00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15                │
+  │                                                                                                                  │
+  │Usage load failed: test store unavailable                                                                         │
+  │Use Refresh to retry.                                                                                             │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all                                            │
+  │Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates                                 │
+  │  Refresh     Close                                                                                               │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
 new session before the Git identity check: CheckGitIdentity
 new session while the check runs: None
 notice while the check runs: Some("Still checking the Git identity on this host…")

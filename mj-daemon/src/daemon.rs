@@ -246,6 +246,10 @@ const ATTACHMENT_LEASE: Duration = Duration::from_secs(15);
 #[derive(Default)]
 struct QuotaBoard {
     snapshot: mj_core::snapshot_map::SharedSnapshot<mj_client::quota::QuotaSnapshot>,
+    /// Active `(cache_identity, refreshed_at_epoch_seconds)` per profile for
+    /// the published reports so stale or relinked forecasts are never paired
+    /// with a different quota reading.
+    report_stamps: BTreeMap<String, (String, u64)>,
     refresh: Option<tokio::sync::mpsc::UnboundedSender<QuotaRefreshIntent>>,
 }
 
@@ -253,6 +257,10 @@ struct QuotaBoard {
 pub(crate) enum QuotaRefreshIntent {
     Force,
     ReconcileSources,
+    ProbeOnFault {
+        profile_id: String,
+        failed_at_epoch_seconds: u64,
+    },
     /// Probe these profiles once even though they sit outside the enabled
     /// batch (for `mj quota --with-disabled`); their reports stay served until
     /// their identities change. A forced probe answers now, off the profile's
@@ -278,7 +286,10 @@ pub struct RuntimeState {
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
-    owner: Mutex<RuntimeStateOwner>,
+    /// Shared with the role-assignment sync task, which invalidates the
+    /// owner's last persisted snapshot when a write fails.
+    owner: Arc<Mutex<RuntimeStateOwner>>,
+    role_sync_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Rebuilt by the delegation service when the API server starts; weak so
     /// the backend's ExportRuntime reference does not form an Arc cycle.
     pub(crate) report_backend:

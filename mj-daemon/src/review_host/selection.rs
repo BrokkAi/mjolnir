@@ -76,8 +76,8 @@ pub(crate) async fn resolve(
             .await
         }
         .map_err(|error| anyhow::anyhow!("reviewer model {model:?}: {}", error.message))?;
-        selected.reservation.commit(None);
         selections.push(ResolvedReviewSettings {
+            reservation: mj_core::review::settings::ReviewReservation::new(selected.reservation),
             profile: selected.profile_id,
             main: ReviewModelSettings {
                 model: Some(selected.model),
@@ -105,8 +105,8 @@ pub(crate) async fn resolve_choice(
     )
     .await
     .map_err(|error| anyhow::anyhow!("model {model:?}: {}", error.message))?;
-    selected.reservation.commit(None);
     Ok(ResolvedReviewSettings {
+        reservation: mj_core::review::settings::ReviewReservation::new(selected.reservation),
         profile: selected.profile_id,
         main: ReviewModelSettings {
             model: Some(selected.model),

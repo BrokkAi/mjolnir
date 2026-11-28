@@ -631,8 +631,7 @@ before a 5-hour reset is plenty, while 5% left six days before a weekly reset
 is not. The window furthest behind decides. A limit for one model, such as a
 weekly Fable limit, counts only for that model. A pay-per-use profile counts as
 exactly on pace, so a subscription with quota to spare comes first. A profile
-with no quota left, then one with no quota report, comes last. Profiles named
-in `[quota] prefer` lead, most preferred first, while their quota tier allows.
+with no quota left, then one with no quota report, comes last.
 On a tie, the parent's own profile wins. `mj doctor` shows, for each profile, where its quota
 comes from and that sub-agents may use it.
 
@@ -694,7 +693,7 @@ dsh-acp settings may go in
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
 cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
-only when it is at least the pinned version (0.8.1), otherwise the pinned npm package. Containers
+only when it is at least the pinned version (0.8.2), otherwise the pinned npm package. Containers
 use their image-provided runtime or the documented installer fallback. The
 `mj login` command invokes the harness's canonical controller-side command from
 `PATH`.

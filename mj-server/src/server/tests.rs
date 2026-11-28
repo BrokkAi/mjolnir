@@ -7,6 +7,30 @@ use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
 #[tokio::test]
+async fn retired_quota_preferences_endpoint_accepts_old_and_empty_requests() {
+    let mut options = detached_options();
+    options.set_loopback_token("terminal-test-token".into());
+    let app = router(options);
+    for body in [r#"{"prefer":["codex"]}"#, "{}"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/terminal/quota/preferences")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        "Bearer terminal-test-token",
+                    )
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
 async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
     let gate = Arc::new(mj_store::upgrade::Gate::default());
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -4160,15 +4184,21 @@ async fn shell_assets_revalidate_with_strong_content_etags() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{path}");
         assert_eq!(
-            response.headers()[CACHE_CONTROL], cache_control,
+            response.headers()[CACHE_CONTROL],
+            cache_control,
             "{path} has the wrong cache contract"
         );
         if path == "/" || path == "/login" {
-            assert_eq!(response.headers()[CONTENT_TYPE], "text/html; charset=utf-8", "{path}");
+            assert_eq!(
+                response.headers()[CONTENT_TYPE],
+                "text/html; charset=utf-8",
+                "{path}"
+            );
         }
         if path.ends_with(".js") {
             assert_eq!(
-                response.headers()[CONTENT_TYPE], "text/javascript; charset=utf-8",
+                response.headers()[CONTENT_TYPE],
+                "text/javascript; charset=utf-8",
                 "{path}"
             );
         }
@@ -4266,7 +4296,10 @@ async fn viewer_responses_negotiate_fast_compression() {
                 .contains("accept-encoding")
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(body.len() < raw.len(), "{encoding} did not reduce the asset");
+        assert!(
+            body.len() < raw.len(),
+            "{encoding} did not reduce the asset"
+        );
         let digest = Sha256::digest(&body)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -5905,4 +5938,3 @@ async fn migrated_terminal_routes_reject_browser_and_external_bearer_before_json
         }
     }
 }
-

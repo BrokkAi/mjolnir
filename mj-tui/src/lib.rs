@@ -631,12 +631,6 @@ pub enum DashboardAction {
         session_id: String,
         ignored: bool,
     },
-    /// Move a profile to the front of `[quota] prefer`.
-    PreferLoadBalancingProfile {
-        profile_id: String,
-    },
-    /// Empty `[quota] prefer`.
-    ClearLoadBalancingPreferences,
     /// Probe one profile's quota now, even a disabled profile's.
     ProbeQuotaProfile {
         profile_id: String,

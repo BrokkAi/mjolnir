@@ -17,7 +17,26 @@ use mj_core::harness_runtime::{
     managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches,
     managed_node_cache_root, node_version_is_at_least, npm_bridge, pin,
 };
+use mj_core::remove_tree::{self, RemoveOutcome};
 use mj_core::worker_launch::HarnessRuntimePolicy;
+
+/// Report a best-effort tree removal without failing the caller. These caches
+/// and staging trees are collected again by the next install or sweep, so a
+/// tree that still has entries is left for that pass.
+fn warn_leftover_tree(path: &Path, what: &str, result: std::io::Result<RemoveOutcome>) {
+    match result {
+        Ok(RemoveOutcome::Removed) => {}
+        Ok(RemoveOutcome::Leftovers { path }) => tracing::warn!(
+            path = %path.display(),
+            "could not empty {what}; the next sweep will retry"
+        ),
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            %error,
+            "could not remove {what}"
+        ),
+    }
+}
 
 const INSTALL_LOCK_FILE: &str = ".install.lock";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -894,19 +913,24 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
 /// retried by the next resolution; it must not block a launch, because
 /// nothing but this sweep ever looks at it.
 fn remove_abandoned_staging(harness_root: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(harness_root)
+    // Collect before deleting: unlinking during the streaming readdir shifts
+    // offsets on fuse-overlayfs and can skip later abandoned installs.
+    let entries = std::fs::read_dir(harness_root)
         .with_context(|| format!("scan managed harness staging in {}", harness_root.display()))?
-    {
-        let entry = entry?;
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
         if !name.starts_with(".install-") || !entry.file_type()?.is_dir() {
             continue;
         }
-        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
-            tracing::warn!(%error, path = %entry.path().display(), "could not remove abandoned harness staging");
-        }
+        let path = entry.path();
+        warn_leftover_tree(
+            &path,
+            "abandoned harness staging",
+            remove_tree::remove_dir_all(&path),
+        );
     }
     Ok(())
 }
@@ -932,9 +956,11 @@ fn set_aside_incomplete(parent: &Path, install: &Path, what: &str) -> Result<()>
             aside.display()
         )
     })?;
-    if let Err(error) = std::fs::remove_dir_all(&aside) {
-        tracing::warn!(%error, path = %aside.display(), "could not remove incomplete {what}; the next installation will retry");
-    }
+    warn_leftover_tree(
+        &aside,
+        &format!("incomplete {what}"),
+        remove_tree::remove_dir_all(&aside),
+    );
     Ok(())
 }
 
@@ -1012,9 +1038,11 @@ async fn install_into(
         Ok(()) => validate_entrypoint(final_path, selected, harness)
             .context("validate relocated managed harness"),
         Err(error) if final_path.exists() => {
-            std::fs::remove_dir_all(&staging_path).with_context(|| {
-                format!("remove losing harness staging {}", staging_path.display())
-            })?;
+            warn_leftover_tree(
+                &staging_path,
+                "losing harness staging",
+                remove_tree::remove_dir_all(&staging_path),
+            );
             if complete_install(final_path, harness, selected)? {
                 Ok(())
             } else {
@@ -1031,8 +1059,10 @@ async fn install_into(
 /// Installer-generated absolute links inside staging must survive its rename.
 /// Do not follow directory links or rewrite links to external tools.
 fn relativize_internal_links(root: &Path, directory: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
+    // Replacing links while the parent readdir is streaming can shift offsets on
+    // fuse-overlayfs; snapshot this level first.
+    let entries = std::fs::read_dir(directory)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
         let path = entry.path();
         let kind = entry.file_type()?;
         if kind.is_dir() {
@@ -1761,10 +1791,12 @@ async fn install_managed_node(
 }
 
 fn gc_node_root(root: &Path, keep: &str) -> Result<()> {
-    for entry in std::fs::read_dir(root)
+    // Collect first so deleting an obsolete install cannot hide a later entry
+    // from this scan on fuse-overlayfs.
+    let entries = std::fs::read_dir(root)
         .with_context(|| format!("scan managed Node.js cache {}", root.display()))?
-    {
-        let entry = entry?;
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -1782,9 +1814,12 @@ fn gc_node_root(root: &Path, keep: &str) -> Result<()> {
         match lease.try_lock() {
             Ok(()) => {
                 let _lease = FileLock::new(lease);
-                if let Err(error) = std::fs::remove_dir_all(entry.path()) {
-                    tracing::warn!(%error, path = %entry.path().display(), "could not remove obsolete managed Node.js");
-                }
+                let path = entry.path();
+                warn_leftover_tree(
+                    &path,
+                    "obsolete managed Node.js",
+                    remove_tree::remove_dir_all(&path),
+                );
             }
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(std::fs::TryLockError::Error(error)) => {
@@ -2393,10 +2428,12 @@ fn collect_obsolete_installs(harness_root: &Path, keep_install_id: &str) -> Resu
 
 /// The caller holds the install lock for `root`.
 fn gc_harness_root(root: &Path, keep_install_id: &str) -> Result<()> {
-    for entry in std::fs::read_dir(root)
+    // Collect first so deleting an obsolete install cannot hide a later entry
+    // from this scan on fuse-overlayfs.
+    let entries = std::fs::read_dir(root)
         .with_context(|| format!("scan managed harness cache {}", root.display()))?
-    {
-        let entry = entry?;
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -2415,9 +2452,12 @@ fn gc_harness_root(root: &Path, keep_install_id: &str) -> Result<()> {
         match lease.try_lock() {
             Ok(()) => {
                 let _lease = FileLock::new(lease);
-                if let Err(error) = std::fs::remove_dir_all(entry.path()) {
-                    tracing::warn!(%error, path = %entry.path().display(), "could not remove obsolete managed harness");
-                }
+                let path = entry.path();
+                warn_leftover_tree(
+                    &path,
+                    "obsolete managed harness",
+                    remove_tree::remove_dir_all(&path),
+                );
             }
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(std::fs::TryLockError::Error(error)) => {

@@ -28,7 +28,7 @@ pub(super) struct Policy {
     catalog: Arc<ProfileCatalog>,
     pub(super) reports: Arc<std::sync::Mutex<QuotaReportMap>>,
     rejected: Arc<std::sync::Mutex<mj_core::credentials::RejectedLogins>>,
-    quotas_tx: watch::Sender<QuotaReportMap>,
+    pub(super) quotas_tx: watch::Sender<QuotaReportMap>,
     profiles_tx: watch::Sender<QuotaRefreshBatch>,
     pub quota_rx: mpsc::Receiver<QuotaUpdate>,
     pub refresh_rx: mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>,
@@ -37,6 +37,11 @@ pub(super) struct Policy {
     catalog_config: Option<mj_core::config::Config>,
     /// Profiles the poller is asking a provider about right now.
     probing: std::collections::BTreeSet<String>,
+    /// Profiles with an immediate fault-triggered probe scheduled as
+    /// `(batch_generation, failed_at_epoch_seconds)` so concurrent 429 bursts
+    /// deduplicate, an already-in-flight pre-fault probe queues one follow-up,
+    /// and a `Finished` from an earlier generation never clears a newer probe.
+    pending_fault_probes: BTreeMap<String, (u64, u64)>,
     /// Poll cycles the poller has finished.
     cycles: u64,
     credentials: CredentialSyncCoordinator,
@@ -155,6 +160,65 @@ fn coalesce_intent(
         crate::daemon::QuotaRefreshIntent::ReconcileSources
     }
 }
+fn settle_fault_probes(
+    pending: &mut BTreeMap<String, (u64, u64)>,
+    probing: &std::collections::BTreeSet<String>,
+    update: &QuotaUpdate,
+) {
+    match update {
+        QuotaUpdate::Report(outcome) => {
+            let id = &outcome.report.profile_id;
+            if let Some(&(_, failed_at)) = pending.get(id)
+                && (outcome.report.refreshed_at_epoch_seconds > failed_at
+                    || outcome.report.rate_limited_until_epoch_seconds.is_some())
+            {
+                pending.remove(id);
+            }
+        }
+        QuotaUpdate::Finished { generation } => pending
+            .retain(|id, (scheduled_gen, _)| *scheduled_gen > *generation || probing.contains(id)),
+        _ => {}
+    }
+}
+
+fn schedule_fault_probes(
+    batch: &mut QuotaRefreshBatch,
+    pending: &mut BTreeMap<String, (u64, u64)>,
+    next: &mut u64,
+    reports: &QuotaReportMap,
+    probes: BTreeMap<String, u64>,
+    now: u64,
+) -> bool {
+    let mut scheduled = Vec::new();
+    for (id, failed_at) in probes {
+        if !batch.profiles.iter().any(|p| p.profile_id == id) || pending.contains_key(&id) {
+            continue;
+        }
+        if let Some(publication) = reports.get(&id)
+            && (publication.effective_report(&id).is_some_and(|r| {
+                r.rate_limited_until_epoch_seconds
+                    .is_some_and(|until| until > now)
+            }) || publication
+                .report
+                .as_ref()
+                .is_some_and(|r| r.error.is_none() && r.refreshed_at_epoch_seconds > failed_at))
+        {
+            continue;
+        }
+        *next += 1;
+        batch.forced_probes.insert(id.clone(), *next);
+        scheduled.push((id, failed_at));
+    }
+    if scheduled.is_empty() {
+        return false;
+    }
+    batch.generation = batch.generation.saturating_add(1);
+    for (id, failed_at) in scheduled {
+        pending.insert(id, (batch.generation, failed_at));
+    }
+    true
+}
+
 impl Policy {
     pub fn new(
         state: Arc<RuntimeState>,
@@ -185,6 +249,20 @@ impl Policy {
         let reports = Arc::new(std::sync::Mutex::new(QuotaReportMap::new()));
         let (quotas_tx, quotas) = watch::channel(QuotaReportMap::new());
         let (refresh, refresh_rx) = mpsc::unbounded_channel();
+        let fault_refresh = refresh.clone();
+        mj_controller::profile_health::shared()
+            .lock()
+            .expect("profile health poisoned")
+            .register_fault_observer(Arc::new(
+                move |profile_id, _fault, failed_at_epoch_seconds| {
+                    fault_refresh
+                        .send(crate::daemon::QuotaRefreshIntent::ProbeOnFault {
+                            profile_id: profile_id.to_owned(),
+                            failed_at_epoch_seconds,
+                        })
+                        .is_ok()
+                },
+            ));
         catalog.set_quota_reports(reports.clone());
         let rejected = state.rejected_logins.clone();
         let runtime = state.clone();
@@ -232,6 +310,7 @@ impl Policy {
             quota_sources: QuotaSourceScan::default(),
             catalog_config: None,
             probing: Default::default(),
+            pending_fault_probes: Default::default(),
             cycles: 0,
             credentials,
             signals: CredentialSyncSignalTracker::default(),
@@ -273,10 +352,20 @@ impl Policy {
         let mut force = false;
         let mut reconcile = false;
         let mut probes = Vec::new();
+        let mut fault_probes = BTreeMap::<String, u64>::new();
         for intent in intents {
             match intent {
                 crate::daemon::QuotaRefreshIntent::Force => force = true,
                 crate::daemon::QuotaRefreshIntent::ReconcileSources => reconcile = true,
+                crate::daemon::QuotaRefreshIntent::ProbeOnFault {
+                    profile_id,
+                    failed_at_epoch_seconds,
+                } => {
+                    fault_probes
+                        .entry(profile_id)
+                        .and_modify(|at| *at = (*at).max(failed_at_epoch_seconds))
+                        .or_insert(failed_at_epoch_seconds);
+                }
                 crate::daemon::QuotaRefreshIntent::ProbeProfiles { requests, forced } => {
                     probes.extend(requests.into_iter().map(|request| (request, forced)))
                 }
@@ -288,8 +377,23 @@ impl Policy {
             self.quota_sources
                 .request(crate::daemon::QuotaRefreshIntent::ReconcileSources);
         }
+        self.probe_on_fault(fault_probes);
         if !probes.is_empty() {
             self.probe_profiles(probes);
+        }
+    }
+
+    fn probe_on_fault(&mut self, probes: BTreeMap<String, u64>) {
+        let reports = self.reports.lock().expect("quota reports poisoned");
+        if schedule_fault_probes(
+            &mut self.batch,
+            &mut self.pending_fault_probes,
+            &mut self.next_forced_probe,
+            &reports,
+            probes,
+            mj_core::clock::epoch_seconds(),
+        ) {
+            self.profiles_tx.send_replace(self.batch.clone());
         }
     }
 
@@ -425,6 +529,11 @@ impl Policy {
             self.quotas_tx.send_replace(reports.clone());
             changed
         };
+        for id in &changed {
+            self.pending_fault_probes.remove(id);
+        }
+        self.pending_fault_probes
+            .retain(|id, _| desired.contains_key(id));
         if !changed.is_empty() {
             let mut health = mj_controller::profile_health::shared()
                 .lock()
@@ -441,12 +550,21 @@ impl Policy {
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
         // The installed profile decides which Antigravity pools people see.
-        let surfaced = surface_quota_reports(&reports, &self.state.owner().controller().config);
-        self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
-            reports: surfaced,
-            probing: self.probing.clone(),
-            cycles: self.cycles,
-        });
+        let owner = self.state.owner();
+        let config = &owner.controller().config;
+        let surfaced = surface_quota_reports(&reports, config);
+        let stamps = active_projection_stamps(&reports, config);
+        drop(owner);
+        self.state.publish_quotas_with_stamps(
+            mj_client::quota::QuotaSnapshot {
+                reports: surfaced,
+                // Filled under `RuntimeState::quota` lock inside `publish_quotas_with_stamps`.
+                quota_projections: Vec::new(),
+                probing: self.probing.clone(),
+                cycles: self.cycles,
+            },
+            stamps,
+        );
     }
     pub fn observe(&mut self, id: &str, observation: &DelegationObservation) {
         let Some(session) = self.state.session_record(id) else {
@@ -568,21 +686,35 @@ impl Policy {
                         profile_id,
                         "discarding quota result for an obsolete profile identity"
                     );
-                } else if outcome.report.error.is_none() {
-                    // A usage-priced profile has no allowance to run out of.
-                    let windows = if outcome.report.is_usage_priced() {
-                        Vec::new()
-                    } else {
-                        outcome.report.windows.clone()
-                    };
-                    mj_controller::profile_health::shared()
-                        .lock()
-                        .expect("profile health poisoned")
-                        .observe_quota(&profile_id, &windows, SystemTime::now());
+                } else {
+                    settle_fault_probes(
+                        &mut self.pending_fault_probes,
+                        &self.probing,
+                        &QuotaUpdate::Report(outcome.clone()),
+                    );
+                    if outcome.report.error.is_none() {
+                        // A usage-priced profile has no allowance to run out of.
+                        let windows = if outcome.report.is_usage_priced() {
+                            Vec::new()
+                        } else {
+                            outcome.report.windows.clone()
+                        };
+                        mj_controller::profile_health::shared()
+                            .lock()
+                            .expect("profile health poisoned")
+                            .observe_quota(&profile_id, &windows, SystemTime::now());
+                    }
                 }
             }
             // Reports end probing, so a finished cycle only counts (#1595).
-            QuotaUpdate::Finished { .. } => self.cycles += 1,
+            QuotaUpdate::Finished { generation } => {
+                settle_fault_probes(
+                    &mut self.pending_fault_probes,
+                    &self.probing,
+                    &QuotaUpdate::Finished { generation },
+                );
+                self.cycles += 1;
+            }
         }
         self.publish_quotas();
     }
@@ -799,6 +931,46 @@ fn reconcile_quota_publications(
 /// What people see of each report. An Antigravity profile shows only the
 /// pools the installed profile uses; the stored report keeps every pool for
 /// selection and quota recovery.
+/// Active surfaced report eligible for burn-rate projection. Shared by
+/// telemetry refresh and `Policy::publish_quotas` so forecast stamps and
+/// Antigravity pool filters always match the exact reading displayed beside them.
+pub(super) fn active_projection_report(
+    id: &str,
+    publication: &mj_controller::quota::QuotaReportPublication,
+    config: &mj_core::config::Config,
+) -> Option<ProfileQuota> {
+    let report = publication.effective_report(id)?;
+    if report.windows.is_empty()
+        || (report.error.is_some() && report.rate_limited_until_epoch_seconds.is_none())
+    {
+        return None;
+    }
+    let mut surfaced = mj_controller::quota::surface_quota_report(&report);
+    if let Ok(profile) = config.named_profile(id) {
+        surfaced.retain_antigravity_pools(&profile.antigravity_pools());
+    }
+    (!surfaced.windows.is_empty()).then_some(surfaced)
+}
+
+fn active_projection_stamps(
+    reports: &QuotaReportMap,
+    config: &mj_core::config::Config,
+) -> BTreeMap<String, (String, u64)> {
+    reports
+        .iter()
+        .filter_map(|(id, publication)| {
+            let active = active_projection_report(id, publication, config)?;
+            Some((
+                id.clone(),
+                (
+                    publication.cache_identity.clone(),
+                    active.refreshed_at_epoch_seconds,
+                ),
+            ))
+        })
+        .collect()
+}
+
 fn surface_quota_reports(
     reports: &QuotaReportMap,
     config: &mj_core::config::Config,
@@ -838,6 +1010,7 @@ mod tests {
                 http_status: None,
                 message: "Authentication required".into(),
                 reset_at: None,
+                retry_after_seconds: None,
                 login_fingerprint: Some("failed-token".into()),
             }),
             usage: None,
@@ -1181,6 +1354,145 @@ mod tests {
         assert!(!publish_quota_outcome(&mut reports, &outcome));
         assert!(reports["codex"].report.is_none());
         assert!(reports["codex"].last_good.is_none());
+    }
+
+    #[test]
+    fn fault_probe_deduplicates_and_respects_holds_and_fresh_reports() {
+        let mut controller = mj_controller::controller::Controller {
+            config: Default::default(),
+            state: Default::default(),
+        };
+        controller.config.profiles.insert(
+            "claude".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                "/tmp/probe-test",
+            ),
+        );
+        let mut batch = QuotaRefreshBatch {
+            profiles: quota_refresh_profiles(&controller),
+            ..Default::default()
+        };
+        let mut pending = Default::default();
+        let mut next = 0;
+        let mut reports = QuotaReportMap::new();
+        for _ in 0..10 {
+            schedule_fault_probes(
+                &mut batch,
+                &mut pending,
+                &mut next,
+                &reports,
+                BTreeMap::from([("claude".into(), 10), ("unsupported".into(), 10)]),
+                20,
+            );
+        }
+        assert_eq!(next, 1);
+        assert_eq!(batch.forced_probes.len(), 1);
+        pending.clear();
+        let report = ProfileQuota {
+            profile_id: "claude".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            windows: vec![],
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            extra: None,
+            error: Some("hold".into()),
+            refreshed_at_epoch_seconds: 1,
+            rate_limited_until_epoch_seconds: Some(30),
+            next_check_at_epoch_seconds: None,
+        };
+        reports.insert(
+            "claude".into(),
+            QuotaReportPublication {
+                login_error: None,
+                cache_identity: String::new(),
+                last_good: None,
+                report: Some(report),
+            },
+        );
+        let probe = || BTreeMap::from([("claude".into(), 10)]);
+        assert!(!schedule_fault_probes(
+            &mut batch,
+            &mut pending,
+            &mut next,
+            &reports,
+            probe(),
+            20
+        ));
+        let report = reports.get_mut("claude").unwrap().report.as_mut().unwrap();
+        report.rate_limited_until_epoch_seconds = None;
+        report.error = None;
+        // Strictly newer report (> failed_at) suppresses a redundant probe.
+        report.refreshed_at_epoch_seconds = 11;
+        assert!(!schedule_fault_probes(
+            &mut batch,
+            &mut pending,
+            &mut next,
+            &reports,
+            probe(),
+            20
+        ));
+        // Same-second failure (refreshed_at == failed_at) still queues a follow-up probe.
+        assert!(schedule_fault_probes(
+            &mut batch,
+            &mut pending,
+            &mut next,
+            &reports,
+            BTreeMap::from([("claude".into(), 11)]),
+            20
+        ));
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn fault_probe_completion_releases_only_settled_profiles() {
+        let mut pending = BTreeMap::from([
+            ("a".to_owned(), (1, 10)),
+            ("b".to_owned(), (1, 10)),
+            ("c".to_owned(), (2, 10)),
+        ]);
+        let probing = ["b".to_owned()].into_iter().collect();
+        let report = |refreshed_at| ProfileQuota {
+            profile_id: "b".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            windows: vec![],
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: refreshed_at,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        let outcome = |refreshed_at| mj_controller::quota::QuotaRefreshOutcome {
+            cache_identity: String::new(),
+            report: report(refreshed_at),
+            credentials_changed: false,
+        };
+        // Finished(generation 1) settles `a`, keeps active `b`, and keeps newer-generation `c`.
+        settle_fault_probes(
+            &mut pending,
+            &probing,
+            &QuotaUpdate::Finished { generation: 1 },
+        );
+        assert_eq!(
+            pending,
+            BTreeMap::from([("b".to_owned(), (1, 10)), ("c".to_owned(), (2, 10))])
+        );
+        // An in-flight pre-fault report (refreshed_at <= failed_at) must not clear `b`.
+        settle_fault_probes(&mut pending, &probing, &QuotaUpdate::Report(outcome(10)));
+        assert!(pending.contains_key("b"));
+        // Post-fault report (refreshed_at > failed_at) clears `b`.
+        settle_fault_probes(&mut pending, &probing, &QuotaUpdate::Report(outcome(11)));
+        assert_eq!(pending, BTreeMap::from([("c".to_owned(), (2, 10))]));
+        settle_fault_probes(
+            &mut pending,
+            &probing,
+            &QuotaUpdate::Finished { generation: 2 },
+        );
+        assert!(pending.is_empty());
     }
 
     #[test]

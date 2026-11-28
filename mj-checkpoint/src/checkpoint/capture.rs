@@ -5,6 +5,7 @@ use crate::archive::git::{
 };
 use crate::archive::{RepositoryPayload, StagedPayload, write_archive_hashed_repository_payloads};
 use mj_core::hex::lower_hex;
+use mj_core::remove_tree;
 
 use super::restore::prepare_private_destination;
 
@@ -68,7 +69,7 @@ pub fn capture_checkpoint_with_native_state(
         {
             return Ok(captured);
         }
-        fs::remove_dir_all(&resolved.stage_path).with_context(|| {
+        remove_tree::remove_dir_all_checked(&resolved.stage_path).with_context(|| {
             format!(
                 "remove stale checkpoint prestage {}",
                 resolved.stage_path.display()
@@ -208,7 +209,7 @@ pub(super) fn refresh_checkpoint_stage(
     }
     let repositories_root = spec.stage_path.join("repositories");
     if repositories_root.exists() {
-        fs::remove_dir_all(&repositories_root).with_context(|| {
+        remove_tree::remove_dir_all_checked(&repositories_root).with_context(|| {
             format!(
                 "replace prestaged repository state {}",
                 repositories_root.display()
@@ -654,7 +655,7 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
             manifest: Some(archive_manifest),
         })
     })();
-    if let Err(cleanup_error) = fs::remove_dir_all(&stage_path)
+    if let Err(cleanup_error) = remove_tree::remove_dir_all_checked(&stage_path)
         && cleanup_error.kind() != std::io::ErrorKind::NotFound
     {
         return match result {
@@ -1489,7 +1490,20 @@ pub(super) fn collect_checkpoint_native_artifacts_with_reports(
                     "project memory replica is outside the harness home"
                 );
                 if root.is_dir() {
-                    collect_claude_memory_tree(harness_home, &root, &mut artifacts)?;
+                    collect_project_memory_tree(harness_home, &root, &mut artifacts)?;
+                }
+                if let Some(baseline) = memory
+                    .baseline_root
+                    .filter(|path| !path.as_os_str().is_empty())
+                {
+                    let baseline = resolve_home_relative_target_path(&baseline)?;
+                    anyhow::ensure!(
+                        baseline.starts_with(harness_home),
+                        "project memory baseline is outside the harness home"
+                    );
+                    if baseline.is_dir() {
+                        collect_project_memory_tree(harness_home, &baseline, &mut artifacts)?;
+                    }
                 }
             }
         }
@@ -1501,6 +1515,25 @@ pub(super) fn collect_checkpoint_native_artifacts_with_reports(
     Ok((artifacts, omitted_reports))
 }
 
+/// Native archives store files, so retain an empty memory root with a hidden
+/// marker. Memory snapshots ignore hidden entries, including this marker.
+fn collect_project_memory_tree(
+    home: &Path,
+    root: &Path,
+    artifacts: &mut Vec<NativeArtifact>,
+) -> Result<()> {
+    let before = artifacts.len();
+    collect_claude_memory_tree(home, root, artifacts)?;
+    if artifacts.len() == before {
+        artifacts.push(NativeArtifact {
+            relative_path: root.strip_prefix(home)?.join(".mj-checkpoint-empty"),
+            data: mj_core::archive::NativeArtifactData::Bytes(Vec::new()),
+            mode: 0o600,
+        });
+    }
+    Ok(())
+}
+
 /// Checkpoint exporters can be refreshed independently of the live worker, so
 /// read only the stable launch fields needed for collection. Fully parsing the
 /// current worker config would reject launch files written by older versions.
@@ -1509,12 +1542,14 @@ pub(super) struct ProjectMemoryCheckpointLaunch {
     #[serde(default)]
     handback_tool: bool,
     #[serde(default)]
-    project_memory: Option<ProjectMemoryCheckpointEndpoint>,
+    pub(super) project_memory: Option<ProjectMemoryCheckpointEndpoint>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct ProjectMemoryCheckpointEndpoint {
-    root: PathBuf,
+    pub(super) root: PathBuf,
+    #[serde(default)]
+    pub(super) baseline_root: Option<PathBuf>,
 }
 
 pub(super) fn read_project_memory_checkpoint_endpoint(

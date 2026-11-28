@@ -527,3 +527,13 @@ export const getPushKey = (signal?: AbortSignal) => apiFetch<PushKey>('/api/v1/p
 
 export const getPushStatus = (endpoint: string, signal?: AbortSignal) =>
   apiFetch<PushDeviceStatus>('/api/v1/push/status', { query: { endpoint }, signal });
+
+export function getUsageReport(query: import('./types').UsageReportQuery = {}, signal?: AbortSignal): Promise<import('./types').SessionUsageReport> {
+  const params = new URLSearchParams();
+  if (query.profile !== undefined) params.set('profile', query.profile);
+  if (query.hour_start_ms !== undefined) params.set('hour_start_ms', String(query.hour_start_ms));
+  if (query.hour_starts_ms !== undefined) params.set('hour_starts_ms', query.hour_starts_ms.join(','));
+  if (query.include_suspended !== undefined) params.set('include_suspended', String(query.include_suspended));
+  const suffix = params.toString();
+  return apiFetch(`/api/v1/usage/report${suffix ? `?${suffix}` : ''}`, { signal });
+}

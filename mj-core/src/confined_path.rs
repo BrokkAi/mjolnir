@@ -147,6 +147,62 @@ impl ConfinedDir {
         &self.path
     }
 
+    /// Change permissions through the already-open directory handle.
+    #[cfg(unix)]
+    pub(crate) fn set_directory_permissions(
+        &self,
+        permissions: std::fs::Permissions,
+    ) -> Result<()> {
+        self.dir
+            .open(".")?
+            .into_std()
+            .set_permissions(permissions)?;
+        Ok(())
+    }
+
+    /// Change permissions on an opened regular file, never through a link.
+    #[cfg(unix)]
+    pub(crate) fn set_file_permissions(
+        &self,
+        name: &OsStr,
+        permissions: std::fs::Permissions,
+    ) -> Result<()> {
+        let file = self
+            .open_regular_file(name)?
+            .context("rendered memory file disappeared")?;
+        file.set_permissions(permissions)?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn set_file_readonly(&self, name: &OsStr, readonly: bool) -> Result<()> {
+        #[cfg(windows)]
+        let file = {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES,
+            };
+            let mut options = OpenOptions::new();
+            options
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                .follow(FollowSymlinks::No);
+            self.dir.open_with(name, &options)?.into_std()
+        };
+        #[cfg(not(windows))]
+        let file = self
+            .open_regular_file(name)?
+            .context("rendered memory file disappeared")?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "rendered memory entry is not a regular file"
+        );
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(readonly);
+        file.set_permissions(permissions)?;
+        Ok(())
+    }
+
     /// Open the directory at `relative` below this one. Returns `None` when a
     /// part of it does not exist; refuses a part that is a link.
     pub fn open_dir(&self, relative: &Path) -> Result<Option<Self>> {
@@ -419,7 +475,7 @@ impl ConfinedDir {
 
     /// Make a rename or new entry in this directory durable. Directory fsync
     /// is only available on Unix, as in `config::sync_directory`.
-    fn sync(&self) -> Result<()> {
+    pub(crate) fn sync(&self) -> Result<()> {
         // The handle itself may be an `O_PATH` descriptor, which cannot be
         // synced, so sync a readable handle on the same directory.
         #[cfg(unix)]

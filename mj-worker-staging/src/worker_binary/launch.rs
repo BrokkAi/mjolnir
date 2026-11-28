@@ -16,6 +16,7 @@ pub enum WorkerFilePreparation {
         operation_id: String,
         expected_store_id: String,
         candidate_id: String,
+        worker_protocol: u32,
     },
     /// Restage the profile into a retained home, and replace the worker
     /// binary when the retained worker's build differs.

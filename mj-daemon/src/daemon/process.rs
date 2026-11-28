@@ -226,6 +226,14 @@ pub(super) async fn run_daemon_runtime(
     })
     .await
     .context("prepare persisted daemon sessions")??;
+    let startup_config = controller.config.clone();
+    if let Err(error) = mj_core::runtime::spawn_blocking(move || {
+        super::snapshot::sync_role_assignments(&startup_config)
+    })
+    .await
+    {
+        tracing::warn!(%error, "role assignment sync task failed");
+    }
     log_startup_phase("load persisted sessions", loading);
     // A local session an earlier release started from a profile home keeps
     // running from it until it is next staged. The link has to be in place
@@ -1325,6 +1333,11 @@ pub(super) async fn run_daemon_runtime(
         "shut down controller daemon session manager",
         manager_shutdown.shutdown().await,
     );
+    epilogue.record(
+        &mut outcome,
+        "drain role assignment sync",
+        state.shutdown_role_sync().await,
+    );
     epilogue.finish();
     outcome
 }
@@ -1800,6 +1813,7 @@ pub(super) fn spawn_manager_target_refresher(
                                 changed
                             };
                             if changed || recent_changed { state.publish_revision(); }
+
                         }
                         Ok(Err(error)) => {
                             tracing::warn!(error = format!("{error:#}"), "could not refresh daemon configuration");

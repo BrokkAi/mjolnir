@@ -209,13 +209,12 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
-    /// The load-balancing preference order from `[quota] prefer`.
-    fn quota_preferences(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
         Default::default()
+    }
+
+    fn published_quota_projections(&self) -> Vec<mj_core::usage::ProfileQuotaProjection> {
+        Vec::new()
     }
 
     fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
@@ -653,12 +652,12 @@ impl ExportRuntime for RuntimeState {
         self.with_config(|config| config.subagents.clone())
     }
 
-    fn quota_preferences(&self) -> Vec<String> {
-        self.with_config(|config| config.quota.prefer.clone())
-    }
-
     fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
         self.quota_telemetry.snapshot()
+    }
+
+    fn published_quota_projections(&self) -> Vec<mj_core::usage::ProfileQuotaProjection> {
+        self.published_quota_projections()
     }
     fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
         self.quota_telemetry.clone()
@@ -979,6 +978,10 @@ impl std::error::Error for WakeNotReady {}
 /// Clap's exit code for a usage failure, which is what a worker binary too old
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
+
+/// The status a POSIX shell, SSH, or container exec reports when the command
+/// path does not exist: a worker root whose `hel` is absent.
+const CONTROL_NOT_FOUND_EXIT_CODE: i32 = 127;
 
 /// The backend the `/api/v1` routes drive sessions through.
 pub struct ApiBackend {
@@ -4698,8 +4701,66 @@ async fn worker_command_with_input(
     .await
 }
 
+/// Whether a worker command must be retried through the staged control
+/// worker because the root's own `hel` cannot run it.
+///
+/// An older `hel` answers clap's usage failure. A root whose `hel` is absent
+/// answers 127 through a POSIX shell, SSH, or container exec; a local target
+/// reports the failed lookup as a `NotFound` I/O error instead.
+pub(super) fn should_stage_control_worker(
+    locator: &targets::TargetLocator,
+    result: &Result<CommandOutput>,
+) -> bool {
+    match result {
+        Ok(output) => {
+            output.status == CLAP_USAGE_EXIT_CODE || output.status == CONTROL_NOT_FOUND_EXIT_CODE
+        }
+        Err(error) => {
+            matches!(locator, targets::TargetLocator::LocalBare { .. })
+                && error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                })
+        }
+    }
+}
+
+/// Install a renewed GitHub App token on a session, through its live actor
+/// when one is attached and directly in its worker root otherwise.
+///
+/// A session in `Error` keeps its target and worker root; an export such as a
+/// branch push must still be able to authenticate there.
+async fn install_renewed_session_github_token(
+    sessions: &SessionControl,
+    session_id: &str,
+    layout: &SessionExportLayout,
+    token: String,
+) -> Result<(), ExportError> {
+    if let Some(handle) = sessions
+        .find_session(session_id.to_owned())
+        .await
+        .map_err(ExportError::Failed)?
+    {
+        return handle
+            .install_github_token(token)
+            .await
+            .map_err(ExportError::Failed);
+    }
+    let root = targets::worker_root(&layout.backend, session_id).map_err(ExportError::Failed)?;
+    let locator = layout.backend.clone();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let _cancel = cancellation.clone().drop_guard();
+    export_blocking("write the session GitHub token", move || {
+        let executor = CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT)
+            .with_cancellation(cancellation);
+        mj_controller::controller::write_session_github_token(&token, &executor, &locator, &root)
+    })
+    .await
+}
+
 /// Run a worker command, staging `stager`'s control worker beside a root
-/// whose own `hel` is too old to know the subcommand.
+/// whose own `hel` is too old to know the subcommand, or is missing.
 async fn worker_command_staging(
     layout: SessionExportLayout,
     session_id: String,
@@ -4723,13 +4784,17 @@ async fn worker_command_staging(
             }
             executor.execute(&command)
         };
-        let first = run("hel")?;
+        let first = run("hel");
         // A worker installed before this subcommand existed answers clap's
-        // usage failure, and it stays until the session is next resumed. The
-        // current build's worker serves the call from the control name beside
-        // it: staging it replaces nothing, so no swap admission is needed.
-        if first.status != CLAP_USAGE_EXIT_CODE || executor.cancellation_requested() {
-            return Ok(first);
+        // usage failure, and it stays until the session is next resumed. A
+        // bare root whose `hel` is absent answers a command-not-found status,
+        // or a local `NotFound` error. The current build's worker serves the
+        // call from the control name beside it: staging it replaces nothing,
+        // so no swap admission is needed.
+        if !should_stage_control_worker(&layout.backend, &first)
+            || executor.cancellation_requested()
+        {
+            return first;
         }
         let root = targets::worker_root(&layout.backend, &session_id)?;
         stager
@@ -4927,9 +4992,31 @@ impl SubagentBackend for ApiBackend {
                     .collect()
             };
             let models = mj_controller::profile_config::advertised_models();
+            let projections: Vec<_> = self
+                .exports
+                .published_quota_projections()
+                .into_iter()
+                .filter(|p| {
+                    query
+                        .profile
+                        .as_deref()
+                        .is_none_or(|wanted| wanted == p.profile_id)
+                })
+                .collect();
             mj_core::runtime::spawn_blocking(move || {
                 let mut report =
                     mj_controller::database::load_session_usage_report(&query, models)?;
+                report.profile_providers = config
+                    .profiles
+                    .iter()
+                    .map(|(id, profile)| {
+                        (
+                            id.clone(),
+                            profile.quota_provider().display_name().to_owned(),
+                        )
+                    })
+                    .collect();
+                report.quota_projections = projections;
                 // The store clipped the last selected interval to its snapshot time.
                 report.quota_usage = mj_controller::quota_telemetry::weekly_quota_usage(
                     profiles,
@@ -5455,10 +5542,6 @@ impl SubagentBackend for ApiBackend {
 
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
-    }
-
-    fn quota_preferences(&self) -> BoxFuture<'_, Result<Vec<String>>> {
-        Box::pin(async move { Ok(self.exports.quota_preferences()) })
     }
 
     fn quota_telemetry(
@@ -6344,6 +6427,9 @@ impl SubagentBackend for ApiBackend {
                 .exports
                 .session_record(&session_id)
                 .and_then(|record| record.target);
+            // Load the layout once; a session with no live actor still needs
+            // its target to receive a renewed export token.
+            let layout = export_layout(session_id.clone()).await?;
             if target.as_ref().is_some_and(|target| {
                 !matches!(&**target, mj_core::state::TargetLocator::LocalBare { .. })
             }) && let Some(token) =
@@ -6351,15 +6437,9 @@ impl SubagentBackend for ApiBackend {
                     .await
                     .map_err(ExportError::Failed)?
             {
-                self.sessions
-                    .session(session_id.clone())
-                    .await
-                    .map_err(ExportError::Failed)?
-                    .install_github_token(token)
-                    .await
-                    .map_err(ExportError::Failed)?;
+                install_renewed_session_github_token(&self.sessions, &session_id, &layout, token)
+                    .await?;
             }
-            let layout = export_layout(session_id.clone()).await?;
             let repository = agent_working_directory(&layout)?;
             let arguments = vec![
                 "push-branch".to_owned(),

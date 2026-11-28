@@ -56,6 +56,7 @@ pub mod redact;
 pub mod refusal;
 pub mod relay;
 pub mod remote_git;
+pub mod remove_tree;
 pub mod repository;
 pub mod retry_after;
 pub mod review;

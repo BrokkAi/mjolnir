@@ -2526,10 +2526,18 @@ fn codex_root_archive_throughput() {
 #[test]
 fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() {
     let temp = tempfile::tempdir().unwrap();
-    let (spec, _) = fixture(temp.path());
+    let (mut spec, _) = fixture(temp.path());
     let memory_root = spec.harness_home.join("projects/replica/memory");
     fs::create_dir_all(&memory_root).unwrap();
     fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
+    let baseline = spec
+        .harness_home
+        .join("projects/replica/.hel-memory-baseline");
+    fs::create_dir_all(baseline.join("nested")).unwrap();
+    let baseline_body = "baseline before unsynced edit\n".repeat(4096);
+    fs::write(baseline.join("nested/note.md"), &baseline_body).unwrap();
+    let record = r#"{"base":{"files":{}},"base_version":null,"handout":null,"incoming":null}"#;
+    fs::write(baseline.join(".hel-memory-record.json"), record).unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
         parked_move: None,
         accepted_reload_operation_id: None,
@@ -2598,6 +2606,165 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         artifact.relative_path == Path::new("projects/replica/memory/MEMORY.md")
             && artifact_bytes(artifact) == b"remember this"
     }));
+    export_checkpoint(&spec).unwrap();
+    let restored = temp.path().join("restored-home");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: restored.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(restored.join("projects/replica/.hel-memory-baseline/nested/note.md"))
+            .unwrap(),
+        baseline_body
+    );
+    assert_eq!(
+        fs::read_to_string(restored.join("projects/replica/memory/MEMORY.md")).unwrap(),
+        "remember this"
+    );
+    // A cross-harness resume discards native history, but memory still belongs
+    // to the session and must come from the archived replica and baseline.
+    let cross_home = temp.path().join("cross-harness-home");
+    let cross_relay = temp.path().join("cross-harness-relay");
+    fs::create_dir_all(&cross_relay).unwrap();
+    let mut launch =
+        mj_core::worker_launch::WorkerLaunchConfig::read(&spec.relay_root.join("launch.json"))
+            .unwrap();
+    let memory = launch.project_memory.as_mut().unwrap();
+    memory.root = cross_home.join("projects/replica/memory");
+    memory.baseline_root = cross_home.join("projects/replica/.hel-memory-baseline");
+    launch.write(&cross_relay.join("launch.json")).unwrap();
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: cross_relay,
+            harness_home: cross_home.clone(),
+            restore_repositories: false,
+            restore_native: false,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(cross_home.join("projects/replica/memory/MEMORY.md")).unwrap(),
+        "remember this"
+    );
+    assert_eq!(
+        fs::read_to_string(cross_home.join("projects/replica/.hel-memory-baseline/nested/note.md"))
+            .unwrap(),
+        baseline_body
+    );
+    assert_eq!(
+        fs::read_to_string(
+            cross_home.join("projects/replica/.hel-memory-baseline/.hel-memory-record.json")
+        )
+        .unwrap(),
+        record
+    );
+
+    // Claude remaps project directories for native history. The private memory
+    // slug must remain stable instead of being remapped to the workspace slug.
+    spec.session.harness_kind = HarnessKind::Claude;
+    let transcript = spec
+        .harness_home
+        .join(format!("projects/old/{NATIVE}.jsonl"));
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(transcript, "transcript").unwrap();
+    spec.output_path = spec.relay_root.join("claude-memory.zip");
+    export_checkpoint(&spec).unwrap();
+    let claude_home = temp.path().join("claude-restored-home");
+    let claude_relay = temp.path().join("claude-restored-relay");
+    fs::create_dir_all(&claude_relay).unwrap();
+    let mut launch =
+        mj_core::worker_launch::WorkerLaunchConfig::read(&spec.relay_root.join("launch.json"))
+            .unwrap();
+    let memory = launch.project_memory.as_mut().unwrap();
+    memory.root = claude_home.join("projects/replica/memory");
+    memory.baseline_root = claude_home.join("projects/replica/.hel-memory-baseline");
+    launch.write(&claude_relay.join("launch.json")).unwrap();
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: claude_relay,
+            harness_home: claude_home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(claude_home.join("projects/replica/memory/MEMORY.md")).unwrap(),
+        "remember this"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            claude_home.join("projects/replica/.hel-memory-baseline/nested/note.md")
+        )
+        .unwrap(),
+        baseline_body
+    );
+    spec.session.harness_kind = HarnessKind::Codex;
+
+    // The archive has only file entries. Empty roots must survive as roots,
+    // including an empty replica that represents a deletion of the last note.
+    for empty_replica in [true, false] {
+        let replica = spec.harness_home.join("projects/replica/memory");
+        for root in [&replica, &baseline] {
+            fs::remove_dir_all(root).unwrap();
+            fs::create_dir_all(root).unwrap();
+        }
+        let nonempty = if empty_replica { &baseline } else { &replica };
+        fs::write(nonempty.join("note.md"), &baseline_body).unwrap();
+        spec.output_path = spec.relay_root.join(format!("empty-{empty_replica}.zip"));
+        export_checkpoint(&spec).unwrap();
+        let home = temp.path().join(format!("restored-{empty_replica}"));
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                report_root: None,
+                archive_path: spec.output_path.clone(),
+                workspace_root: spec.workspace_root.clone(),
+                relay_root: temp.path().join(format!("relay-{empty_replica}")),
+                harness_home: home.clone(),
+                restore_repositories: false,
+                restore_native: true,
+                queue_policy: QueueRestorePolicy::Restore,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        let restored_replica = home.join("projects/replica/memory");
+        let restored_baseline = home.join("projects/replica/.hel-memory-baseline");
+        assert!(restored_replica.is_dir());
+        assert!(restored_baseline.is_dir());
+        let replica_tree = mj_core::project_memory::ProjectMemoryStore::new(restored_replica)
+            .snapshot()
+            .unwrap();
+        let baseline_tree = mj_core::project_memory::ProjectMemoryStore::new(restored_baseline)
+            .snapshot()
+            .unwrap();
+        assert_eq!(replica_tree.is_empty(), empty_replica);
+        assert_eq!(baseline_tree.is_empty(), !empty_replica);
+    }
 }
 
 #[test]

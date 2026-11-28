@@ -197,6 +197,7 @@ async fn a_worker_quota_assessment_schedules_recovery_whatever_the_spent_allowan
         code: None,
         http_status: None,
         reset_at: None,
+        retry_after_seconds: None,
         login_fingerprint: None,
     });
     quota_assessed(&mut blocked);
@@ -1005,7 +1006,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
                 Placement::TopLevel,
                 Some("primary"),
                 None,
-                &[],
                 mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
                 now,
             )
@@ -1024,7 +1024,6 @@ fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
                 Placement::TopLevel,
                 Some("primary"),
                 None,
-                &[],
                 mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
                 now,
             )
@@ -1152,7 +1151,6 @@ async fn automatic_move_settles_before_any_wait_and_releases_failed_placement() 
                     Placement::TopLevel,
                     Some("primary"),
                     None,
-                    &[],
                     mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
                     now,
                 )
@@ -2791,6 +2789,7 @@ async fn quota_prepare_ignores_stale_profile_for_all_session_kinds() {
         code: Some("usageLimitExceeded".into()),
         http_status: None,
         reset_at: Some(explicit_reset.to_string()),
+        retry_after_seconds: None,
         login_fingerprint: None,
     });
 

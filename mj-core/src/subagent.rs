@@ -2906,6 +2906,7 @@ mod tests {
             code: None,
             http_status: None,
             reset_at: None,
+            retry_after_seconds: None,
             login_fingerprint: None,
         });
         assert_eq!(
@@ -2929,6 +2930,7 @@ mod tests {
             code: code.map(str::to_owned),
             http_status: None,
             reset_at: None,
+            retry_after_seconds: None,
             login_fingerprint: None,
         };
         let failed_with = |message: &str, code: Option<&str>| {

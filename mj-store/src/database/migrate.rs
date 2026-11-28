@@ -513,7 +513,7 @@ pub fn inspect_migration_preconditions_with_templates(
         let (id, state) = row?;
         result.blockers.push(format!("session {id} is {state}"));
     }
-    let mut query = connection.prepare("SELECT environment_id,phase FROM environments WHERE phase NOT IN ('active','reclaimed') ORDER BY environment_id")?;
+    let mut query = connection.prepare("SELECT environment_id,phase FROM environments WHERE phase NOT IN ('active','reclaimed','retiring') ORDER BY environment_id")?;
     for row in query.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })? {
@@ -560,7 +560,7 @@ mod tests {
         let worker_root = DataLayout::at(root.path()).worker_root("one");
         connection.execute("INSERT OR REPLACE INTO session_targets(session_id,kind,workspace) VALUES ('one','local-bare',?1)", [path_to_blob(&worker_root)]).unwrap();
         connection.execute("INSERT INTO worker_restart_intents(session_id,operation_id,target_json,desired_build,phase) VALUES ('one','restart','{}','build','prepared')", []).unwrap();
-        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('retired','one','reclaimed','{}')",[]).unwrap();
+        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('retired','one','retiring','{}')",[]).unwrap();
         let ready = inspect_migration_preconditions(&connection, root.path()).unwrap();
         assert!(ready.blockers.is_empty(), "{:?}", ready.blockers);
         assert_eq!(ready.waiting_worker_restart_intents, 1);
@@ -588,13 +588,28 @@ mod tests {
             )
             .unwrap();
         connection.execute("INSERT INTO session_create_intents(session_id,operation_id,remember_launch_choices,created_at) VALUES ('one','create',0,'now')", []).unwrap();
+        // The current schema cannot store `provisioning`; the precondition
+        // query still guards it so a row from an older revision blocks.
         connection
-            .execute(
-                "UPDATE environments SET phase='retiring' WHERE environment_id='retired'",
-                [],
-            )
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .unwrap();
+        connection.execute("INSERT INTO environments(environment_id,owner_session_id,phase,placement_json) VALUES ('provisioning','one','provisioning','{}')",[]).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=OFF")
             .unwrap();
         let blocked = inspect_migration_preconditions(&connection, root.path()).unwrap();
         assert_eq!(blocked.blockers.len(), 4, "{:?}", blocked.blockers);
+        assert!(
+            blocked
+                .blockers
+                .iter()
+                .any(|blocker| blocker == "environment provisioning is provisioning")
+        );
+        assert!(
+            !blocked
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("retired"))
+        );
     }
 }

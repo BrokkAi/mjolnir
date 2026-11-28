@@ -310,29 +310,59 @@ pub struct SchedulingContext<'a> {
     pub placement: Placement,
     pub category: Option<&'a str>,
     pub ranking_anchor: Option<&'a str>,
-    pub prefer: &'a [String],
     pub telemetry: &'a crate::quota_telemetry::QuotaTelemetrySnapshot,
     pub power_ranking: &'a crate::power_ranking::PowerRankingSnapshot,
     pub now_seconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlacementDecisionReason {
+    SafeSubscription,
+    UnknownQuota,
+    PaidSpill {
+        sub_5h_unsafe: usize,
+        sub_weekly_unsafe: usize,
+        sub_exhausted_or_absent: usize,
+    },
+    UnsafeSubscriptionFallback,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementDecision {
+    pub chosen_profile: String,
+    pub chosen_tier: u8,
+    pub reason: PlacementDecisionReason,
+    pub estimated_cost_usd: Option<f64>,
+    pub binding_profile: Option<String>,
+    pub binding_window: Option<crate::quota_telemetry::WindowKind>,
+    pub binding_remaining_pct: Option<f64>,
 }
 
 /// Generalized pool-first, velocity- and value-weighted draw across
 /// `candidates`. Filters out exhausted and disallowed paid-credit
 /// candidates, deduplicates to one entry per quota pool
 /// `(profile_id, binding_window_scope)`, and orders the surviving pools by
-/// tier, `[quota] prefer`, Efraimidis–Spirakis weighted sample, `ranking_anchor`,
+/// tier, Efraimidis–Spirakis weighted sample, `ranking_anchor`,
 /// and `profile_id`.
 pub fn draw_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     candidates: &mut Vec<T>,
     ctx: &SchedulingContext<'_>,
 ) -> anyhow::Result<()> {
+    draw_scheduled_candidates_with_decision(candidates, ctx).map(|_| ())
+}
+
+pub fn draw_scheduled_candidates_with_decision<T: AsRef<ScheduledCandidate>>(
+    candidates: &mut Vec<T>,
+    ctx: &SchedulingContext<'_>,
+) -> anyhow::Result<Option<PlacementDecision>> {
     let mut units = Vec::with_capacity(candidates.len());
     for _ in 0..candidates.len() {
         let bits = getrandom::u64().map_err(|error| anyhow::anyhow!("draw a profile: {error}"))?;
         units.push(((bits >> 11) + 1) as f64 / (1u64 << 53) as f64);
     }
-    order_scheduled_candidates_by_draw(candidates, &units, ctx);
-    Ok(())
+    Ok(order_scheduled_candidates_by_draw_with_decision(
+        candidates, &units, ctx,
+    ))
 }
 
 /// Deterministic counterpart to [`draw_scheduled_candidates`] taking one
@@ -342,7 +372,53 @@ pub fn order_scheduled_candidates_by_draw<T: AsRef<ScheduledCandidate>>(
     units: &[f64],
     ctx: &SchedulingContext<'_>,
 ) {
+    let _ = order_scheduled_candidates_by_draw_with_decision(candidates, units, ctx);
+}
+
+pub fn order_scheduled_candidates_by_draw_with_decision<T: AsRef<ScheduledCandidate>>(
+    candidates: &mut Vec<T>,
+    units: &[f64],
+    ctx: &SchedulingContext<'_>,
+) -> Option<PlacementDecision> {
+    let subscription_profiles: BTreeSet<String> = candidates
+        .iter()
+        .filter_map(|item| {
+            let c = item.as_ref();
+            matches!(c.quota, CandidateQuota::Subscription { .. }).then(|| c.profile_id.clone())
+        })
+        .collect();
     let scored = prepare_scored_pools(std::mem::take(candidates), ctx);
+    let sub_5h: BTreeSet<_> = scored
+        .iter()
+        .filter(|p| p.tier == 3)
+        .map(|p| p.item.as_ref().profile_id.clone())
+        .collect();
+    let sub_weekly: BTreeSet<_> = scored
+        .iter()
+        .filter(|p| p.tier == 4)
+        .map(|p| p.item.as_ref().profile_id.clone())
+        .collect();
+    let available_subs: BTreeSet<_> = scored
+        .iter()
+        .filter(|p| {
+            p.tier != 2 && matches!(p.item.as_ref().quota, CandidateQuota::Subscription { .. })
+        })
+        .map(|p| p.item.as_ref().profile_id.clone())
+        .collect();
+    let exhausted = subscription_profiles.difference(&available_subs).count();
+    let spill_binding = scored
+        .iter()
+        .filter(|p| matches!(p.tier, 3 | 4))
+        .filter_map(|p| {
+            p.binding_failure
+                .map(|failure| (p.item.as_ref().profile_id.clone(), failure))
+        })
+        .min_by(|a, b| {
+            a.1.margin_pct
+                .total_cmp(&b.1.margin_pct)
+                .then_with(|| a.1.remaining_pct.total_cmp(&b.1.remaining_pct))
+                .then_with(|| a.0.cmp(&b.0))
+        });
     let mut keyed: Vec<(f64, ScoredPool<T>)> = scored
         .into_iter()
         .enumerate()
@@ -352,7 +428,7 @@ pub fn order_scheduled_candidates_by_draw<T: AsRef<ScheduledCandidate>>(
                 .copied()
                 .unwrap_or(0.5)
                 .clamp(f64::MIN_POSITIVE, 1.0);
-            let key = if matches!(pool.tier, 0 | 1 | 3 | 4 | 5) && pool.weight > 0.0 {
+            let key = if matches!(pool.tier, 0..=4) && pool.weight > 0.0 {
                 unit.ln() / pool.weight
             } else {
                 f64::NEG_INFINITY
@@ -365,7 +441,12 @@ pub fn order_scheduled_candidates_by_draw<T: AsRef<ScheduledCandidate>>(
         left.1
             .tier
             .cmp(&right.1.tier)
-            .then_with(|| left.1.prefer_pos.cmp(&right.1.prefer_pos))
+            .then_with(|| {
+                left.1
+                    .paid_cost_usd
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&right.1.paid_cost_usd.unwrap_or(f64::INFINITY))
+            })
             .then_with(|| right.0.total_cmp(&left.0))
             .then_with(|| right.1.is_anchor.cmp(&left.1.is_anchor))
             .then_with(|| {
@@ -376,11 +457,40 @@ pub fn order_scheduled_candidates_by_draw<T: AsRef<ScheduledCandidate>>(
                     .cmp(&right.1.item.as_ref().profile_id)
             })
     });
+    let decision = keyed.first().map(|(_, p)| {
+        let reason = match p.tier {
+            0 => PlacementDecisionReason::SafeSubscription,
+            1 => PlacementDecisionReason::UnknownQuota,
+            2 => PlacementDecisionReason::PaidSpill {
+                sub_5h_unsafe: sub_5h.len(),
+                sub_weekly_unsafe: sub_weekly.len(),
+                sub_exhausted_or_absent: exhausted,
+            },
+            _ => PlacementDecisionReason::UnsafeSubscriptionFallback,
+        };
+        let binding = match p.tier {
+            2 => spill_binding.as_ref().map(|(id, f)| (id.clone(), *f)),
+            3 | 4 => p
+                .binding_failure
+                .map(|f| (p.item.as_ref().profile_id.clone(), f)),
+            _ => None,
+        };
+        PlacementDecision {
+            chosen_profile: p.item.as_ref().profile_id.clone(),
+            chosen_tier: p.tier,
+            reason,
+            estimated_cost_usd: p.estimated_cost_usd,
+            binding_profile: binding.as_ref().map(|(id, _)| id.clone()),
+            binding_window: binding.as_ref().map(|(_, f)| f.kind),
+            binding_remaining_pct: binding.as_ref().map(|(_, f)| f.remaining_pct),
+        }
+    });
     candidates.extend(keyed.into_iter().map(|(_, pool)| pool.item));
+    decision
 }
 
 /// Deterministic ranking (no random draw): orders surviving pools by tier,
-/// `[quota] prefer`, descending weight, `ranking_anchor`, and `profile_id`.
+/// descending weight, `ranking_anchor`, and `profile_id`.
 pub fn rank_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     candidates: &mut Vec<T>,
     ctx: &SchedulingContext<'_>,
@@ -389,7 +499,11 @@ pub fn rank_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     scored.sort_by(|left, right| {
         left.tier
             .cmp(&right.tier)
-            .then_with(|| left.prefer_pos.cmp(&right.prefer_pos))
+            .then_with(|| {
+                left.paid_cost_usd
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&right.paid_cost_usd.unwrap_or(f64::INFINITY))
+            })
             .then_with(|| right.weight.total_cmp(&left.weight))
             .then_with(|| right.is_anchor.cmp(&left.is_anchor))
             .then_with(|| {
@@ -402,12 +516,36 @@ pub fn rank_scheduled_candidates<T: AsRef<ScheduledCandidate>>(
     candidates.extend(scored.into_iter().map(|pool| pool.item));
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BindingWindowFailure {
+    kind: crate::quota_telemetry::WindowKind,
+    remaining_pct: f64,
+    margin_pct: f64,
+}
+
+fn record_binding_failure(slot: &mut Option<BindingWindowFailure>, cand: BindingWindowFailure) {
+    let replace = match *slot {
+        None => true,
+        Some(existing) => {
+            cand.margin_pct
+                .total_cmp(&existing.margin_pct)
+                .then_with(|| cand.remaining_pct.total_cmp(&existing.remaining_pct))
+                == std::cmp::Ordering::Less
+        }
+    };
+    if replace {
+        *slot = Some(cand);
+    }
+}
+
 struct ScoredPool<T> {
     item: T,
     tier: u8,
     weight: f64,
-    prefer_pos: usize,
     is_anchor: bool,
+    paid_cost_usd: Option<f64>,
+    estimated_cost_usd: Option<f64>,
+    binding_failure: Option<BindingWindowFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +556,8 @@ struct WindowEval {
     u_w: f64,
     t_left_hours: f64,
     model_scope: Option<String>,
+    reset_elapsed: bool,
+    cycle_start: Option<i64>,
 }
 
 fn window_remaining_pct(window: &crate::quota::QuotaWindow) -> Option<f64> {
@@ -444,12 +584,32 @@ fn evaluate_applying_windows(
         if let Some(reset) = window.resets_at_epoch_seconds
             && reset <= now_seconds
         {
+            let duration = window
+                .duration_seconds
+                .filter(|d| *d > 0)
+                .unwrap_or(match kind {
+                    crate::quota_telemetry::WindowKind::Short5h => 5 * 3600,
+                    crate::quota_telemetry::WindowKind::Long => 7 * 86_400,
+                });
+            // Never extrapolate an unobserved subsequent reset when probes stay
+            // stale past an entire window (rolling 5h windows restart on first
+            // use, not at fixed multiples). Keep `cycle_start` at the observed
+            // reset so recent placements stay accounted for, and keep
+            // `t_left_hours > 0` so the runway gate stays active.
+            let next_reset = reset.saturating_add(duration);
+            let t_left_seconds = if now_seconds < next_reset {
+                next_reset.saturating_sub(now_seconds)
+            } else {
+                duration
+            };
             evals.push(WindowEval {
                 kind,
                 remaining_pct: 100.0,
                 h_w: (100.0 - RESERVE_FLOOR_PCT) / 100.0,
                 u_w: 1.0,
-                t_left_hours: 0.0,
+                t_left_hours: t_left_seconds as f64 / 3600.0,
+                reset_elapsed: true,
+                cycle_start: Some(reset),
                 model_scope: window.model_scope.clone(),
             });
             continue;
@@ -479,6 +639,8 @@ fn evaluate_applying_windows(
             h_w,
             u_w,
             t_left_hours,
+            reset_elapsed: false,
+            cycle_start: None,
             model_scope: window.model_scope.clone(),
         });
     }
@@ -538,18 +700,18 @@ pub(crate) fn calibrated_prior_scale<'a>(
 ) -> f64 {
     let mut log_bench_sum = 0.0;
     let mut bench_count = 0;
-    let mut observed_usd = 0.0;
-    let mut benchmark_usd = 0.0;
+    let mut observed_bench_tasks = 0.0;
+    let mut observed_samples = 0.0;
     for (bench, obs) in cells {
         log_bench_sum += bench.ln();
         bench_count += 1;
         if let Some(obs) = obs.filter(|obs| positive_cost_observation(obs)) {
-            observed_usd += obs.total_api_usd;
-            benchmark_usd += obs.sample_count as f64 * bench;
+            observed_bench_tasks += obs.total_api_usd / bench;
+            observed_samples += obs.sample_count as f64;
         }
     }
-    if benchmark_usd > 0.0 && observed_usd > 0.0 {
-        observed_usd / benchmark_usd
+    if observed_samples > 0.0 && observed_bench_tasks > 0.0 {
+        observed_bench_tasks / observed_samples
     } else if bench_count > 0 {
         default_usd / (log_bench_sum / f64::from(bench_count)).exp()
     } else {
@@ -612,70 +774,45 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     raw_candidates: Vec<T>,
     ctx: &SchedulingContext<'_>,
 ) -> Vec<ScoredPool<T>> {
-    // 1. Pool-first deduplication.
-    let mut pools: std::collections::BTreeMap<(String, Option<String>), (f64, T)> =
-        std::collections::BTreeMap::new();
-
-    for item in raw_candidates {
-        let cand = item.as_ref();
-        if ctx.placement == Placement::Orchestrator && !cand.harness.supports_delegation_tools() {
-            continue;
-        }
-        let lookup = ctx
-            .power_ranking
-            .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
-        let entry_tasks_per_200 = match &cand.quota {
-            CandidateQuota::UsagePriced => lookup
-                .as_ref()
-                .and_then(|l| l.tasks_per_200_api.or(l.tasks_per_200_sub))
-                .unwrap_or(1.0),
-            _ => lookup
-                .as_ref()
-                .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
-                .unwrap_or(1.0),
-        };
-        let pool_key = (cand.profile_id.clone(), binding_window_scope(cand));
-        match pools.entry(pool_key) {
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert((entry_tasks_per_200, item));
-            }
-            std::collections::btree_map::Entry::Occupied(mut slot) => {
-                let (existing_tp200, existing_item) = slot.get();
-                let replace = entry_tasks_per_200 > *existing_tp200
-                    || (entry_tasks_per_200 == *existing_tp200
-                        && (cand.model.as_str(), cand.effort.as_deref())
-                            < (
-                                existing_item.as_ref().model.as_str(),
-                                existing_item.as_ref().effort.as_deref(),
-                            ));
-                if replace {
-                    slot.insert((entry_tasks_per_200, item));
-                }
-            }
-        }
-    }
-
     let category = ctx.category.unwrap_or("primary");
     let cat_stats = ctx.telemetry.category_stats(category);
     let canonical_category = canonical_observed_category(category).unwrap_or(category);
-    let pool_items: Vec<_> = pools
-        .into_values()
-        .map(|(_, item)| {
+
+    // 1. Price every eligible candidate before pool-first deduplication so
+    // live cost observations can beat benchmark throughput on paid pools.
+    let eligible: Vec<_> = raw_candidates
+        .into_iter()
+        .filter(|item| {
+            ctx.placement != Placement::Orchestrator
+                || item.as_ref().harness.supports_delegation_tools()
+        })
+        .map(|item| {
             let cand = item.as_ref();
             let lookup =
                 ctx.power_ranking
                     .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
+            let entry_tasks_per_200 = match &cand.quota {
+                CandidateQuota::UsagePriced => lookup
+                    .as_ref()
+                    .and_then(|l| l.tasks_per_200_api.or(l.tasks_per_200_sub))
+                    .unwrap_or(1.0),
+                _ => lookup
+                    .as_ref()
+                    .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
+                    .unwrap_or(1.0),
+            };
             let bench = lookup.as_ref().and_then(benchmark_task_usd);
             let obs =
                 ctx.telemetry
                     .cell_cost_observation(category, &cand.model, cand.effort.as_deref());
-            (item, lookup, bench, obs)
+            (item, lookup, entry_tasks_per_200, bench, obs)
         })
         .collect();
+
     let mut seen_cells = BTreeSet::new();
     let prior_scale = calibrated_prior_scale(
         cat_stats.mean_api_usd,
-        pool_items.iter().filter_map(|(item, _, bench, obs)| {
+        eligible.iter().filter_map(|(item, _, _, bench, obs)| {
             let bench = (*bench)?;
             let cand = item.as_ref();
             seen_cells
@@ -687,28 +824,115 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
         }),
     );
 
-    // 2. Price subscriptions in tasks per week and use the same units for peers.
-    let pool_items: Vec<_> = pool_items
-        .into_iter()
-        .map(|(item, lookup, bench, obs)| {
-            let prior_usd = cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd);
-            let estimate_usd = shrink_cell_cost_usd(obs.as_ref(), prior_usd);
-            let subscription = match &item.as_ref().quota {
-                CandidateQuota::Subscription {
-                    monthly_price_usd, ..
-                } => {
-                    let pricing = SubscriptionPricing::new(*monthly_price_usd, lookup.as_ref());
-                    let capacity = pricing.priced_capacity(estimate_usd, prior_usd, prior_scale);
-                    Some((pricing, capacity))
+    let mut pools: std::collections::BTreeMap<(String, Option<String>), _> =
+        std::collections::BTreeMap::new();
+    for (item, lookup, entry_tasks_per_200, bench, obs) in eligible {
+        let cand = item.as_ref();
+        let prior_usd = cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd);
+        let estimate_usd = shrink_cell_cost_usd(obs.as_ref(), prior_usd);
+        let api_bench = lookup
+            .as_ref()
+            .and_then(|l| l.tasks_per_200_api.filter(|x| x.is_finite() && *x > 0.0))
+            .map(|tasks| 200.0 / tasks);
+        let paid_estimate = if api_bench.is_some()
+            || bench.is_some()
+            || obs.as_ref().is_some_and(positive_cost_observation)
+        {
+            let paid_prior =
+                cell_prior_usd(api_bench.or(bench), prior_scale, cat_stats.mean_api_usd);
+            shrink_cell_cost_usd(obs.as_ref(), paid_prior)
+        } else {
+            lookup
+                .as_ref()
+                .and_then(|l| {
+                    l.tasks_per_200_api
+                        .filter(|x| x.is_finite() && *x > 0.0)
+                        .or_else(|| l.tasks_per_200_sub.filter(|x| x.is_finite() && *x > 0.0))
+                })
+                .map_or(f64::INFINITY, |tasks| 200.0 / tasks)
+        };
+        let is_paid_pool = match &cand.quota {
+            CandidateQuota::UsagePriced => true,
+            CandidateQuota::Subscription {
+                windows,
+                paid_credits,
+                ..
+            } => {
+                let evals = evaluate_applying_windows(windows, &cand.model, ctx.now_seconds);
+                (evals.is_empty() || evals.iter().any(|e| e.remaining_pct <= 0.0))
+                    && paid_weight(paid_credits.as_ref()).is_some()
+            }
+            CandidateQuota::Unknown => false,
+        };
+        let pool_key = (cand.profile_id.clone(), binding_window_scope(cand));
+        let candidate_entry = (
+            entry_tasks_per_200,
+            paid_estimate,
+            is_paid_pool,
+            item,
+            lookup,
+            prior_usd,
+            estimate_usd,
+        );
+        match pools.entry(pool_key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(candidate_entry);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let (existing_tp200, existing_paid, existing_is_paid, existing_item, _, _, _) =
+                    slot.get();
+                let cand_ref = candidate_entry.3.as_ref();
+                let existing_ref = existing_item.as_ref();
+                let replace = if is_paid_pool && *existing_is_paid {
+                    match paid_estimate.total_cmp(existing_paid) {
+                        std::cmp::Ordering::Less => true,
+                        std::cmp::Ordering::Greater => false,
+                        std::cmp::Ordering::Equal => {
+                            entry_tasks_per_200 > *existing_tp200
+                                || (entry_tasks_per_200 == *existing_tp200
+                                    && (cand_ref.model.as_str(), cand_ref.effort.as_deref())
+                                        < (
+                                            existing_ref.model.as_str(),
+                                            existing_ref.effort.as_deref(),
+                                        ))
+                        }
+                    }
+                } else {
+                    entry_tasks_per_200 > *existing_tp200
+                        || (entry_tasks_per_200 == *existing_tp200
+                            && (cand_ref.model.as_str(), cand_ref.effort.as_deref())
+                                < (existing_ref.model.as_str(), existing_ref.effort.as_deref()))
+                };
+                if replace {
+                    slot.insert(candidate_entry);
                 }
-                _ => None,
-            };
-            (item, lookup, estimate_usd, subscription)
-        })
+            }
+        }
+    }
+
+    // 2. Price subscriptions in tasks per week and use the same units for peers.
+    let pool_items: Vec<_> = pools
+        .into_values()
+        .map(
+            |(_, paid_estimate, _, item, lookup, prior_usd, estimate_usd)| {
+                let subscription = match &item.as_ref().quota {
+                    CandidateQuota::Subscription {
+                        monthly_price_usd, ..
+                    } => {
+                        let pricing = SubscriptionPricing::new(*monthly_price_usd, lookup.as_ref());
+                        let capacity =
+                            pricing.priced_capacity(estimate_usd, prior_usd, prior_scale);
+                        Some((pricing, capacity))
+                    }
+                    _ => None,
+                };
+                (item, lookup, estimate_usd, subscription, paid_estimate)
+            },
+        )
         .collect();
     let mut log_sum = 0.0;
     let mut priced_count = 0;
-    for (_, _, _, subscription) in &pool_items {
+    for (_, _, _, subscription, _) in &pool_items {
         if let Some((_, Some(capacity))) = subscription {
             log_sum += capacity.ln();
             priced_count += 1;
@@ -722,24 +946,19 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
 
     // 3. Score each pool, filtering out Exhausted (tier 6) and disallowed Paid.
     let mut scored = Vec::with_capacity(pool_items.len());
-    for (item, lookup, cand_est_usd, subscription) in pool_items {
+    for (item, lookup, cand_est_usd, subscription, paid_estimate) in pool_items {
         let cand = item.as_ref();
-        let prefer_pos = ctx
-            .prefer
-            .iter()
-            .position(|id| id == &cand.profile_id)
-            .unwrap_or(usize::MAX);
         let is_anchor = ctx.ranking_anchor == Some(cand.profile_id.as_str());
 
-        let (tier, weight) = match &cand.quota {
-            CandidateQuota::Unknown => (2u8, 1.0),
+        let (tier, weight, binding_failure) = match &cand.quota {
+            CandidateQuota::Unknown => (1u8, 1.0, None),
             CandidateQuota::UsagePriced => {
                 let tp200_api = lookup
                     .as_ref()
                     .and_then(|l| l.tasks_per_200_api.or(l.tasks_per_200_sub))
                     .filter(|v| v.is_finite() && *v > 0.0)
                     .unwrap_or(1.0);
-                (5u8, tp200_api)
+                (2u8, tp200_api, None)
             }
             CandidateQuota::Subscription {
                 windows,
@@ -757,12 +976,12 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
                             .filter(|v| v.is_finite() && *v > 0.0)
                             .unwrap_or(1.0);
-                        (4u8, tp200 * credit_w)
+                        (2u8, tp200 * credit_w, None)
                     } else if windows.is_empty() && paid_credits.is_some() {
                         // Exhausted paid-only subscription with 0 credits.
                         continue;
                     } else {
-                        (2u8, 1.0)
+                        (1u8, 1.0, None)
                     }
                 } else if evals.iter().any(|e| e.remaining_pct <= 0.0) {
                     // Exhausted subscription: fall back to Paid credits if allowed, else drop (tier 6).
@@ -775,7 +994,7 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
                             .filter(|v| v.is_finite() && *v > 0.0)
                             .unwrap_or(1.0);
-                        (4u8, tp200 * credit_w)
+                        (2u8, tp200 * credit_w, None)
                     } else {
                         continue;
                     }
@@ -817,11 +1036,10 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                     let mut all_above_reserve = true;
                     let mut five_hour_safe = true;
                     let mut weekly_safe = true;
+                    let mut failing_tier3: Option<BindingWindowFailure> = None;
+                    let mut failing_tier4: Option<BindingWindowFailure> = None;
 
                     for ev in &evals {
-                        if ev.h_w <= 0.0 {
-                            all_above_reserve = false;
-                        }
                         match ev.kind {
                             crate::quota_telemetry::WindowKind::Long => {
                                 u_long = Some(u_long.map_or(ev.u_w, |cur| cur.min(ev.u_w)));
@@ -830,6 +1048,7 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                                 u_5h = Some(u_5h.map_or(ev.u_w, |cur| cur.min(ev.u_w)));
                             }
                         }
+                        let mut runway_margin: Option<f64> = None;
                         if ev.t_left_hours > 0.0 {
                             let wt = ctx.telemetry.window_telemetry(
                                 &cand.profile_id,
@@ -837,7 +1056,11 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                                 ev.kind,
                                 ev.model_scope.as_deref(),
                             );
-                            let v_60m = wt.map_or(0.0, |t| t.trailing_60m_pct_per_hour);
+                            let v_60m = if ev.reset_elapsed {
+                                0.0
+                            } else {
+                                wt.map_or(0.0, |t| t.trailing_60m_pct_per_hour)
+                            };
                             let second_to_last = wt.and_then(|t| t.second_to_last_clean_ts);
                             let ratio = wt.and_then(|t| t.five_hour_to_weekly_ratio);
                             let burn = |usd| {
@@ -852,26 +1075,51 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             };
                             let reserved: f64 = ctx
                                 .telemetry
-                                .qualifying_placements(&cand.profile_id, second_to_last)
+                                .qualifying_placements(
+                                    &cand.profile_id,
+                                    second_to_last,
+                                    ev.cycle_start,
+                                    ctx.now_seconds,
+                                )
                                 .map(|placement| burn(placement_cost(placement)))
                                 .sum();
                             let new_burn = burn(cand_est_usd);
                             let rem_eff =
                                 ev.remaining_pct - RESERVE_FLOOR_PCT - reserved - new_burn;
-                            let safe = rem_eff
-                                >= v_60m * cat_stats.runway_duration_hours.min(ev.t_left_hours);
-                            match ev.kind {
-                                crate::quota_telemetry::WindowKind::Short5h => {
-                                    if !safe {
+                            let required =
+                                v_60m * cat_stats.runway_duration_hours.min(ev.t_left_hours);
+                            let margin = rem_eff - required;
+                            runway_margin = Some(margin);
+                            if margin < 0.0 {
+                                let failure = BindingWindowFailure {
+                                    kind: ev.kind,
+                                    remaining_pct: ev.remaining_pct,
+                                    margin_pct: margin,
+                                };
+                                match ev.kind {
+                                    crate::quota_telemetry::WindowKind::Short5h => {
                                         five_hour_safe = false;
+                                        record_binding_failure(&mut failing_tier3, failure);
                                     }
-                                }
-                                crate::quota_telemetry::WindowKind::Long => {
-                                    if !safe {
+                                    crate::quota_telemetry::WindowKind::Long => {
                                         weekly_safe = false;
+                                        record_binding_failure(&mut failing_tier4, failure);
                                     }
                                 }
                             }
+                        }
+                        if ev.h_w <= 0.0 {
+                            all_above_reserve = false;
+                            let reserve_margin = ev.remaining_pct - RESERVE_FLOOR_PCT;
+                            record_binding_failure(
+                                &mut failing_tier4,
+                                BindingWindowFailure {
+                                    kind: ev.kind,
+                                    remaining_pct: ev.remaining_pct,
+                                    margin_pct: runway_margin
+                                        .map_or(reserve_margin, |m| m.min(reserve_margin)),
+                                },
+                            );
                         }
                     }
 
@@ -885,24 +1133,36 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                     }
                     .max(f64::MIN_POSITIVE);
 
-                    let tier = if !all_above_reserve || !weekly_safe {
-                        3u8
+                    // Tier 2 (Unified Paid) intentionally precedes Tier 3/4
+                    // single-task runway-unsafe and 1%-floor subscriptions so
+                    // bursts spill before stranding turns (distinct from any
+                    // deferred multi-day cross-role reserve).
+                    let (tier, binding_failure) = if !all_above_reserve || !weekly_safe {
+                        (4u8, failing_tier4)
                     } else if five_hour_safe {
-                        0u8
+                        (0u8, None)
                     } else {
-                        1u8
+                        (3u8, failing_tier3)
                     };
-                    (tier, weight)
+                    (tier, weight, binding_failure)
                 }
             }
         };
 
+        let paid_cost_usd = (tier == 2).then_some(paid_estimate);
+        let estimated_cost_usd = if tier == 2 {
+            paid_estimate.is_finite().then_some(paid_estimate)
+        } else {
+            cand_est_usd.is_finite().then_some(cand_est_usd)
+        };
         scored.push(ScoredPool {
             item,
+            paid_cost_usd,
+            estimated_cost_usd,
             tier,
             weight,
-            prefer_pos,
             is_anchor,
+            binding_failure,
         });
     }
 
@@ -910,7 +1170,11 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     scored.sort_by(|left, right| {
         left.tier
             .cmp(&right.tier)
-            .then_with(|| left.prefer_pos.cmp(&right.prefer_pos))
+            .then_with(|| {
+                left.paid_cost_usd
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&right.paid_cost_usd.unwrap_or(f64::INFINITY))
+            })
             .then_with(|| right.weight.total_cmp(&left.weight))
             .then_with(|| right.is_anchor.cmp(&left.is_anchor))
             .then_with(|| {
@@ -1238,7 +1502,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("subtle"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &QuotaTelemetrySnapshot::default(),
             power_ranking: ranking,
             now_seconds: now,
@@ -1316,12 +1579,29 @@ mod tests {
         );
         assert_eq!(
             (scores[1].item.profile_id.as_str(), scores[1].tier),
-            ("pricey", 1)
+            ("pricey", 3)
         );
         assert_eq!(
             prepare_scored_pools(vec![candidates.remove(0)], &ctx)[0].tier,
-            1
+            3
         );
+    }
+
+    #[test]
+    fn calibration_weights_cheap_and_expensive_samples_equally() {
+        let cheap = CellCostObservation {
+            total_api_usd: 45.6,
+            sample_count: 100,
+        };
+        let expensive = CellCostObservation {
+            total_api_usd: 97.0,
+            sample_count: 2,
+        };
+        let scale = calibrated_prior_scale(
+            1.0,
+            [(0.456, Some(&cheap)), (24.25, Some(&expensive))].into_iter(),
+        );
+        assert!((scale - 104.0 / 102.0).abs() < 1e-10);
     }
 
     #[test]
@@ -1378,7 +1658,7 @@ mod tests {
             .iter()
             .map(|cand| benchmark_task_usd(&lookup(cand)).unwrap())
             .collect();
-        let scale = (1.41 + 16.0) / (benchmarks[0] + benchmarks[1]);
+        let scale = (1.41 / benchmarks[0] + 16.0 / benchmarks[1]) / 2.0;
         let expected = [
             (3.0 * scale * benchmarks[0] + 141.0) / 103.0,
             (3.0 * scale * benchmarks[1] + 1600.0) / 103.0,
@@ -1390,7 +1670,6 @@ mod tests {
                     placement: Placement::Child,
                     category: Some("subtle"),
                     ranking_anchor: None,
-                    prefer: &[],
                     telemetry,
                     power_ranking,
                     now_seconds: now,
@@ -1426,7 +1705,7 @@ mod tests {
             .iter()
             .map(|lookup| 200.0 / lookup.tasks_per_200_api.unwrap())
             .collect();
-        let fallback_scale = (1.41 + 16.0) / (api_benchmarks[0] + api_benchmarks[1]);
+        let fallback_scale = (1.41 / api_benchmarks[0] + 16.0 / api_benchmarks[1]) / 2.0;
         for (i, observed_mean) in [1.41, 16.0].into_iter().enumerate() {
             let prior = fallback_scale * api_benchmarks[i];
             let estimate = (3.0 * prior + 100.0 * observed_mean) / 103.0;
@@ -1457,9 +1736,9 @@ mod tests {
         let kimi_budget = lookup(&candidates[1]).weekly_budget_usd.unwrap();
         let kimi_window = window_key(&candidates[1]);
         for (headroom_usd, placement, expected_tier) in [
-            (0.99 * expected[1], false, 1),
+            (0.99 * expected[1], false, 3),
             (1.01 * expected[1], false, 0),
-            (1.99 * expected[1], true, 1),
+            (1.99 * expected[1], true, 3),
             (2.01 * expected[1], true, 0),
         ] {
             telemetry.windows.insert(
@@ -1504,7 +1783,7 @@ mod tests {
         let cross_category_usd = (0.12 + 0.20) / 2.0;
         let sol_budget = lookup(&candidates[0]).weekly_budget_usd.unwrap();
         for (headroom_usd, expected_tier) in [
-            (expected[0] + cross_category_usd - 0.01, 1),
+            (expected[0] + cross_category_usd - 0.01, 3),
             (expected[0] + cross_category_usd + 0.01, 0),
         ] {
             telemetry.windows.insert(
@@ -1535,7 +1814,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("straightforward"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: ranking,
             now_seconds: now,
@@ -1607,6 +1885,7 @@ mod tests {
             },
             crate::quota_telemetry::WindowTelemetry {
                 trailing_60m_pct_per_hour: 1.0,
+                has_trailing_interval: true,
                 second_to_last_clean_ts: Some(now - 600),
                 five_hour_to_weekly_ratio: None,
             },
@@ -1627,7 +1906,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("subtle"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: ranking,
             now_seconds: now,
@@ -1661,6 +1939,196 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_reset_excludes_prior_placements_and_retains_burst_across_stale_window() {
+        use crate::quota_telemetry::{QuotaTelemetrySnapshot, RecentPlacement};
+        let now = 1_000_000;
+        let reset = now - 300;
+        let mut window = week_window(0, reset);
+        window.label = "5h".into();
+        window.duration_seconds = Some(5 * 3600);
+        let eval = evaluate_applying_windows(&[window.clone()], "gpt-6.1-sol", now);
+        assert_eq!(eval[0].cycle_start, Some(reset));
+        assert!((eval[0].t_left_hours - (5.0 - 300.0 / 3600.0)).abs() < 1e-9);
+        let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
+        let mut telemetry = QuotaTelemetrySnapshot::default();
+        telemetry.windows.insert(
+            crate::quota_telemetry::WindowKey {
+                profile_id: "codex".into(),
+                cache_identity: "id-codex".into(),
+                window_kind: crate::quota_telemetry::WindowKind::Short5h,
+                model_scope: None,
+            },
+            crate::quota_telemetry::WindowTelemetry {
+                five_hour_to_weekly_ratio: Some(1.0),
+                second_to_last_clean_ts: Some(reset - 100),
+                ..Default::default()
+            },
+        );
+        let placement = |ts| RecentPlacement {
+            category: "subtle".into(),
+            model: None,
+            effort: None,
+            created_at_epoch_seconds: ts,
+        };
+        telemetry
+            .recent_placements
+            .insert("codex".into(), vec![placement(reset - 1); 500]);
+        let cand = scheduled_sub(
+            "codex",
+            mj_core::config::HarnessKind::Codex,
+            "gpt-6.1-sol",
+            Some("high"),
+            Some(200),
+            vec![window],
+            None,
+            false,
+        );
+        let tier = |cand: &ScheduledCandidate, telemetry: &QuotaTelemetrySnapshot| {
+            prepare_scored_pools(
+                vec![cand.clone()],
+                &SchedulingContext {
+                    placement: Placement::Child,
+                    category: Some("subtle"),
+                    ranking_anchor: None,
+                    telemetry,
+                    power_ranking: ranking,
+                    now_seconds: now,
+                },
+            )[0]
+            .tier
+        };
+        assert_eq!(tier(&cand, &telemetry), 0);
+        telemetry
+            .recent_placements
+            .get_mut("codex")
+            .unwrap()
+            .extend(vec![placement(reset); 500]);
+        assert_eq!(tier(&cand, &telemetry), 3);
+        let mut paid = cand.clone();
+        paid.profile_id = "paid".into();
+        paid.quota = CandidateQuota::UsagePriced;
+        let ctx = SchedulingContext {
+            placement: Placement::Child,
+            category: Some("subtle"),
+            ranking_anchor: None,
+            telemetry: &telemetry,
+            power_ranking: ranking,
+            now_seconds: now,
+        };
+        let mut candidates = vec![cand.clone(), paid.clone()];
+        let decision =
+            order_scheduled_candidates_by_draw_with_decision(&mut candidates, &[0.1, 1.0], &ctx)
+                .unwrap();
+        assert_eq!(candidates[0].profile_id, "paid");
+        assert_eq!(
+            decision.binding_window,
+            Some(crate::quota_telemetry::WindowKind::Short5h)
+        );
+
+        // When probes fail for longer than one full 5h window, never extrapolate
+        // an unobserved reset that would discard placements made shortly before
+        // the invented boundary.
+        let stale_reset = now - 5 * 3600 - 300;
+        let mut stale_window = week_window(0, stale_reset);
+        stale_window.label = "5h".into();
+        stale_window.duration_seconds = Some(5 * 3600);
+        let stale_eval = evaluate_applying_windows(&[stale_window.clone()], "gpt-6.1-sol", now);
+        assert_eq!(stale_eval[0].cycle_start, Some(stale_reset));
+        assert!((stale_eval[0].t_left_hours - 5.0).abs() < 1e-9);
+        let mut stale_telemetry = QuotaTelemetrySnapshot::default();
+        stale_telemetry.windows.insert(
+            crate::quota_telemetry::WindowKey {
+                profile_id: "codex".into(),
+                cache_identity: "id-codex".into(),
+                window_kind: crate::quota_telemetry::WindowKind::Short5h,
+                model_scope: None,
+            },
+            crate::quota_telemetry::WindowTelemetry {
+                five_hour_to_weekly_ratio: Some(1.0),
+                second_to_last_clean_ts: None,
+                ..Default::default()
+            },
+        );
+        // Placed 10m ago (before an extrapolated `stale_reset + 5h = now - 300`).
+        stale_telemetry
+            .recent_placements
+            .insert("codex".into(), vec![placement(now - 600); 500]);
+        let stale_cand = scheduled_sub(
+            "codex",
+            mj_core::config::HarnessKind::Codex,
+            "gpt-6.1-sol",
+            Some("high"),
+            Some(200),
+            vec![stale_window],
+            None,
+            false,
+        );
+        assert_eq!(tier(&stale_cand, &stale_telemetry), 3);
+    }
+
+    #[test]
+    fn paid_spill_reports_failing_5h_window_instead_of_lower_safe_weekly_window() {
+        let now = 1_000_000;
+        let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
+        let mut telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
+        telemetry.windows.insert(
+            crate::quota_telemetry::WindowKey {
+                profile_id: "sub".into(),
+                cache_identity: "id-sub".into(),
+                window_kind: crate::quota_telemetry::WindowKind::Short5h,
+                model_scope: None,
+            },
+            crate::quota_telemetry::WindowTelemetry {
+                trailing_60m_pct_per_hour: 120.0,
+                ..Default::default()
+            },
+        );
+        let five_hour = crate::quota::QuotaWindow {
+            label: "5h".into(),
+            remaining_percent: Some(60),
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: Some(now + 4 * 3600),
+            duration_seconds: Some(5 * 3600),
+            model_scope: None,
+        };
+        let weekly = week_window(20, now + 5 * 86_400);
+        let sub = scheduled_sub(
+            "sub",
+            mj_core::config::HarnessKind::Codex,
+            "gpt-6.1-sol",
+            Some("high"),
+            Some(200),
+            vec![five_hour, weekly],
+            None,
+            false,
+        );
+        let mut paid = sub.clone();
+        paid.profile_id = "dsf".into();
+        paid.quota = CandidateQuota::UsagePriced;
+        let ctx = SchedulingContext {
+            placement: Placement::Child,
+            category: Some("subtle"),
+            ranking_anchor: None,
+            telemetry: &telemetry,
+            power_ranking: ranking,
+            now_seconds: now,
+        };
+        let mut candidates = vec![sub, paid];
+        let decision =
+            order_scheduled_candidates_by_draw_with_decision(&mut candidates, &[0.5, 0.5], &ctx)
+                .unwrap();
+        assert_eq!(decision.chosen_profile, "dsf");
+        assert_eq!(decision.binding_profile.as_deref(), Some("sub"));
+        assert_eq!(
+            decision.binding_window,
+            Some(crate::quota_telemetry::WindowKind::Short5h)
+        );
+        assert_eq!(decision.binding_remaining_pct, Some(60.0));
+    }
+
+    #[test]
     fn paid_and_api_tiers_order_by_tasks_per_200_and_credit_balance() {
         let now = 1_000_000;
         let ranking = crate::power_ranking::PowerRankingSnapshot {
@@ -1674,7 +2142,7 @@ mod tests {
                     effort: Some("high".into()),
                     harness: None,
                     tasks_per_200_sub: Some(100.0),
-                    tasks_per_200_api: Some(80.0),
+                    tasks_per_200_api: Some(200.0 / 0.12),
                     weekly_budget_usd: None,
                     plan_usd_per_month: Some(200.0),
                     plan_assumed: false,
@@ -1687,7 +2155,7 @@ mod tests {
                     effort: Some("high".into()),
                     harness: None,
                     tasks_per_200_sub: Some(20.0),
-                    tasks_per_200_api: Some(10.0),
+                    tasks_per_200_api: Some(200.0 / 15.0),
                     weekly_budget_usd: None,
                     plan_usd_per_month: Some(200.0),
                     plan_assumed: false,
@@ -1701,7 +2169,6 @@ mod tests {
             placement: Placement::Child,
             category: Some("straightforward"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: &ranking,
             now_seconds: now,
@@ -1746,14 +2213,83 @@ mod tests {
                 true,
             ),
         ];
+        for units in [
+            [f64::MIN_POSITIVE, 1.0, 1.0, 1.0],
+            [1.0, 1.0, f64::MIN_POSITIVE, 1.0],
+            [1.0; 4],
+        ] {
+            let mut drawn = candidates.clone();
+            order_scheduled_candidates_by_draw(&mut drawn, &units, &ctx);
+            let ids = drawn
+                .iter()
+                .map(|c| c.profile_id.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                ids.iter().position(|id| *id == "api-cheap")
+                    < ids.iter().position(|id| *id == "paid-small")
+            );
+        }
         rank_scheduled_candidates(&mut candidates, &ctx);
         assert_eq!(
             candidates
                 .iter()
                 .map(|c| c.profile_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["paid-large", "paid-small", "api-cheap", "api-expensive"]
+            vec!["paid-large", "api-cheap", "paid-small", "api-expensive"]
         );
+        let mut unknown = candidates[0].clone();
+        unknown.profile_id = "unknown".into();
+        unknown.quota = CandidateQuota::Unknown;
+        candidates.push(unknown);
+        order_scheduled_candidates_by_draw(&mut candidates, &[1.0; 5], &ctx);
+        assert_eq!(candidates[0].profile_id, "unknown");
+
+        // Same paid profile offering two models where live cost observations
+        // reverse benchmark throughput must keep the empirically cheaper model.
+        let mut learned_telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
+        learned_telemetry.cell_costs.insert(
+            crate::database::CellCostKey {
+                category: "subtle".into(),
+                model: "cheap-model".into(),
+                effort: Some("high".into()),
+            },
+            CellCostObservation {
+                total_api_usd: 500.0 * 2.0,
+                sample_count: 500,
+            },
+        );
+        learned_telemetry.cell_costs.insert(
+            crate::database::CellCostKey {
+                category: "subtle".into(),
+                model: "expensive-model".into(),
+                effort: Some("high".into()),
+            },
+            CellCostObservation {
+                total_api_usd: 500.0 * 0.05,
+                sample_count: 500,
+            },
+        );
+        let learned_ctx = SchedulingContext {
+            placement: Placement::Child,
+            category: Some("subtle"),
+            ranking_anchor: None,
+            telemetry: &learned_telemetry,
+            power_ranking: &ranking,
+            now_seconds: now,
+        };
+        let paid_entry = |model: &str| ScheduledCandidate {
+            profile_id: "dsh".into(),
+            harness: mj_core::config::HarnessKind::Dsh,
+            model: model.into(),
+            effort: Some("high".into()),
+            quota: CandidateQuota::UsagePriced,
+            may_consume_credits: false,
+            cache_identity: None,
+        };
+        let mut same_paid_profile = vec![paid_entry("cheap-model"), paid_entry("expensive-model")];
+        order_scheduled_candidates_by_draw(&mut same_paid_profile, &[0.5, 0.5], &learned_ctx);
+        assert_eq!(same_paid_profile.len(), 1);
+        assert_eq!(same_paid_profile[0].model, "expensive-model");
     }
 
     #[test]
@@ -1765,7 +2301,6 @@ mod tests {
             placement: Placement::Orchestrator,
             category: Some("orchestrator"),
             ranking_anchor: None,
-            prefer: &[],
             telemetry: &telemetry,
             power_ranking: ranking,
             now_seconds: now,

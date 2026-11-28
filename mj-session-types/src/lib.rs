@@ -49,6 +49,7 @@ impl RelaySessionTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectMemorySyncTarget {
     pub canonical_root: std::path::PathBuf,
+    pub relay: CommandSpec,
 }
 
 /// The working directory a bare-target worker must be able to enter before it

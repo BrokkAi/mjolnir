@@ -3987,7 +3987,7 @@ impl Controller {
                                 let staged = self.prepare_worker_files_for(
                                     &id, &source_backend, &source_worker_root, executor,
                                     super::worker_binary::launch::WorkerFilePreparation::StageCandidate {
-                                        operation_id: operation.operation_id.clone(), expected_store_id: expected_store_id.clone(), candidate_id: candidate.clone(),
+                                        operation_id: operation.operation_id.clone(), expected_store_id: expected_store_id.clone(), candidate_id: candidate.clone(), worker_protocol: protocol_version,
                                     }, super::worker_binary::launch::LaunchHistory::Stored,
                                 )?;
                                 self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = staged.aws_profile;

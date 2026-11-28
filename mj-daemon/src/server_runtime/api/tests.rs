@@ -1697,6 +1697,237 @@ async fn a_worker_command_an_older_hel_cannot_serve_runs_on_the_staged_control_w
     assert_eq!((staged, untouched), (1, true));
 }
 
+/// An absent `hel` reports a local `NotFound` error, while a remote root
+/// reports 127 through its shell. Both mean the same thing, and both must
+/// stage the current build's control worker beside the root and rerun.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_hel_is_recovered_by_staging_the_control_worker() {
+    use std::os::unix::fs::PermissionsExt;
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    struct Stager {
+        staged: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl mj_controller::targets::ControlWorkerStager for Stager {
+        fn stage_control_worker(
+            &self,
+            _caller: &impl mj_controller::targets::CommandExecutor,
+            _locator: &mj_core::targets::TargetLocator,
+            _session_id: &str,
+            root: &str,
+        ) -> Result<()> {
+            self.staged
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            std::fs::create_dir_all(root)?;
+            let path = std::path::Path::new(root).join("hel-control");
+            std::fs::write(&path, "#!/bin/sh\nprintf 'bundle via %s' \"$0\"\n")?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            Ok(())
+        }
+    }
+    async fn run_case(
+        missing_root: bool,
+        hel: &'static str,
+    ) -> (Result<Vec<u8>, ExportError>, usize) {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_root = directory.path().join(SESSION);
+        if !missing_root {
+            std::fs::create_dir_all(&worker_root).unwrap();
+            let hel_path = worker_root.join("hel");
+            std::fs::write(&hel_path, hel).unwrap();
+            std::fs::set_permissions(&hel_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let layout = SessionExportLayout {
+            backend: mj_core::targets::TargetLocator::LocalBare {
+                worker_root: worker_root.to_str().unwrap().to_owned(),
+            },
+            workspace_root: String::new(),
+            primary_repository: "project".into(),
+            repositories: Vec::new(),
+            report_root: String::new(),
+            managed_worktree: None,
+        };
+        let staged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = worker_command_staging(
+            layout,
+            SESSION.into(),
+            vec!["bundle".into()],
+            "session bundle",
+            None,
+            Stager {
+                staged: staged.clone(),
+            },
+        )
+        .await;
+        (result, staged.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    for (missing_root, hel) in [(true, ""), (false, "#!/bin/sh\nexit 127\n")] {
+        let (result, staged) = run_case(missing_root, hel).await;
+        let bytes = result.unwrap();
+        assert!(
+            String::from_utf8(bytes).unwrap().ends_with("/hel-control"),
+            "the staged control worker ran the command"
+        );
+        assert_eq!(staged, 1);
+    }
+
+    // A transport failure on a remote target is not proof that its `hel` is
+    // missing: only a local failed lookup stages.
+    let missing = || -> Result<CommandOutput> {
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no such file").into())
+    };
+    let remote = mj_core::targets::TargetLocator::SshBare {
+        ssh: mj_core::targets::SshTarget {
+            destination: "builder".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: ".local/share/hel/workspaces/x".into(),
+        worker_id: None,
+    };
+    assert!(!should_stage_control_worker(&remote, &missing()));
+    assert!(should_stage_control_worker(
+        &mj_core::targets::TargetLocator::LocalBare {
+            worker_root: "/workers/x".into(),
+        },
+        &missing()
+    ));
+}
+
+/// A root kept for an `Error` session can lose its `hel`. `mj fetch` must
+/// stage the control worker there and read through it, with a fresh spool for
+/// the retried command.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fetch_from_a_root_without_hel_stages_the_control_worker() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_FETCH_MISSING_HEL_CHILD";
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "a_fetch_from_a_root_without_hel_stages_the_control_worker",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let checkout = directory.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let worker_root = directory.path().join("worker roots").join(SESSION);
+    let mut session = mj_controller::controller::test_support::checkpoint_test_session(SESSION);
+    session.state = SessionState::Error;
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    session.target_template_id = "local-bare".into();
+    session.project_directory = Some(checkout);
+    mj_controller::database::save_session(&session).unwrap();
+
+    struct Stager {
+        staged: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl mj_controller::targets::ControlWorkerStager for Stager {
+        fn stage_control_worker(
+            &self,
+            _caller: &impl mj_controller::targets::CommandExecutor,
+            _locator: &mj_core::targets::TargetLocator,
+            _session_id: &str,
+            root: &str,
+        ) -> Result<()> {
+            self.staged
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            std::fs::create_dir_all(root)?;
+            let path = std::path::Path::new(root).join("hel-control");
+            std::fs::write(
+                &path,
+                "#!/bin/sh\nprintf '%s\\n' '{\"kind\":\"file\",\"path\":\"/w/out\",\"length\":5}'\nprintf 'hello'\n",
+            )?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            Ok(())
+        }
+    }
+    let staged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fetched = fetch_transfer::read_with_stager(
+        SESSION.into(),
+        PathBuf::from("out"),
+        FetchMode::Content,
+        Stager {
+            staged: staged.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fetched.kind, mj_checkpoint::archive::FetchedKind::File);
+    assert_eq!(fetched.path, "/w/out");
+    assert_eq!(fetched.len(), 5);
+    let mut content = String::new();
+    std::io::Read::read_to_string(&mut fetched.reader(), &mut content).unwrap();
+    assert_eq!(content, "hello");
+    assert_eq!(staged.load(std::sync::atomic::Ordering::Acquire), 1);
+}
+
+/// A session in `Error` keeps its target and worker root but has no actor. A
+/// renewed export token must land in that root rather than fail as unmanaged.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_renewed_export_token_lands_in_a_retained_root_without_a_live_actor() {
+    use std::os::unix::fs::PermissionsExt;
+    struct NoActor;
+    impl mj_client::session::SessionControlBackend for NoActor {
+        fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>> {
+            Box::pin(async move { anyhow::bail!("session {session_id} is not managed") })
+        }
+
+        fn find_session(
+            &self,
+            _session_id: String,
+        ) -> BoxFuture<'_, Result<Option<SessionHandle>>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    let layout = SessionExportLayout {
+        backend: mj_core::targets::TargetLocator::LocalBare {
+            worker_root: root.to_string_lossy().into_owned(),
+        },
+        workspace_root: String::new(),
+        primary_repository: "project".into(),
+        repositories: Vec::new(),
+        report_root: String::new(),
+        managed_worktree: None,
+    };
+    install_renewed_session_github_token(
+        &SessionControl::new(NoActor),
+        SESSION,
+        &layout,
+        "github_app_token".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("github-token")).unwrap(),
+        "github_app_token\n"
+    );
+    assert_eq!(
+        std::fs::metadata(root.join("github-token"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
 /// A stopped session whose cleanup is deferred keeps its locator. Its work is
 /// in the checkpoint, so a patch export reads that instead of addressing a
 /// target that no longer runs it, and a stopped session with nothing saved is
@@ -8544,6 +8775,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
         code: Some("service".into()),
         http_status: None,
         reset_at: None,
+        retry_after_seconds: None,
         login_fingerprint: None,
     });
     snapshot.materialized.applied_event_ordinal = turn.completed_ordinal;
@@ -8695,6 +8927,7 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         code: Some("limit".into()),
         http_status: None,
         reset_at: None,
+        retry_after_seconds: None,
         login_fingerprint: None,
     };
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");

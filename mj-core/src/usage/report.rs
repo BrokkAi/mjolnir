@@ -150,6 +150,12 @@ pub fn descending_cost(a: &CostUsdTicks, b: &CostUsdTicks) -> std::cmp::Ordering
 pub struct ModelUsageEstimate {
     pub model: Option<String>,
     pub totals: BTreeMap<String, crate::storage::UsageCounterTotal>,
+    /// Completed turns on this model whose usage was missing, unspecified, or
+    /// last-request-only. Their cost is unknown, so `cost_usd_ticks` is a lower
+    /// bound: the known sum of full-turn reports, never poisoned to
+    /// `Err(UnknownCost)` by them.
+    #[serde(default)]
+    pub unreported_turns: u64,
     pub cost_usd_ticks: CostUsdTicks,
 }
 
@@ -158,6 +164,7 @@ impl Default for ModelUsageEstimate {
         Self {
             model: None,
             totals: BTreeMap::new(),
+            unreported_turns: 0,
             cost_usd_ticks: Ok(0),
         }
     }
@@ -267,6 +274,8 @@ pub struct ProfileQuotaUsage {
     /// 10,000 is all of one weekly allowance. An estimate from the probes the
     /// history holds. None when no part of the span could be measured.
     pub consumed_basis_points: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_seconds: Option<u64>,
     /// The probes did not cover the whole span (no reading before the start or
     /// after the end, a reset whose earlier use was lost, or an interval that
     /// could not be read), so the figure covers only part of it.
@@ -274,6 +283,55 @@ pub struct ProfileQuotaUsage {
     pub partial: bool,
     /// The profile's plan price, which weights profiles of one provider.
     pub monthly_price_usd: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileQuotaProjection {
+    pub profile_id: String,
+    pub window_label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_short_window: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_weekly_window: Option<bool>,
+    pub remaining_percent: u8,
+    pub resets_at_epoch_seconds: Option<i64>,
+    pub observed_pct_per_hour: Option<f64>,
+    pub sustainable_pct_per_hour: Option<f64>,
+    pub pace_ratio: Option<f64>,
+    pub projected_exhaustion_epoch_seconds: Option<i64>,
+}
+
+impl PartialEq for ProfileQuotaProjection {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile_id == other.profile_id
+            && self.window_label == other.window_label
+            && self.is_short_window == other.is_short_window
+            && self.is_weekly_window == other.is_weekly_window
+            && self.remaining_percent == other.remaining_percent
+            && self.resets_at_epoch_seconds == other.resets_at_epoch_seconds
+            && self.observed_pct_per_hour.map(f64::to_bits)
+                == other.observed_pct_per_hour.map(f64::to_bits)
+            && self.sustainable_pct_per_hour.map(f64::to_bits)
+                == other.sustainable_pct_per_hour.map(f64::to_bits)
+            && self.pace_ratio.map(f64::to_bits) == other.pace_ratio.map(f64::to_bits)
+            && self.projected_exhaustion_epoch_seconds == other.projected_exhaustion_epoch_seconds
+    }
+}
+impl Eq for ProfileQuotaProjection {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileRoleUsageEstimate {
+    pub profile: Option<String>,
+    pub role: UsageAgentRole,
+    pub models: Vec<ModelUsageEstimate>,
+    pub cost_usd_ticks: CostUsdTicks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleAssignmentChange {
+    pub id: i64,
+    pub changed_at_ms: i64,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,6 +346,8 @@ pub struct SessionUsageReport {
     /// Includes retained parent and turn profile names even if no longer
     /// configured.
     pub profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profile_providers: BTreeMap<String, String>,
     pub sessions: Vec<SessionUsageEstimate>,
     /// Filtered model totals grouped by each session's retained role. Children
     /// destroyed before kind retention was introduced remain unclassified.
@@ -297,9 +357,15 @@ pub struct SessionUsageReport {
     /// differ from its parent session's profile.
     #[serde(default)]
     pub profile_usage: Vec<ProfileUsageEstimate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_role_usage: Vec<ProfileRoleUsageEstimate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_changes: Vec<RoleAssignmentChange>,
     /// Weekly quota consumed in the selected intervals, filled by the daemon.
     #[serde(default)]
     pub quota_usage: Vec<ProfileQuotaUsage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_projections: Vec<ProfileQuotaProjection>,
     /// Sum of `sessions`; unknown when any session's cost is unknown.
     pub cost_usd_ticks: CostUsdTicks,
 }
@@ -311,10 +377,14 @@ impl Default for SessionUsageReport {
             until_ms: 0,
             hours: Vec::new(),
             profiles: Vec::new(),
+            profile_providers: BTreeMap::new(),
             sessions: Vec::new(),
             agent_usage: Vec::new(),
             profile_usage: Vec::new(),
+            profile_role_usage: Vec::new(),
+            role_changes: Vec::new(),
             quota_usage: Vec::new(),
+            quota_projections: Vec::new(),
             cost_usd_ticks: Ok(0),
         }
     }

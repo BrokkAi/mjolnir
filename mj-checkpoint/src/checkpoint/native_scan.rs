@@ -650,7 +650,9 @@ pub(super) fn is_antigravity_native_artifact(relative_path: &Path, session_id: &
 /// into it. Agents fill it with throwaway copies: one held 101 copies of a
 /// project tree, 260,000 files in 11 GB.
 fn antigravity_scratch(session_id: &str) -> PathBuf {
-    Path::new(ANTIGRAVITY_BRAIN).join(session_id).join("scratch")
+    Path::new(ANTIGRAVITY_BRAIN)
+        .join(session_id)
+        .join("scratch")
 }
 
 fn is_antigravity_legacy_conversation(path: &Path) -> bool {

@@ -109,6 +109,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use sha2::Digest;
 
+#[cfg(unix)]
 fn run_session_actor(
     target: RelaySessionTarget,
     commands: mpsc::Receiver<ActorCommand>,
@@ -269,6 +270,7 @@ fn recovery_plan_changes_keep_only_the_same_actor_identity() {
     let mut memory = original.clone();
     memory.project_memory = Some(ProjectMemorySyncTarget {
         canonical_root: PathBuf::from("/different"),
+        relay: CommandSpec::new("memory-relay", ["argument"]),
     });
     variants.push(memory);
     let mut no_recovery = original.clone();
@@ -2403,6 +2405,157 @@ async fn retirement_ends_a_connect_that_never_answers() {
     assert_eq!(error.to_string(), RELAY_JOB_ACTOR_STOPPED);
 }
 
+// Hard-won: 3c9929f33: turn delivery changed memory without telling the agent to reread it.
+#[cfg(unix)]
+#[tokio::test]
+async fn turn_memory_delivery_notifies_only_for_changed_replica() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+    use mj_core::project_memory::{
+        ProjectMemorySnapshot, SwapOutcome, commit_canonical, read_canonical_state,
+    };
+    use mj_core::relay::{
+        ProjectMemoryDeliveryOutcome, ProjectMemoryTransferAction as Action,
+        ProjectMemoryTransferResult as Reply, ProjectMemoryTurnSnapshot, ProjectMemoryWireTree,
+        RELAY_PROTOCOL_VERSION, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
+        RelayResponseEnvelope, RelayResponsePayload,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const CHILD: &str = "MJ_TEST_TURN_MEMORY_NOTICE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "turn_memory_delivery_notifies_only_for_changed_replica",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let temp = tempfile::tempdir().unwrap();
+    for mode in ["in_sync", "equal", "stale", "changed"] {
+        let base = ProjectMemorySnapshot {
+            files: [("/note.md".into(), "old".into())].into(),
+        };
+        let mut canonical = base.clone();
+        if matches!(mode, "stale" | "changed") {
+            canonical.files.insert("/note.md".into(), "foreign".into());
+            canonical.files.insert("/new.md".into(), "new".into());
+        }
+        let root = temp.path().join(mode).join("memory");
+        let state = read_canonical_state(&root).unwrap();
+        assert_eq!(
+            commit_canonical(&root, &state, "other", &canonical, None).unwrap(),
+            SwapOutcome::Swapped
+        );
+        let wire = ProjectMemoryTurnSnapshot {
+            base: ProjectMemoryWireTree::encode(base.clone(), RELAY_PROTOCOL_VERSION).unwrap(),
+            id: format!("{mode}-handout"),
+            tree: ProjectMemoryWireTree::encode(base, RELAY_PROTOCOL_VERSION).unwrap(),
+        };
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let (controller, worker) = tokio::io::duplex(16384);
+        let mut client = crate::worker_client::test_fixtures::duplex_relay_client(
+            controller,
+            LEASED_RELAY_SESSION,
+        );
+        let peer = mj_core::runtime::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut lines = BufReader::new(reader).lines();
+            let count = if mode == "in_sync" { 1 } else { 5 };
+            for expected in 0..count {
+                let request: RelayRequestEnvelope =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let RelayRequest::ProjectMemoryTransfer { action } = request.request else {
+                    panic!("unexpected request")
+                };
+                let result = match (expected, action) {
+                    (0, Action::BeginTurnSnapshot { .. }) if mode == "in_sync" => Reply::InSync,
+                    (0, Action::BeginTurnSnapshot { .. }) => Reply::SnapshotStarted {
+                        transfer_id: 1,
+                        total_bytes: bytes.len() as u64,
+                    },
+                    (
+                        1,
+                        Action::ReadSnapshotPage {
+                            transfer_id: 1,
+                            offset: 0,
+                        },
+                    ) => Reply::SnapshotPage {
+                        transfer_id: 1,
+                        offset: 0,
+                        next_offset: bytes.len() as u64,
+                        complete: true,
+                        chunk: BASE64.encode(&bytes),
+                    },
+                    (2, Action::BeginUpload { .. }) => Reply::UploadStarted { transfer_id: 2 },
+                    (
+                        3,
+                        Action::AppendUpload {
+                            transfer_id: 2,
+                            offset,
+                            chunk,
+                        },
+                    ) => Reply::UploadProgress {
+                        transfer_id: 2,
+                        next_offset: offset + BASE64.decode(chunk).unwrap().len() as u64,
+                    },
+                    (4, Action::CommitUpload { transfer_id: 2 }) => Reply::Delivered {
+                        outcome: if mode == "stale" {
+                            ProjectMemoryDeliveryOutcome::Stale
+                        } else {
+                            ProjectMemoryDeliveryOutcome::Delivered
+                        },
+                    },
+                    other => panic!("unexpected action: {other:?}"),
+                };
+                let response = RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: RELAY_PROTOCOL_VERSION,
+                    body: RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::ProjectMemoryTransfer { result },
+                    },
+                };
+                let mut frame = serde_json::to_vec(&response).unwrap();
+                frame.push(b'\n');
+                writer.write_all(&frame).await.unwrap();
+            }
+        });
+        let target = ProjectMemorySyncTarget {
+            canonical_root: root,
+            relay: CommandSpec::new("unused", ["unused"]),
+        };
+        assert!(
+            standalone::sync_turn_project_memory(
+                &mut client,
+                &target,
+                LEASED_RELAY_SESSION,
+                &mj_core::config::Config::default(),
+                tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .unwrap()
+        );
+        peer.await.unwrap();
+        let notices = crate::database::pending_mailbox_events(10).unwrap();
+        if mode == "changed" {
+            assert_eq!(notices.len(), 1);
+            let event: MailboxEvent = serde_json::from_str(&notices[0].event_json).unwrap();
+            assert_eq!(event.source, "project-memory");
+            assert!(!event.wake && !notices[0].unpark);
+            assert!(
+                event
+                    .key
+                    .starts_with(&format!("project-memory:{LEASED_RELAY_SESSION}:"))
+            );
+            assert_eq!(event.body, MailboxEventBody::PlainText { text: "Project memory changed. Reread MEMORY.md and the affected notes. Added new.md. Updated note.md.".into() });
+        } else {
+            assert!(notices.is_empty(), "{mode} must not enqueue a notice");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn project_memory_install_queues_only_replica_changes() {
@@ -2630,6 +2783,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     let mut target = leased_relay_target(relay_root.path());
     target.project_memory = Some(ProjectMemorySyncTarget {
         canonical_root: canonical.path().to_path_buf(),
+        relay: target.spec.clone(),
     });
 
     let mut connection = StandaloneSession::connect(&target)

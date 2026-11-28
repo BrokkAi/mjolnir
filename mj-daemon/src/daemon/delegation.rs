@@ -236,6 +236,9 @@ fn spawn_power_ranking_refresh(state: &Arc<RuntimeState>, cancellation: Cancella
 fn spawn_quota_telemetry_refresh(
     state: &Arc<RuntimeState>,
     reports: Arc<std::sync::Mutex<BTreeMap<String, mj_controller::quota::QuotaReportPublication>>>,
+    mut quotas_rx: tokio::sync::watch::Receiver<
+        BTreeMap<String, mj_controller::quota::QuotaReportPublication>,
+    >,
     cancellation: CancellationToken,
 ) {
     let state = state.clone();
@@ -244,27 +247,17 @@ fn spawn_quota_telemetry_refresh(
         poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut category_tick = tokio::time::interval(Duration::from_secs(60 * 60));
         category_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut quotas_closed = false;
         loop {
-            tokio::select! {
+            let trigger_refresh = tokio::select! {
                 _ = cancellation.cancelled() => break,
-                _ = poll_tick.tick() => {
-                    let profiles: Vec<(String, String)> = reports
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .iter()
-                        .map(|(profile_id, pub_record)| {
-                            (profile_id.clone(), pub_record.cache_identity.clone())
-                        })
-                        .collect();
-                    let telemetry = state.quota_telemetry.clone();
-                    let now = mj_core::clock::epoch_seconds() as i64;
-                    if let Ok(Err(error)) = mj_core::runtime::spawn_blocking(move || {
-                        telemetry.refresh_from_store(&profiles, now)
-                    })
-                    .await
-                    {
-                        tracing::warn!(%error, "quota telemetry refresh failed");
+                _ = poll_tick.tick() => true,
+                changed = quotas_rx.changed(), if !quotas_closed => {
+                    if changed.is_err() {
+                        quotas_closed = true;
+                        continue;
                     }
+                    true
                 }
                 _ = category_tick.tick() => {
                     let telemetry = state.quota_telemetry.clone();
@@ -278,6 +271,37 @@ fn spawn_quota_telemetry_refresh(
                     {
                         tracing::warn!(%error, "category burn observation refresh failed");
                     }
+                    false
+                }
+            };
+            if trigger_refresh {
+                let config = state.owner().controller().config.clone();
+                let (profiles, projection_reports): (Vec<_>, Vec<_>) = {
+                    let reports = reports.lock().unwrap_or_else(|e| e.into_inner());
+                    let profiles = reports
+                        .iter()
+                        .map(|(id, p)| (id.clone(), p.cache_identity.clone()))
+                        .collect();
+                    let projections = reports
+                        .iter()
+                        .filter_map(|(id, p)| {
+                            policy::active_projection_report(id, p, &config)
+                                .map(|r| (id.clone(), p.cache_identity.clone(), r))
+                        })
+                        .collect();
+                    (profiles, projections)
+                };
+                let telemetry = state.quota_telemetry.clone();
+                let now = mj_core::clock::epoch_seconds() as i64;
+                match mj_core::runtime::spawn_blocking(move || {
+                    telemetry.refresh_from_store(&profiles, now)?;
+                    telemetry.refresh_projections(&projection_reports, now)
+                })
+                .await
+                {
+                    Ok(Ok(())) => state.publish_quota_projections(),
+                    Ok(Err(error)) => tracing::warn!(%error, "quota telemetry refresh failed"),
+                    Err(error) => tracing::warn!(%error, "quota telemetry refresh task failed"),
                 }
             }
         }
@@ -292,7 +316,12 @@ async fn run(
 ) -> Result<()> {
     let backend = policy.services.backend.clone();
     spawn_power_ranking_refresh(&state, cancellation.clone());
-    spawn_quota_telemetry_refresh(&state, policy.reports.clone(), cancellation.clone());
+    spawn_quota_telemetry_refresh(
+        &state,
+        policy.reports.clone(),
+        policy.quotas_tx.subscribe(),
+        cancellation.clone(),
+    );
     // Housekeeping for stores written by builds that kept acknowledged rows.
     if let Err(error) =
         mj_core::runtime::spawn_blocking(mj_controller::database::prune_acknowledged_delegations)

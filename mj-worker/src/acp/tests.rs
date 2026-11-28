@@ -7625,6 +7625,10 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
         error.contains("no native history for session missing-thread"),
         "unexpected failure: {error}"
     );
+    assert!(
+        error.contains("start a fresh session instead of retrying Resume"),
+        "the failure must tell the operator what to do next: {error}"
+    );
     let mut events = Vec::new();
     while let Ok(event) = event_rx.try_recv() {
         events.push(event);

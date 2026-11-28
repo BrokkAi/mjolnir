@@ -304,12 +304,6 @@ impl SetupOperations for ProfileBackend {
     ) -> BoxFuture<'static, AnyResult<()>> {
         unimplemented!()
     }
-    fn set_quota_preferences(
-        self: Arc<Self>,
-        request: SetQuotaPreferencesRequest,
-    ) -> BoxFuture<'static, AnyResult<()>> {
-        unimplemented!()
-    }
     fn check_availability(self: Arc<Self>) -> BoxFuture<'static, AnyResult<()>> {
         unimplemented!()
     }

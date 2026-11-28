@@ -153,35 +153,6 @@ impl SetupOperations for RuntimeState {
         })
     }
 
-    fn set_quota_preferences(
-        self: Arc<Self>,
-        request: SetQuotaPreferencesRequest,
-    ) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move {
-            let SetQuotaPreferencesRequest { prefer } = request;
-
-            // Hold the configuration owner through persistence and publication:
-            // an acknowledged save must be visible to the next dashboard.
-            let mut inactivity = self.config_mutation.lock().await;
-            let config = terminal_blocking(move || {
-                Config::update(|config| {
-                    config.quota.prefer = prefer;
-                    Ok(())
-                })
-                .map(|(config, ())| config)
-            })
-            .await?;
-            self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
-            self.review_config
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone_from(&config.review);
-            self.owner().install_config(config);
-            self.publish_revision();
-            Ok(())
-        })
-    }
-
     fn check_availability(self: Arc<Self>) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
             self.request_availability_check()?;
