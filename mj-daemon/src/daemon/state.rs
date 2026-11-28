@@ -52,10 +52,29 @@ impl RuntimeState {
             workspaces,
             Controller::load,
         );
+        let (sender, task) = spawn_role_sync(mj_controller::database::database_path());
+        state.owner().set_role_sync(sender);
+        *state
+            .role_sync_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(task);
         state.committed = mj_controller::database::database_writer_installed().then(|| {
             mj_controller::database::subscribe_committed_state().expect("installed database writer")
         });
         state
+    }
+
+    pub(super) async fn shutdown_role_sync(&self) -> Result<()> {
+        self.owner().close_role_sync();
+        let task = self
+            .role_sync_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            task.await.context("role assignment sync task panicked")?;
+        }
+        Ok(())
     }
 
     pub(super) fn new_with_controller_loader(
@@ -119,6 +138,7 @@ impl RuntimeState {
             workspaces_tx,
             workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
+            role_sync_task: Mutex::new(None),
             owner: Mutex::new(RuntimeStateOwner::new(controller, {
                 let review_host = review_host.clone();
                 Arc::new(move |child: &str, reason| {
@@ -2296,5 +2316,99 @@ impl ChildReview {
     /// cannot rule out yet.
     pub(crate) fn holds(self) -> bool {
         self != Self::Closed
+    }
+}
+
+fn spawn_role_sync(
+    path: PathBuf,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<super::owner::RoleSyncRequest>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::unbounded_channel::<super::owner::RoleSyncRequest>();
+    let task = mj_core::runtime::spawn(async move {
+        while let Some(request) = receiver.recv().await {
+            let path = path.clone();
+            let result = mj_core::runtime::spawn_blocking(move || {
+                let result = mj_controller::database::sync_role_assignment_snapshot_at(
+                    &path,
+                    &request.snapshot,
+                    request.observed_at_ms,
+                );
+                if let Err(error) = result {
+                    tracing::warn!(%error, "could not persist role assignments");
+                }
+                if let Some(ack) = request.ack {
+                    let _ = ack.send(());
+                }
+            })
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "role assignment sync task failed");
+            }
+        }
+    });
+    (sender, task)
+}
+
+#[cfg(test)]
+mod role_sync_tests {
+    use super::*;
+    use mj_core::config::{RoleAssignmentSnapshot, SubagentChoice};
+
+    #[tokio::test]
+    async fn role_sync_drains_in_owner_install_order_and_ack_is_durable() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("roles.sqlite");
+        let config = Config::default();
+        let snapshot = RoleAssignmentSnapshot::from_config(&config);
+        mj_controller::database::sync_role_assignment_snapshot_at(&path, &snapshot, 0)?;
+        let controller = Controller {
+            config: config.clone(),
+            state: Default::default(),
+        };
+        let mut owner = RuntimeStateOwner::new(controller, Arc::new(|_, _| {}));
+        let (sender, task) = spawn_role_sync(path.clone());
+        owner.set_role_sync(sender);
+        let mut first = config.clone();
+        first.subagents.primary = vec![SubagentChoice {
+            model: "a".into(),
+            effort: None,
+        }];
+        let first_ack = owner.install_config(first.clone()).unwrap();
+        let mut second = first;
+        second.subagents.primary[0].model = "b".into();
+        let second_ack = owner.install_config(second.clone()).unwrap();
+        assert!(owner.install_config(second.clone()).is_none());
+        let barrier = owner.role_sync_barrier().unwrap();
+        first_ack.await?;
+        assert!(
+            !mj_controller::database::load_role_assignment_changes_at(&path, 0, i64::MAX)?
+                .is_empty()
+        );
+        second_ack.await?;
+        barrier.await?;
+        let changes = mj_controller::database::load_role_assignment_changes_at(&path, 0, i64::MAX)?;
+        assert_eq!(
+            changes
+                .iter()
+                .map(|c| c.summary.as_str())
+                .collect::<Vec<_>>(),
+            ["Primary: off → a", "Primary: a → b"]
+        );
+        second.subagents.primary[0].model = "c".into();
+        let pending = owner.install_config(second).unwrap();
+        owner.close_role_sync();
+        task.await?;
+        pending.await?;
+        assert_eq!(
+            mj_controller::database::load_role_assignment_changes_at(&path, 0, i64::MAX)?
+                .last()
+                .unwrap()
+                .summary,
+            "Primary: b → c"
+        );
+        Ok(())
     }
 }

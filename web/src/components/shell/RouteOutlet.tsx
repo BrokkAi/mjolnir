@@ -15,6 +15,7 @@ const NewSessionView = lazy(() => import('../../features/new-session/NewSessionV
 const ResumeView = lazy(() => import('../../features/resume/ResumeView'));
 const MoveView = lazy(() => import('../../features/move/MoveView'));
 const TargetsView = lazy(() => import('../../features/targets/TargetsView'));
+const UsageView = lazy(() => import('../../features/usage/UsageView'));
 const QuotaView = lazy(() => import('../../features/quota/QuotaView'));
 const SettingsView = lazy(() => import('../../features/settings/SettingsView'));
 
@@ -131,6 +132,9 @@ export function RouteOutlet() {
       break;
     case 'targets':
       view = <TargetsView />;
+      break;
+    case 'usage':
+      view = <UsageView />;
       break;
     case 'quota':
       view = <QuotaView />;

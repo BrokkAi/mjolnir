@@ -287,6 +287,7 @@ pub struct RuntimeState {
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     owner: Mutex<RuntimeStateOwner>,
+    role_sync_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Rebuilt by the delegation service when the API server starts; weak so
     /// the backend's ExportRuntime reference does not form an Arc cycle.
     pub(crate) report_backend:

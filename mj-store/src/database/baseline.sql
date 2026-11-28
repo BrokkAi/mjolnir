@@ -415,3 +415,7 @@ VALUES (
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 );
+
+CREATE TABLE IF NOT EXISTS role_assignment_state (id INTEGER PRIMARY KEY CHECK (id = 1), snapshot_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS role_assignment_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, changed_at_ms INTEGER NOT NULL, summary TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_role_assignment_changes_time ON role_assignment_changes (changed_at_ms);

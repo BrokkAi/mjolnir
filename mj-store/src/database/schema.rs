@@ -3930,6 +3930,18 @@ pub(super) fn migrate_schema(connection: &Connection, sessions_root: Option<&Pat
         )?;
         transaction.commit()?;
     }
+    // Revision 166 is compatible: additive sidecar tables are ignored by 165
+    // readers and writers; creation is O(1) DDL.
+    if version < 166 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS role_assignment_state (id INTEGER PRIMARY KEY CHECK (id = 1), snapshot_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS role_assignment_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, changed_at_ms INTEGER NOT NULL, summary TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_role_assignment_changes_time ON role_assignment_changes (changed_at_ms);
+            INSERT INTO schema_migrations(version, applied_at) VALUES (166, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version=166;")?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5223,6 +5235,34 @@ mod reader_tests {
     }
 
     #[test]
+    fn role_assignment_migration_166_preserves_165_compatibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        save_session_to(&path, &super::super::tests::session("kept", "project")).unwrap();
+        stamp_schema_version(&path, 165);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE role_assignment_state; DROP TABLE role_assignment_changes;")
+            .unwrap();
+        migrate_schema(&connection, None).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 166);
+        assert_eq!(state.minimum_compatible, Some(165));
+        state.ensure_supported_by(165).unwrap();
+        connection
+            .execute("INSERT INTO role_assignment_state VALUES (1, '{}', 1)", [])
+            .unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE session_id='kept'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn report_trigger_removal_at_165_raises_the_compatibility_floor() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("upgrade.sqlite3");
@@ -5255,7 +5295,7 @@ mod reader_tests {
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
-        assert!(state.ensure_supported_by(SCHEMA_VERSION - 1).is_err());
+        assert!(state.ensure_supported_by(164).is_err());
         state.ensure_supported_by(SCHEMA_VERSION).unwrap();
     }
 

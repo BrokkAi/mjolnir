@@ -1,9 +1,10 @@
 //! One consistent store snapshot of parent usage and retained descendants.
 use super::*;
 use mj_core::usage::{
-    AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileUsageEstimate,
-    SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, USAGE_GRAPH_HOURS, UnknownCost,
-    UsageAgentRole, UsageScope, add_cost, descending_cost, graph_start_ms,
+    AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileRoleUsageEstimate,
+    ProfileUsageEstimate, SessionUsageEstimate, SessionUsageQuery, SessionUsageReport,
+    USAGE_GRAPH_HOURS, UnknownCost, UsageAgentRole, UsageScope, add_cost, descending_cost,
+    graph_start_ms,
 };
 
 use mj_core::usage::model_catalog;
@@ -72,11 +73,14 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
 /// Count a completed turn whose usage cannot price this model. The row keeps
 /// its known full-turn cost, so an unreported turn makes it a lower bound
 /// rather than unknown.
-fn record_unreported_turn(groups: &mut BTreeMap<Option<String>, ModelUsageEstimate>, model: &str) {
+fn record_unreported_turn(
+    groups: &mut BTreeMap<Option<String>, ModelUsageEstimate>,
+    model: Option<&str>,
+) {
     let group = groups
-        .entry(Some(model.to_owned()))
+        .entry(model.map(str::to_owned))
         .or_insert_with(|| ModelUsageEstimate {
-            model: Some(model.to_owned()),
+            model: model.map(str::to_owned),
             ..Default::default()
         });
     group.unreported_turns += 1;
@@ -182,6 +186,12 @@ fn load_with(
     ]);
     // Keyed by each turn's own retained profile, not its parent's.
     let mut profile_groups: BTreeMap<Option<String>, ProfileUsageEstimate> = BTreeMap::new();
+    let mut profile_role_groups: BTreeMap<
+        (Option<String>, UsageAgentRole),
+        BTreeMap<Option<String>, ModelUsageEstimate>,
+    > = BTreeMap::new();
+    report.role_changes =
+        super::role_changes::load_role_assignment_changes_tx(&tx, graph_start, now_ms)?;
     let mut turns = tx.prepare(REPORT_TURNS_SQL)?;
     let rows = turns.query_map(params![since_ms.min(graph_start), now_ms, wanted], |row| {
         Ok((
@@ -271,7 +281,13 @@ fn load_with(
                             add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
                                 .context("profile cost overflow")?;
                     }
-                    for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
+                    for groups in [
+                        &mut entry.models,
+                        role_groups.entry(role).or_default(),
+                        profile_role_groups
+                            .entry((turn_profile.clone(), role))
+                            .or_default(),
+                    ] {
                         let group = groups.entry(selection.model.clone()).or_insert_with(|| {
                             ModelUsageEstimate {
                                 model: selection.model.clone(),
@@ -293,7 +309,7 @@ fn load_with(
                 if let Some(group) = &mut profile_group {
                     group.coverage.last_request_reports += 1;
                 }
-                selection.model
+                Some(selection.model)
             }
             Some(_) => {
                 if in_rows {
@@ -302,7 +318,7 @@ fn load_with(
                 if let Some(group) = &mut profile_group {
                     group.coverage.unspecified_reports += 1;
                 }
-                selection.model
+                Some(selection.model)
             }
             None => {
                 if in_rows {
@@ -311,14 +327,22 @@ fn load_with(
                 if let Some(group) = &mut profile_group {
                     group.coverage.missing_reports += 1;
                 }
-                selection.model
+                Some(selection.model)
             }
         };
         if let (Some(role), Some(model)) = (role, unreported_model) {
-            let model = catalogs.priced_model(turn_profile.as_deref(), model);
-            for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
-                record_unreported_turn(groups, &model);
+            let model = model.map(|model| catalogs.priced_model(turn_profile.as_deref(), model));
+            if model.is_some() {
+                for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
+                    record_unreported_turn(groups, model.as_deref());
+                }
             }
+            record_unreported_turn(
+                profile_role_groups
+                    .entry((turn_profile.clone(), role))
+                    .or_default(),
+                model.as_deref(),
+            );
         }
     }
     // A turn already running at the start of the window can still consume in it.
@@ -374,6 +398,28 @@ fn load_with(
     report.profile_usage.sort_by(|a, b| {
         descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
             .then_with(|| a.profile.cmp(&b.profile))
+    });
+    for ((profile, role), groups) in profile_role_groups {
+        let mut models: Vec<_> = groups.into_values().collect();
+        models.sort_by(|a, b| {
+            descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        let cost_usd_ticks = models
+            .iter()
+            .try_fold(Ok(0), |total, model| add_cost(total, model.cost_usd_ticks))
+            .context("profile role cost overflow")?;
+        report.profile_role_usage.push(ProfileRoleUsageEstimate {
+            profile,
+            role,
+            models,
+            cost_usd_ticks,
+        });
+    }
+    report.profile_role_usage.sort_by(|a, b| {
+        descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
+            .then_with(|| a.profile.cmp(&b.profile))
+            .then_with(|| a.role.cmp(&b.role))
     });
     for (role, groups) in role_groups {
         let mut models: Vec<_> = groups.into_values().collect();
@@ -757,6 +803,48 @@ mod tests {
                 .unwrap()
                 .cost_usd_ticks
         };
+        let change_connection = open(&path)?;
+        change_connection.execute(
+            "INSERT INTO role_assignment_changes(changed_at_ms, summary) VALUES (?1, 'earlier')",
+            [now - 2 * HOUR_MS],
+        )?;
+        drop(change_connection);
+        let one_hour = load_from(
+            &path,
+            &SessionUsageQuery {
+                hour_start_ms: Some(now),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(one_hour.role_changes.len(), 1);
+        assert_eq!(one_hour.role_changes[0].summary, "earlier");
+        let primary = one_hour
+            .profile_role_usage
+            .iter()
+            .find(|p| p.role == UsageAgentRole::Primary)
+            .unwrap();
+        assert_eq!(primary.profile.as_deref(), Some("codex"));
+        assert!(primary.models.iter().any(|m| m.unreported_turns == 2));
+        let reviewers = one_hour
+            .profile_role_usage
+            .iter()
+            .filter(|p| p.role == UsageAgentRole::Reviewer)
+            .map(|p| p.profile.as_deref())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(reviewers, BTreeSet::from([Some("codex"), Some("codex2")]));
+        assert!(
+            one_hour
+                .profile_role_usage
+                .iter()
+                .any(|p| p.role == UsageAgentRole::Subagent)
+        );
+        assert!(
+            one_hour
+                .profile_role_usage
+                .iter()
+                .any(|p| p.role == UsageAgentRole::Reviewer)
+        );
         let before_destroy = load_from(&path, &SessionUsageQuery::default(), now)?;
         assert_eq!(
             role_cost(&before_destroy, UsageAgentRole::Primary),

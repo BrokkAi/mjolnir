@@ -30,7 +30,7 @@ enum PaneOperation {
     Workspace(String),
     /// Probe this profile's quota now.
     RefreshProfile(String),
-    /// Open Usage by session filtered to this profile.
+    /// Open Usage Dashboard filtered to this profile.
     ProfileUsage(String),
     /// Runs a session command for the session whose row was right-clicked,
     /// through the same entry point its menu row uses.
@@ -192,7 +192,7 @@ impl DashboardState {
                 "Profiles",
                 &[
                     ("Settings…", CommandId::ManageProfiles),
-                    ("Usage by session…", CommandId::SessionUsageReport),
+                    ("Usage Dashboard…", CommandId::SessionUsageReport),
                 ],
             ),
             SupportPane::Sessions | SupportPane::Notifications => return,

@@ -1663,7 +1663,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::SessionUsageReport,
-        label: "Usage by session",
+        label: "Usage Dashboard",
         description: "Compare each parent session and its sub-agents by model and estimated API cost, highest total first; filter by parent profile and trailing hour, week or month.",
         scope: Scope::Global,
         pane_keys: &[],

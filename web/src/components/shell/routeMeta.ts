@@ -23,6 +23,8 @@ export function routeTitle(route: Route, rowById: RowById): string {
       return 'Move session';
     case 'targets':
       return 'Targets';
+    case 'usage':
+      return 'Usage Dashboard';
     case 'quota':
       return 'Quota';
     case 'settings':

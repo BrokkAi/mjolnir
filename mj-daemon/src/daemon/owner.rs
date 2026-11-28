@@ -163,6 +163,8 @@ impl PollableWorkerInputs {
 /// work receives copied inputs and reports its result back to this owner.
 pub(super) struct RuntimeStateOwner {
     controller: Controller,
+    role_sync: Option<tokio::sync::mpsc::UnboundedSender<RoleSyncRequest>>,
+    last_role_snapshot: mj_core::config::RoleAssignmentSnapshot,
     pub(super) config_snapshot: mj_core::snapshot_map::SharedSnapshot<Config>,
     pub(super) lifecycle: BTreeMap<String, ActiveLifecycle>,
     pub(super) lifecycle_intents: BTreeMap<String, std::collections::VecDeque<Arc<()>>>,
@@ -185,6 +187,12 @@ pub(super) struct RuntimeStateOwner {
     /// Told when a reviewer child's session ends, so an open review does not
     /// wait forever for a report the child can no longer give.
     reviewer_ended: ReviewerEnded,
+}
+
+pub(super) struct RoleSyncRequest {
+    pub(super) snapshot: mj_core::config::RoleAssignmentSnapshot,
+    pub(super) observed_at_ms: i64,
+    pub(super) ack: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// Receives a reviewer child's session id and why its session ended.
@@ -402,11 +410,63 @@ impl RuntimeStateOwner {
         self.sessions.insert(session_id, runtime);
     }
 
-    pub(super) fn install_config(&mut self, config: Config) {
+    pub(super) fn install_config(
+        &mut self,
+        config: Config,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let snapshot = mj_core::config::RoleAssignmentSnapshot::from_config(&config);
+        let ack = if snapshot != self.last_role_snapshot {
+            self.last_role_snapshot = snapshot.clone();
+            self.role_sync.as_ref().and_then(|sender| {
+                let (ack, receiver) = tokio::sync::oneshot::channel();
+                let request = RoleSyncRequest {
+                    snapshot,
+                    observed_at_ms: mj_core::clock::epoch_millis() as i64,
+                    ack: Some(ack),
+                };
+                if sender.send(request).is_err() {
+                    tracing::warn!("role assignment persistence task stopped");
+                    None
+                } else {
+                    Some(receiver)
+                }
+            })
+        } else {
+            None
+        };
         if self.controller.config != config {
             self.config_snapshot = config.clone().into();
             self.controller.config = config;
         }
+        ack
+    }
+
+    pub(super) fn role_sync_barrier(&self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        self.role_sync.as_ref().and_then(|sender| {
+            let (ack, receiver) = tokio::sync::oneshot::channel();
+            let request = RoleSyncRequest {
+                snapshot: self.last_role_snapshot.clone(),
+                observed_at_ms: mj_core::clock::epoch_millis() as i64,
+                ack: Some(ack),
+            };
+            if sender.send(request).is_err() {
+                tracing::warn!("role assignment persistence task stopped");
+                None
+            } else {
+                Some(receiver)
+            }
+        })
+    }
+
+    pub(super) fn set_role_sync(
+        &mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<RoleSyncRequest>,
+    ) {
+        self.role_sync = Some(sender);
+    }
+
+    pub(super) fn close_role_sync(&mut self) {
+        self.role_sync.take();
     }
 
     pub(super) fn edit_sessions<R>(
@@ -422,6 +482,10 @@ impl RuntimeStateOwner {
     pub(super) fn new(controller: Controller, reviewer_ended: ReviewerEnded) -> Self {
         let indexes = RecordIndexes::bootstrap(&controller.state);
         Self {
+            last_role_snapshot: mj_core::config::RoleAssignmentSnapshot::from_config(
+                &controller.config,
+            ),
+            role_sync: None,
             config_snapshot: controller.config.clone().into(),
             controller,
             lifecycle: BTreeMap::new(),
@@ -440,15 +504,18 @@ impl RuntimeStateOwner {
         }
     }
 
-    pub(super) fn install_controller(&mut self, controller: Controller) {
+    pub(super) fn install_controller(
+        &mut self,
+        controller: Controller,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
         if !matches!(self.store, StoreState::Bootstrap) {
-            self.install_config(controller.config);
-            return;
+            return self.install_config(controller.config);
         }
         let before = self.controller.state.clone();
-        self.install_config(controller.config.clone());
+        let ack = self.install_config(controller.config.clone());
         self.controller = controller;
         self.records_changed(&before);
+        ack
     }
 
     fn observe_committed(&mut self, committed: &Arc<mj_controller::database::CommittedState>) {

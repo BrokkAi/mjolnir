@@ -6455,6 +6455,7 @@ mod tests {
             .push(mj_core::usage::ProfileQuotaProjection {
                 profile_id: "claude".into(),
                 window_label: "Week".into(),
+                is_short_window: false,
                 remaining_percent: 38,
                 resets_at_epoch_seconds: Some(now as i64 + 54 * 3600),
                 observed_pct_per_hour: Some(1.0),

@@ -1220,7 +1220,7 @@ fn golden_dashboard_dialogs() {
     usage.handle_key(key(KeyCode::Char('3')));
     append_dialog_render(
         &mut output,
-        "Usage by session loading",
+        "Usage Dashboard loading",
         120,
         36,
         &drawn(&mut usage, 120, 36),
@@ -1364,18 +1364,21 @@ fn golden_dashboard_dialogs() {
         ProfileQuotaUsage {
             profile: "claude".into(),
             consumed_basis_points: Some(1000),
+            covered_seconds: Some(86_400),
             partial: false,
             monthly_price_usd: Some(200),
         },
         ProfileQuotaUsage {
             profile: "claude-idle".into(),
             consumed_basis_points: Some(0),
+            covered_seconds: Some(86_400),
             partial: false,
             monthly_price_usd: Some(100),
         },
         ProfileQuotaUsage {
             profile: "codex".into(),
             consumed_basis_points: Some(2000),
+            covered_seconds: Some(86_400),
             partial: false,
             monthly_price_usd: Some(200),
         },
@@ -1479,6 +1482,7 @@ fn golden_dashboard_dialogs() {
     forecast_report.quota_projections = vec![mj_core::usage::ProfileQuotaProjection {
         profile_id: "codex4".into(),
         window_label: "Week".into(),
+        is_short_window: false,
         remaining_percent: 38,
         resets_at_epoch_seconds: Some(now + 54 * 3600 + 30),
         observed_pct_per_hour: Some(1.0),
@@ -1497,14 +1501,17 @@ fn golden_dashboard_dialogs() {
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,
-        "Usage by session All with model costs",
+        "Usage Dashboard All with model costs",
         120,
         36,
         &drawn(&mut usage, 120, 36),
     );
     // Hard-won: #1501: a wrapped fixed header clipped models and crowded out sessions.
-    for _ in 0..3 {
-        usage.handle_key(key(KeyCode::Tab));
+    if let Mode::SessionUsageReport(dialog) = &mut usage.mode {
+        dialog
+            .form
+            .get_mut()
+            .focus(crate::session_usage_report::UsageControl::Rows);
     }
     usage.handle_key(key(KeyCode::Home));
     for _ in 0..16 {
@@ -1512,14 +1519,14 @@ fn golden_dashboard_dialogs() {
     }
     append_dialog_render(
         &mut output,
-        "Usage by session All with remaining agent roles",
+        "Usage Dashboard All with sessions",
         120,
         36,
         &drawn(&mut usage, 120, 36),
     );
     append_dialog_render(
         &mut output,
-        "Usage narrow last model total",
+        "Usage narrow session list",
         70,
         22,
         &drawn(&mut usage, 70, 22),
@@ -1533,8 +1540,11 @@ fn golden_dashboard_dialogs() {
         &drawn(&mut usage, 70, 22),
     );
     usage.handle_key(key(KeyCode::Home));
-    for _ in 0..3 {
-        usage.handle_key(key(KeyCode::BackTab));
+    if let Mode::SessionUsageReport(dialog) = &mut usage.mode {
+        dialog
+            .form
+            .get_mut()
+            .focus(crate::session_usage_report::UsageControl::Profile);
     }
     drawn(&mut usage, 120, 36);
     usage.handle_key(key(KeyCode::Enter));
@@ -1594,7 +1604,7 @@ fn golden_dashboard_dialogs() {
     // Hard-won: #1501: unknown totals hid the known per-model sums in both views.
     append_dialog_render(
         &mut output,
-        "Usage Codex with model totals",
+        "Usage Codex with session models",
         120,
         36,
         &drawn(&mut usage, 120, 36),
@@ -2639,5 +2649,175 @@ fn suspend_history_only_requires_second_confirmation_and_back_returns_to_blocker
                 ..Default::default()
             },
         }
+    );
+}
+
+#[test]
+fn usage_timeline_range_and_provider_interactions() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use mj_core::usage::{
+        HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileQuotaProjection, ProfileQuotaUsage,
+        ProfileRoleUsageEstimate, RoleAssignmentChange, SessionUsageReport, UsageAgentRole,
+    };
+    let mut usage = dashboard_with_session(running_session());
+    usage.begin_session_usage_report(None);
+    let first = usage.session_usage_request().unwrap().0;
+    let hours: Vec<_> = (0..24)
+        .map(|i| HourlyUsage {
+            start_ms: (490_000 + i) * HOUR_MS,
+            known_cost_usd_ticks: 10_000_000_000,
+            has_unknown_cost: false,
+        })
+        .collect();
+    let report = SessionUsageReport {
+        since_ms: hours[0].start_ms,
+        until_ms: hours[23].start_ms + HOUR_MS,
+        hours: hours.clone(),
+        quota_usage: vec![ProfileQuotaUsage {
+            profile: "codex".into(),
+            consumed_basis_points: Some(2000),
+            covered_seconds: Some(86_400),
+            partial: false,
+            monthly_price_usd: Some(100),
+        }],
+        quota_projections: vec![ProfileQuotaProjection {
+            profile_id: "codex".into(),
+            window_label: "5h".into(),
+            is_short_window: true,
+            remaining_percent: 1,
+            resets_at_epoch_seconds: None,
+            observed_pct_per_hour: None,
+            sustainable_pct_per_hour: None,
+            pace_ratio: None,
+            projected_exhaustion_epoch_seconds: None,
+        }],
+        role_changes: vec![RoleAssignmentChange {
+            id: 1,
+            changed_at_ms: hours[8].start_ms + 1234,
+            summary: "Reviewers changed".into(),
+        }],
+        ..Default::default()
+    };
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    assert!(screen.iter().any(|line| line.contains("▲①")));
+    let provider_y = screen.iter().position(|line| line.contains('▸')).unwrap();
+    let provider_x = screen[provider_y].chars().position(|c| c == '▸').unwrap();
+    let click =
+        |usage: &mut DashboardState, p: (u16, u16), down: KeyModifiers, up: KeyModifiers| {
+            for (kind, mods) in [
+                (MouseEventKind::Down(MouseButton::Left), down),
+                (MouseEventKind::Up(MouseButton::Left), up),
+            ] {
+                let mut event = mouse_at(kind, p);
+                event.modifiers = mods;
+                usage.handle_mouse(event);
+            }
+        };
+    click(
+        &mut usage,
+        (provider_x as u16, provider_y as u16),
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+    );
+    let screen = drawn(&mut usage, 120, 36);
+    assert!(
+        screen
+            .iter()
+            .any(|line| line.contains("External / untracked"))
+    );
+    assert!(!screen.iter().any(|line| line.contains("1% left")));
+    usage.handle_key(key(KeyCode::Left));
+    let screen = drawn(&mut usage, 120, 36);
+    assert!(
+        !screen
+            .iter()
+            .any(|line| line.contains("External / untracked"))
+    );
+    let mut with_roles = report.clone();
+    with_roles.profile_role_usage = [(UsageAgentRole::Primary, 3), (UsageAgentRole::Reviewer, 1)]
+        .into_iter()
+        .map(|(role, cost)| ProfileRoleUsageEstimate {
+            profile: Some("codex".into()),
+            role,
+            models: vec![ModelUsageEstimate {
+                model: Some("model-a".into()),
+                cost_usd_ticks: Ok(cost),
+                ..Default::default()
+            }],
+            cost_usd_ticks: Ok(cost),
+        })
+        .collect();
+    usage.apply_session_usage_result(first, Ok(with_roles));
+    drawn(&mut usage, 120, 36);
+    click(
+        &mut usage,
+        (provider_x as u16, provider_y as u16),
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+    );
+    let expanded = drawn(&mut usage, 120, 36);
+    assert!(expanded.iter().any(|line| line.contains("Primary agents")
+        && line.contains("105%")
+        && line.contains("75% share")));
+    assert!(expanded.iter().any(|line| line.contains("Reviewers")
+        && line.contains("35%")
+        && line.contains("25% share")));
+    usage.handle_key(key(KeyCode::Left));
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    let change_y = screen
+        .iter()
+        .position(|line| line.contains("Reviewers changed"))
+        .unwrap();
+    let change_x = screen[change_y].chars().position(|c| c == '①').unwrap();
+    click(
+        &mut usage,
+        (change_x as u16, change_y as u16),
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+    );
+    let (generation, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[8..].iter().map(|h| h.start_ms).collect()
+    );
+    usage.apply_session_usage_result(generation, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    let bar_y = screen.iter().position(|line| line.contains("$0 ")).unwrap();
+    let bar_x = screen[bar_y].chars().position(|c| c == '█').unwrap();
+    let pitch = 4;
+    let at = |i: usize| ((bar_x + i * pitch) as u16, bar_y as u16);
+    click(&mut usage, at(2), KeyModifiers::NONE, KeyModifiers::NONE);
+    let generation = usage.session_usage_request().unwrap().0;
+    usage.apply_session_usage_result(generation, Ok(report.clone()));
+    drawn(&mut usage, 120, 36);
+    click(&mut usage, at(5), KeyModifiers::SHIFT, KeyModifiers::NONE);
+    let (generation, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[2..=5].iter().map(|h| h.start_ms).collect()
+    );
+    usage.apply_session_usage_result(generation, Ok(report.clone()));
+    drawn(&mut usage, 120, 36);
+    let mut shifted = key(KeyCode::Right);
+    shifted.modifiers = KeyModifiers::SHIFT;
+    usage.handle_key(shifted);
+    let (generation, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[2..=6].iter().map(|h| h.start_ms).collect()
+    );
+    usage.apply_session_usage_result(generation, Ok(report));
+    drawn(&mut usage, 120, 36);
+    usage.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), at(3)));
+    usage.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), at(9)));
+    assert_eq!(usage.session_usage_request().unwrap().0, generation);
+    usage.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), at(9)));
+    let (after, query) = usage.session_usage_request().unwrap();
+    assert_eq!(after, generation + 1);
+    assert_eq!(
+        query.hour_starts_ms.unwrap(),
+        hours[3..=9].iter().map(|h| h.start_ms).collect()
     );
 }

@@ -23,7 +23,7 @@ export function BottomNav() {
       className="shrink-0 border-t border-line bg-surface pb-safe pl-safe pr-safe md:hidden"
     >
       <ul className="grid grid-cols-5">
-        {NAV_ITEMS.map(item => {
+        {NAV_ITEMS.filter(item => item.name !== 'usage').map(item => {
           const Icon = item.icon;
           const current = shown.name === item.name;
           return (

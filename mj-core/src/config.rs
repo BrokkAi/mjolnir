@@ -2655,3 +2655,153 @@ mod tests;
 
 /// Release installed by Mjolnir for host setup and Nitro guests.
 pub const MBX_VERSION: &str = "1.30.0";
+
+/// Global role choices retained for the usage timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleAssignmentSnapshot {
+    pub primary: Vec<SubagentChoice>,
+    pub subtle: Vec<SubagentChoice>,
+    pub straightforward: Vec<SubagentChoice>,
+    pub oracle: Vec<SubagentChoice>,
+    pub reviewers: Vec<SubagentChoice>,
+    pub brief_writer: Option<SubagentChoice>,
+}
+
+impl RoleAssignmentSnapshot {
+    pub fn from_config(config: &Config) -> Self {
+        let mut reviewers = config.review.reviewers.clone();
+        if let Some(legacy) = &config.review.legacy
+            && let Some(model) = &legacy.profile
+        {
+            reviewers.push(SubagentChoice {
+                model: model.clone(),
+                effort: legacy.effort.clone(),
+            });
+        }
+        Self {
+            primary: config.subagents.primary.clone(),
+            subtle: config.subagents.subtle.clone(),
+            straightforward: config.subagents.straightforward.clone(),
+            oracle: config.subagents.oracle.clone(),
+            reviewers,
+            brief_writer: config
+                .review
+                .brief_writer
+                .as_ref()
+                .and_then(BriefWriterConfig::choice),
+        }
+    }
+}
+
+pub fn diff_role_assignments(
+    old: &RoleAssignmentSnapshot,
+    new: &RoleAssignmentSnapshot,
+) -> Option<String> {
+    fn choice(c: &SubagentChoice) -> String {
+        match c.effort.as_deref().filter(|e| !e.is_empty()) {
+            Some(e) => format!("{} ({e})", c.model),
+            None => c.model.clone(),
+        }
+    }
+    fn diff(label: &str, old: &[SubagentChoice], new: &[SubagentChoice]) -> Option<String> {
+        if old == new {
+            return None;
+        }
+        let a: Vec<_> = old.iter().map(choice).collect();
+        let b: Vec<_> = new.iter().map(choice).collect();
+        let format_list = |v: &[String]| {
+            if v.is_empty() {
+                "off".to_string()
+            } else {
+                v.join(", ")
+            }
+        };
+        let mut sorted_a = a.clone();
+        sorted_a.sort();
+        let mut sorted_b = b.clone();
+        sorted_b.sort();
+        let detail = if sorted_a == sorted_b {
+            format!("reordered ({})", b.join(", "))
+        } else if a.len() <= 1 && b.len() <= 1 {
+            format!("{} → {}", format_list(&a), format_list(&b))
+        } else {
+            let mut remaining_old = a.clone();
+            let mut added = Vec::new();
+            for item in &b {
+                if let Some(index) = remaining_old.iter().position(|old| old == item) {
+                    remaining_old.remove(index);
+                } else {
+                    added.push(format!("+{item}"));
+                }
+            }
+            added.extend(remaining_old.iter().map(|item| format!("-{item}")));
+            added.join(", ")
+        };
+        Some(format!("{label}: {detail}"))
+    }
+    let changes = [
+        diff("Primary", &old.primary, &new.primary),
+        diff("Subtle", &old.subtle, &new.subtle),
+        diff(
+            "Straightforward",
+            &old.straightforward,
+            &new.straightforward,
+        ),
+        diff("Oracle", &old.oracle, &new.oracle),
+        diff("Reviewers", &old.reviewers, &new.reviewers),
+        diff(
+            "Brief writer",
+            old.brief_writer.as_slice(),
+            new.brief_writer.as_slice(),
+        ),
+    ];
+    let changes: Vec<_> = changes.into_iter().flatten().collect();
+    (!changes.is_empty()).then(|| changes.join("; "))
+}
+
+#[cfg(test)]
+mod role_diff_tests {
+    use super::*;
+    #[test]
+    fn role_diff_describes_order_and_multiple_changes() {
+        let choice = |model: &str| SubagentChoice {
+            model: model.into(),
+            effort: None,
+        };
+        let old = RoleAssignmentSnapshot::from_config(&Config::default());
+        assert_eq!(diff_role_assignments(&old, &old), None);
+        let mut a = old.clone();
+        a.primary = vec![choice("a")];
+        assert_eq!(
+            diff_role_assignments(&old, &a).as_deref(),
+            Some("Primary: off → a")
+        );
+        let mut b = a.clone();
+        b.primary = vec![choice("b")];
+        assert_eq!(
+            diff_role_assignments(&a, &b).as_deref(),
+            Some("Primary: a → b")
+        );
+        a.subtle = vec![choice("a"), choice("b")];
+        b = a.clone();
+        b.subtle = vec![choice("b"), choice("c")];
+        assert_eq!(
+            diff_role_assignments(&a, &b).as_deref(),
+            Some("Subtle: +c, -a")
+        );
+        b.subtle = vec![choice("b"), choice("a")];
+        assert_eq!(
+            diff_role_assignments(&a, &b).as_deref(),
+            Some("Subtle: reordered (b, a)")
+        );
+        b.brief_writer = Some(choice("writer"));
+        assert_eq!(
+            diff_role_assignments(&a, &b).as_deref(),
+            Some("Subtle: reordered (b, a); Brief writer: off → writer")
+        );
+        assert_eq!(
+            diff_role_assignments(&b, &a).as_deref(),
+            Some("Subtle: reordered (a, b); Brief writer: writer → off")
+        );
+    }
+}

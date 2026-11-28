@@ -36,6 +36,7 @@ export type Route =
   | { name: 'move'; workspaceId: string; sessionId: string }
   | { name: 'targets' }
   | { name: 'quota' }
+  | { name: 'usage' }
   | { name: 'settings'; path: string[] };
 
 export type RouteName = Route['name'];
@@ -59,6 +60,7 @@ const ROUTE_PATTERNS: [RegExp, (m: string[]) => Route][] = [
   [/^notifications$/, () => ({ name: 'notifications' })],
   [/^targets$/, () => ({ name: 'targets' })],
   [/^quota$/, () => ({ name: 'quota' })],
+  [/^usage$/, () => ({ name: 'usage' })],
   // A settings path names keys the user chose, so each segment is URI-encoded.
   [/^settings((?:\/[^/]*)*)$/, ([rest]) => ({ name: 'settings', path: settingsPath(rest ?? '') })],
 ];
@@ -117,6 +119,8 @@ export function routeHash(route: Route): string {
       return '#targets';
     case 'quota':
       return '#quota';
+    case 'usage':
+      return '#usage';
     case 'settings':
       return `#settings${route.path.map(key => `/${encodeURIComponent(key)}`).join('')}`;
     case 'workspace':
@@ -131,6 +135,7 @@ export function isTopLevelRoute(route: Route): boolean {
     route.name === 'workspace' ||
     route.name === 'targets' ||
     route.name === 'quota' ||
+    route.name === 'usage' ||
     route.name === 'settings'
   );
 }

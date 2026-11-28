@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 165;
+const SCHEMA_VERSION: i64 = 166;
 /// The schema revision this build reads and writes, for migration peers to compare.
 pub const STORE_SCHEMA_VERSION: i64 = SCHEMA_VERSION;
 
@@ -71,6 +71,8 @@ mod turn_outcome;
 use turn_outcome::{deserialize_turn_outcome, serialize_turn_outcome};
 mod usage;
 pub use usage::*;
+mod role_changes;
+pub use role_changes::*;
 mod usage_report;
 pub use usage_report::load_session_usage_report;
 mod subagent_questions;

@@ -4,7 +4,7 @@ use crate::{
     DashboardAction, DashboardState, Mode,
     widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells},
 };
-use crossterm::event::{Event, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use mj_chat::components::PopupSide;
 use mj_chat::{
     components::{Checkbox, ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, Interaction},
@@ -13,6 +13,7 @@ use mj_chat::{
 };
 use mj_core::usage::{
     CostUsdTicks, HOUR_MS, HourlyUsage, SessionUsageQuery, SessionUsageReport, UsageAgentRole,
+    hour_start_ms,
 };
 use ratatui::{
     Frame,
@@ -29,6 +30,8 @@ pub(crate) enum UsageControl {
     Suspended,
     /// The hourly bar graph; its columns are the selectable hours.
     Hours,
+    Changes,
+    Providers,
     Rows,
     Refresh,
     Close,
@@ -36,8 +39,6 @@ pub(crate) enum UsageControl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UsageRow {
-    Role(UsageAgentRole),
-    ModelTotal(UsageAgentRole, Option<String>),
     Session(String),
     Model(String, Option<String>),
     Coverage(String),
@@ -56,6 +57,10 @@ pub(crate) struct SessionUsageDialog {
     hidden_hours: Cell<usize>,
     hour_anchor: Option<i64>,
     hour_cursor: Option<i64>,
+    hour_geometry: Cell<(Rect, u16)>,
+    hour_press: Option<(usize, KeyModifiers, bool)>,
+    expanded_providers: BTreeSet<String>,
+    provider_keys: RefCell<Vec<String>>,
     selected_key: RefCell<Option<UsageRow>>,
     row_keys: RefCell<Vec<UsageRow>>,
     selected_row: Cell<usize>,
@@ -80,6 +85,10 @@ impl DashboardState {
             hidden_hours: Cell::new(0),
             hour_anchor: None,
             hour_cursor: None,
+            hour_geometry: Cell::new((Rect::default(), 1)),
+            hour_press: None,
+            expanded_providers: BTreeSet::new(),
+            provider_keys: RefCell::new(Vec::new()),
             selected_key: RefCell::new(None),
             row_keys: RefCell::new(Vec::new()),
             selected_row: Cell::new(0),
@@ -105,7 +114,7 @@ impl DashboardState {
             return;
         }
         if let Err(error) = &result {
-            self.set_failure_notice(format!("Usage by session: {error}"));
+            self.set_failure_notice(format!("Usage Dashboard: {error}"));
         }
         if let Mode::SessionUsageReport(dialog) = &mut self.mode {
             if let Ok(report) = &result {
@@ -163,14 +172,115 @@ impl DashboardState {
         event: Event,
         mut dialog: SessionUsageDialog,
     ) -> DashboardAction {
-        let modifiers = match event {
+        let mut modifiers = match event {
             Event::Mouse(mouse) => Some(mouse.modifiers),
+            Event::Key(key) => Some(key.modifiers),
             _ => None,
         };
+        let mut dragged = false;
+        if let Event::Mouse(mouse) = event {
+            let (rect, pitch) = dialog.hour_geometry.get();
+            let index = rect
+                .contains((mouse.column, mouse.row).into())
+                .then(|| usize::from((mouse.column - rect.x) / pitch));
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) if index.is_some() => {
+                    dialog.hour_press = Some((index.unwrap_or(0), mouse.modifiers, false));
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let (Some((start, _, moved)), Some(end)) = (&mut dialog.hour_press, index) {
+                        *moved |= *start != end;
+                        if *moved {
+                            let hidden = dialog.hidden_hours.get();
+                            let a = *start + hidden;
+                            let b = end + hidden;
+                            dialog.query.hour_starts_ms = Some(
+                                dialog
+                                    .hours
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, h)| {
+                                        (a.min(b)..=a.max(b)).contains(&i).then_some(h.start_ms)
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some((start, down_modifiers, moved)) = dialog.hour_press.take() {
+                        modifiers = Some(mouse.modifiers | down_modifiers);
+                        if moved && let Some(end) = index {
+                            let hidden = dialog.hidden_hours.get();
+                            let a = start + hidden;
+                            let b = end + hidden;
+                            dialog.query.hour_starts_ms = Some(
+                                dialog
+                                    .hours
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, h)| {
+                                        (a.min(b)..=a.max(b)).contains(&i).then_some(h.start_ms)
+                                    })
+                                    .collect(),
+                            );
+                            dialog.hour_anchor = dialog.hours.get(a).map(|h| h.start_ms);
+                            dialog.hour_cursor = dialog.hours.get(b).map(|h| h.start_ms);
+                            dialog.query.hour_start_ms = None;
+                            dragged = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let hours_focused = dialog.form.get_mut().is_focused(UsageControl::Hours);
+        let providers_focused = dialog.form.get_mut().is_focused(UsageControl::Providers);
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
-        let action = dialog.combo.route(result.action);
-        let mut reload = false;
+        let mut action = dialog.combo.route(result.action);
+        if let Event::Key(key) = event
+            && key.modifiers == KeyModifiers::SHIFT
+            && matches!(key.code, KeyCode::Left | KeyCode::Right)
+            && hours_focused
+        {
+            let count = dialog.hours.len().saturating_sub(dialog.hidden_hours.get());
+            let current = dialog.hours[dialog.hidden_hours.get().min(dialog.hours.len())..]
+                .iter()
+                .position(|hour| Some(hour.start_ms) == dialog.hour_cursor)
+                .unwrap_or(count.saturating_sub(1));
+            if dialog.hour_anchor.is_none() {
+                dialog.hour_anchor = dialog
+                    .hours
+                    .get(dialog.hidden_hours.get() + current)
+                    .map(|hour| hour.start_ms);
+            }
+            let next = if key.code == KeyCode::Left {
+                current.saturating_sub(1)
+            } else {
+                (current + 1).min(count.saturating_sub(1))
+            };
+            dialog
+                .form
+                .get_mut()
+                .set_selected(UsageControl::Hours, next);
+            action = Some(Interaction::Select(UsageControl::Hours, next));
+        }
+        if let Event::Key(key) = event
+            && key.modifiers.is_empty()
+            && matches!(
+                key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            )
+            && providers_focused
+        {
+            dialog.form.get_mut().focus(UsageControl::Providers);
+            action = Some(Interaction::Activate(UsageControl::Providers));
+        }
+        if dragged {
+            action = None;
+        }
+        let mut reload = dragged;
         match action {
             Some(Interaction::Cancel | Interaction::Activate(UsageControl::Close)) => {
                 self.cancel_modal();
@@ -248,6 +358,36 @@ impl DashboardState {
                         .saturating_sub(dialog.hidden_hours.get() + 1),
                 );
             }
+            Some(
+                Interaction::Select(UsageControl::Changes, _)
+                | Interaction::Activate(UsageControl::Changes),
+            ) => {
+                let index = dialog
+                    .form
+                    .get_mut()
+                    .selected(UsageControl::Changes)
+                    .unwrap_or(0);
+                if let Some(change) = dialog
+                    .report
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .and_then(|r| r.role_changes.get(index))
+                {
+                    let start = hour_start_ms(change.changed_at_ms);
+                    dialog.query.hour_start_ms = None;
+                    dialog.query.hour_starts_ms = Some(
+                        dialog
+                            .hours
+                            .iter()
+                            .filter(|hour| hour.start_ms >= start)
+                            .map(|hour| hour.start_ms)
+                            .collect(),
+                    );
+                    dialog.hour_anchor = Some(start);
+                    dialog.hour_cursor = dialog.hours.last().map(|hour| hour.start_ms);
+                    reload = true;
+                }
+            }
             Some(Interaction::Toggle(UsageControl::Suspended)) => {
                 dialog.query.include_suspended = !dialog.query.include_suspended;
                 reload = true;
@@ -256,6 +396,22 @@ impl DashboardState {
             Some(Interaction::Select(UsageControl::Rows, index)) => {
                 *dialog.selected_key.borrow_mut() = dialog.row_keys.borrow().get(index).cloned();
                 dialog.selected_row.set(index);
+            }
+            Some(Interaction::Select(UsageControl::Providers, index)) => {
+                if matches!(event, Event::Mouse(_))
+                    && let Some(key) = dialog.provider_keys.borrow().get(index).cloned()
+                    && !dialog.expanded_providers.remove(&key)
+                {
+                    dialog.expanded_providers.insert(key);
+                }
+            }
+            Some(Interaction::Activate(UsageControl::Providers)) => {
+                if let Some(index) = dialog.form.get_mut().selected(UsageControl::Providers)
+                    && let Some(key) = dialog.provider_keys.borrow().get(index).cloned()
+                    && !dialog.expanded_providers.remove(&key)
+                {
+                    dialog.expanded_providers.insert(key);
+                }
             }
             _ => {}
         }
@@ -282,255 +438,448 @@ fn dollars(cost: CostUsdTicks, partial: bool) -> String {
     format!("${:.3}{plus}", ticks as f64 / 10_000_000_000.0)
 }
 
-/// Use the same provider snapshot as quota pools; file-backed profiles can
-/// remain unresolved until background discovery finishes.
-fn provider_totals(
+#[derive(Default)]
+struct Provider {
+    profiles: BTreeSet<String>,
+    quota: Vec<mj_core::usage::ProfileQuotaUsage>,
+    cost: u64,
+    unknown_cost: bool,
+    partial: bool,
+    roles: BTreeMap<UsageAgentRole, Role>,
+}
+#[derive(Default)]
+struct Role {
+    cost: u64,
+    unknown_cost: bool,
+    tokens: u64,
+    models: BTreeMap<String, u64>,
+    unreported: u64,
+}
+
+fn allocations(values: &[u64], total: u64) -> Vec<u64> {
+    let sum: u128 = values.iter().map(|v| u128::from(*v)).sum();
+    if sum == 0 {
+        return vec![0; values.len()];
+    }
+    let mut out: Vec<u64> = values
+        .iter()
+        .map(|v| (u128::from(*v) * u128::from(total) / sum) as u64)
+        .collect();
+    let mut order: Vec<_> = (0..values.len()).collect();
+    order.sort_by_key(|&i| {
+        (
+            std::cmp::Reverse(u128::from(values[i]) * u128::from(total) % sum),
+            i,
+        )
+    });
+    for &i in order
+        .iter()
+        .take(total.saturating_sub(out.iter().sum()) as usize)
+    {
+        out[i] += 1;
+    }
+    out
+}
+
+fn pace(quota: &[mj_core::usage::ProfileQuotaUsage], duration: u64) -> (Option<u64>, bool) {
+    let equal = quota.iter().any(|q| q.monthly_price_usd.unwrap_or(0) == 0);
+    let mut weight = 0.0;
+    let mut sum = 0.0;
+    let mut partial = false;
+    for q in quota {
+        let elapsed = q.covered_seconds.unwrap_or(duration);
+        let Some(used) = q.consumed_basis_points.filter(|_| elapsed >= 60) else {
+            partial = true;
+            continue;
+        };
+        let w = if equal {
+            1.0
+        } else {
+            f64::from(q.monthly_price_usd.unwrap_or(0))
+        };
+        weight += w;
+        sum += w * used as f64 / 10_000.0 * 604_800.0 / elapsed as f64;
+        partial |= q.partial || elapsed < duration;
+    }
+    (
+        (weight > 0.0).then(|| (100.0 * sum / weight).round() as u64),
+        partial,
+    )
+}
+
+fn forecast(pace: u64, projections: &[(f64, i64, f64)], now: i64) -> String {
+    if pace == 0 {
+        return "idle".into();
+    }
+    if pace < 80 {
+        return format!("slack · ~{}% unused", 100 - pace);
+    }
+    if pace <= 105 {
+        return "on pace · safe".into();
+    }
+    if projections.is_empty() {
+        return "over pace".into();
+    }
+    let total_weight: f64 = projections.iter().map(|p| p.2).sum();
+    let mut accounts: Vec<_> = projections
+        .iter()
+        .map(|&(left, reset, weight)| (left * weight / total_weight, reset, weight / total_weight))
+        .collect();
+    let rate = pace as f64 / 168.0;
+    let end = now + 604_800;
+    let mut t = now as f64;
+    while t < end as f64 {
+        for account in &mut accounts {
+            while account.1 as f64 <= t {
+                account.0 = 100.0 * account.2;
+                account.1 += 604_800;
+            }
+        }
+        let next = accounts.iter().map(|a| a.1).min().unwrap_or(end).min(end) as f64;
+        let mut hours = (next - t) / 3600.0;
+        while hours > 0.0 {
+            let active_weight: f64 = accounts.iter().filter(|a| a.0 > 1e-9).map(|a| a.2).sum();
+            if active_weight == 0.0 {
+                let minutes = ((t - now as f64) / 60.0).ceil() as u64;
+                return if minutes >= 1440 {
+                    format!("dry in {}d {}h", minutes / 1440, minutes % 1440 / 60)
+                } else {
+                    format!("dry in {}h {}m", minutes / 60, minutes % 60)
+                };
+            }
+            let depletion = accounts
+                .iter()
+                .filter(|a| a.0 > 1e-9)
+                .map(|a| a.0 * active_weight / (rate * a.2))
+                .fold(f64::INFINITY, f64::min);
+            let step = hours.min(depletion);
+            for account in &mut accounts {
+                if account.0 > 1e-9 {
+                    account.0 = (account.0 - rate * account.2 / active_weight * step).max(0.0);
+                }
+            }
+            t += step * 3600.0;
+            hours -= step;
+        }
+        t = next;
+    }
+    "tight · safe 7d".into()
+}
+
+fn meridian(pct: Option<u64>, width: usize, thin: bool) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let Some(pct) = pct else {
+        return "┄".repeat(width);
+    };
+    let mid = width / 2;
+    let filled = ((pct.min(200) as f64 / 100.0 * mid as f64).round() as usize).min(width - 1);
+    (0..width)
+        .map(|i| {
+            if i == mid {
+                if thin {
+                    '┆'
+                } else if pct > 100 {
+                    '┼'
+                } else {
+                    '│'
+                }
+            } else if i < filled + usize::from(filled >= mid) {
+                if thin { '─' } else { '━' }
+            } else {
+                '·'
+            }
+        })
+        .collect()
+}
+
+fn provider_rows(
     dashboard: &DashboardState,
+    dialog: &SessionUsageDialog,
     report: &SessionUsageReport,
     width: u16,
-) -> Vec<String> {
-    struct ProviderTotal {
-        cost: CostUsdTicks,
-        partial: bool,
-        quota_partial: bool,
-        quotas: Vec<(Option<u64>, Option<u32>)>,
+) -> (Vec<Line<'static>>, Vec<Option<usize>>, Vec<String>) {
+    let label = |id: &str| {
+        dashboard.config.profiles.get(id).map_or_else(
+            || format!("{id} (unconfigured)"),
+            |p| {
+                crate::render::quota_pools::profile_provider(id, p, &dashboard.quota_providers)
+                    .display_name()
+                    .to_owned()
+            },
+        )
+    };
+    let mut providers: BTreeMap<String, Provider> = BTreeMap::new();
+    for q in &report.quota_usage {
+        let p = providers.entry(label(&q.profile)).or_default();
+        p.profiles.insert(q.profile.clone());
+        p.quota.push(q.clone());
     }
-    impl Default for ProviderTotal {
-        fn default() -> Self {
-            Self {
-                cost: Ok(0),
-                partial: false,
-                quota_partial: false,
-                quotas: Vec::new(),
+    for p in report
+        .quota_projections
+        .iter()
+        .filter(|p| !p.is_short_window && !p.window_label.to_ascii_lowercase().starts_with("5h"))
+    {
+        providers
+            .entry(label(&p.profile_id))
+            .or_default()
+            .profiles
+            .insert(p.profile_id.clone());
+    }
+    for u in &report.profile_usage {
+        let key = u
+            .profile
+            .as_deref()
+            .map_or_else(|| "Unattributed profile".to_owned(), label);
+        let provider = providers.entry(key).or_default();
+        provider.cost = provider.cost.saturating_add(u.cost_usd_ticks.unwrap_or(0));
+        provider.unknown_cost |= u.cost_usd_ticks.is_err();
+        provider.partial |= u.coverage.is_partial();
+    }
+    for u in &report.profile_role_usage {
+        let key = u
+            .profile
+            .as_deref()
+            .map_or_else(|| "Unattributed profile".to_owned(), label);
+        let role = providers
+            .entry(key)
+            .or_default()
+            .roles
+            .entry(u.role)
+            .or_default();
+        for model in &u.models {
+            role.cost = role.cost.saturating_add(model.cost_usd_ticks.unwrap_or(0));
+            role.unknown_cost |= model.cost_usd_ticks.is_err();
+            role.tokens = role
+                .tokens
+                .saturating_add(model.totals.get("total_tokens").map_or(0, |t| t.tokens));
+            let name = model
+                .model
+                .clone()
+                .unwrap_or_else(|| "Unknown model".into());
+            let amount = model.cost_usd_ticks.unwrap_or(0);
+            let total = role.models.entry(name).or_default();
+            *total = total.saturating_add(amount);
+            role.unreported += model.unreported_turns;
+        }
+    }
+    let duration: u64 = dialog
+        .query
+        .selected_intervals(report.until_ms)
+        .into_iter()
+        .map(|(start, end)| (end - start).saturating_add(1).max(0) as u64 / 1000)
+        .sum();
+    let gauge_width = if width >= 95 {
+        25
+    } else if width >= 75 {
+        17
+    } else {
+        0
+    };
+    let scale = match gauge_width {
+        25 => "0%        100%      200%+",
+        17 => "0%    100%  200%+",
+        _ => "",
+    };
+    let mut lines = vec![Line::styled(
+        format!(
+            "{:<26}{scale}   Pace      Tank    Est $   Forecast / Models",
+            "Provider Pace"
+        ),
+        theme::muted(),
+    )];
+    let mut map = vec![None];
+    let mut keys = Vec::new();
+    for (name, provider) in providers {
+        let index = keys.len();
+        keys.push(name.clone());
+        let mut quota = provider.quota.clone();
+        for profile in &provider.profiles {
+            if !quota.iter().any(|q| &q.profile == profile) {
+                quota.push(mj_core::usage::ProfileQuotaUsage {
+                    profile: profile.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        let (pct, partial) = pace(&quota, duration);
+        let equal = provider.profiles.iter().any(|profile| {
+            provider
+                .quota
+                .iter()
+                .find(|q| &q.profile == profile)
+                .and_then(|q| q.monthly_price_usd)
+                .unwrap_or(0)
+                == 0
+        });
+        let mut weekly = Vec::new();
+        for profile in &provider.profiles {
+            let projection = report
+                .quota_projections
+                .iter()
+                .filter(|p| {
+                    p.profile_id == *profile
+                        && !p.is_short_window
+                        && !p.window_label.to_ascii_lowercase().starts_with("5h")
+                })
+                .min_by_key(|p| p.window_label.len());
+            if let Some(p) = projection {
+                let weight = if equal {
+                    1.0
+                } else {
+                    provider
+                        .quota
+                        .iter()
+                        .find(|q| q.profile == *profile)
+                        .and_then(|q| q.monthly_price_usd)
+                        .filter(|p| *p > 0)
+                        .map_or(1.0, f64::from)
+                };
+                weekly.push((p, weight));
+            }
+        }
+        let weight: f64 = weekly.iter().map(|(_, w)| w).sum();
+        let tank = if weight > 0.0 {
+            format!(
+                "{:.0}% left",
+                weekly
+                    .iter()
+                    .map(|(p, w)| f64::from(p.remaining_percent) * w)
+                    .sum::<f64>()
+                    / weight
+            )
+        } else if provider.quota.is_empty() {
+            "∞".into()
+        } else {
+            "?".into()
+        };
+        let now = mj_core::clock::epoch_seconds() as i64;
+        let live: Vec<_> = weekly
+            .iter()
+            .filter_map(|(p, w)| {
+                p.resets_at_epoch_seconds
+                    .filter(|r| *r > now)
+                    .map(|r| (f64::from(p.remaining_percent), r, *w))
+            })
+            .collect();
+        let note = pct.map_or_else(
+            || {
+                if provider.quota.is_empty() && weekly.is_empty() {
+                    "usage-billed".into()
+                } else {
+                    "unmeasured".into()
+                }
+            },
+            |p| forecast(p, &live, now),
+        );
+        let gauge = meridian(pct, gauge_width, false);
+        let arrow = if dialog.expanded_providers.contains(&name) {
+            '▾'
+        } else {
+            '▸'
+        };
+        let amount = dollars(
+            if provider.unknown_cost {
+                Err(mj_core::usage::UnknownCost)
+            } else {
+                Ok(provider.cost)
+            },
+            provider.partial,
+        );
+        let pace_text = pct.map_or_else(
+            || {
+                if provider.quota.is_empty() && weekly.is_empty() {
+                    "payg".into()
+                } else {
+                    "?".into()
+                }
+            },
+            |p| format!("{}{p}%", if partial { "~" } else { "" }),
+        );
+        let color = match pct {
+            None => theme::palette().secondary,
+            Some(p) if p < 80 => theme::pin_color(0),
+            Some(p) if p <= 105 => theme::palette().success,
+            Some(p) if p <= 130 => theme::palette().warning,
+            Some(_) => theme::palette().error,
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{arrow} {:<23} ",
+                    truncate_to_cells(&name, 23, Truncate::PLAIN)
+                ),
+                theme::actionable(),
+            ),
+            Span::styled(gauge, ratatui::style::Style::default().fg(color)),
+            Span::styled(
+                format!(" {pace_text:>6} {tank:>9} {amount:>8}  {note}"),
+                theme::actionable(),
+            ),
+        ]));
+        map.push(Some(index));
+        if dialog.expanded_providers.contains(&name) {
+            let mut roles: Vec<_> = provider.roles.into_iter().collect();
+            let cost_sum: u64 = roles.iter().map(|(_, r)| r.cost).sum();
+            let values: Vec<_> = roles
+                .iter()
+                .map(|(_, r)| if cost_sum > 0 { r.cost } else { r.tokens })
+                .collect();
+            if values.iter().all(|v| *v == 0) && pct.unwrap_or(0) > 0 {
+                lines.push(Line::styled(
+                    format!(
+                        "  └─ {:<20} {} {:>5}% 100% share",
+                        "External / untracked",
+                        meridian(pct, gauge_width, true),
+                        pct.unwrap_or(0)
+                    ),
+                    theme::muted(),
+                ));
+                map.push(None);
+            } else {
+                let shares = allocations(&values, 100);
+                let paces = allocations(&values, pct.unwrap_or(0));
+                let count = roles.len();
+                for (i, (role, data)) in roles.drain(..).enumerate() {
+                    let mut models: Vec<_> = data.models.into_iter().collect();
+                    models.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    let model = models
+                        .into_iter()
+                        .take(2)
+                        .map(|(name, _)| name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let extra = if data.unreported > 0 {
+                        format!(" · {} unreported", data.unreported)
+                    } else {
+                        String::new()
+                    };
+                    lines.push(Line::styled(
+                        format!(
+                            "  {} {:<20} {} {:>5}% {:>3}% share {:>8}  {model}{extra}",
+                            if i + 1 == count { "└─" } else { "├─" },
+                            truncate_to_cells(role.label(), 20, Truncate::PLAIN),
+                            meridian(Some(paces[i]), gauge_width, true),
+                            paces[i],
+                            shares[i],
+                            dollars(
+                                if data.unknown_cost {
+                                    Err(mj_core::usage::UnknownCost)
+                                } else {
+                                    Ok(data.cost)
+                                },
+                                data.unreported > 0
+                            )
+                        ),
+                        theme::muted(),
+                    ));
+                    map.push(None);
+                }
             }
         }
     }
-    let label_for = |id: &str| match dashboard.config.profiles.get(id) {
-        None => format!("{id} (unconfigured)"),
-        Some(profile) => {
-            crate::render::quota_pools::profile_provider(id, profile, &dashboard.quota_providers)
-                .display_name()
-                .to_owned()
-        }
-    };
-    let mut totals: BTreeMap<String, ProviderTotal> = BTreeMap::new();
-    for usage in &report.profile_usage {
-        let label = usage
-            .profile
-            .as_deref()
-            .map_or_else(|| "Unattributed profile".to_owned(), label_for);
-        let total = totals.entry(label).or_default();
-        // Overflow is an unknown estimate, never a wrapped dollar total.
-        total.cost = mj_core::usage::add_cost(total.cost, usage.cost_usd_ticks)
-            .unwrap_or(Err(mj_core::usage::UnknownCost));
-        total.partial |= usage.coverage.is_partial();
-    }
-    // The report owns account membership: idle and unreadable weekly accounts
-    // are included; API accounts have no weekly capacity to pool.
-    for quota in &report.quota_usage {
-        let total = totals.entry(label_for(&quota.profile)).or_default();
-        total.quota_partial |= quota.partial;
-        total
-            .quotas
-            .push((quota.consumed_basis_points, quota.monthly_price_usd));
-    }
-    let mut totals: Vec<_> = totals.into_iter().collect();
-    totals.sort_by(|(a, ac), (b, bc)| {
-        mj_core::usage::descending_cost(&ac.cost, &bc.cost).then_with(|| a.cmp(b))
-    });
-    let mut lines = Vec::<String>::new();
-    for (label, total) in totals {
-        let unweighted = total
-            .quotas
-            .iter()
-            .any(|(_, price)| price.unwrap_or(0) == 0);
-        let quota =
-            if total.quotas.is_empty() || total.quotas.iter().any(|(used, _)| used.is_none()) {
-                "quota n/a".to_owned()
-            } else {
-                // Match quota pools: if any plan weight is unknown, use equal
-                // weights for every member rather than mixing incompatible units.
-                let mut weighted = 0.0;
-                let mut weights = 0.0;
-                for (used, price) in &total.quotas {
-                    let weight = if unweighted {
-                        1.0
-                    } else {
-                        f64::from(price.unwrap_or(0))
-                    };
-                    weighted += used.unwrap_or(0) as f64 * weight;
-                    weights += weight;
-                }
-                format!(
-                    "~{:.1}%{}{}",
-                    weighted / weights / 100.0,
-                    if total.quota_partial {
-                        " (partial)"
-                    } else {
-                        ""
-                    },
-                    if unweighted { " unweighted" } else { "" }
-                )
-            };
-        let amount = format!("{} · {quota}", dollars(total.cost, total.partial));
-        let label_width = (width as usize).saturating_sub(Line::raw(amount.as_str()).width() + 1);
-        let entry = format!(
-            "{} {amount}",
-            truncate_to_cells(&label, label_width, Truncate::SUMMARY)
-        );
-        if let Some(line) = lines.last_mut()
-            && Line::raw(line.as_str()).width() + 3 + Line::raw(entry.as_str()).width()
-                <= width as usize
-        {
-            line.push_str(" · ");
-            line.push_str(&entry);
-        } else {
-            lines.push(entry);
-        }
-    }
-    if !lines.is_empty() {
-        lines.push("Weekly quota consumed in window · all account use".into());
-    }
-    lines
-}
-
-fn quota_forecast_lines(report: &SessionUsageReport, now: i64) -> Vec<String> {
-    let mut forecasts: Vec<_> = report
-        .quota_projections
-        .iter()
-        .filter(|p| p.pace_ratio.is_some_and(|pace| pace > 1.0))
-        .collect();
-    if forecasts.is_empty() {
-        return Vec::new();
-    }
-    forecasts.sort_by(|left, right| {
-        right
-            .pace_ratio
-            .unwrap_or(0.0)
-            .total_cmp(&left.pace_ratio.unwrap_or(0.0))
-            .then_with(|| {
-                left.projected_exhaustion_epoch_seconds
-                    .unwrap_or(i64::MAX)
-                    .cmp(&right.projected_exhaustion_epoch_seconds.unwrap_or(i64::MAX))
-            })
-            .then_with(|| left.profile_id.cmp(&right.profile_id))
-            .then_with(|| left.window_label.cmp(&right.window_label))
-    });
-    let duration = |end: i64| {
-        let secs = end.saturating_sub(now);
-        let hours = secs / 3600;
-        if hours >= 24 {
-            format!("{}d {}h", hours / 24, hours % 24)
-        } else if hours >= 1 {
-            format!("{hours}h")
-        } else {
-            let mins = (secs / 60).max(1);
-            format!("{mins}m")
-        }
-    };
-    let mut lines = Vec::with_capacity(forecasts.len() + 1);
-    lines.push("Quota Pace & Forecast".into());
-    for p in forecasts {
-        let exhaustion = p
-            .projected_exhaustion_epoch_seconds
-            .map(duration)
-            .unwrap_or_else(|| "unknown".into());
-        let reset = p
-            .resets_at_epoch_seconds
-            .map(duration)
-            .unwrap_or_else(|| "unknown".into());
-        lines.push(format!(
-            "{}  {}  {}% left  {:.1}× pace  exhausts in {} (resets in {})",
-            p.profile_id,
-            p.window_label,
-            p.remaining_percent,
-            p.pace_ratio.unwrap_or_default(),
-            exhaustion,
-            reset
-        ));
-    }
-    lines
-}
-
-fn assemble_summary_lines(
-    mut provider_lines: Vec<String>,
-    mut forecast_lines: Vec<String>,
-    budget: usize,
-) -> Vec<String> {
-    if budget == 0 {
-        return Vec::new();
-    }
-    if provider_lines.len() + forecast_lines.len() <= budget {
-        provider_lines.extend(forecast_lines);
-        return provider_lines;
-    }
-    if forecast_lines.is_empty() {
-        let explanation = provider_lines.last().cloned().unwrap_or_default();
-        let visible = budget.saturating_sub(2);
-        let hidden = provider_lines.len().saturating_sub(1 + visible);
-        provider_lines.truncate(visible);
-        provider_lines.push(format!("… {hidden} more provider rows (enlarge terminal)"));
-        if budget > 1 {
-            provider_lines.push(explanation);
-        }
-        return provider_lines;
-    }
-    // Keep exhaustion warnings visible even when provider totals fill a short
-    // terminal, reserving at most one summary line for clipped provider totals.
-    let min_provider = usize::from(!provider_lines.is_empty() && budget >= 4);
-    let forecast_budget = forecast_lines
-        .len()
-        .min(budget.saturating_sub(min_provider));
-    let provider_budget = budget.saturating_sub(forecast_budget);
-
-    if provider_budget == 0 {
-        provider_lines.clear();
-    } else if provider_lines.len() > provider_budget {
-        if provider_budget == 1 {
-            let count = provider_lines.len().saturating_sub(1).max(1);
-            provider_lines = vec![format!("… {count} provider rows (enlarge terminal)")];
-        } else {
-            let explanation = provider_lines.last().cloned().unwrap_or_default();
-            let visible = provider_budget.saturating_sub(2);
-            let hidden = provider_lines.len().saturating_sub(1 + visible);
-            provider_lines.truncate(visible);
-            provider_lines.push(format!("… {hidden} more provider rows (enlarge terminal)"));
-            provider_lines.push(explanation);
-        }
-    }
-
-    if forecast_budget == 0 {
-        forecast_lines.clear();
-    } else if forecast_lines.len() > forecast_budget {
-        let warnings = forecast_lines.len().saturating_sub(1);
-        if forecast_budget == 1 {
-            let top = forecast_lines.swap_remove(1);
-            forecast_lines = vec![if warnings > 1 {
-                format!("{top} (+{} more)", warnings - 1)
-            } else {
-                top
-            }];
-        } else if forecast_budget == 2 {
-            let top = forecast_lines.swap_remove(1);
-            let more = warnings.saturating_sub(1);
-            forecast_lines = vec![
-                if more > 0 {
-                    format!("Quota Pace & Forecast (+{more} more)")
-                } else {
-                    "Quota Pace & Forecast".into()
-                },
-                top,
-            ];
-        } else {
-            let shown_warnings = forecast_budget - 2;
-            let hidden = warnings.saturating_sub(shown_warnings);
-            forecast_lines.truncate(1 + shown_warnings);
-            forecast_lines.push(format!("… {hidden} more quota warnings (enlarge terminal)"));
-        }
-    }
-
-    provider_lines.extend(forecast_lines);
-    provider_lines
+    (lines, map, keys)
 }
 
 pub(crate) fn render(
@@ -540,7 +889,7 @@ pub(crate) fn render(
     dialog: &SessionUsageDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 92, 32, area);
+    let popup = centered_modal(frame, surfaces, 110, 34, area);
     let inner = popup.inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -550,7 +899,7 @@ pub(crate) fn render(
     let title = dismissible_modal_title(
         &mut form,
         popup,
-        "Usage by session",
+        "Usage Dashboard",
         theme::title(true),
         true,
     );
@@ -623,46 +972,97 @@ pub(crate) fn render(
     };
     let header_height = if compact { 3 } else { 5 };
     // The chart label row occupies one of these rows; normal mode adds a gap.
-    let row_gap = if compact { 1 } else { 2 };
+    let changes = dialog
+        .report
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|r| r.role_changes.as_slice())
+        .unwrap_or_default();
+    let changes_height = if compact || changes.is_empty() {
+        0
+    } else {
+        (changes.len() as u16 + 1).min(4)
+    };
+    let row_gap = if compact { 2 } else { 3 };
     let hints = [
         "Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Enter all",
         "Sub-agents included · profile filters turns · + partial · ░ unpriced · base rates",
     ];
     let visible_hints = &hints[usize::from(compact)..];
     let footer_height = visible_hints.len() as u16 + 1;
-    let provider_lines = match &dialog.report {
-        Some(Ok(report)) => provider_totals(dashboard, report, inner.width),
-        _ => Vec::new(),
+    let (provider_lines, provider_map, provider_keys) = match &dialog.report {
+        Some(Ok(report)) => provider_rows(dashboard, dialog, report, inner.width),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     };
-    let forecast_lines = match &dialog.report {
-        Some(Ok(report)) => quota_forecast_lines(report, mj_core::clock::epoch_seconds() as i64),
-        _ => Vec::new(),
-    };
-    // Keep the chart and at least one selectable detail row on short screens.
     let summary_budget = inner
         .height
-        .saturating_sub(header_height + bar_rows + row_gap + footer_height + 1)
-        as usize;
-    let summary_lines = assemble_summary_lines(provider_lines, forecast_lines, summary_budget);
-    let provider_height = summary_lines.len() as u16;
+        .saturating_sub(header_height + bar_rows + row_gap + changes_height + footer_height + 1);
+    let provider_height = (provider_lines.len() as u16).min(summary_budget);
     let chart_y = inner.y + header_height + provider_height;
-    frame.render_widget(
-        Paragraph::new(summary_lines.join("\n")),
-        Rect::new(
-            inner.x,
-            chart_y - provider_height,
-            inner.width,
-            provider_height,
-        ),
-    );
+    *dialog.provider_keys.borrow_mut() = provider_keys;
+    if provider_height > 0 {
+        let selected = form.selected(UsageControl::Providers).unwrap_or(0);
+        ChoiceList::render_with_rows(
+            frame,
+            Rect::new(
+                inner.x,
+                chart_y - provider_height,
+                inner.width,
+                provider_height,
+            ),
+            &provider_lines,
+            selected,
+            &provider_map,
+            &[],
+            &mut form,
+            UsageControl::Providers,
+        );
+    }
     render_hour_chart(
         frame,
-        Rect::new(inner.x, chart_y, inner.width, bar_rows + 1),
+        Rect::new(inner.x, chart_y, inner.width, bar_rows + 2),
         dialog,
         bar_rows,
         &mut form,
     );
-    let rows_y = chart_y + bar_rows + row_gap;
+    let changes_y = chart_y + bar_rows + row_gap;
+    if changes_height > 0 {
+        frame.render_widget(
+            Paragraph::new("Role changes on timeline").style(theme::title(false)),
+            Rect::new(inner.x, changes_y, inner.width, 1),
+        );
+        let lines: Vec<_> = changes
+            .iter()
+            .enumerate()
+            .map(|(index, change)| {
+                let local = chrono::DateTime::from_timestamp_millis(change.changed_at_ms)
+                    .unwrap_or_default()
+                    .with_timezone(&DisplayZone::now().timezone());
+                Line::raw(format!(
+                    "{} {}  {}",
+                    change_badge(index),
+                    local.format("%H:%M"),
+                    change.summary
+                ))
+            })
+            .collect();
+        let selected = form
+            .selected(UsageControl::Changes)
+            .unwrap_or(0)
+            .min(lines.len().saturating_sub(1));
+        let row_map: Vec<_> = (0..lines.len()).map(Some).collect();
+        ChoiceList::render_with_rows(
+            frame,
+            Rect::new(inner.x, changes_y + 1, inner.width, changes_height - 1),
+            &lines,
+            selected,
+            &row_map,
+            &[],
+            &mut form,
+            UsageControl::Changes,
+        );
+    }
+    let rows_y = changes_y + changes_height;
     let rows_area = Rect::new(
         inner.x,
         rows_y,
@@ -693,50 +1093,6 @@ pub(crate) fn render(
             let mut row_map = Vec::new();
             let mut row_keys = dialog.row_keys.borrow_mut();
             row_keys.clear();
-            if !report.sessions.is_empty() {
-                for agents in &report.agent_usage {
-                    let role_partial =
-                        partial || agents.models.iter().any(|model| model.unreported_turns > 0);
-                    lines.push(Line::styled(
-                        format!(
-                            "{}  {}",
-                            agents.role.label(),
-                            dollars(agents.cost_usd_ticks, role_partial)
-                        ),
-                        theme::title(false),
-                    ));
-                    row_map.push(Some(row_keys.len()));
-                    row_keys.push(UsageRow::Role(agents.role));
-                    for model in &agents.models {
-                        let cost =
-                            dollars(model.cost_usd_ticks, partial || model.unreported_turns > 0);
-                        let detail = if model.unreported_turns > 0 {
-                            format!(
-                                "{cost} · {} {} unreported",
-                                model.unreported_turns,
-                                if model.unreported_turns == 1 {
-                                    "turn"
-                                } else {
-                                    "turns"
-                                }
-                            )
-                        } else {
-                            cost
-                        };
-                        let name = truncate_to_cells(
-                            model.model.as_deref().unwrap_or("Unknown model"),
-                            usize::from(inner.width)
-                                .saturating_sub(Line::raw(detail.as_str()).width() + 4),
-                            Truncate::PLAIN,
-                        );
-                        lines.push(Line::raw(format!("  {name}  {detail}")));
-                        row_map.push(Some(row_keys.len()));
-                        row_keys.push(UsageRow::ModelTotal(agents.role, model.model.clone()));
-                    }
-                    lines.push(Line::default());
-                    row_map.push(None);
-                }
-            }
             for session in &report.sessions {
                 let cost = format!(
                     "{}{}",
@@ -910,6 +1266,13 @@ fn axis_label(dollars: f64) -> String {
     format!("${}", text.trim_end_matches('0').trim_end_matches('.'))
 }
 
+fn change_badge(index: usize) -> char {
+    ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨']
+        .get(index)
+        .copied()
+        .unwrap_or('*')
+}
+
 /// One bar per hour in the report, tallest at the axis top. Each is a column
 /// of the `Hours` control, so a click or arrow selects that hour.
 fn render_hour_chart(
@@ -995,6 +1358,36 @@ fn render_hour_chart(
         }
         lines.push(Line::from(spans));
     }
+    let changes = dialog
+        .report
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|r| r.role_changes.as_slice())
+        .unwrap_or_default();
+    let mut axis = vec![Span::raw(" ".repeat(usize::from(gutter)))];
+    for hour in hours {
+        let marker = changes
+            .iter()
+            .enumerate()
+            .filter(|(_, change)| hour_start_ms(change.changed_at_ms) == hour.start_ms)
+            .map(|(index, _)| format!("▲{}", change_badge(index)))
+            .collect::<String>();
+        let marker = truncate_to_cells(&marker, usize::from(pitch), Truncate::PLAIN);
+        let remaining = usize::from(pitch).saturating_sub(Line::raw(marker.as_str()).width());
+        axis.push(Span::styled(
+            marker,
+            ratatui::style::Style::default().fg(theme::pin_color(5)),
+        ));
+        axis.push(Span::styled(
+            if selected(hour) { "━" } else { "─" }.repeat(remaining),
+            if selected(hour) {
+                theme::active_control()
+            } else {
+                theme::muted()
+            },
+        ));
+    }
+    lines.push(Line::from(axis));
     // A two-digit hour needs two cells; with one-cell bars, label every other bar.
     let stride = if bar_width >= 2 {
         1
@@ -1033,6 +1426,10 @@ fn render_hour_chart(
             (start, start + pitch)
         })
         .collect::<Vec<_>>();
+    dialog.hour_geometry.set((
+        Rect::new(area.x + gutter, area.y, shown as u16 * pitch, bar_rows),
+        pitch,
+    ));
     form.register_columns(
         UsageControl::Hours,
         Rect::new(area.x + gutter, area.y, shown as u16 * pitch, area.height),
@@ -1045,60 +1442,50 @@ fn render_hour_chart(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_core::usage::ProfileQuotaUsage;
 
     #[test]
-    fn short_terminal_keeps_quota_forecast_warnings_visible_when_provider_rows_overflow() {
-        let providers = vec![
-            "Codex $40 · ~20%".into(),
-            "Claude $30 · ~15%".into(),
-            "Kimi $10 · ~50%".into(),
-            "Gemini $5 · ~10%".into(),
-            "Weekly quota consumed in window · all account use".into(),
-        ];
-        let now = 1_000_000;
-        let report = SessionUsageReport {
-            quota_projections: vec![
-                mj_core::usage::ProfileQuotaProjection {
-                    profile_id: "codex2".into(),
-                    window_label: "Week".into(),
-                    remaining_percent: 30,
-                    resets_at_epoch_seconds: Some(now + 48 * 3600),
-                    observed_pct_per_hour: Some(0.9),
-                    sustainable_pct_per_hour: Some(0.625),
-                    pace_ratio: Some(1.44),
-                    projected_exhaustion_epoch_seconds: Some(now + 33 * 3600),
-                },
-                mj_core::usage::ProfileQuotaProjection {
-                    profile_id: "kimi".into(),
-                    window_label: "5h".into(),
-                    remaining_percent: 12,
-                    resets_at_epoch_seconds: Some(now + 3 * 3600),
-                    observed_pct_per_hour: Some(10.0),
-                    sustainable_pct_per_hour: Some(4.0),
-                    pace_ratio: Some(2.5),
-                    projected_exhaustion_epoch_seconds: Some(now + 4320),
-                },
-            ],
-            ..Default::default()
+    fn usage_weighted_weekly_pace_and_partial_coverage() {
+        let a = ProfileQuotaUsage {
+            profile: "a".into(),
+            consumed_basis_points: Some(10_000),
+            covered_seconds: Some(604_800),
+            partial: false,
+            monthly_price_usd: Some(100),
         };
-        let forecasts = quota_forecast_lines(&report, now);
-        // Tight budget (4 rows) cannot fit 5 provider lines + 3 forecast lines;
-        // forecasts must stay visible with worst pace first.
-        let lines = assemble_summary_lines(providers.clone(), forecasts.clone(), 4);
-        assert_eq!(lines.len(), 4);
-        assert!(lines.iter().any(|line| line == "Quota Pace & Forecast"));
-        let kimi_pos = lines.iter().position(|line| line.starts_with("kimi  5h"));
-        let codex_pos = lines
-            .iter()
-            .position(|line| line.starts_with("codex2  Week"));
-        assert!(kimi_pos.is_some());
-        assert!(codex_pos.is_some());
-        assert!(kimi_pos < codex_pos);
+        let mut b = ProfileQuotaUsage {
+            profile: "b".into(),
+            consumed_basis_points: Some(10_000),
+            covered_seconds: Some(302_400),
+            partial: false,
+            monthly_price_usd: Some(300),
+        };
+        assert_eq!(pace(&[a.clone(), b.clone()], 604_800), (Some(175), true));
+        b.monthly_price_usd = None;
+        assert_eq!(pace(&[a.clone(), b.clone()], 604_800), (Some(150), true));
+        b.covered_seconds = Some(59);
+        assert_eq!(pace(&[a, b], 604_800), (Some(100), true));
+    }
 
-        // Even tighter budget (2 rows) still surfaces the worst warning.
-        let tight = assemble_summary_lines(providers, forecasts, 2);
-        assert_eq!(tight.len(), 2);
-        assert!(tight[0].starts_with("Quota Pace & Forecast"));
-        assert!(tight[1].starts_with("kimi  5h"));
+    #[test]
+    fn usage_staggered_resets_change_pooled_forecast() {
+        assert_eq!(
+            forecast(200, &[(30.0, 200_000, 1.0), (30.0, 200_000, 1.0)], 0),
+            "dry in 1d 1h"
+        );
+        assert_eq!(
+            forecast(110, &[(90.0, 86_400, 1.0), (90.0, 345_600, 1.0)], 0),
+            "tight · safe 7d"
+        );
+        assert_eq!(forecast(120, &[], 0), "over pace");
+    }
+
+    #[test]
+    fn usage_largest_remainder_keeps_role_totals_and_meridian_scale() {
+        assert_eq!(allocations(&[1, 1, 1], 100), vec![34, 33, 33]);
+        assert_eq!(allocations(&[1, 2, 3], 145).iter().sum::<u64>(), 145);
+        assert_eq!(meridian(Some(100), 25, false).chars().nth(12), Some('│'));
+        assert_eq!(meridian(Some(100), 25, true).chars().nth(12), Some('┆'));
+        assert_eq!(meridian(Some(10), 0, false), "");
     }
 }

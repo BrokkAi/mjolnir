@@ -52,19 +52,31 @@ impl RuntimeState {
         // Serialize installs so an earlier phone publication cannot overwrite
         // a later completed lifecycle with the controller snapshot it loaded.
         let mut inactivity = self.config_mutation.lock().await;
-        if self.committed.is_some() {
+        let ack = if self.committed.is_some() {
             let config = mj_core::runtime::spawn_blocking(Config::load)
                 .await
                 .context("daemon configuration reader panicked")??;
             self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
-            self.owner().install_config(config);
+            let mut owner = self.owner();
+            owner
+                .install_config(config)
+                .or_else(|| owner.role_sync_barrier())
         } else {
             let controller_loader = self.controller_loader;
             let controller = mj_core::runtime::spawn_blocking(controller_loader)
                 .await
                 .context("daemon controller loader panicked")??;
             self.configure_inactivity(&mut inactivity, controller.config.advanced.auto_afk_minutes);
-            self.owner().install_controller(controller);
+            let mut owner = self.owner();
+            owner
+                .install_controller(controller)
+                .or_else(|| owner.role_sync_barrier())
+        };
+        drop(inactivity);
+        if let Some(ack) = ack
+            && ack.await.is_err()
+        {
+            tracing::warn!("role assignment sync acknowledgement lost");
         }
         self.publish_revision();
         Ok(())
@@ -487,5 +499,15 @@ impl RuntimeState {
                 tracing::warn!(%error, "operator away delivery task failed");
             }
         }
+    }
+}
+
+pub(super) fn sync_role_assignments(config: &Config) {
+    let snapshot = mj_core::config::RoleAssignmentSnapshot::from_config(config);
+    if let Err(error) = mj_controller::database::sync_role_assignment_snapshot(
+        &snapshot,
+        mj_core::clock::epoch_millis() as i64,
+    ) {
+        tracing::warn!(%error, "could not persist role assignments");
     }
 }

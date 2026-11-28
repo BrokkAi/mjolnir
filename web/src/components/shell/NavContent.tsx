@@ -1,4 +1,4 @@
-import { Bell, LayoutGrid, LogOut, Gauge, Monitor, Moon, Server, Settings, Sun } from 'lucide-react';
+import { BarChart3, Bell, LayoutGrid, LogOut, Gauge, Monitor, Moon, Server, Settings, Sun } from 'lucide-react';
 import type { ComponentType } from 'react';
 import { useSessionStore } from '../../stores/useSessionStore';
 import { useUiStore, type Route, type Theme } from '../../stores/useUiStore';
@@ -15,6 +15,7 @@ export const NAV_ITEMS: NavItem[] = [
   { name: 'notifications', label: 'Inbox', route: { name: 'notifications' }, icon: Bell },
   { name: 'workspace', label: 'Sessions', route: { name: 'workspace' }, icon: LayoutGrid },
   { name: 'targets', label: 'Targets', route: { name: 'targets' }, icon: Server },
+  { name: 'usage', label: 'Usage Dashboard', route: { name: 'usage' }, icon: BarChart3 },
   { name: 'quota', label: 'Quota', route: { name: 'quota' }, icon: Gauge },
   { name: 'settings', label: 'Settings', route: { name: 'settings', path: [] }, icon: Settings },
 ];

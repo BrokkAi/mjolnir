@@ -601,6 +601,23 @@ pub fn weekly_quota_usage(
     profiles: Vec<QuotaUsageProfile>,
     intervals: &[(i64, i64)],
 ) -> Vec<mj_core::usage::ProfileQuotaUsage> {
+    weekly_quota_usage_with_loader(profiles, intervals, |identity, profile, start, end| {
+        crate::database::load_quota_history_bracketing(
+            identity,
+            profile,
+            start,
+            end,
+            WEEKLY_PERIOD_SECONDS as u64,
+            has_weekly_reading,
+        )
+    })
+}
+
+fn weekly_quota_usage_with_loader(
+    profiles: Vec<QuotaUsageProfile>,
+    intervals: &[(i64, i64)],
+    load: impl Fn(&str, &str, u64, u64) -> anyhow::Result<Vec<ProfileQuota>>,
+) -> Vec<mj_core::usage::ProfileQuotaUsage> {
     let spans: Vec<_> = intervals
         .iter()
         .map(|&(start, end)| weekly_usage_span(start, end))
@@ -609,24 +626,20 @@ pub fn weekly_quota_usage(
         .into_iter()
         .map(|profile| {
             let consumption = if spans.is_empty() {
-                Some(WeeklyConsumption {
-                    basis_points: 0,
-                    partial: false,
-                })
+                Some((
+                    WeeklyConsumption {
+                        basis_points: 0,
+                        partial: false,
+                    },
+                    0,
+                ))
             } else {
                 profile.cache_identity.as_deref().and_then(|identity| {
                     let since = spans.first()?.0;
                     let until = spans.last()?.1;
                     let bounds = u64::try_from(since).ok().zip(u64::try_from(until).ok())?;
-                    match crate::database::load_quota_history_bracketing(
-                        identity,
-                        &profile.profile_id,
-                        bounds.0,
-                        bounds.1,
-                        WEEKLY_PERIOD_SECONDS as u64,
-                        has_weekly_reading,
-                    ) {
-                        Ok(history) => weekly_consumption_in_spans(&history, &spans),
+                    match load(identity, &profile.profile_id, bounds.0, bounds.1) {
+                        Ok(history) => weekly_consumption_with_coverage(&history, &spans),
                         Err(error) => {
                             tracing::warn!(
                                 profile_id = %profile.profile_id,
@@ -640,8 +653,9 @@ pub fn weekly_quota_usage(
             };
             mj_core::usage::ProfileQuotaUsage {
                 profile: profile.profile_id,
-                consumed_basis_points: consumption.map(|consumption| consumption.basis_points),
-                partial: consumption.is_some_and(|consumption| consumption.partial),
+                consumed_basis_points: consumption.map(|(consumption, _)| consumption.basis_points),
+                partial: consumption.is_some_and(|(consumption, _)| consumption.partial),
+                covered_seconds: consumption.and_then(|(_, covered)| u64::try_from(covered).ok()),
                 monthly_price_usd: profile.monthly_price_usd,
             }
         })
@@ -1320,6 +1334,7 @@ impl QuotaTelemetryStore {
                     projection: mj_core::usage::ProfileQuotaProjection {
                         profile_id: profile_id.clone(),
                         window_label: report.window_label(window),
+                        is_short_window: kind == WindowKind::Short5h,
                         remaining_percent,
                         resets_at_epoch_seconds: window.resets_at_epoch_seconds,
                         observed_pct_per_hour: observed,
@@ -1674,6 +1689,7 @@ mod tests {
             .refresh_projections_with_loader(&reports, NOW, |_, _, _| Ok(covered.clone()))
             .unwrap();
         let projection = &store.snapshot().projections[0];
+        assert!(!projection.is_short_window);
         assert!((projection.observed_pct_per_hour.unwrap() - 1.0).abs() < 1e-9);
         assert!((projection.pace_ratio.unwrap() - 1.2).abs() < 1e-9);
 
@@ -1689,6 +1705,27 @@ mod tests {
         };
         let history = vec![scoped_row(NOW - 24 * 3600, 44, 80), scoped_row(NOW, 20, 68)];
         let reports = vec![("p".to_owned(), "id".to_owned(), history[1].clone())];
+        store
+            .refresh_projections_with_loader(&reports, NOW, |_, _, _| Ok(history.clone()))
+            .unwrap();
+        let both = sample_report(
+            "p",
+            NOW as u64,
+            Some((70, Some(NOW + 3600))),
+            Some((50, Some(NOW + 86400))),
+        );
+        store
+            .refresh_projections_with_loader(&[("p".into(), "id".into(), both)], NOW, |_, _, _| {
+                Ok(Vec::new())
+            })
+            .unwrap();
+        let kinds: Vec<_> = store
+            .snapshot()
+            .projections
+            .iter()
+            .map(|p| p.is_short_window)
+            .collect();
+        assert_eq!(kinds, vec![true, false]);
         store
             .refresh_projections_with_loader(&reports, NOW, |_, _, _| Ok(history.clone()))
             .unwrap();
@@ -1919,6 +1956,43 @@ mod tests {
             &[],
         );
         assert_eq!(empty[0].consumed_basis_points, Some(0));
+        assert_eq!(empty[0].covered_seconds, Some(0));
+        let profile = || {
+            vec![QuotaUsageProfile {
+                profile_id: "p1".into(),
+                cache_identity: Some("id".into()),
+                monthly_price_usd: None,
+            }]
+        };
+        let get = |spans: &[(i64, i64)]| {
+            weekly_quota_usage_with_loader(profile(), spans, |_, _, _, _| Ok(history.clone()))
+        };
+        assert_eq!(
+            get(&[((T + 1800) * 1000, (T + 9000) * 1000 - 1)])[0].covered_seconds,
+            Some(7200)
+        );
+        assert_eq!(
+            get(&[((T - 1800) * 1000, (T + 3600) * 1000 - 1)])[0].covered_seconds,
+            Some(3600)
+        );
+        assert_eq!(
+            get(&[((T - 10000) * 1000, (T - 5000) * 1000 - 1)])[0].covered_seconds,
+            None
+        );
+
+        assert_eq!(
+            weekly_consumption_with_coverage(&history, &[(T + 1800, T + 9000)])
+                .unwrap()
+                .1,
+            7200
+        );
+        assert_eq!(
+            weekly_consumption_with_coverage(&history, &[(T - 1800, T + 3600)])
+                .unwrap()
+                .1,
+            3600
+        );
+        assert!(weekly_consumption_with_coverage(&history, &[(T - 10000, T - 5000)]).is_none());
         assert!(!empty[0].partial);
         // Spans no probe pair covers are unknown, whichever side they fall on.
         assert_eq!(measure(&history, -10_000, -5_000), None);

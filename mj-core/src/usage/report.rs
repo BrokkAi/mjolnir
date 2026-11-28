@@ -274,6 +274,8 @@ pub struct ProfileQuotaUsage {
     /// 10,000 is all of one weekly allowance. An estimate from the probes the
     /// history holds. None when no part of the span could be measured.
     pub consumed_basis_points: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_seconds: Option<u64>,
     /// The probes did not cover the whole span (no reading before the start or
     /// after the end, a reset whose earlier use was lost, or an interval that
     /// could not be read), so the figure covers only part of it.
@@ -287,6 +289,8 @@ pub struct ProfileQuotaUsage {
 pub struct ProfileQuotaProjection {
     pub profile_id: String,
     pub window_label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_short_window: bool,
     pub remaining_percent: u8,
     pub resets_at_epoch_seconds: Option<i64>,
     pub observed_pct_per_hour: Option<f64>,
@@ -299,6 +303,7 @@ impl PartialEq for ProfileQuotaProjection {
     fn eq(&self, other: &Self) -> bool {
         self.profile_id == other.profile_id
             && self.window_label == other.window_label
+            && self.is_short_window == other.is_short_window
             && self.remaining_percent == other.remaining_percent
             && self.resets_at_epoch_seconds == other.resets_at_epoch_seconds
             && self.observed_pct_per_hour.map(f64::to_bits)
@@ -310,6 +315,21 @@ impl PartialEq for ProfileQuotaProjection {
     }
 }
 impl Eq for ProfileQuotaProjection {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileRoleUsageEstimate {
+    pub profile: Option<String>,
+    pub role: UsageAgentRole,
+    pub models: Vec<ModelUsageEstimate>,
+    pub cost_usd_ticks: CostUsdTicks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleAssignmentChange {
+    pub id: i64,
+    pub changed_at_ms: i64,
+    pub summary: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageReport {
@@ -332,6 +352,10 @@ pub struct SessionUsageReport {
     /// differ from its parent session's profile.
     #[serde(default)]
     pub profile_usage: Vec<ProfileUsageEstimate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_role_usage: Vec<ProfileRoleUsageEstimate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_changes: Vec<RoleAssignmentChange>,
     /// Weekly quota consumed in the selected intervals, filled by the daemon.
     #[serde(default)]
     pub quota_usage: Vec<ProfileQuotaUsage>,
@@ -351,6 +375,8 @@ impl Default for SessionUsageReport {
             sessions: Vec::new(),
             agent_usage: Vec::new(),
             profile_usage: Vec::new(),
+            profile_role_usage: Vec::new(),
+            role_changes: Vec::new(),
             quota_usage: Vec::new(),
             quota_projections: Vec::new(),
             cost_usd_ticks: Ok(0),
