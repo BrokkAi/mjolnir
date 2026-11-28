@@ -488,6 +488,7 @@ impl ViewerSnapshot {
                     Vec::new()
                 },
                 capabilities_key: profile.capabilities_key(id),
+                quota_provider: Some(profile.quota_provider().display_name().to_owned()),
                 quota: None,
             })
             .collect();
@@ -1090,6 +1091,11 @@ pub struct ViewerProfile {
     /// Rows exist before the first reading and survive a failed quota probe.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quota_pools: Vec<String>,
+    /// The provider metering this profile's allowance, resolved the way the
+    /// terminal resolves it: a Codex profile pointed at DeepSeek says
+    /// DeepSeek, not OpenAI. Absent in snapshots from an older controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<ViewerQuota>,
 }

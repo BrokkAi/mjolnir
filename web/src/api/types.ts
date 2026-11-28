@@ -795,6 +795,7 @@ export interface ViewerProfile {
   availability: AvailabilityVerdict;
   capabilities_key: string;
   harness_kind: string;
+  quota_provider?: string;
   quota_pools?: string[];
   quota?: ViewerQuota;
 }

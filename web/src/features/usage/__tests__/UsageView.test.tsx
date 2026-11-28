@@ -22,3 +22,22 @@ it('toggles an hour off from all hours and commits a drag released outside', asy
   await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms)
     .toEqual(hours.slice(7, 11).map(h => h.start_ms)));
 });
+it('displays partial role costs and highlights exhaustion at 100 percent pace', async () => {
+  vi.mocked(getUsageReport).mockResolvedValue({ ...report,
+    quota_projections: [{ profile_id: 'a', window_label: 'Weekly', remaining_percent: 10, resets_at_epoch_seconds: Date.now() / 1000 + 3 * 86400, observed_pct_per_hour: null, sustainable_pct_per_hour: null, pace_ratio: null, projected_exhaustion_epoch_seconds: null }],
+    profile_role_usage: [{ profile: 'a', role: 'primary', cost_usd_ticks: { Err: null }, models: [{ model: 'priced', cost_usd_ticks: { Ok: 30000000000 }, totals: {} }, { model: 'unknown', cost_usd_ticks: { Err: null }, totals: {} }] }],
+  } as never);
+  render(<UsageView />); expect(await screen.findByText(/^dry in /)).toHaveClass('text-danger');
+  fireEvent.click(screen.getByRole('button', { name: /▸ a/ })); expect(screen.getByText('$3.00+')).toBeInTheDocument();
+});
+it('clears rolled-off selections and anchors before a shift selection', async () => {
+  const advancedHours = [...hours.slice(1), { ...hours[0], start_ms: hours[23].start_ms + 3600000 }];
+  render(<UsageView />); await screen.findByText('Sessions');
+  fireEvent.pointerUp(screen.getAllByRole('button', { name: /^Hour / })[0]);
+  await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([hours[0].start_ms]));
+  vi.mocked(getUsageReport).mockResolvedValue({ ...report, hours: advancedHours } as never);
+  fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+  await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([]));
+  fireEvent.pointerUp(screen.getAllByRole('button', { name: /^Hour / })[2], { shiftKey: true });
+  await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([advancedHours[2].start_ms]));
+});

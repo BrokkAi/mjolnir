@@ -286,7 +286,9 @@ pub struct RuntimeState {
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
-    owner: Mutex<RuntimeStateOwner>,
+    /// Shared with the role-assignment sync task, which invalidates the
+    /// owner's last persisted snapshot when a write fails.
+    owner: Arc<Mutex<RuntimeStateOwner>>,
     role_sync_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Rebuilt by the delegation service when the API server starts; weak so
     /// the backend's ExportRuntime reference does not form an Arc cycle.

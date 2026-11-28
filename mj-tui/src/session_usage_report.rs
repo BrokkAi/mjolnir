@@ -57,6 +57,9 @@ pub(crate) struct SessionUsageDialog {
     hidden_hours: Cell<usize>,
     hour_anchor: Option<i64>,
     hour_cursor: Option<i64>,
+    /// The range a left-button drag covers right now, drawn but never queried
+    /// until the button release commits it.
+    hour_drag_preview: Option<BTreeSet<i64>>,
     hour_geometry: Cell<(Rect, u16)>,
     hour_press: Option<(usize, KeyModifiers, bool)>,
     expanded_providers: BTreeSet<String>,
@@ -85,6 +88,7 @@ impl DashboardState {
             hidden_hours: Cell::new(0),
             hour_anchor: None,
             hour_cursor: None,
+            hour_drag_preview: None,
             hour_geometry: Cell::new((Rect::default(), 1)),
             hour_press: None,
             expanded_providers: BTreeSet::new(),
@@ -194,7 +198,11 @@ impl DashboardState {
                             let hidden = dialog.hidden_hours.get();
                             let a = *start + hidden;
                             let b = end + hidden;
-                            dialog.query.hour_starts_ms = Some(
+                            // A drag previews its range without touching the
+                            // query: the report stays put until the release
+                            // commits, and a release outside the chart commits
+                            // nothing.
+                            dialog.hour_drag_preview = Some(
                                 dialog
                                     .hours
                                     .iter()
@@ -208,6 +216,7 @@ impl DashboardState {
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
+                    dialog.hour_drag_preview = None;
                     if let Some((start, down_modifiers, moved)) = dialog.hour_press.take() {
                         modifiers = Some(mouse.modifiers | down_modifiers);
                         if moved && let Some(end) = index {
@@ -511,59 +520,68 @@ fn forecast(pace: u64, projections: &[(f64, i64, f64)], now: i64) -> String {
     if pace == 0 {
         return "idle".into();
     }
-    if pace < 80 {
-        return format!("slack · ~{}% unused", 100 - pace);
-    }
-    if pace <= 105 {
-        return "on pace · safe".into();
-    }
-    if projections.is_empty() {
-        return "over pace".into();
-    }
-    let total_weight: f64 = projections.iter().map(|p| p.2).sum();
-    let mut accounts: Vec<_> = projections
-        .iter()
-        .map(|&(left, reset, weight)| (left * weight / total_weight, reset, weight / total_weight))
-        .collect();
-    let rate = pace as f64 / 168.0;
-    let end = now + 604_800;
-    let mut t = now as f64;
-    while t < end as f64 {
-        for account in &mut accounts {
-            while account.1 as f64 <= t {
-                account.0 = 100.0 * account.2;
-                account.1 += 604_800;
-            }
-        }
-        let next = accounts.iter().map(|a| a.1).min().unwrap_or(end).min(end) as f64;
-        let mut hours = (next - t) / 3600.0;
-        while hours > 0.0 {
-            let active_weight: f64 = accounts.iter().filter(|a| a.0 > 1e-9).map(|a| a.2).sum();
-            if active_weight == 0.0 {
-                let minutes = ((t - now as f64) / 60.0).ceil() as u64;
-                return if minutes >= 1440 {
-                    format!("dry in {}d {}h", minutes / 1440, minutes % 1440 / 60)
-                } else {
-                    format!("dry in {}h {}m", minutes / 60, minutes % 60)
-                };
-            }
-            let depletion = accounts
+    if !projections.is_empty() {
+        let total_weight: f64 = projections.iter().map(|p| p.2).sum();
+        if total_weight > 0.0 {
+            let mut accounts: Vec<_> = projections
                 .iter()
-                .filter(|a| a.0 > 1e-9)
-                .map(|a| a.0 * active_weight / (rate * a.2))
-                .fold(f64::INFINITY, f64::min);
-            let step = hours.min(depletion);
-            for account in &mut accounts {
-                if account.0 > 1e-9 {
-                    account.0 = (account.0 - rate * account.2 / active_weight * step).max(0.0);
+                .map(|&(left, reset, weight)| {
+                    (left * weight / total_weight, reset, weight / total_weight)
+                })
+                .collect();
+            let rate = pace as f64 / 168.0;
+            let end = now + 604_800;
+            let mut t = now as f64;
+            while t < end as f64 {
+                for account in &mut accounts {
+                    while account.1 as f64 <= t {
+                        account.0 = 100.0 * account.2;
+                        account.1 += 604_800;
+                    }
                 }
+                let next = accounts.iter().map(|a| a.1).min().unwrap_or(end).min(end) as f64;
+                let mut hours = (next - t) / 3600.0;
+                while hours > 0.0 {
+                    let active_weight: f64 =
+                        accounts.iter().filter(|a| a.0 > 1e-9).map(|a| a.2).sum();
+                    if active_weight == 0.0 {
+                        let minutes = ((t - now as f64) / 60.0).ceil() as u64;
+                        return if minutes == 0 {
+                            "dry now".into()
+                        } else if minutes >= 1440 {
+                            format!("dry in {}d {}h", minutes / 1440, minutes % 1440 / 60)
+                        } else {
+                            format!("dry in {}h {}m", minutes / 60, minutes % 60)
+                        };
+                    }
+                    let depletion = accounts
+                        .iter()
+                        .filter(|a| a.0 > 1e-9)
+                        .map(|a| a.0 * active_weight / (rate * a.2))
+                        .fold(f64::INFINITY, f64::min);
+                    let step = hours.min(depletion);
+                    for account in &mut accounts {
+                        if account.0 > 1e-9 {
+                            account.0 =
+                                (account.0 - rate * account.2 / active_weight * step).max(0.0);
+                        }
+                    }
+                    t += step * 3600.0;
+                    hours -= step;
+                }
+                t = next;
             }
-            t += step * 3600.0;
-            hours -= step;
         }
-        t = next;
     }
-    "tight · safe 7d".into()
+    if pace < 80 {
+        format!("slack · ~{}% unused", 100 - pace)
+    } else if pace <= 105 {
+        "on pace · safe".into()
+    } else if projections.is_empty() {
+        "over pace".into()
+    } else {
+        "tight · safe 7d".into()
+    }
 }
 
 fn meridian(pct: Option<u64>, width: usize, thin: bool) -> String {
@@ -804,6 +822,16 @@ fn provider_rows(
             Some(p) if p <= 130 => theme::palette().warning,
             Some(_) => theme::palette().error,
         };
+        // A dry forecast overrides the pace band's "safe" reading: exhaustion
+        // is a warning below the error band and an error inside it.
+        let note_style = if note.starts_with("dry") {
+            ratatui::style::Style::default().fg(match pct {
+                Some(p) if p > 130 => theme::palette().error,
+                _ => theme::palette().warning,
+            })
+        } else {
+            theme::actionable()
+        };
         lines.push(Line::from(vec![
             Span::styled(
                 format!(
@@ -814,9 +842,10 @@ fn provider_rows(
             ),
             Span::styled(gauge, ratatui::style::Style::default().fg(color)),
             Span::styled(
-                format!(" {pace_text:>6} {tank:>9} {amount:>8}  {note}"),
+                format!(" {pace_text:>6} {tank:>9} {amount:>8}  "),
                 theme::actionable(),
             ),
+            Span::styled(note, note_style),
         ]));
         map.push(Some(index));
         if dialog.expanded_providers.contains(&name) {
@@ -1300,13 +1329,12 @@ fn render_hour_chart(
     let hidden = dialog.hours.len() - shown;
     dialog.hidden_hours.set(hidden);
     let hours = &dialog.hours[hidden..];
-    let selected = |hour: &HourlyUsage| {
-        dialog
-            .query
-            .hour_starts_ms
-            .as_ref()
-            .is_some_and(|selected| selected.contains(&hour.start_ms))
-    };
+    let highlighted = dialog
+        .hour_drag_preview
+        .as_ref()
+        .or(dialog.query.hour_starts_ms.as_ref());
+    let selected =
+        |hour: &HourlyUsage| highlighted.is_some_and(|selected| selected.contains(&hour.start_ms));
     let cursor = hours
         .iter()
         .position(|hour| Some(hour.start_ms) == dialog.hour_cursor)
@@ -1478,6 +1506,21 @@ mod tests {
             "tight · safe 7d"
         );
         assert_eq!(forecast(120, &[], 0), "over pace");
+    }
+
+    /// A weekly pace inside the "safe" band still exhausts a nearly-empty tank
+    /// long before its reset; the forecast must say so.
+    // Hard-won: review-group-e0d8539b: pace ≤ 105% short-circuited to "on pace · safe" without simulating exhaustion.
+    #[test]
+    fn usage_forecast_reports_exhaustion_at_a_safe_pace() {
+        let now = 1_700_000_000;
+        let note = forecast(100, &[(10.0, now + 3 * 86_400, 1.0)], now);
+        assert!(
+            note.starts_with("dry in"),
+            "pace 100% with 10% left and a reset 3d away runs dry: {note}"
+        );
+        let note = forecast(100, &[(0.0, now + 3 * 86_400, 1.0)], now);
+        assert_eq!(note, "dry now");
     }
 
     #[test]

@@ -4,7 +4,10 @@ export const ticks = (cost: CostUsdTicks) => 'Ok' in cost ? cost.Ok : 0;
 export const money = (cost: CostUsdTicks) => 'Ok' in cost ? `$${(cost.Ok / 1e10).toFixed(2)}` : 'Unknown';
 
 export function providerName(id: string, profiles: ViewerProfile[]): string {
-  const kind = profiles.find(p => p.id === id)?.harness_kind.toLowerCase() ?? '';
+  const profile = profiles.find(p => p.id === id);
+  const provider = profile?.quota_provider?.trim();
+  if (provider) return provider;
+  const kind = profile?.harness_kind.toLowerCase() ?? '';
   const names: Record<string, string> = {
     codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', antigravity: 'Google',
     kimi: 'Kimi', grok: 'xAI', deepseek: 'DeepSeek',
@@ -58,7 +61,7 @@ export interface ProviderRow {
   partial: boolean;
   tank: number | null;
   forecast: string;
-  roles: { name: string; share: number; pace: number; cost: number; models: ModelUsageEstimate[] }[];
+  roles: { name: string; share: number; pace: number; cost: number; unknownCost: boolean; models: ModelUsageEstimate[] }[];
 }
 
 export function providerRows(report: SessionUsageReport, profiles: ViewerProfile[], duration: number, now = Date.now() / 1000): ProviderRow[] {
@@ -97,7 +100,7 @@ export function providerRows(report: SessionUsageReport, profiles: ViewerProfile
     const hasQuota = quotaMembers.length > 0;
     let forecast = pace === null ? (hasQuota ? 'unavailable' : 'usage-billed') : pace === 0 ? 'idle'
       : pace < 80 ? `slack · ~${100 - pace}% unused` : pace <= 105 ? 'on pace · safe' : 'over pace';
-    if (pace !== null && pace > 105 && tank !== null && selected.some(p => p.resets_at_epoch_seconds != null && p.resets_at_epoch_seconds > now)) {
+    if (pace !== null && pace > 0 && tank !== null && selected.some(p => p.resets_at_epoch_seconds != null && p.resets_at_epoch_seconds > now)) {
       let remaining = tank;
       let last = 0;
       let dry: number | null = null;
@@ -136,21 +139,29 @@ export function providerRows(report: SessionUsageReport, profiles: ViewerProfile
         }
         last = event.t;
       }
-      forecast = dry === null ? 'tight · safe 7d' : dry >= 24
-        ? `dry in ${Math.floor(dry / 24)}d ${Math.floor(dry % 24)}h`
-        : `dry in ${Math.floor(dry)}h ${Math.floor(dry % 1 * 60)}m`;
+      if (dry !== null) {
+        const minutes = Math.ceil(dry * 60);
+        forecast = minutes === 0 ? 'dry now' : minutes >= 1440
+          ? `dry in ${Math.floor(minutes / 1440)}d ${Math.floor(minutes % 1440 / 60)}h`
+          : `dry in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+      } else if (pace > 105) {
+        forecast = 'tight · safe 7d';
+      }
     }
     const profileUsage = (report.profile_usage ?? []).filter(p => p.profile && members.includes(p.profile));
     const unknown = profileUsage.some(p => 'Err' in p.cost_usd_ticks);
     const isPartial = profileUsage.some(p => p.coverage.full_turn_reports < p.coverage.recorded_turns || (p.coverage.unfinished_turns ?? 0) > 0);
     const estimatedCost = unknown ? '?' : `$${(profileUsage.reduce((sum, p) => sum + ticks(p.cost_usd_ticks), 0) / 1e10).toFixed(2)}${isPartial ? '+' : ''}`;
-    const roleMap = new Map<string, { cost: number; tokens: number; models: ModelUsageEstimate[] }>();
+    const roleMap = new Map<string, { cost: number; tokens: number; unknownCost: boolean; models: ModelUsageEstimate[] }>();
     for (const role of report.profile_role_usage ?? []) {
       if (!role.profile || !members.includes(role.profile)) continue;
-      const entry = roleMap.get(role.role) ?? { cost: 0, tokens: 0, models: [] };
-      entry.cost += ticks(role.cost_usd_ticks);
+      const entry = roleMap.get(role.role) ?? { cost: 0, tokens: 0, unknownCost: false, models: [] };
+      for (const model of role.models) {
+        entry.cost += ticks(model.cost_usd_ticks);
+        entry.unknownCost ||= 'Err' in model.cost_usd_ticks || (model.unreported_turns ?? 0) > 0;
+      }
       entry.models.push(...role.models);
-      entry.tokens += role.models.reduce((s, m) => s + Object.values(m.totals).reduce((a, t) => a + t.tokens, 0), 0);
+      entry.tokens += role.models.reduce((s, m) => s + (m.totals.total_tokens?.tokens ?? 0), 0);
       roleMap.set(role.role, entry);
     }
     const entries = [...roleMap];
@@ -160,10 +171,10 @@ export function providerRows(report: SessionUsageReport, profiles: ViewerProfile
     const paces = allocate(vals, pace ?? 0);
     const roles = entries.map(([role, r], i) => ({
       name: roleLabels[role] ?? role.replaceAll('_', ' '), share: shares[i], pace: paces[i],
-      cost: r.cost, models: mergeModels(r.models),
+      cost: r.cost, unknownCost: r.unknownCost, models: mergeModels(r.models),
     }));
     if (!vals.some(v => v > 0) && pace && pace > 0) {
-      roles.splice(0, roles.length, { name: 'External / untracked', share: 100, pace, cost: 0, models: [] });
+      roles.splice(0, roles.length, { name: 'External / untracked', share: 100, pace, cost: 0, unknownCost: false, models: [] });
     }
     return { name, pace, partial, tank, forecast, roles, hasQuota, accountCount: quotaMembers.length, estimatedCost };
   });

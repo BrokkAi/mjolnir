@@ -2821,3 +2821,115 @@ fn usage_timeline_range_and_provider_interactions() {
         hours[3..=9].iter().map(|h| h.start_ms).collect()
     );
 }
+
+/// A drag across the hour chart only previews its range; releasing outside
+/// the chart discards the preview without touching the report query.
+// Hard-won: review-group-e0d8539b: the drag mutated the live query, and a release off the chart still committed it.
+#[test]
+fn usage_hour_drag_released_outside_the_chart_keeps_the_query() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use mj_core::usage::{HOUR_MS, HourlyUsage, SessionUsageReport};
+    let mut usage = dashboard_with_session(running_session());
+    usage.begin_session_usage_report(None);
+    let first = usage.session_usage_request().unwrap().0;
+    let hours: Vec<_> = (0..24)
+        .map(|i| HourlyUsage {
+            start_ms: (490_000 + i) * HOUR_MS,
+            known_cost_usd_ticks: 10_000_000_000,
+            has_unknown_cost: false,
+        })
+        .collect();
+    let report = SessionUsageReport {
+        since_ms: hours[0].start_ms,
+        until_ms: hours[23].start_ms + HOUR_MS,
+        hours: hours.clone(),
+        ..Default::default()
+    };
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    let screen = drawn(&mut usage, 120, 36);
+    let bar_y = screen.iter().position(|line| line.contains("$0 ")).unwrap() as u16;
+    let bar_x = screen[usize::from(bar_y)]
+        .chars()
+        .position(|c| c == '█')
+        .unwrap() as u16;
+    let pitch = 4;
+    let at = |i: usize| (bar_x + i as u16 * pitch, bar_y);
+    usage.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), at(2)));
+    usage.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), at(2)));
+    let (generation, query) = usage.session_usage_request().unwrap();
+    let selected = query.hour_starts_ms.unwrap();
+    assert_eq!(selected, [hours[2].start_ms].into_iter().collect());
+    usage.apply_session_usage_result(generation, Ok(report));
+    drawn(&mut usage, 120, 36);
+
+    usage.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), at(3)));
+    usage.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), at(9)));
+    let (during, query) = usage.session_usage_request().unwrap();
+    assert_eq!(during, generation, "a drag must not reload the report");
+    assert_eq!(
+        query.hour_starts_ms.as_ref(),
+        Some(&selected),
+        "a drag previews its range without changing the query"
+    );
+    usage.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        (at(9).0, bar_y + 5),
+    ));
+    let (after, query) = usage.session_usage_request().unwrap();
+    assert_eq!(
+        after, generation,
+        "a release outside the chart commits nothing"
+    );
+    assert_eq!(query.hour_starts_ms.as_ref(), Some(&selected));
+}
+
+/// Exhaustion ahead of the reset is a warning even at a "safe" weekly pace.
+// Hard-won: review-group-e0d8539b: "dry in ..." at pace ≤ 105% rendered like "on pace · safe".
+#[test]
+fn usage_dry_forecast_at_a_safe_pace_is_styled_as_a_warning() {
+    use mj_core::usage::{ProfileQuotaProjection, ProfileQuotaUsage, SessionUsageReport};
+    let mut usage = dashboard_with_session(running_session());
+    usage.begin_session_usage_report(None);
+    let first = usage.session_usage_request().unwrap().0;
+    let now = mj_core::clock::epoch_seconds() as i64;
+    let report = SessionUsageReport {
+        quota_usage: vec![
+            // Anthropic sorts ahead of OpenAI so OpenAI is not the selected
+            // row (row 0) whose selection highlight overrides cell foreground.
+            ProfileQuotaUsage {
+                profile: "claude".into(),
+                consumed_basis_points: Some(5_000),
+                covered_seconds: Some(604_800),
+                partial: false,
+                monthly_price_usd: Some(100),
+            },
+            ProfileQuotaUsage {
+                profile: "codex".into(),
+                consumed_basis_points: Some(10_000),
+                covered_seconds: Some(604_800),
+                partial: false,
+                monthly_price_usd: Some(100),
+            },
+        ],
+        quota_projections: vec![ProfileQuotaProjection {
+            profile_id: "codex".into(),
+            window_label: "Week".into(),
+            is_short_window: false,
+            remaining_percent: 10,
+            resets_at_epoch_seconds: Some(now + 3 * 86_400),
+            observed_pct_per_hour: None,
+            sustainable_pct_per_hour: None,
+            pace_ratio: None,
+            projected_exhaustion_epoch_seconds: None,
+        }],
+        ..Default::default()
+    };
+    usage.apply_session_usage_result(first, Ok(report));
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut usage))
+        .expect("draw the surface");
+    let buffer = terminal.backend().buffer();
+    let (x, y) = point(&buffer_lines(buffer), "dry in");
+    assert_eq!(buffer[(x, y)].fg, mj_chat::theme::palette().warning);
+}

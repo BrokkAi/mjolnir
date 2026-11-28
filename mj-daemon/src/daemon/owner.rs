@@ -164,7 +164,9 @@ impl PollableWorkerInputs {
 pub(super) struct RuntimeStateOwner {
     controller: Controller,
     role_sync: Option<tokio::sync::mpsc::UnboundedSender<RoleSyncRequest>>,
-    last_role_snapshot: mj_core::config::RoleAssignmentSnapshot,
+    /// The snapshot last handed to the persistence task. `None` after a write
+    /// failed, so the next install retries the transition it swallowed.
+    last_role_snapshot: Option<mj_core::config::RoleAssignmentSnapshot>,
     pub(super) config_snapshot: mj_core::snapshot_map::SharedSnapshot<Config>,
     pub(super) lifecycle: BTreeMap<String, ActiveLifecycle>,
     pub(super) lifecycle_intents: BTreeMap<String, std::collections::VecDeque<Arc<()>>>,
@@ -192,7 +194,12 @@ pub(super) struct RuntimeStateOwner {
 pub(super) struct RoleSyncRequest {
     pub(super) snapshot: mj_core::config::RoleAssignmentSnapshot,
     pub(super) observed_at_ms: i64,
-    pub(super) ack: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Answers `Ok(())` once the snapshot is persisted, or the write's failure.
+    pub(super) ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    /// Held from the queue until SQLite answers, so a daemon handoff waits for
+    /// every accepted role-change write. Absent once the handoff has closed
+    /// admission; the shutdown epilogue still drains the queue.
+    pub(super) admission: Option<mj_core::upgrade::Work>,
 }
 
 /// Receives a reviewer child's session id and why its session ended.
@@ -413,24 +420,27 @@ impl RuntimeStateOwner {
     pub(super) fn install_config(
         &mut self,
         config: Config,
-    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
         let snapshot = mj_core::config::RoleAssignmentSnapshot::from_config(&config);
-        let ack = if snapshot != self.last_role_snapshot {
-            self.last_role_snapshot = snapshot.clone();
-            self.role_sync.as_ref().and_then(|sender| {
+        let ack = if self.last_role_snapshot.as_ref() != Some(&snapshot) {
+            self.last_role_snapshot = Some(snapshot.clone());
+            let mut queued = None;
+            if let Some(sender) = &self.role_sync {
                 let (ack, receiver) = tokio::sync::oneshot::channel();
                 let request = RoleSyncRequest {
                     snapshot,
                     observed_at_ms: mj_core::clock::epoch_millis() as i64,
                     ack: Some(ack),
+                    admission: mj_controller::upgrade::activity("role assignment sync").ok(),
                 };
                 if sender.send(request).is_err() {
                     tracing::warn!("role assignment persistence task stopped");
-                    None
+                    self.last_role_snapshot = None;
                 } else {
-                    Some(receiver)
+                    queued = Some(receiver);
                 }
-            })
+            }
+            queued
         } else {
             None
         };
@@ -441,13 +451,20 @@ impl RuntimeStateOwner {
         ack
     }
 
-    pub(super) fn role_sync_barrier(&self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    pub(super) fn role_sync_barrier(
+        &self,
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
         self.role_sync.as_ref().and_then(|sender| {
             let (ack, receiver) = tokio::sync::oneshot::channel();
             let request = RoleSyncRequest {
-                snapshot: self.last_role_snapshot.clone(),
+                // After a failed write cleared the marker, the barrier retries
+                // persistence with the current configuration's snapshot.
+                snapshot: self.last_role_snapshot.clone().unwrap_or_else(|| {
+                    mj_core::config::RoleAssignmentSnapshot::from_config(&self.controller.config)
+                }),
                 observed_at_ms: mj_core::clock::epoch_millis() as i64,
                 ack: Some(ack),
+                admission: mj_controller::upgrade::activity("role assignment sync").ok(),
             };
             if sender.send(request).is_err() {
                 tracing::warn!("role assignment persistence task stopped");
@@ -456,6 +473,17 @@ impl RuntimeStateOwner {
                 Some(receiver)
             }
         })
+    }
+
+    /// Forget the persisted marker after a failed write so the next install
+    /// retries the transition, unless a newer snapshot already replaced it.
+    pub(super) fn invalidate_role_snapshot(
+        &mut self,
+        snapshot: &mj_core::config::RoleAssignmentSnapshot,
+    ) {
+        if self.last_role_snapshot.as_ref() == Some(snapshot) {
+            self.last_role_snapshot = None;
+        }
     }
 
     pub(super) fn set_role_sync(
@@ -482,9 +510,9 @@ impl RuntimeStateOwner {
     pub(super) fn new(controller: Controller, reviewer_ended: ReviewerEnded) -> Self {
         let indexes = RecordIndexes::bootstrap(&controller.state);
         Self {
-            last_role_snapshot: mj_core::config::RoleAssignmentSnapshot::from_config(
+            last_role_snapshot: Some(mj_core::config::RoleAssignmentSnapshot::from_config(
                 &controller.config,
-            ),
+            )),
             role_sync: None,
             config_snapshot: controller.config.clone().into(),
             controller,
@@ -507,7 +535,7 @@ impl RuntimeStateOwner {
     pub(super) fn install_controller(
         &mut self,
         controller: Controller,
-    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
         if !matches!(self.store, StoreState::Bootstrap) {
             return self.install_config(controller.config);
         }

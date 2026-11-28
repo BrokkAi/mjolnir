@@ -73,10 +73,14 @@ impl RuntimeState {
                 .or_else(|| owner.role_sync_barrier())
         };
         drop(inactivity);
-        if let Some(ack) = ack
-            && ack.await.is_err()
-        {
-            tracing::warn!("role assignment sync acknowledgement lost");
+        if let Some(ack) = ack {
+            match ack.await {
+                Ok(Ok(())) => {}
+                // Say the role assignments were not persisted rather than
+                // reporting a reload whose marker is missing.
+                Ok(Err(error)) => return Err(anyhow!("role assignment sync failed: {error}")),
+                Err(_) => tracing::warn!("role assignment sync acknowledgement lost"),
+            }
         }
         self.publish_revision();
         Ok(())

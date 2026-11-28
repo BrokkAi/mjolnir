@@ -6,7 +6,7 @@ function report(): SessionUsageReport { return { since_ms: 0, until_ms: 3600000,
 describe('provider pace', () => {
   it('weights covered rates by plan price and marks partial coverage', () => { const row = providerRows(report(), profiles, 7200)[0]; expect(row.pace).toBe(175); expect(row.partial).toBe(true); });
   it('excludes short windows and models reset safety across the week', () => { const r = report(); r.quota_projections = [{profile_id:'a', window_label:'5h', is_short_window:true, remaining_percent:0, resets_at_epoch_seconds:1, observed_pct_per_hour:null,sustainable_pct_per_hour:null,pace_ratio:null,projected_exhaustion_epoch_seconds:null}, {profile_id:'a',window_label:'Weekly',remaining_percent:100,resets_at_epoch_seconds:3600,observed_pct_per_hour:null,sustainable_pct_per_hour:null,pace_ratio:null,projected_exhaustion_epoch_seconds:null}]; const row = providerRows(r, profiles, 6048, 0)[0]; expect(row.tank).toBe(100); expect(row.forecast).toBe('dry in 4d 1h'); });
-  it('allocates rounded role pace and shares and displays external usage', () => { const r = report(); expect(providerRows(r, profiles, 6048)[0].roles[0].name).toBe('External / untracked'); r.profile_role_usage = ['primary','oracle','reviewer'].map(role => ({profile:'a', role, cost_usd_ticks:{Ok:1}, models:[]})); const row = providerRows(r, profiles, 6048)[0]; expect(row.roles.reduce((n,x) => n+x.pace,0)).toBe(row.pace); expect(row.roles.reduce((n,x) => n+x.share,0)).toBe(100); });
+  it('allocates rounded role pace and shares and displays external usage', () => { const r = report(); expect(providerRows(r, profiles, 6048)[0].roles[0].name).toBe('External / untracked'); r.profile_role_usage = ['primary','oracle','reviewer'].map(role => ({profile:'a', role, cost_usd_ticks:{Ok:1}, models:[{model:role, cost_usd_ticks:{Ok:1}, totals:{}}]})); const row = providerRows(r, profiles, 6048)[0]; expect(row.roles.reduce((n,x) => n+x.pace,0)).toBe(row.pace); expect(row.roles.reduce((n,x) => n+x.share,0)).toBe(100); });
 });
 it('does not invent quota when an empty account resets', () => {
   const r = report();
@@ -27,4 +27,31 @@ it('merges the same model across provider accounts', () => {
   const role = providerRows(r, profiles, 6048)[0].roles[0];
   expect(role.name).toBe('Primary agents');
   expect(role.models).toEqual([{ model: 'gpt', cost_usd_ticks: { Ok: 10 }, unreported_turns: 2, totals: { input: { tokens: 14, reported_turns: 2 } } }]);
+});
+it('groups by resolved quota provider before harness kind', () => {
+  const r = report(); r.profiles = ['a', 'b', 'c'];
+  const accounts = [{ id: 'a', harness_kind: 'codex', quota_provider: ' DeepSeek ' }, { id: 'b', harness_kind: 'opencode', quota_provider: 'Anthropic' }, { id: 'c', harness_kind: 'opencode', quota_provider: 'Anthropic' }] as ViewerProfile[];
+  r.quota_usage = r.profiles.map(profile => ({ profile, consumed_basis_points: 100, covered_seconds: 6048, partial: false, monthly_price_usd: 100 }));
+  expect(providerRows(r, accounts, 6048).map(row => [row.name, row.accountCount])).toEqual([['DeepSeek', 1], ['Anthropic', 2]]);
+});
+it('retains priced model costs for role shares when another model is unknown', () => {
+  const r = report();
+  r.profile_role_usage = [
+    { profile: 'a', role: 'primary', cost_usd_ticks: { Err: null }, models: [{ model: 'priced', totals: {}, cost_usd_ticks: { Ok: 30000000000 } }, { model: 'unknown', totals: {}, cost_usd_ticks: { Err: null } }] },
+    { profile: 'a', role: 'oracle', cost_usd_ticks: { Ok: 10000000000 }, models: [{ model: 'other', totals: {}, cost_usd_ticks: { Ok: 10000000000 } }] },
+  ];
+  expect(providerRows(r, profiles, 6048)[0].roles.map(role => [role.cost, role.unknownCost, role.share, role.pace])).toEqual([[30000000000, true, 75, 131], [10000000000, false, 25, 44]]);
+});
+it('uses total tokens alone for fallback shares', () => {
+  const r = report(); const total = (tokens: number) => ({ tokens, reported_turns: 1 });
+  r.profile_role_usage = [
+    { profile: 'a', role: 'primary', cost_usd_ticks: { Err: null }, models: [{ model: 'a', cost_usd_ticks: { Err: null }, totals: { input_tokens: total(90), output_tokens: total(10), total_tokens: total(100) } }] },
+    { profile: 'a', role: 'oracle', cost_usd_ticks: { Err: null }, models: [{ model: 'b', cost_usd_ticks: { Err: null }, totals: { total_tokens: total(100) } }] },
+  ];
+  expect(providerRows(r, profiles, 6048)[0].roles.map(role => role.share)).toEqual([50, 50]);
+});
+it('forecasts exhaustion at an on-pace rate with a low tank', () => {
+  const r = report(); r.profiles = ['a']; r.quota_usage = [r.quota_usage![0]];
+  r.quota_projections = [{ profile_id: 'a', window_label: 'Weekly', remaining_percent: 10, resets_at_epoch_seconds: 3 * 86400, observed_pct_per_hour: null, sustainable_pct_per_hour: null, pace_ratio: null, projected_exhaustion_epoch_seconds: null }];
+  const row = providerRows(r, profiles, 6048, 0)[0]; expect(row.pace).toBe(100); expect(row.forecast).toMatch(/^dry in /);
 });

@@ -46,6 +46,17 @@ export default function UsageView() {
     return () => controller.abort();
   }, [profile, suspended, selected, refresh]);
 
+  useEffect(() => {
+    if (!report) return;
+    const visibleHours = new Set(report.hours.map(h => h.start_ms));
+    if (anchor.current !== null && !visibleHours.has(anchor.current)) anchor.current = null;
+    setSelected(current => {
+      if (current === null) return null;
+      const reconciled = current.filter(h => visibleHours.has(h));
+      return reconciled.length === current.length ? current : reconciled;
+    });
+  }, [report]);
+
   const hours = report?.hours ?? [];
   const range = (a: number, b: number) => hours.map(h => h.start_ms)
     .filter(h => h >= Math.min(a, b) && h <= Math.max(a, b));
@@ -128,11 +139,11 @@ export default function UsageView() {
                 <Gauge pace={row.pace} payg={!row.hasQuota} />
                 <span>{row.pace === null ? (row.hasQuota ? 'unknown' : 'payg') : `${row.partial ? '~' : ''}${row.pace}%`}</span>
                 <span>{row.tank === null ? (row.hasQuota ? '—' : '∞') : `${Math.round(row.tank)}%`}</span>
-                <span>{row.estimatedCost}</span><span>{row.forecast}</span>
+                <span>{row.estimatedCost}</span><span className={row.forecast.startsWith('dry ') ? 'text-danger' : undefined}>{row.forecast}</span>
               </button>
               {expanded.has(row.name) && row.roles.map(role => <div key={role.name} className={`${columns} mt-3 text-xs`}>
                 <span className="pl-4">{role.name}</span><Gauge pace={role.pace} thin />
-                <span>{role.pace}%</span><span>{role.share}% share</span><span>${(role.cost / 1e10).toFixed(2)}</span>
+                <span>{role.pace}%</span><span>{role.share}% share</span><span>{role.unknownCost && role.cost === 0 ? '?' : `$${(role.cost / 1e10).toFixed(2)}${role.unknownCost ? '+' : ''}`}</span>
                 <span>{role.models.map(m => `${m.model ?? 'Unknown'}${m.unreported_turns ? ` (${m.unreported_turns} unreported)` : ''}`).join(', ')}</span>
               </div>)}
             </div>)}
