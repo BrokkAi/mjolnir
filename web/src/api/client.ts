@@ -29,6 +29,8 @@ import type {
   NotificationMessageSelector,
   PathCompletion,
   PreflightNew,
+  ProviderProfileSelectionRequest,
+  QuotaProvider,
   PreflightResume,
   PreflightResumeRequest,
   ProjectCatalogView,
@@ -399,6 +401,12 @@ export const destroySession = (id: string) =>
 /* -------------------------------------------------------------------------- */
 /* Launch, projects, preflight                                                */
 /* -------------------------------------------------------------------------- */
+
+export const getProfileProviders = (signal?: AbortSignal) =>
+  apiFetch<{ providers: Record<string, QuotaProvider> }>('/api/v1/profiles/providers', { signal });
+
+export const selectProviderProfile = (request: ProviderProfileSelectionRequest, signal?: AbortSignal) =>
+  apiFetch<string>('/api/v1/profiles/select', { method: 'POST', json: request, signal });
 
 export const getLaunchOptions = (signal?: AbortSignal) =>
   apiFetch<LaunchOptions>('/api/v1/options', { signal });

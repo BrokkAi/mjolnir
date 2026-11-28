@@ -685,6 +685,17 @@ describe('hash routing', () => {
     remove();
   });
 
+  it('keeps an explicit All workspaces selection after its hash change', async () => {
+    const remove = installUiListeners();
+    useUiStore.getState().navigate({ name: 'workspace', workspaceId: 'w1' });
+    await flush();
+    useUiStore.getState().navigate({ name: 'workspace' });
+    await flush();
+    expect(useUiStore.getState().implicitRoute).toBe(false);
+    expect(effectiveRoute(useUiStore.getState().route, useUiStore.getState().implicitRoute, true)).toEqual({ name: 'workspace' });
+    remove();
+  });
+
   it('opens an app URL from a notification through the router, ignoring other origins', () => {
     useUiStore.getState().navigateToUrl(`${location.origin}/#conversation/s8`);
     expect(useUiStore.getState().route).toEqual({ name: 'conversation', sessionId: 's8' });

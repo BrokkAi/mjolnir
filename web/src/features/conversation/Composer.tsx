@@ -133,11 +133,6 @@ function useCoarsePointer(): boolean {
   }, []);
 }
 
-function currentChoiceName(option: ViewerConfigOption): string {
-  const choice = option.choices.find(item => String(item.value) === String(option.current));
-  return choice?.name || String(option.current ?? '');
-}
-
 export interface ComposerProps {
   session: ViewerSession;
   /** Re-attach the transcript to the end after an accepted submission. */
@@ -517,9 +512,11 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
   };
 
   const policyKeys = useMemo(() => new Set(session.policy_config_keys ?? []), [session.policy_config_keys]);
-  const configOptions = (session.config_options ?? []).filter(option => !policyKeys.has(option.key));
-  const modelOption = configOptions.find(option => option.key === 'model');
-  const configLabel = modelOption ? currentChoiceName(modelOption) : 'Config';
+  const allConfig = session.config_options ?? [];
+  const modelOption = allConfig.find(option => option.key === 'model');
+  const effortOption = allConfig.find(option => option.key === 'effort') ??
+    allConfig.find(option => option.key === 'thought_level') ?? allConfig.find(option => option.key === 'reasoning_effort');
+  const configOptions = allConfig.filter(option => option !== modelOption && option !== effortOption && !policyKeys.has(option.key));
   const canConfig = Boolean(capabilities.set_config) && !transitioning && configOptions.length > 0;
 
   const turnControls = turnControlView(session);
@@ -872,16 +869,23 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
               Plan mode
             </button>
           )}
-          {canConfig && (
-            <button
-              type="button"
-              aria-label="Model and configuration"
-              aria-expanded={configOpen}
-              onClick={() => setConfigOpen(open => !open)}
-              className="inline-flex min-h-7 max-w-56 items-center gap-1.5 rounded-full border border-line px-2.5 py-0.5 text-[11px] text-muted hover:text-fg"
+          {[modelOption, effortOption].map((option, index) => option && (
+            <select
+              key={option.key}
+              aria-label={index === 0 ? 'Model' : 'Effort'}
+              value={String(option.current ?? '')}
+              disabled={!capabilities.set_config || transitioning || policyKeys.has(option.key) || option.choices.length <= 1 || configPending !== null}
+              onChange={event => void chooseConfig(option, event.target.value)}
+              className="min-h-7 max-w-44 truncate rounded-full border border-line bg-raised px-2.5 text-[11px] font-medium text-fg"
             >
-              <SlidersHorizontal className="size-3 shrink-0" aria-hidden />
-              <span className="truncate">{configLabel}</span>
+              {option.choices.map(choice => <option key={String(choice.value)} value={String(choice.value)}>{choice.name || String(choice.value)}</option>)}
+            </select>
+          ))}
+          {canConfig && (
+            <button type="button" aria-label="More configuration" aria-expanded={configOpen}
+              onClick={() => setConfigOpen(open => !open)}
+              className="inline-flex min-h-7 items-center rounded-full border border-line px-2.5 text-muted">
+              <SlidersHorizontal className="size-3" aria-hidden />
             </button>
           )}
           <button
@@ -892,15 +896,7 @@ export function Composer({ session, onFollowBottom }: ComposerProps) {
             <History className="size-3" aria-hidden />
             History
           </button>
-          <span className="ml-auto text-[10.5px] text-muted">
-            {shellMode
-              ? canShell
-                ? 'Shell command · runs in this session'
-                : 'Shell commands are unavailable'
-              : coarsePointer
-                ? 'Tap Send to submit · Enter adds a line'
-                : 'Enter to send · Shift+Enter for a new line'}
-          </span>
+          {shellMode && <span className="ml-auto text-[10.5px] text-muted">{canShell ? 'Shell command · runs in this session' : 'Shell commands are unavailable'}</span>}
         </div>
       </div>
 

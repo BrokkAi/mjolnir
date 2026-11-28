@@ -9,6 +9,23 @@ use mj_core::state::{MaterializedSession, MaterializedSessionSummary, Transcript
 use mj_core::workspace::{ConversationLayout, PaneSize, PaneSizes};
 
 impl DashboardBackend for RuntimeState {
+    fn profile_providers(
+        &self,
+    ) -> BoxFuture<'_, Result<std::collections::BTreeMap<String, mj_core::config::QuotaProvider>>>
+    {
+        let config = self.owner().controller().config.clone();
+        Box::pin(async move {
+            mj_core::runtime::spawn_blocking(move || {
+                config
+                    .enabled_profiles()
+                    .map(|(id, profile)| (id.to_owned(), profile.quota_provider()))
+                    .collect()
+            })
+            .await
+            .context("resolve profile providers")
+        })
+    }
+
     fn select_provider_profile(
         &self,
         request: mj_client::http::ProviderProfileSelectionRequest,

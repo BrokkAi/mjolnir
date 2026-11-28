@@ -68,6 +68,7 @@ export default function DashboardView({ workspaceId, subagentParentId, childKind
   const meta = useSessionStore(state => state.meta);
   const rows = useSessionStore(state => state.sessionsById);
   const navigate = useUiStore(state => state.navigate);
+  const setSelectedWorkspaceId = useUiStore(state => state.setSelectedWorkspaceId);
   const [dismissedNotices, setDismissedNotices] = useState<ReadonlySet<number>>(() => new Set());
   const [dismissedFailures, setDismissedFailures] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -208,7 +209,7 @@ export default function DashboardView({ workspaceId, subagentParentId, childKind
               <button
                 type="button"
                 aria-pressed={!workspaceId}
-                onClick={() => navigate({ name: 'workspace' })}
+                onClick={() => { setSelectedWorkspaceId(null); navigate({ name: 'workspace' }); }}
                 className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${
                   !workspaceId
                     ? 'border-accent bg-accent/15 text-accent'
@@ -222,7 +223,7 @@ export default function DashboardView({ workspaceId, subagentParentId, childKind
                   key={workspace.id}
                   type="button"
                   aria-pressed={workspaceId === workspace.id}
-                  onClick={() => navigate({ name: 'workspace', workspaceId: workspace.id })}
+                  onClick={() => { setSelectedWorkspaceId(workspace.id); navigate({ name: 'workspace', workspaceId: workspace.id }); }}
                   className={`min-h-11 max-w-full break-words rounded-lg border px-3 text-sm font-medium ${
                     workspaceId === workspace.id
                       ? 'border-accent bg-accent/15 text-accent'

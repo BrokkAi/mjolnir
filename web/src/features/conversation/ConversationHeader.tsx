@@ -169,10 +169,11 @@ export function ConversationHeader({
   const capabilities = session.capabilities;
   const transitioning = Boolean(session.transitioning || session.verdict.transition);
   const nativeSubagentCount = session.detail === false ? 0 : (session.native_subagents?.length ?? 0);
-  const subagentCount =
+  const hasAnySubagents =
     (session.subagent_session_ids?.length ?? 0) +
     (session.reviewer_session_ids?.length ?? 0) +
-    nativeSubagentCount;
+    nativeSubagentCount > 0;
+  const activeSubagentCount = session.verdict?.working_children ?? 0;
   const detail =
     session.activity_details?.label || session.question_message || session.activity || '';
 
@@ -306,12 +307,12 @@ export function ConversationHeader({
 
   const buttons = (
     <>
-      {subagentCount > 0 && (
-        <IconButton label={`Sub-agents and reviewers, ${subagentCount}`} onClick={onOpenSubagents}>
+      {hasAnySubagents && (
+        <IconButton label={activeSubagentCount > 0 ? `Sub-agents and reviewers, ${activeSubagentCount} active` : 'Sub-agents and reviewers'} onClick={onOpenSubagents}>
           <Users className="size-5" aria-hidden />
-          <span className="absolute -right-0.5 -top-0.5 rounded-full bg-accent px-1 text-[10px] font-semibold leading-4 text-accent-fg">
-            {subagentCount}
-          </span>
+          {activeSubagentCount > 0 && <span className="absolute -right-0.5 -top-0.5 rounded-full bg-accent px-1 text-[10px] font-semibold leading-4 text-accent-fg">
+            {activeSubagentCount}
+          </span>}
         </IconButton>
       )}
       <IconButton label="Session diff" onClick={onOpenDiff}>

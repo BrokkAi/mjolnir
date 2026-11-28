@@ -83,10 +83,13 @@ export class RouteErrorBoundary extends Component<{ children: ReactNode; resetKe
 export function RouteOutlet() {
   const route = useUiStore(state => state.route);
   const implicit = useUiStore(state => state.implicitRoute);
+  const remembered = useUiStore(state => state.selectedWorkspaceId);
+  const workspaces = useSessionStore(state => state.meta?.workspaces);
+  const validRemembered = workspaces?.some(workspace => workspace.id === remembered) ? remembered : null;
   const attention = useAttentionCount();
   // Until the first snapshot lands, an empty hash must not flash the wrong default.
   const loaded = useSessionStore(state => state.meta !== null);
-  const shown = effectiveRoute(route, implicit, loaded && attention > 0);
+  const shown = effectiveRoute(route, implicit, loaded && attention > 0, validRemembered, remembered !== null);
 
   let view;
   switch (shown.name) {

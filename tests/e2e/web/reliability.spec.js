@@ -181,7 +181,11 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await expect(page).toHaveURL(/\/new$/);
     // Config::with_local_targets also offers container candidates. Select the
     // bare host explicitly so this scenario exercises the directory flow.
-    await page.getByLabel('Profile').first().selectOption('fake');
+    const fakeAccount = page.getByRole('button', { name: /^fake \(/ });
+    if (!(await fakeAccount.isVisible())) {
+      await page.getByRole('button', { name: /^Expand .* accounts$/ }).first().click();
+    }
+    await fakeAccount.click();
     const localhostValue = await page.getByLabel('Target').evaluate(select => {
       const option = [...select.options].find(candidate => /^localhost/.test(candidate.textContent));
       return option ? option.value : null;

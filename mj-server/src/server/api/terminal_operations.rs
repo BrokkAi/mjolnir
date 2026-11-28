@@ -1,5 +1,7 @@
 use super::dashboard::dashboard_backend;
 mod streams;
+#[cfg(test)]
+pub(super) mod test_profile_backend;
 use super::*;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, FromRequest, Request};

@@ -6,6 +6,8 @@ import {
   discoverProjects,
   getLaunchOptions,
   getProjects,
+  getProfileProviders,
+  selectProviderProfile,
   getSubagentOptions,
   preflightNew,
 } from '../../api/client';
@@ -15,6 +17,7 @@ import {
   type CreateBundleRequest,
   type LaunchAvailability,
   type LaunchOptions,
+  type LaunchProfile,
   type LaunchTarget,
   type LocalRemoteRepair,
   type NewSessionAction,
@@ -23,6 +26,7 @@ import {
   type ProjectCatalogView,
   type ProjectDiscovery,
   type ProjectEntry,
+  type QuotaProvider,
   type SessionReview,
   type SubagentChoice,
   type SubagentOptions,
@@ -50,6 +54,22 @@ interface BundleChoice {
   label: string;
   repositories: string[];
   saved: boolean;
+  search?: string;
+}
+
+function providerFor(harness: string): QuotaProvider {
+  const known: Record<string, QuotaProvider> = {
+    claude: 'Anthropic', codex: 'OpenAI', antigravity: 'Google', grok: 'XAI', kimi: 'Moonshot',
+    muse: { Other: 'Muse' }, opencode: { Other: 'OpenCode' }, dsh: { Other: 'DSH' },
+  };
+  return known[harness.toLowerCase()] ?? { Other: harness };
+}
+
+function providerLabel(provider: QuotaProvider): string {
+  if (typeof provider !== 'string') return provider.Other;
+  if (provider === 'XAI') return 'xAI';
+  if (provider === 'Zai') return 'Z.ai';
+  return provider;
 }
 
 function describe(error: unknown): string {
@@ -134,6 +154,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   const meta = useSessionStore(state => state.meta);
+  const sessions = useSessionStore(state => state.sessionsById);
   const dispatchAction = useSessionStore(state => state.dispatchAction);
   const pushToast = useUiStore(state => state.pushToast);
   const navigate = useUiStore(state => state.navigate);
@@ -144,6 +165,13 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   const [loadError, setLoadError] = useState('');
 
   const [profileId, setProfileId] = useState('');
+  const [providers, setProviders] = useState<Record<string, QuotaProvider>>({});
+  const [autoProvider, setAutoProvider] = useState<QuotaProvider | null>(null);
+  const [resolvedTarget, setResolvedTarget] = useState<string | null>(null);
+  const [providerError, setProviderError] = useState('');
+  const [expandedProviders, setExpandedProviders] = useState<string[]>([]);
+  const [bundleSearch, setBundleSearch] = useState('');
+  const [createOpen, setCreateOpen] = useState<boolean | null>(null);
   const [targetId, setTargetId] = useState('');
   const [bundleId, setBundleId] = useState('');
   const [projectDirectory, setProjectDirectory] = useState('');
@@ -209,6 +237,7 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   const preflightController = useRef<AbortController | null>(null);
   const preflightRequestRef = useRef<NewSessionPreflightRequest | null>(null);
   const selectionRef = useRef({ targetId: '', projectDirectory: '' });
+  const providerGeneration = useRef(0);
 
   /* ---------------------------------------------------------------------- */
   /* Lazy catalog load                                                       */
@@ -219,11 +248,13 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
     let alive = true;
     void (async () => {
       try {
-        const [launch, catalog] = await Promise.all([
+        const [launch, catalog, providerMap] = await Promise.all([
           getLaunchOptions(controller.signal),
           getProjects(controller.signal),
+          getProfileProviders(controller.signal).catch(() => ({ providers: {} })),
         ]);
         if (!alive) return;
+        setProviders(providerMap.providers);
         setOptions(launch);
         setProjects(catalog);
       } catch (error) {
@@ -250,16 +281,30 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
           ? ''
           : (options.profiles[0]?.id ?? ''),
     );
+    const preferred = options.profiles.find(profile => profile.id === preferredProfile) ?? (!options.primary_configured ? options.profiles[0] : undefined);
+    if (preferred) setExpandedProviders([JSON.stringify(providers[preferred.id] ?? providerFor(preferred.harness))]);
     setTargetId(
       preferredTarget && options.targets.some(target => target.id === preferredTarget)
         ? preferredTarget
         : (options.targets[0]?.id ?? ''),
     );
-  }, [options]);
+  }, [options, providers]);
+
+  useEffect(() => {
+    if (!autoProvider) return;
+    const controller = new AbortController();
+    const generation = ++providerGeneration.current;
+    setResolvedTarget(null);
+    setProviderError('');
+    selectProviderProfile({ provider: autoProvider, profile_id: null, target_template_id: targetId || null }, controller.signal)
+      .then(id => { if (!controller.signal.aborted && providerGeneration.current === generation) { setProfileId(id); setResolvedTarget(targetId); } })
+      .catch(error => { if (!controller.signal.aborted && providerGeneration.current === generation) setProviderError(describe(error)); });
+    return () => controller.abort();
+  }, [autoProvider, targetId]);
 
   useEffect(() => {
     if (!initialized.current || bundleId) return;
-    const first = options?.bundles[0]?.id ?? projects?.projects[0]?.bundle_id ?? '';
+    const first = options?.default?.bundle_id ?? options?.bundles[0]?.id ?? projects?.projects[0]?.bundle_id ?? '';
     if (first) setBundleId(first);
   }, [options, projects, bundleId]);
 
@@ -276,7 +321,19 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
     [options, targetId],
   );
   // An empty profile asks the daemon to pick among the configured primary models.
-  const autoPrimary = options?.primary_configured === true && profileId === '';
+  const autoPrimary = !autoProvider && options?.primary_configured === true && profileId === '';
+  const providerPending = autoProvider !== null && resolvedTarget !== targetId;
+  const providerGroups = useMemo(() => {
+    const groups = new Map<string, { provider: QuotaProvider; profiles: LaunchProfile[] }>();
+    for (const profile of options?.profiles ?? []) {
+      const provider = providers[profile.id] ?? providerFor(profile.harness);
+      const key = JSON.stringify(provider);
+      const group = groups.get(key) ?? { provider, profiles: [] };
+      group.profiles.push(profile);
+      groups.set(key, group);
+    }
+    return [...groups.entries()];
+  }, [options, providers]);
   const launchProfile = useMemo(
     () => options?.profiles.find(profile => profile.id === profileId),
     [options, profileId],
@@ -293,6 +350,7 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
         id: bundle.id,
         label: bundle.id,
         repositories: bundle.repositories.map(repository => repository.github || repository.id),
+        search: [bundle.primary_repository, ...bundle.repositories.flatMap(repository => [repository.id, repository.github ?? '', repository.destination])].join(' '),
         saved: true,
       });
     }
@@ -304,14 +362,22 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
         repositories: project.project.bundle.repositories.map(
           repository => repository.github || repository.id,
         ),
+        search: [existing?.search ?? '', project.project.bundle.primary_repo, ...project.project.bundle.repositories.flatMap(repository => [repository.id, repository.github ?? '', repository.destination])].join(' '),
         saved: true,
       });
     }
     for (const bundle of createdBundles) {
       if (!choices.has(bundle.id)) choices.set(bundle.id, bundle);
     }
-    return [...choices.values()];
-  }, [options, projects, createdBundles]);
+    const recent = new Map<string, number>();
+    const sorted = Object.values(sessions).sort((a, b) => (b.last_activity_at_ms ?? (Date.parse(b.updated_at) || 0)) - (a.last_activity_at_ms ?? (Date.parse(a.updated_at) || 0)));
+    for (const row of sorted) if (!recent.has(row.bundle_id)) recent.set(row.bundle_id, recent.size);
+    if (options?.default?.bundle_id && !recent.has(options.default.bundle_id)) recent.set(options.default.bundle_id, recent.size);
+    return [...choices.values()].sort((a, b) => (recent.get(a.id) ?? Infinity) - (recent.get(b.id) ?? Infinity) || a.label.localeCompare(b.label));
+  }, [options, projects, createdBundles, sessions]);
+  const recentBundleIds = useMemo(() => new Set([...Object.values(sessions).map(row => row.bundle_id), options?.default?.bundle_id].filter(Boolean)), [sessions, options]);
+  const filteredBundles = bundleChoices.filter(bundle => `${bundle.id} ${bundle.label} ${bundle.repositories.join(' ')} ${bundle.search ?? ''}`.toLowerCase().includes(bundleSearch.toLowerCase()));
+  const selectedBundle = bundleChoices.find(bundle => bundle.id === bundleId);
 
   const completeMounts = useMemo(
     () => mounts.filter(mount => mount.source.trim() && mount.destination.trim()),
@@ -401,7 +467,7 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
   /* ---------------------------------------------------------------------- */
 
   const preflightRequest = useMemo<NewSessionPreflightRequest | null>(() => {
-    if ((!profileId && !autoPrimary) || !targetId) return null;
+    if (providerPending || (!profileId && !autoPrimary) || !targetId) return null;
     if (requiresProjectDirectory && !projectDirectory.trim()) return null;
     if (!requiresProjectDirectory && !bundleId) return null;
     const request: NewSessionPreflightRequest = {
@@ -419,6 +485,7 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
     workspaceId,
     profileId,
     autoPrimary,
+    providerPending,
     targetId,
     bundleId,
     projectDirectory,
@@ -838,220 +905,12 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
         </div>
       )}
 
-      <Section
-        title="1 · Project"
-        description={
-          requiresProjectDirectory
-            ? 'This target runs directly in a directory on its host.'
-            : 'Choose a saved project or create a bundle from a repository.'
-        }
-      >
-        {requiresProjectDirectory ? (
-          <>
-            {(viewerTarget?.recent_project_directories?.length ?? 0) > 0 && (
-              <Field label="Recent directories">
-                <select
-                  value=""
-                  onChange={event => {
-                    if (event.target.value) setDirectory(event.target.value);
-                  }}
-                  className="rounded-md border border-line bg-bg px-2.5 py-2 text-sm text-fg"
-                >
-                  <option value="">Choose a recent project…</option>
-                  {viewerTarget?.recent_project_directories?.map(directory => (
-                    <option key={directory} value={directory}>
-                      {directory}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            )}
-            <PathInput
-              id="new-project-directory"
-              label="Project directory"
-              value={projectDirectory}
-              onChange={setDirectory}
-              targetId={targetId}
-              kind="directories"
-              placeholder="~/projects/app"
-              hint="The directory must exist on the selected target's host."
-            />
-          </>
-        ) : (
-          <>
-            <div className="flex flex-col gap-1.5" role="group" aria-label="Project bundles">
-              {bundleChoices.map(bundle => (
-                <div key={bundle.id} className="flex items-stretch gap-1.5">
-                  <button
-                    type="button"
-                    aria-pressed={bundle.id === bundleId}
-                    onClick={() => setBundleId(bundle.id)}
-                    className={`flex min-w-0 flex-1 flex-col rounded-lg border px-3 py-2 text-left ${
-                      bundle.id === bundleId
-                        ? 'border-accent bg-accent/10'
-                        : 'border-line bg-raised hover:bg-surface'
-                    }`}
-                  >
-                    <span className="truncate text-sm text-fg">{bundle.label}</span>
-                    <span className="truncate text-xs text-muted">
-                      {bundle.id}
-                      {bundle.repositories.length ? ` · ${bundle.repositories.join(' · ')}` : ''}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Delete bundle ${bundle.id}`}
-                    onClick={() => void handleDeleteBundle(bundle.id)}
-                    className="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-2 text-muted hover:bg-raised hover:text-danger"
-                  >
-                    <Trash2 className="size-4" aria-hidden />
-                  </button>
-                </div>
-              ))}
-              {!bundleChoices.length && (
-                <p className="text-sm text-muted">No saved projects yet. Create one from a repository below.</p>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-2 rounded-lg border border-line bg-raised p-3">
-              <Field label="Repository source">
-                <textarea
-                  value={newSource}
-                  onChange={event => setNewSource(event.target.value)}
-                  rows={2}
-                  placeholder={'One per line: owner/repo, https://…, or /path/to/checkout'}
-                  spellCheck={false}
-                  className="min-w-0 rounded-md border border-line bg-bg px-2.5 py-2 font-mono text-sm text-fg placeholder:text-muted/70"
-                />
-              </Field>
-              <label className="flex items-center gap-2 text-sm text-fg">
-                <input
-                  type="checkbox"
-                  checked={includeProject}
-                  onChange={event => setIncludeProject(event.target.checked)}
-                />
-                Save as a project in the catalog
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={creatingBundle || !newSource.trim()}
-                  onClick={() => void handleCreateBundle()}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg disabled:opacity-50"
-                >
-                  {creatingBundle && <LoaderCircle className="size-4 animate-spin" aria-hidden />}
-                  Create bundle
-                </button>
-                <button
-                  type="button"
-                  aria-expanded={discoveryOpen}
-                  onClick={() => setDiscoveryOpen(open => !open)}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-sm text-fg hover:bg-surface"
-                >
-                  <FolderSearch className="size-4" aria-hidden />
-                  Discover projects
-                </button>
-              </div>
-              {projectError && (
-                <p className="text-sm text-danger" role="alert">
-                  {projectError}
-                </p>
-              )}
-              {discoveryOpen && (
-                <div className="flex flex-col gap-2 border-t border-line pt-2">
-                  <Field label="Folder path">
-                    <input
-                      value={discoveryPath}
-                      onChange={event => setDiscoveryPath(event.target.value)}
-                      placeholder="~/projects"
-                      spellCheck={false}
-                      className="rounded-md border border-line bg-bg px-2.5 py-2 font-mono text-sm text-fg"
-                    />
-                  </Field>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={discoveryLoading}
-                      onClick={() => void runDiscovery(discoveryPath)}
-                      className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-sm text-fg hover:bg-surface disabled:opacity-50"
-                    >
-                      {discoveryLoading && <LoaderCircle className="size-4 animate-spin" aria-hidden />}
-                      Browse folder
-                    </button>
-                    {discovery?.parent && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDiscoveryPath(discovery.parent!);
-                          void runDiscovery(discovery.parent!);
-                        }}
-                        className="inline-flex min-h-9 items-center rounded-md border border-line px-3 text-sm text-fg hover:bg-surface"
-                      >
-                        Up
-                      </button>
-                    )}
-                  </div>
-                  {discoveryError && (
-                    <p className="text-sm text-danger" role="alert">
-                      {discoveryError}
-                    </p>
-                  )}
-                  {discovery?.entries.map(entry => (
-                    <button
-                      key={`${entry.kind}:${entry.source}`}
-                      type="button"
-                      onClick={() => chooseDiscoveryEntry(entry)}
-                      className="flex min-w-0 flex-col rounded-md border border-line bg-bg px-2.5 py-1.5 text-left hover:bg-surface"
-                    >
-                      <span className="truncate text-sm text-fg">{entry.name}</span>
-                      <span className="truncate text-xs text-muted">
-                        {entry.description || entry.source}
-                        {entry.kind === 'directory' ? ' · folder' : ' · repository'}
-                      </span>
-                    </button>
-                  ))}
-                  {discovery?.truncated && (
-                    <p className="text-xs text-muted">More entries exist; narrow the folder path.</p>
-                  )}
-                </div>
-              )}
-            </div>
-          </>
-        )}
-      </Section>
-
-      <Section title="2 · Account and target" description="Availability is the daemon's last check.">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="flex flex-col gap-1">
-            <Field label="Profile">
-              <select
-                value={profileId}
-                onChange={event => setProfileId(event.target.value)}
-                className="rounded-md border border-line bg-bg px-2.5 py-2 text-sm text-fg"
-              >
-                {options?.primary_configured ? (
-                  <option value="">Auto (Primary)</option>
-                ) : (
-                  !options?.profiles.length && <option value="">No profiles configured</option>
-                )}
-                {options?.profiles.map(profile => (
-                  <option key={profile.id} value={profile.id}>
-                    {profile.id} ({profile.harness})
-                  </option>
-                ))}
-              </select>
-            </Field>
-            {autoPrimary ? (
-              <p className="text-xs text-muted">Load-balanced across configured primary models.</p>
-            ) : (
-              <AvailabilityBadge status={profileBadge.status} reason={profileBadge.reason} />
-            )}
-          </div>
+      <Section title="1 · Target" description="Choose where the session runs.">
           <div className="flex flex-col gap-1">
             <Field label="Target">
               <select
                 value={targetId}
-                onChange={event => setTargetId(event.target.value)}
+                onChange={event => { providerGeneration.current += 1; setTargetId(event.target.value); }}
                 className="rounded-md border border-line bg-bg px-2.5 py-2 text-sm text-fg"
               >
                 {!options?.targets.length && <option value="">No targets configured</option>}
@@ -1064,17 +923,11 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
             </Field>
             <AvailabilityBadge status={targetBadge.status} reason={targetBadge.reason} />
           </div>
-        </div>
-        {launchProfile && (
-          <p className="text-xs text-muted">
-            {launchProfile.harness} via {launchTarget?.host || launchTarget?.kind || targetId}
-          </p>
-        )}
       </Section>
 
       {(resourceKind === 'container' || !requiresProjectDirectory) && (
         <Section
-          title="3 · Resources"
+          title="Resources"
           description={
             resourceKind === 'container'
               ? 'Container size is committed on the host before the session starts.'
@@ -1142,6 +995,185 @@ export default function NewSessionView({ workspaceId }: NewSessionViewProps) {
           )}
         </Section>
       )}
+
+      <Section
+        title="2 · Project"
+        description={
+          requiresProjectDirectory
+            ? 'This target runs directly in a directory on its host.'
+            : 'Choose a saved project or create a bundle from a repository.'
+        }
+      >
+        {requiresProjectDirectory ? (
+          <>
+            {(viewerTarget?.recent_project_directories?.length ?? 0) > 0 && (
+              <Field label="Recent directories">
+                <select
+                  value=""
+                  onChange={event => {
+                    if (event.target.value) setDirectory(event.target.value);
+                  }}
+                  className="rounded-md border border-line bg-bg px-2.5 py-2 text-sm text-fg"
+                >
+                  <option value="">Choose a recent project…</option>
+                  {viewerTarget?.recent_project_directories?.map(directory => (
+                    <option key={directory} value={directory}>
+                      {directory}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            <PathInput
+              id="new-project-directory"
+              label="Project directory"
+              value={projectDirectory}
+              onChange={setDirectory}
+              targetId={targetId}
+              kind="directories"
+              placeholder="~/projects/app"
+              hint="The directory must exist on the selected target's host."
+            />
+          </>
+        ) : (
+          <>
+            {selectedBundle && <div className="flex items-center gap-2 rounded-lg border border-line bg-raised p-3">
+              <div className="min-w-0 flex-1"><p className="text-xs text-muted">Selected bundle</p><p className="truncate text-sm text-fg">{selectedBundle.id} · {selectedBundle.repositories.join(' · ')}</p></div>
+              <button type="button" aria-label={`Delete bundle ${selectedBundle.id}`} onClick={() => void handleDeleteBundle(selectedBundle.id)} className="text-muted hover:text-danger"><Trash2 className="size-4" aria-hidden /></button>
+            </div>}
+            <input aria-label="Search bundles" placeholder="Filter bundles or repositories…" value={bundleSearch} onChange={event => setBundleSearch(event.target.value)} className="rounded-lg border border-line bg-bg px-3 py-2 text-sm text-fg" />
+            <div role="listbox" aria-label="Project bundles" className="max-h-60 overflow-y-auto overscroll-contain rounded-lg border border-line">
+              {filteredBundles.map(bundle => <button key={bundle.id} type="button" role="option" aria-selected={bundle.id === bundleId} onClick={() => setBundleId(bundle.id)} className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left last:border-b-0 hover:bg-raised">
+                <span className="min-w-0 flex-1"><span className="block truncate text-sm text-fg">{bundle.label} {recentBundleIds.has(bundle.id) && <span className="text-xs text-muted">Recent</span>}</span><span className="block truncate text-xs text-muted">{bundle.id} · {bundle.repositories.join(' · ')}</span></span>
+                {bundle.id === bundleId && <span aria-hidden>✓</span>}
+              </button>)}
+              {!filteredBundles.length && <p className="p-3 text-sm text-muted">No bundles found.</p>}
+            </div>
+            {(bundleSearch || bundleChoices.length > 5) && <p className="text-xs text-muted">{filteredBundles.length} of {bundleChoices.length} bundles</p>}
+            <button type="button" aria-expanded={createOpen ?? bundleChoices.length === 0} onClick={() => setCreateOpen(!(createOpen ?? bundleChoices.length === 0))} className="text-left text-sm text-accent">+ Create bundle from repository</button>
+            {projectError && <p className="text-sm text-danger" role="alert">{projectError}</p>}
+            {(createOpen ?? bundleChoices.length === 0) && (
+            <div className="flex flex-col gap-2 rounded-lg border border-line bg-raised p-3">
+              <Field label="Repository source">
+                <textarea
+                  value={newSource}
+                  onChange={event => setNewSource(event.target.value)}
+                  rows={2}
+                  placeholder={'One per line: owner/repo, https://…, or /path/to/checkout'}
+                  spellCheck={false}
+                  className="min-w-0 rounded-md border border-line bg-bg px-2.5 py-2 font-mono text-sm text-fg placeholder:text-muted/70"
+                />
+              </Field>
+              <label className="flex items-center gap-2 text-sm text-fg">
+                <input
+                  type="checkbox"
+                  checked={includeProject}
+                  onChange={event => setIncludeProject(event.target.checked)}
+                />
+                Save as a project in the catalog
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={creatingBundle || !newSource.trim()}
+                  onClick={() => void handleCreateBundle()}
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg disabled:opacity-50"
+                >
+                  {creatingBundle && <LoaderCircle className="size-4 animate-spin" aria-hidden />}
+                  Create bundle
+                </button>
+                <button
+                  type="button"
+                  aria-expanded={discoveryOpen}
+                  onClick={() => setDiscoveryOpen(open => !open)}
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-sm text-fg hover:bg-surface"
+                >
+                  <FolderSearch className="size-4" aria-hidden />
+                  Discover projects
+                </button>
+              </div>
+              {discoveryOpen && (
+                <div className="flex flex-col gap-2 border-t border-line pt-2">
+                  <Field label="Folder path">
+                    <input
+                      value={discoveryPath}
+                      onChange={event => setDiscoveryPath(event.target.value)}
+                      placeholder="~/projects"
+                      spellCheck={false}
+                      className="rounded-md border border-line bg-bg px-2.5 py-2 font-mono text-sm text-fg"
+                    />
+                  </Field>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={discoveryLoading}
+                      onClick={() => void runDiscovery(discoveryPath)}
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-sm text-fg hover:bg-surface disabled:opacity-50"
+                    >
+                      {discoveryLoading && <LoaderCircle className="size-4 animate-spin" aria-hidden />}
+                      Browse folder
+                    </button>
+                    {discovery?.parent && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDiscoveryPath(discovery.parent!);
+                          void runDiscovery(discovery.parent!);
+                        }}
+                        className="inline-flex min-h-9 items-center rounded-md border border-line px-3 text-sm text-fg hover:bg-surface"
+                      >
+                        Up
+                      </button>
+                    )}
+                  </div>
+                  {discoveryError && (
+                    <p className="text-sm text-danger" role="alert">
+                      {discoveryError}
+                    </p>
+                  )}
+                  {discovery?.entries.map(entry => (
+                    <button
+                      key={`${entry.kind}:${entry.source}`}
+                      type="button"
+                      onClick={() => chooseDiscoveryEntry(entry)}
+                      className="flex min-w-0 flex-col rounded-md border border-line bg-bg px-2.5 py-1.5 text-left hover:bg-surface"
+                    >
+                      <span className="truncate text-sm text-fg">{entry.name}</span>
+                      <span className="truncate text-xs text-muted">
+                        {entry.description || entry.source}
+                        {entry.kind === 'directory' ? ' · folder' : ' · repository'}
+                      </span>
+                    </button>
+                  ))}
+                  {discovery?.truncated && (
+                    <p className="text-xs text-muted">More entries exist; narrow the folder path.</p>
+                  )}
+                </div>
+              )}
+            </div>
+            )}
+          </>
+        )}
+      </Section>
+
+      <Section title="3 · Account" description="Availability is the daemon's last check.">
+        <div role="group" aria-label="Profile" className="flex flex-col gap-2">
+          {options?.primary_configured && <button type="button" aria-pressed={autoPrimary} onClick={() => { providerGeneration.current += 1; setAutoProvider(null); setProfileId(''); }} className="rounded-lg border border-line p-2 text-left text-sm">Auto (Primary)</button>}
+          {providerGroups.map(([key, group]) => {
+            const label = providerLabel(group.provider);
+            const selected = autoProvider !== null && JSON.stringify(autoProvider) === key;
+            const expanded = expandedProviders.includes(key);
+            return <div key={key} className="rounded-lg border border-line">
+              <div className="flex items-center"><button type="button" aria-pressed={selected} onClick={() => { if (!selected) { providerGeneration.current += 1; setResolvedTarget(null); setAutoProvider(group.provider); } }} className="min-w-0 flex-1 p-2 text-left text-sm">Auto ({label}) {selected && (providerError ? '' : providerPending ? '· Resolving…' : `→ ${profileId}`)}</button>
+                <button type="button" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${label} accounts`} aria-expanded={expanded} onClick={() => setExpandedProviders(current => expanded ? current.filter(value => value !== key) : [...current, key])} className="p-2 text-xs text-muted">{group.profiles.length} {group.profiles.length === 1 ? 'account' : 'accounts'} {expanded ? '▴' : '▾'}</button></div>
+              {selected && providerError && <p role="alert" className="px-2 pb-2 text-xs text-danger">Could not select an account: {providerError}</p>}
+              {expanded && group.profiles.map(profile => <button key={profile.id} type="button" aria-pressed={!autoProvider && profileId === profile.id} onClick={() => { providerGeneration.current += 1; setAutoProvider(null); setProfileId(profile.id); }} className="block w-full border-t border-line px-4 py-2 text-left text-sm">{profile.id} ({profile.harness})</button>)}
+            </div>;
+          })}
+        </div>
+        {autoPrimary ? <p className="text-xs text-muted">Load-balanced across configured primary models.</p> : !autoProvider && <AvailabilityBadge status={profileBadge.status} reason={profileBadge.reason} />}
+        {launchProfile && <p className="text-xs text-muted">{launchProfile.harness} via {launchTarget?.host || launchTarget?.kind || targetId}</p>}
+      </Section>
 
       <details className="rounded-xl border border-line bg-surface p-4">
         <summary className="cursor-pointer text-sm font-semibold text-fg">Advanced options</summary>

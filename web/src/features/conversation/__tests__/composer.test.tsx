@@ -57,6 +57,24 @@ afterEach(() => {
 });
 
 describe('Composer', () => {
+  it('shows model and effort inline and sends effort changes', async () => {
+    const fetchMock = installRoutes();
+    const options = [
+      { key: 'model', label: 'Model', current: 'a', choices: [{ value: 'a', name: 'A' }, { value: 'b', name: 'B' }] },
+      { key: 'effort', label: 'Effort', current: 'low', choices: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }] },
+    ];
+    const view = render(<Composer session={session({ config_options: options })} />);
+    const model = screen.getByLabelText('Model');
+    const effort = screen.getByLabelText('Effort');
+    expect(model.nextElementSibling).toBe(effort);
+    fireEvent.change(effort, { target: { value: 'high' } });
+    await waitFor(() => expect(actionBodies(fetchMock.calls)).toContainEqual({ action: 'set-config', session_id: 's1', key: 'effort', value: 'high' }));
+    expect(screen.queryByText(/Enter adds a line|Enter to send/)).not.toBeInTheDocument();
+    view.rerender(<Composer session={session({ config_options: options, policy_config_keys: ['model'], capabilities: { ...session().capabilities, set_config: false } })} />);
+    expect(screen.getByLabelText('Model')).toBeDisabled();
+    expect(screen.getByLabelText('Effort')).toBeDisabled();
+  });
+
   it('submits a prompt with a command_id, an optimistic row, and re-attaches follow', async () => {
     const fetchMock = installRoutes();
     const follow = vi.fn();

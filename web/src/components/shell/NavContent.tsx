@@ -65,12 +65,15 @@ function ThemePicker() {
 export function NavContent() {
   const route = useUiStore(state => state.route);
   const implicit = useUiStore(state => state.implicitRoute);
+  const remembered = useUiStore(state => state.selectedWorkspaceId);
+  const workspaces = useSessionStore(state => state.meta?.workspaces);
+  const validRemembered = workspaces?.some(workspace => workspace.id === remembered) ? remembered : null;
   const navigate = useUiStore(state => state.navigate);
   const signOut = useSessionStore(state => state.signOut);
   const version = useSessionStore(state => state.meta?.server_version);
   const attention = useAttentionCount();
   // An implicit route is the default screen; highlight whichever the shell shows.
-  const active = implicit && route.name === 'workspace' && attention > 0 ? 'notifications' : route.name;
+  const active = implicit && route.name === 'workspace' && !remembered && attention > 0 ? 'notifications' : route.name;
 
   return (
     <div className="flex h-full flex-col gap-4 p-3">
@@ -87,7 +90,7 @@ export function NavContent() {
               key={item.name}
               type="button"
               aria-current={current ? 'page' : undefined}
-              onClick={() => navigate(item.route)}
+              onClick={() => navigate(item.name === 'workspace' && validRemembered ? { name: 'workspace', workspaceId: validRemembered } : item.route)}
               className={`flex h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium ${
                 current ? 'bg-raised text-fg' : 'text-muted hover:bg-raised/60 hover:text-fg'
               }`}

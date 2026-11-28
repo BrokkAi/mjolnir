@@ -80,7 +80,8 @@ test('new session lazily loads catalogs, acknowledges a dirty repo and launches'
     await openDashboard(page);
     expect(server.requests('GET', '/api/v1/options')).toHaveLength(0);
     await page.getByRole('link', { name: 'New session' }).click();
-    await expect(page.getByRole('heading', { name: '1 · Project' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '1 · Target' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '2 · Project' })).toBeVisible();
     // The catalogs load lazily, only now.
     expect(server.requests('GET', '/api/v1/options')).toHaveLength(1);
     expect(server.requests('GET', '/api/v1/projects')).toHaveLength(1);
@@ -161,9 +162,15 @@ test('additional mounts serialize with the exact read_only wire shape', async ({
   try {
     await openDashboard(page);
     await page.getByRole('link', { name: 'New session' }).click();
-    await expect(page.getByRole('heading', { name: '1 · Project' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '2 · Project' })).toBeVisible();
     // The default target is the container target, which takes bundles and mounts.
     await expect(page.getByLabel('Target')).toHaveValue('pod');
+    const bundles = page.getByRole('listbox', { name: 'Project bundles' });
+    await expect(bundles).toHaveClass(/max-h-60/);
+    await page.getByLabel('Search bundles').fill('/DEST');
+    await expect(bundles.getByRole('option')).toHaveCount(1);
+    await page.getByLabel('Search bundles').clear();
+    await expect(page.getByRole('button', { name: '+ Create bundle from repository' })).toHaveAttribute('aria-expanded', 'false');
     await expect(page.getByText('Preflight passed.')).toBeVisible();
 
     await page.getByRole('button', { name: 'Add mount' }).click();

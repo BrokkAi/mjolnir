@@ -11,10 +11,13 @@ import { useAttentionCount } from './useSessionSelectors';
 export function BottomNav() {
   const route = useUiStore(state => state.route);
   const implicit = useUiStore(state => state.implicitRoute);
+  const remembered = useUiStore(state => state.selectedWorkspaceId);
+  const workspaces = useSessionStore(state => state.meta?.workspaces);
+  const validRemembered = workspaces?.some(workspace => workspace.id === remembered) ? remembered : null;
   const navigate = useUiStore(state => state.navigate);
   const attention = useAttentionCount();
   const signedIn = useSessionStore(state => state.auth === 'signed_in');
-  const shown = effectiveRoute(route, implicit, attention > 0);
+  const shown = effectiveRoute(route, implicit, attention > 0, validRemembered, remembered !== null);
   if (!signedIn || !isTopLevelRoute(shown)) return null;
 
   return (
@@ -31,7 +34,7 @@ export function BottomNav() {
               <button
                 type="button"
                 aria-current={current ? 'page' : undefined}
-                onClick={() => navigate(item.route)}
+                onClick={() => navigate(item.name === 'workspace' && validRemembered ? { name: 'workspace', workspaceId: validRemembered } : item.route)}
                 className={`relative flex h-14 w-full flex-col items-center justify-center gap-0.5 text-[11px] font-medium ${
                   current ? 'font-semibold text-accent' : 'text-muted hover:text-fg'
                 }`}

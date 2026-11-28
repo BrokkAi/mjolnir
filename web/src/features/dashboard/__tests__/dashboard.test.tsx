@@ -1,9 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionRow } from '../../../api/types';
 import { useLifecycleModal } from '../../lifecycle/useLifecycleModal';
 import { useSessionStore } from '../../../stores/useSessionStore';
-import { useUiStore } from '../../../stores/useUiStore';
+import { readSelectedWorkspaceId, useUiStore } from '../../../stores/useUiStore';
+import { BottomNav } from '../../../components/shell/BottomNav';
+import { NavContent } from '../../../components/shell/NavContent';
+import { effectiveRoute } from '../../../stores/selectors';
 import { liveRow, metadata, mockFetch } from '../../../test-utils';
 import DashboardView from '../DashboardView';
 
@@ -29,6 +32,8 @@ function actionCalls(calls: { url: string; init?: RequestInit }[]) {
 }
 
 beforeEach(() => {
+  localStorage.removeItem('mj.web.selected_workspace');
+  useUiStore.setState({ selectedWorkspaceId: null });
   useLifecycleModal.setState({ modal: null });
   useUiStore.setState({
     layers: [],
@@ -43,6 +48,29 @@ afterEach(() => {
 });
 
 describe('Workspaces dashboard', () => {
+  it('remembers a workspace across navigation and reload, and falls back when deleted', () => {
+    hydrate([]);
+    mockFetch({});
+    const view = render(<><DashboardView /><BottomNav /><NavContent /></>);
+    fireEvent.click(screen.getByRole('button', { name: 'Beta' }));
+    expect(readSelectedWorkspaceId()).toBe('w2');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Targets' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Sessions' })[0]);
+    expect(useUiStore.getState().route).toEqual({ name: 'workspace', workspaceId: 'w2' });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Targets' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Sessions' })[1]);
+    expect(useUiStore.getState().route).toEqual({ name: 'workspace', workspaceId: 'w2' });
+    expect(effectiveRoute({ name: 'workspace' }, true, true, readSelectedWorkspaceId())).toEqual({ name: 'workspace', workspaceId: 'w2' });
+    act(() => hydrate([], { workspaces: [{ id: 'w1', name: 'Alpha', last_opened_at: '2026-11-25T10:00:00Z' }] }));
+    expect(effectiveRoute({ name: 'workspace' }, true, true, null, true)).toEqual({ name: 'workspace' });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Sessions' })[0]);
+    expect(useUiStore.getState().route).toEqual({ name: 'workspace' });
+    view.unmount();
+    render(<DashboardView />);
+    fireEvent.click(screen.getByRole('button', { name: 'All workspaces' }));
+    expect(readSelectedWorkspaceId()).toBeNull();
+  });
+
   it('filters to one workspace and links New and Resume at that workspace', () => {
     hydrate([
       liveRow('a', { title: 'Alpha session', workspace_id: 'w1' }),

@@ -790,6 +790,14 @@ export interface ViewerQuota {
   has_error: boolean;
 }
 
+export type QuotaProvider = 'Anthropic' | 'OpenAI' | 'Google' | 'XAI' | 'Moonshot' | 'DeepSeek' | 'Zai' | 'Meta' | { Other: string };
+
+export interface ProviderProfileSelectionRequest {
+  provider: QuotaProvider;
+  profile_id: string | null;
+  target_template_id: string | null;
+}
+
 export interface ViewerProfile {
   id: string;
   availability: AvailabilityVerdict;
@@ -1475,6 +1483,7 @@ export interface LaunchTarget {
 
 /** `mj-server/src/server/api/types.rs` `LaunchDefault`. */
 export interface LaunchDefault {
+  bundle_id?: string;
   profile_id: string;
   target_id: string;
 }

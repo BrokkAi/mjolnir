@@ -40,6 +40,18 @@ afterEach(() => {
 });
 
 describe('ConversationView', () => {
+  it('keeps historical sub-agents accessible and badges only working children', () => {
+    mockFetch({ '/api/v1/sessions/s1/client-state': () => jsonResponse({ draft: '', through_event_ordinal: 0 }) });
+    const row = liveRow('s1', { subagent_session_ids: ['c1'] });
+    useSessionStore.getState().applySnapshot(snapshot([row]));
+    render(<ConversationView sessionId="s1" />);
+    const idle = screen.getAllByRole('button', { name: 'Sub-agents and reviewers' });
+    expect(idle.length).toBeGreaterThan(0);
+    expect(idle[0].querySelector('span')).toBeNull();
+    act(() => useSessionStore.setState(state => ({ sessionsById: { ...state.sessionsById, s1: { ...row, verdict: { ...row.verdict, working_children: 2 } } } })));
+    expect(screen.getAllByRole('button', { name: 'Sub-agents and reviewers, 2 active' })[0]).toHaveTextContent('2');
+  });
+
   it('renders the single-scrollport conversation without opening or closing it', () => {
     const fetchMock = mockFetch({
       '/api/v1/sessions/s1/client-state': () =>

@@ -188,6 +188,7 @@ test('composer sends prompts, shell commands, plan mode and model config', async
                 { value: 'opus', name: 'Opus' },
               ],
             },
+            { key: 'effort', label: 'Effort', current: 'low', choices: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }] },
           ],
         }),
       ],
@@ -239,14 +240,16 @@ test('composer sends prompts, shell commands, plan mode and model config', async
       postedActions(server).find(body => body.action === 'set-plan-mode'),
     ).toEqual({ action: 'set-plan-mode', session_id: 's1', active: true });
 
-    await composer.getByRole('button', { name: 'Model and configuration' }).click();
-    await page.getByRole('button', { name: 'Opus' }).click();
+    await composer.getByLabel('Model').selectOption('opus');
     await expect.poll(() =>
       postedActions(server).filter(body => body.action === 'set-config').length,
     ).toBe(1);
     expect(
       postedActions(server).find(body => body.action === 'set-config'),
     ).toEqual({ action: 'set-config', session_id: 's1', key: 'model', value: 'opus' });
+    await composer.getByLabel('Effort').selectOption('high');
+    await expect.poll(() => postedActions(server).filter(body => body.action === 'set-config').length).toBe(2);
+    expect(postedActions(server).find(body => body.key === 'effort')).toEqual({ action: 'set-config', session_id: 's1', key: 'effort', value: 'high' });
     await guards.assertClean();
   } finally {
     await context.close();
