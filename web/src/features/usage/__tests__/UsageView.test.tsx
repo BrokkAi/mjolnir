@@ -37,7 +37,8 @@ it('clears rolled-off selections and anchors before a shift selection', async ()
   await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([hours[0].start_ms]));
   vi.mocked(getUsageReport).mockResolvedValue({ ...report, hours: advancedHours } as never);
   fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
-  await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([]));
+  await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toBeUndefined());
+  expect(screen.getByText(/Last 24h/)).toBeInTheDocument();
   fireEvent.pointerUp(screen.getAllByRole('button', { name: /^Hour / })[2], { shiftKey: true });
   await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([advancedHours[2].start_ms]));
 });
@@ -54,11 +55,11 @@ it('keeps loaded window metadata while a selection loads and after failure', asy
   vi.mocked(getUsageReport).mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
   fireEvent.click(screen.getByRole('button', { name: /Changed/ }));
   expect(await screen.findByRole('status')).toHaveTextContent('Loading…');
-  expect(screen.getByText('Last 24h')).toBeInTheDocument();
+  expect(screen.getByText(/Last 24h/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Changed/ })).toHaveAttribute('aria-pressed', 'false');
   reject(new Error('offline'));
   expect(await screen.findByRole('alert')).toHaveTextContent('offline');
-  expect(screen.getByText('Last 24h')).toBeInTheDocument();
+  expect(screen.getByText(/Last 24h/)).toBeInTheDocument();
   expect(screen.queryByRole('status')).not.toBeInTheDocument();
 });
 
@@ -78,6 +79,8 @@ it('renders session and model usage in aligned table columns', async () => {
   render(<UsageView />);
   const table = await screen.findByRole('table', { name: 'Sessions' });
   expect(within(table).getAllByRole('columnheader').map(header => header.textContent)).toEqual(['Session / Model', 'Profile', 'Est $', 'Tokens', 'Input', 'Output', 'Cached', 'Coverage']);
+  expect(within(table).getAllByRole('row')).toHaveLength(2);
+  fireEvent.click(within(table).getByRole('button', { name: 'Expand Session one' }));
   const rows = within(table).getAllByRole('row');
   expect(within(rows[1]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['a', '$8.20+', '1,700+', '1,300+', '300+', '250+', '2 sub · 2/4 turns · 1 active']);
   expect(within(rows[1]).getByText('Suspended')).toBeInTheDocument();
@@ -87,6 +90,8 @@ it('renders session and model usage in aligned table columns', async () => {
   expect(within(rows[2]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '$8.20+', '1,200+', '900+', '300+', '250+', '2 unreported · thought: 20']);
   expect(within(rows[3]).getByRole('rowheader')).toHaveTextContent('└─ Unknown model');
   expect(within(rows[3]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '?', '500', '400', '—', '—', '']);
+  fireEvent.click(within(table).getByRole('button', { name: 'Collapse Session one' }));
+  expect(within(table).getAllByRole('row')).toHaveLength(2);
 });
 
 it('shows an empty sessions table when no sessions match', async () => {
@@ -94,4 +99,49 @@ it('shows an empty sessions table when no sessions match', async () => {
   render(<UsageView />);
   const table = await screen.findByRole('table', { name: 'Sessions' });
   expect(within(table).getByText('No sessions match these filters.')).toHaveAttribute('colspan', '8');
+});
+
+it('clears the last hour by toggle, pointer and keyboard click, and toggles role changes', async () => {
+  render(<UsageView />); await screen.findByText('Sessions');
+  const bar = screen.getAllByRole('button', { name: /^Hour / })[1];
+  for (const deselect of [() => fireEvent.pointerUp(bar, { ctrlKey: true }), () => { fireEvent.pointerDown(bar); fireEvent.pointerUp(bar); }, () => fireEvent.click(bar, { detail: 0 })]) {
+    fireEvent.pointerUp(bar);
+    await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toEqual([hours[1].start_ms]));
+    deselect();
+    await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toBeUndefined());
+    expect(screen.getByText(/Last 24h/)).toBeInTheDocument();
+    expect(screen.queryByText('Show all 24h')).not.toBeInTheDocument();
+  }
+  const role = screen.getByRole('button', { name: /Changed/ });
+  fireEvent.click(role); await waitFor(() => expect(role).toHaveAttribute('aria-pressed', 'true'));
+  fireEvent.click(role); await waitFor(() => expect(vi.mocked(getUsageReport).mock.calls.at(-1)?.[0]?.hour_starts_ms).toBeUndefined());
+});
+
+it('orders sections and collapses provider pace into a sorted over-100 summary', async () => {
+  vi.mocked(getUsageReport).mockResolvedValue({ ...report, quota_usage: [
+    { profile: 'Zed', consumed_basis_points: 115, covered_seconds: 6048, monthly_price_usd: 100, partial: true },
+    { profile: 'Alpha', consumed_basis_points: 142, covered_seconds: 6048, monthly_price_usd: 100, partial: false },
+    { profile: 'Low', consumed_basis_points: 100, covered_seconds: 6048, monthly_price_usd: 100, partial: false },
+  ] } as never);
+  render(<UsageView />);
+  const timeline = await screen.findByText('Last 24 hours');
+  const total = screen.getByText(/Total.*estimated API USD/);
+  const pace = screen.getByRole('button', { name: /Provider Pace/ });
+  const sessions = screen.getByText('Sessions');
+  expect(timeline.compareDocumentPosition(total) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(total.compareDocumentPosition(pace) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(pace.compareDocumentPosition(sessions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(pace).toHaveAttribute('aria-expanded', 'true');
+  fireEvent.click(pace);
+  expect(pace).toHaveAttribute('aria-expanded', 'false');
+  const summary = screen.getByText(/Over 100%:/);
+  expect(summary).toHaveTextContent('Over 100%: Alpha ~142%, Zed ~115%');
+  expect(summary).not.toHaveTextContent('Low');
+  expect(screen.queryByText('Tank / Share')).not.toBeInTheDocument();
+});
+
+it('shows a muted message when no providers exceed 100 percent', async () => {
+  render(<UsageView />);
+  fireEvent.click(await screen.findByRole('button', { name: /Provider Pace/ }));
+  expect(screen.getByText('No providers over 100%')).toHaveClass('text-muted');
 });
