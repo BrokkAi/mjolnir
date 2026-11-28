@@ -465,35 +465,62 @@ fn format_tokens(tokens: u64) -> String {
 struct SessionTable {
     session: usize,
     profile: Option<usize>,
+    est: usize,
     tokens: Option<usize>,
     coverage: Option<usize>,
 }
 
 impl SessionTable {
-    const EST: usize = 9;
+    const MIN_EST: usize = 9;
+    const MIN_SESSION: usize = 16;
     const GAP: usize = 2;
 
-    fn for_width(width: u16) -> Self {
+    fn for_sessions(width: u16, sessions: &[mj_core::usage::SessionUsageEstimate]) -> Self {
         let width = usize::from(width);
-        let (profile, tokens, coverage) = if width >= 84 {
-            (Some(12), Some(12), Some(18))
-        } else if width >= 60 {
-            (Some(10), Some(11), None)
-        } else {
-            (None, None, None)
+        let mut est = Self::MIN_EST;
+        let mut max_tokens = 11usize;
+        for session in sessions {
+            est = est.max(dollars(session.cost_usd_ticks, session.is_partial()).len());
+            max_tokens = max_tokens.max(session_tokens(session).len());
+            for model in &session.models {
+                est = est.max(dollars(model.cost_usd_ticks, model.unreported_turns > 0).len());
+                if let Some(counter) = model.totals.get("total_tokens") {
+                    max_tokens = max_tokens.max(format_tokens(counter.tokens).len());
+                }
+            }
+        }
+        let fits = |profile: Option<usize>, tokens: Option<usize>, coverage: Option<usize>| {
+            let extra = [profile, tokens, coverage].into_iter().flatten().count();
+            let fixed = est
+                + [profile, tokens, coverage]
+                    .into_iter()
+                    .flatten()
+                    .sum::<usize>()
+                + Self::GAP * (extra + 1);
+            width.saturating_sub(fixed) >= Self::MIN_SESSION
         };
+        let (profile, tokens, coverage) =
+            if width >= 84 && fits(Some(12), Some(max_tokens.max(12)), Some(18)) {
+                (Some(12), Some(max_tokens.max(12)), Some(18))
+            } else if width >= 72 && fits(Some(9), Some(max_tokens), Some(14)) {
+                // Standard 80-column terminals keep every column including Coverage.
+                (Some(9), Some(max_tokens), Some(14))
+            } else if width >= 58 && fits(Some(9), Some(max_tokens), None) {
+                (Some(9), Some(max_tokens), None)
+            } else {
+                (None, None, None)
+            };
         let extra = [profile, tokens, coverage].into_iter().flatten().count();
-        let fixed = Self::EST
+        let fixed = est
             + [profile, tokens, coverage]
                 .into_iter()
                 .flatten()
                 .sum::<usize>()
             + Self::GAP * (extra + 1);
         Self {
-            // At the 84-column breakpoint this is already 25, so the
-            // 24-cell minimum needs no clamping.
             session: width.saturating_sub(fixed),
             profile,
+            est,
             tokens,
             coverage,
         }
@@ -544,12 +571,7 @@ fn table_line(table: &SessionTable, row: TableRow<'_>) -> Line<'static> {
     }
     spans.push(gap());
     spans.push(Span::styled(
-        table_cell(
-            row.est,
-            SessionTable::EST,
-            CellAlign::Right,
-            Truncate::PLAIN,
-        ),
+        table_cell(row.est, table.est, CellAlign::Right, Truncate::PLAIN),
         row.rest_style,
     ));
     if let Some(width) = table.tokens {
@@ -591,7 +613,7 @@ fn table_header(table: &SessionTable) -> Line<'static> {
 fn session_tokens(session: &mj_core::usage::SessionUsageEstimate) -> String {
     let mut total = 0u64;
     let mut reported = false;
-    let mut partial = false;
+    let mut partial = session.is_partial();
     for model in &session.models {
         match model.totals.get("total_tokens") {
             Some(counter) => {
@@ -1328,7 +1350,7 @@ pub(crate) fn render(
                     rows_area,
                 );
             } else {
-                let table = SessionTable::for_width(inner.width);
+                let table = SessionTable::for_sessions(inner.width, &report.sessions);
                 // The column header is pinned above the list; only the
                 // session and model rows scroll under it. A one-row area
                 // keeps the row and drops the header.
@@ -1356,11 +1378,6 @@ pub(crate) fn render(
                         lines.push(Line::default());
                         row_map.push(None);
                     }
-                    let mut title = session.title.clone();
-                    if session.suspended {
-                        title.push_str(" [suspended]");
-                    }
-                    let title = table_cell(&title, table.session, CellAlign::Left, Truncate::PLAIN);
                     let mut coverage = format!(
                         "{} sub · {}/{}",
                         session.subagent_count,
@@ -1370,6 +1387,17 @@ pub(crate) fn render(
                     if session.coverage.unfinished_turns > 0 {
                         coverage.push_str(&format!(" +{}", session.coverage.unfinished_turns));
                     }
+                    let mut title = session.title.clone();
+                    if table.profile.is_none() {
+                        title.push_str(&format!(" [{}]", session.profile));
+                    }
+                    if session.suspended {
+                        title.push_str(" [suspended]");
+                    }
+                    if table.coverage.is_none() {
+                        title.push_str(&format!(" · {coverage}"));
+                    }
+                    let title = table_cell(&title, table.session, CellAlign::Left, Truncate::PLAIN);
                     // The title carries the suspended marker; when truncation
                     // cut it off, the coverage column keeps it visible.
                     if session.suspended
@@ -1399,10 +1427,6 @@ pub(crate) fn render(
                         } else {
                             "  ├─ "
                         };
-                        let name = format!(
-                            "{branch}{}",
-                            model.model.as_deref().unwrap_or("Unknown model")
-                        );
                         let tokens = model
                             .totals
                             .get("total_tokens")
@@ -1412,6 +1436,16 @@ pub(crate) fn render(
                         } else {
                             String::new()
                         };
+                        let mut name = format!(
+                            "{branch}{}",
+                            model.model.as_deref().unwrap_or("Unknown model")
+                        );
+                        if table.tokens.is_none() && tokens != "—" {
+                            name.push_str(&format!(" · {tokens} tok"));
+                        }
+                        if table.coverage.is_none() && !unreported.is_empty() {
+                            name.push_str(&format!(" · {unreported}"));
+                        }
                         lines.push(table_line(
                             &table,
                             TableRow {

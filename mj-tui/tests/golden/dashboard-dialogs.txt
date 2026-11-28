@@ -869,7 +869,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
   │                                                                │
-  │Write release notes           claude        $8.200+   1,100,000+│
+  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
@@ -889,7 +889,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
-  │Write release notes           claude        $8.200+   1,100,000+│
+  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
   ╰────────────────────────────────────────────────────────────────╯
@@ -920,7 +920,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
   │                                                                │
-  │Write release notes           claude        $8.200+   1,100,000+│
+  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
@@ -978,7 +978,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
-  │Write release notes           claude        $8.200+   1,100,000+│
+  │Write release notes · 0 sub …  claude       $8.200+   1,100,000+│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
   ╰────────────────────────────────────────────────────────────────╯
@@ -1139,7 +1139,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
   │                                                                │
-  │  └─ deepseek-flash                         $0.000+            —│
+  │  └─ deepseek-flash · 2 unre…               $0.000+            —│
   │Click/←→ hour · Ctrl toggle · Shift range · Ctrl+Shift add · Ent│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
@@ -1425,7 +1425,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁             │
   │    ────────────────────────────────────────────────            │
   │    16  18  20  22  00  02  04  06  08  10  12  14              │
-  │Investigate recovery [suspe…  codex               ?            —│
+  │Investigate recovery [suspen…  codex              ?            —│
   │Sub-agents included · profile filters turns · + partial · ░ unpr│
   │  Refresh     Close                                             │
   ╰────────────────────────────────────────────────────────────────╯

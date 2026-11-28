@@ -79,12 +79,12 @@ it('renders session and model usage in aligned table columns', async () => {
   const table = await screen.findByRole('table', { name: 'Sessions' });
   expect(within(table).getAllByRole('columnheader').map(header => header.textContent)).toEqual(['Session / Model', 'Profile', 'Est $', 'Tokens', 'Input', 'Output', 'Cached', 'Coverage']);
   const rows = within(table).getAllByRole('row');
-  expect(within(rows[1]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['a', '$8.20+', '1,700+', '1,300', '300', '250', '2 sub · 2/4 turns · 1 active']);
+  expect(within(rows[1]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['a', '$8.20+', '1,700+', '1,300+', '300+', '250+', '2 sub · 2/4 turns · 1 active']);
   expect(within(rows[1]).getByText('Suspended')).toBeInTheDocument();
-  expect(within(rows[1]).getByTitle('Read: 200 · Write: 50 · Thought: 20')).toHaveTextContent('250');
+  expect(within(rows[1]).getByTitle('Read: 200 · Write: 50 · Thought: 20')).toHaveTextContent('250+');
   expect(within(rows[2]).getByRole('rowheader')).toHaveTextContent('├─ Model A');
   expect(within(rows[2]).getByRole('rowheader')).toHaveClass('pl-6');
-  expect(within(rows[2]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '$8.20+', '1,200', '900', '300', '250', '2 unreported · thought: 20']);
+  expect(within(rows[2]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '$8.20+', '1,200+', '900+', '300+', '250+', '2 unreported · thought: 20']);
   expect(within(rows[3]).getByRole('rowheader')).toHaveTextContent('└─ Unknown model');
   expect(within(rows[3]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '?', '500', '400', '—', '—', '']);
 });

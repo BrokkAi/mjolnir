@@ -14,6 +14,17 @@ function tokenSum(models: ModelUsageEstimate[], keys: string[]): number | null {
   return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
 }
 
+function counterPartial(models: ModelUsageEstimate[], keys: string[], basePartial: boolean): boolean {
+  if (basePartial) return true;
+  return models.some(model => {
+    if ((model.unreported_turns ?? 0) > 0) return true;
+    const present = keys.flatMap(key => model.totals[key] ? [model.totals[key]] : []);
+    if (!present.length) return true;
+    const totalTurns = model.totals.total_tokens?.reported_turns ?? 0;
+    return totalTurns > 0 && present.every(counter => counter.reported_turns < totalTurns);
+  });
+}
+
 function tokenText(value: number | null, partial = false) {
   return value === null ? '—' : `${value.toLocaleString()}${partial ? '+' : ''}`;
 }
@@ -248,26 +259,25 @@ export default function UsageView() {
                   {report.sessions.length === 0 && <tr><td colSpan={8} className="border-t border-line px-2 py-3 text-muted">No sessions match these filters.</td></tr>}
                   {report.sessions.map(s => {
                     const partial = s.coverage.full_turn_reports < s.coverage.recorded_turns || (s.coverage.unfinished_turns ?? 0) > 0;
-                    const partialTokens = partial || s.models.some(m => !m.totals.total_tokens || (m.unreported_turns ?? 0) > 0);
                     return <Fragment key={s.session_id}>
                       <tr className="border-t border-line bg-raised/40">
                         <th scope="row" className="px-2 py-2 text-left font-medium text-fg">{s.title} {s.suspended && <span className="rounded bg-raised px-1.5 py-0.5 text-xs text-warn">Suspended</span>}</th>
                         <td className="px-2 py-2 text-left">{s.profile}</td>
                         <td className="px-2 py-2 text-right tabular-nums">{costText(s.cost_usd_ticks, partial)}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['total_tokens']), partialTokens)}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['input_tokens']))}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['output_tokens']))}</td>
-                        <td title={cachedTitle(s.models)} className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['cached_read_tokens', 'cached_write_tokens']))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['total_tokens']), counterPartial(s.models, ['total_tokens'], partial))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['input_tokens']), counterPartial(s.models, ['input_tokens'], partial))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['output_tokens']), counterPartial(s.models, ['output_tokens'], partial))}</td>
+                        <td title={cachedTitle(s.models)} className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum(s.models, ['cached_read_tokens', 'cached_write_tokens']), counterPartial(s.models, ['cached_read_tokens', 'cached_write_tokens'], partial))}</td>
                         <td className="px-2 py-2 text-left text-xs text-muted">{s.subagent_count} sub · {s.coverage.full_turn_reports}/{s.coverage.recorded_turns} turns{(s.coverage.unfinished_turns ?? 0) > 0 ? ` · ${s.coverage.unfinished_turns} active` : ''}</td>
                       </tr>
                       {s.models.map((m, i) => <tr key={i} className="border-t border-line/40 text-xs text-muted">
                         <th scope="row" className="py-2 pl-6 pr-2 text-left font-normal">{i === s.models.length - 1 ? '└─' : '├─'} {m.model ?? 'Unknown model'}</th>
                         <td />
                         <td className="px-2 py-2 text-right tabular-nums">{costText(m.cost_usd_ticks, (m.unreported_turns ?? 0) > 0)}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['total_tokens']))}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['input_tokens']))}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['output_tokens']))}</td>
-                        <td title={cachedTitle([m])} className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['cached_read_tokens', 'cached_write_tokens']))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['total_tokens']), counterPartial([m], ['total_tokens'], false))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['input_tokens']), counterPartial([m], ['input_tokens'], false))}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['output_tokens']), counterPartial([m], ['output_tokens'], false))}</td>
+                        <td title={cachedTitle([m])} className="px-2 py-2 text-right tabular-nums">{tokenText(tokenSum([m], ['cached_read_tokens', 'cached_write_tokens']), counterPartial([m], ['cached_read_tokens', 'cached_write_tokens'], false))}</td>
                         <td className="px-2 py-2 text-left text-xs text-muted">{[(m.unreported_turns ?? 0) > 0 ? `${m.unreported_turns} unreported` : '', (m.totals.thought_tokens?.tokens ?? 0) > 0 ? `thought: ${m.totals.thought_tokens.tokens.toLocaleString()}` : ''].filter(Boolean).join(' · ')}</td>
                       </tr>)}
                     </Fragment>;
